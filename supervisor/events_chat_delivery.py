@@ -599,7 +599,10 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
                 "terminal_projection_token": publication_token,
                 "routing": {"basis": "terminal_sender_bound_project", "intended_chat_id": int(evt["chat_id"]),
                             "routed_chat_id": chat_id} if bound_chat == chat_id or chat_id != int(evt["chat_id"]) else None}
-            _DELIVERED_MESSAGE_IDS.append((memory_id, {k: v for k, v in emitted.items() if k != "text"}))
+            if isinstance(evt.get("presence_delivery"), dict):  # its conversation's own delivery, for the receipt
+                emitted["presence_delivery"] = evt["presence_delivery"]
+            _DELIVERED_MESSAGE_IDS.append((memory_id, {k: v for k, v in emitted.items()
+                                                       if k not in ("text", "presence_delivery")}))
             # Retain the physical-send fact before slower capture/ack. A failed registry
             # write is covered by the existing bounded in-process dedupe until replay.
             _defer_delivery(ctx, {**evt, "emitted": emitted, "transport_failed": False})

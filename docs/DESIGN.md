@@ -1652,7 +1652,7 @@ A confirmed answer/closure shows its result for five seconds, then retires only 
 
 Unavailable canonical refresh retains text, references and drafts but disables affected controls. Missing, failed or wrong-Project reads say `Status unavailable`; absent form text says `Open the original question for its text.` The chip opens the original; owned refresh retries.
 
-**One message in two rooms.** A Project room is the whole conversation of its work. What its work says to the owner in Main, or answers in the room a note came from, also stands in the Project at its time: the same words, address, Reply and Copy, never a copy or a link, and one notification. Presence's private contact, host refusals and move receipts stay where they were issued; ordinary Project speech stays in the Project.
+**One message in two rooms.** A Project room is the whole conversation of its work. What its work says to the owner in Main, or answers in the room a note came from, also stands in the Project at its time: the same words, address, Reply and Copy, never a copy or a link, and one notification (owner 28.10, A). Presence's private contact stands there too and is never shown in its place; work a place started answers in its Project as well, with its Done row, while the place hears only its own reply (owner 31.10). Host refusals and move receipts stay where they were issued; ordinary Project speech stays in the Project.
 
 **Work portal.** A work living in a Project room keeps its one Main card at the
 request's place, whoever moved it (Turn into project, the mind's move, a

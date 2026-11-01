@@ -388,6 +388,60 @@ def test_required_private_question_uses_existing_wait_and_stop(contact_runtime):
     _run(r, during, live=False)
 
 
+def test_the_model_reads_where_private_contact_and_its_answers_stand():
+    """The tool I report with and the note beside an owner's answer say the same three facts as the room rule:
+    Main keeps the address, the Project my work lives in shows the same row, the place never does."""
+    from ouroboros.presence_owner_contact import answer_source_context
+    from ouroboros.tools.control import get_tools
+
+    [tool] = [entry for entry in get_tools() if entry.name == "send_user_message"]
+    said = tool.schema["parameters"]["properties"]["destination"]["description"]
+    assert "Main only" not in said
+    assert all(fact in said for fact in ("Main keeps its address", "the Project its work lives in (if any) shows the "
+                                         "same row", "its place never sees it"))
+    note = answer_source_context({"presence_contact": {"task_id": "work-1", "binding_id": "b", "source_event_id": "e"}})
+    assert "delivered privately in Main" not in note
+    assert all(fact in note for fact in ("one row at its Main address", "the Project its work lives in (if any)",
+                                         "never in its source conversation", "No external reply or action"))
+
+
+def test_a_fresh_private_question_is_one_unread_message_in_main_and_its_project_on_a_declared_frame(contact_runtime):
+    """The real producer's one question frame stays inside the published ``QuizOutbound`` (its ``also_rooms`` declared
+    and typed), and its one row counts once in each room that shows it, as a private notice does; a place never."""
+    from typing import get_type_hints
+
+    from ouroboros.gateway.contracts import QuizOutbound
+    from ouroboros.gateway.schema import validate_ingress
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    r, saved = contact_runtime, {}
+    project = create_project(r.root, "source-work", name="Source work")
+
+    def revisions():
+        return {room["chat_id"]: room["revision"] for room in dialogue_store.rooms(r.root)}
+
+    def during(ctx, _task, _agent):
+        bind_task_to_project(r.root, ctx.task_id, project["id"], origin={"absent": "system"})
+        saved["before"] = revisions()
+        assert _ask(ctx).startswith("OK:")
+        saved["tid"], saved["place_room"] = ctx.task_id, _task["chat_id"]
+
+    _run(r, during, live=False)  # the deferred question is published by the runner's flush
+    saved["after"] = revisions()
+    [frame] = [f for f in r.frames if f.get("type") == "quiz" and f.get("task_id") == saved["tid"]]
+    [row] = [entry.row for entry in dialogue_store.iter_rows(r.root, "chat")
+             if entry.row.get("type") == "quiz" and entry.row.get("task_id") == saved["tid"]]
+    declared = set(get_type_hints(QuizOutbound))
+    assert not set(frame) - declared, sorted(set(frame) - declared)  # every emitted key is published
+    assert not validate_ingress(frame, QuizOutbound), validate_ingress(frame, QuizOutbound)
+    assert validate_ingress({**frame, "also_rooms": "elsewhere"}, QuizOutbound)  # typed, not only present
+    assert (frame["chat_id"], frame["also_rooms"]) == (1, [project["chat_id"]])
+    assert set(row["room_revisions"]) == set(frame["room_revisions"]) == {"1", str(project["chat_id"])}
+    moved = {chat: saved["after"].get(chat, 0) - saved["before"].get(chat, 0) for chat in (1, project["chat_id"])}
+    assert moved == {1: 1, project["chat_id"]: 1}  # one unread message in each room that shows it
+    assert saved["place_room"] not in (1, project["chat_id"])  # and never the place's (its stamp names none)
+
+
 def test_main_question_keeps_its_address_after_project_binding_in_frontend_consumer(contact_runtime):
     import shutil
     import subprocess
@@ -406,18 +460,35 @@ def test_main_question_keeps_its_address_after_project_binding_in_frontend_consu
         blocks = quiz_states(r.root, ctx.task_id)
         qid, = blocks
         assert "publication_chat_id" not in blocks[qid]
-        assert question_display_rooms(r.root, ctx.task_id, blocks)[qid] == {
-            "state": "known", "chat_id": 1, "project_id": ""}
+        assert question_display_rooms(r.root, ctx.task_id, blocks)[qid] == {  # Main's address, its Project's too
+            "state": "known", "chat_id": 1, "project_id": "", "also_project_ids": [project["id"]]}
         saved.update(tid=ctx.task_id, qid=qid)
 
     _run(r, during, live=False)
     detail = detail_client(r.root).get("/api/tasks/" + saved["tid"]).json()
     assert detail["owner_quiz"][saved["qid"]]["publication_chat_id"] == 1
+    assert detail["question_rooms"][saved["qid"]]["also_project_ids"] == [project["id"]]
+    census = main_decisions_snapshot(r.root, [], {})  # still Main's own native question, no Project pointer
+    assert [(row["task_id"], row.get("native")) for row in census["current_questions"]] == [(saved["tid"], True)]
     main = json.loads(_assemble_history_response(r.root, 1, 20, 0))["messages"]
     other = json.loads(_assemble_history_response(r.root, project["chat_id"], 20, 0))["messages"]
-    assert len([m for m in main if m.get("quiz")]) == 1
-    assert not [m for m in other if m.get("quiz")]
+    # One stored question at its Main address, shown in Main and in its work's Project (formerly Main-only).
+    shown = [[m for m in rows if m.get("quiz")] for rows in (main, other)]
+    assert [len(rows) for rows in shown] == [1, 1]
+    assert shown[0][0]["row_address"] == shown[1][0]["row_address"] and shown[1][0]["row_address"].startswith("row:1@")
     run = subprocess.run([shutil.which("node"), "web/tests/presence_contact_consumer.mjs"],
         input=json.dumps({"detail": detail, "quizId": saved["qid"], "sourceUrl": r.event.message["url"]}),
         text=True, capture_output=True, timeout=15, cwd=Path(__file__).resolve().parents[1])
     assert run.returncode == 0, run.stdout + run.stderr
+    # Its one live frame: Main's by address, the Project's through ``also_rooms``, as each panel's router reads it.
+    [frame] = [f for f in r.frames if f.get("type") == "quiz" and f.get("quiz_id") == saved["qid"]]
+    assert (frame["chat_id"], frame["also_rooms"]) == (1, [project["chat_id"]])
+    module = (Path(__file__).resolve().parents[1] / "web" / "modules" / "chat_activity.js").as_uri()
+    probe = subprocess.run([shutil.which("node"), "--input-type=module", "-e", f"""
+        import {{ chatThreadAccepts }} from {json.dumps(module)};
+        let input = ''; for await (const chunk of process.stdin) input += chunk;
+        const [frame, project] = JSON.parse(input), known = new Set([project]);
+        process.stdout.write(JSON.stringify([chatThreadAccepts(frame, true, 1, known),
+            chatThreadAccepts(frame, false, project, known), chatThreadAccepts(frame, false, project + 1, known)]));
+    """], input=json.dumps([frame, project["chat_id"]]), text=True, capture_output=True, timeout=15, check=True)
+    assert json.loads(probe.stdout) == [True, True, False]

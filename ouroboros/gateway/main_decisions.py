@@ -17,7 +17,11 @@ log = logging.getLogger(__name__)
 
 
 def question_display_rooms(drive_root: Any, task_id: str, quizzes: Any, *, rooms=None, project_ids=None) -> dict:
-    """Shared detail/census proof; context and immutable delivery are not display authority."""
+    """Shared detail/census proof; context and immutable delivery are not display authority.
+
+    A private Presence question's room is Main, its address; the Project its work lives in shows the
+    same row (``room_membership.row_rooms``) and is named in ``also_project_ids`` when the room rule
+    proves it. Unreadable authority leaves that Project unproven, never Main."""
     from ouroboros.projects_registry import RoomResolver, list_reserved_projects
     from ouroboros.presence_owner_contact import private_main_contact
 
@@ -25,6 +29,16 @@ def question_display_rooms(drive_root: Any, task_id: str, quizzes: Any, *, rooms
         return {}
     private = {qid: {"state": "known", "chat_id": 1, "project_id": ""} for qid, block in quizzes.items()
                if isinstance(block, dict) and block.get("quiz_id") == qid and private_main_contact(block, task_id)}
+    if private:
+        try:
+            rooms = rooms or RoomResolver(drive_root, strict=True)
+            if project_ids is None:
+                project_ids = {p["chat_id"]: p["id"] for p in list_reserved_projects(drive_root, strict=True)}
+            work = rooms(task_id)
+            if work in project_ids:
+                private = {qid: {**room, "also_project_ids": [project_ids[work]]} for qid, room in private.items()}
+        except Exception:
+            log.debug("private question Project unavailable for %s", task_id, exc_info=True)
     if len(private) == len(quizzes):
         return private
     unknown = {qid: private.get(qid, {"state": "unknown"}) for qid in quizzes}

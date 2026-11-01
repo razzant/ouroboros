@@ -148,6 +148,7 @@ def history_row_destination(root, row, thread_id, project_ids, source_refs, room
     task and the reference's old chat label cannot supply a home. Unreadable authority raises.
     """
     from ouroboros.chat_chain import _row_chat_id
+    from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_admission import reserved_project_for_chat
     from ouroboros.project_dialogue import bound_room_chat, room_membership
 
@@ -161,8 +162,8 @@ def history_row_destination(root, row, thread_id, project_ids, source_refs, room
         work = bound_room_chat(rooms, row)
         candidates = {1, written, work} & {1, *project_ids}
         homes = [chat for chat in candidates if belongs(chat, [])]
-        if len(homes) > 1 and work in homes:  # work speech shown where it was written too: its work's room is home
-            homes = [work]
+        if len(homes) > 1 and work in homes:  # work speech shown where it was written too: its work's room is home,
+            homes = [1 if private_main_row(dict(row)) else work]  # private contact's is Main, its address
         if len(homes) != 1:
             return {"state": "ambiguous" if homes else "unavailable"}
         home = homes[0]

@@ -423,3 +423,29 @@ def test_new_request_delivery_failure_keeps_retryable_winning_answer(runtime, mo
     assert _answer(runtime, 'mailbox-heal', request_id='another-id', index=1)[0] == 409
     [message] = drain_owner_entries(runtime.root, runtime.task['id'], include_acknowledged=True)
     assert 'Only this answer' in message['text']
+
+
+def test_an_answer_arriving_after_its_question_carries_its_delivery_as_it_is_now(runtime):
+    """A room that already shows the question learns the answer from the arrival read alone (its live state frame
+    missed): the evidence row is the recorded answer with the question's current delivery, never the answer-time
+    snapshot that still says owed; the stored row keeps its own bytes."""
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from tests._dialogue import chat_rows
+
+    def read(**params):
+        response = asyncio.run(make_chat_history_endpoint(runtime.root)(
+            SimpleNamespace(query_params={"thread": "1", **params})))
+        return json.loads(response.body)
+
+    _ask(runtime, "arrival")
+    cursor = read()["after_cursor"]
+    assert _answer(runtime, "arrival", request_id="arrival", index=0)[0] == 200
+    [stored] = [row for row in _facts(runtime) if row["quiz"]["quiz_id"] == "arrival"]
+    assert stored["quiz"]["delivery"]["state"] == "owed"  # what the answer row froze when it was written
+    [owed] = [row["quiz"] for row in read(cursor=cursor)["messages"] if row.get("system_type") == "quiz_answer"]
+    assert owed["question_delivery"]["state"] == "owed"  # unread by its task yet: still owed, said so
+    _read(runtime, "arrival")
+    [now] = [row["quiz"] for row in read(cursor=cursor)["messages"] if row.get("system_type") == "quiz_answer"]
+    assert now["state"] == "answered" and now["question_delivery"] == {"kind": "answer", "state": "delivered"}
+    assert [row for row in chat_rows(runtime.root) if row.get("type") == "quiz_answer"] == _facts(runtime)
+    assert _facts(runtime)[-1] == stored  # the source row is unchanged

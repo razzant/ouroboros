@@ -125,9 +125,10 @@ export function createChatDecision({
     }
 
     // The detail projects the shared room resolver for this exact quiz. Stored task context
-    // and publication/reply addresses do not prove where its question is displayed now.
+    // and publication/reply addresses do not prove where its question is displayed now. A private
+    // Main question also shows in the Project its work lives in (`also_project_ids`).
     const questionInRoom = (room, projectId) => room?.state === 'known' && Number.isInteger(room.chat_id)
-        && (projectId ? room.project_id === String(projectId)
+        && (projectId ? room.project_id === String(projectId) || (room.also_project_ids || []).includes(String(projectId))
             : isMain && room.project_id === '' && room.chat_id === Number(chatId));
 
     // Navigation single-flights per task. A revalidation is its own read, begun after the copy it

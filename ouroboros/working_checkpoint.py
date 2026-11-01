@@ -357,9 +357,14 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
     text and any preserved copy's ``preserved_path`` travel), ``delivered`` (a retained
     receipt whose bytes are re-read; a legacy id proves no bytes, so ``text`` may be
     empty) or ``unreadable`` (the registry could not be read: an answer may exist, which
-    is not permission to regenerate). Never the task result's prose.
+    is not permission to regenerate). Never the task result's prose. A Presence root's
+    final also carries its conversation's own delivery (``presence_delivery``).
     """
     from supervisor.terminal_delivery import terminal_answer_receipts
+
+    def carried(source: Dict[str, Any]) -> Dict[str, Any]:
+        delivery = source.get("presence_delivery")
+        return {"presence_delivery": dict(delivery)} if isinstance(delivery, dict) else {}
 
     receipts = terminal_answer_receipts(root, task_id)
     if receipts.get("registry") == "unreadable":
@@ -369,12 +374,12 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         if rows:
             row = max(rows, key=lambda item: str(item.get("registered_at") or ""))
             return {"basis": basis, "text": str(row.get("text") or ""), "delivery_id": str(row.get("delivery_id") or ""),
-                    "terminal_origin": str(row.get("terminal_origin") or ""),
+                    "terminal_origin": str(row.get("terminal_origin") or ""), **carried(row),
                     **({"preserved_path": str(row["preserved_path"])} if row.get("preserved_path") else {})}
     delivered = [row for row in (receipts.get("delivered") or []) if isinstance(row, dict)]
     if delivered:
         receipt = max(delivered, key=lambda item: str(item.get("sent_at") or ""))
-        text = origin = ""
+        text, origin, record = "", "", {}
         try:
             from ouroboros.artifacts import read_actor_source_bytes
 
@@ -384,7 +389,7 @@ def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
         except Exception:
             log.debug("Retained terminal answer of %s could not be re-read", task_id, exc_info=True)
         return {"basis": "delivered", "text": text, "delivery_id": str(receipt.get("delivery_id") or ""),
-                "terminal_origin": origin}
+                "terminal_origin": origin, **(carried(record) if isinstance(record, dict) else {})}
     unverified = [str(did) for did in (receipts.get("unverified_delivery_ids") or [])]
     if unverified:
         return {"basis": "delivered", "text": "", "delivery_id": unverified[-1], "terminal_origin": ""}
@@ -448,9 +453,25 @@ def adopt_registered_answer(root: Any, task: Dict[str, Any], task_id: str, *, at
             log.warning("Preserved host salvage of %s could not be read; the receipt stays the result", task_id)
     if answer["text"] and origin:  # the producer's stamp travels; an unstamped legacy row claims none
         fields["terminal_origin"] = origin
+    from ouroboros.dialogue_provenance import is_presence_task
+
+    delivery, presence = answer.get("presence_delivery"), is_presence_task(task or {})
+
+    def keep_delivery(existing: Dict[str, Any], projected: Dict[str, Any]) -> Dict[str, Any]:
+        # A Presence root's conversation hears what its result stamped before the death, explicit
+        # emptiness included; the local final's text is never its speech, so without those facts it hears none.
+        metadata = dict(existing.get("metadata") or {})
+        if isinstance(delivery, dict):
+            metadata.update(delivery)
+        elif (presence or isinstance(metadata.get("presence"), dict)) and "presence_outcome" not in metadata:
+            metadata.update(presence_outcome="silent", presence_result_text="")
+        else:
+            return projected
+        return {**projected, "metadata": metadata}
+
     log.warning("Task %s attempt %s: finalizing from its registered answer (%s) instead of a retry (%s)",
                 task_id, attempt, answer["basis"], cause)
-    return write_task_result(pathlib.Path(root), task_id, STATUS_FAILED, **fields)
+    return write_task_result(pathlib.Path(root), task_id, STATUS_FAILED, _field_projector=keep_delivery, **fields)
 
 
 def prepare_recovery(root: Any, task_id: str, *, from_attempt: int, cause: str) -> Dict[str, Any]:

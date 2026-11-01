@@ -256,6 +256,23 @@ test('Project recovery requires its existing project binding; foreign and unknow
     }
 });
 
+test('a private Main question its Project also shows recovers there; another Project never does', async () => {
+    for (const [also, posts] of [[['p1'], 1], [['other'], 0]]) {
+        const storage = store();
+        let fx = baseFixture({ storage, projectId: 'p1', chatId: 23, fetchImpl: async () => { throw new Error('lost'); } });
+        let card = fx.decision.buildQuizCard(WS_MSG); choose(card); await turn(); fx.restore();
+        fx = baseFixture({ storage, projectId: 'p1', chatId: 23, rawDetail: true, fetchDetail: async () => ({
+            task_id: 't-1', owner_quiz: { 'qz-1': WS_MSG },
+            question_rooms: { 'qz-1': { state: 'known', chat_id: 1, project_id: '', also_project_ids: also } },
+        }) });
+        try {
+            card = fx.decision.buildQuizCard(WS_MSG); await turn();
+            card.querySelector('.chat-quiz-retry').click(); await turn();
+            assert.equal(fx.calls.length, posts, also.join());
+        } finally { fx.restore(); }
+    }
+});
+
 test('a late negative response of an older attempt cannot clear a different attempt learned from another view', async () => {
     const events = new EventTarget(), storage = store();
     let finish;

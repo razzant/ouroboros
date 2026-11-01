@@ -153,14 +153,14 @@ def room(tmp_path, monkeypatch):
         yield SimpleNamespace(h=h, data=data, place=place, client=client, transport=transport)
 
 
-def turn(room, event_id="chat:a:1", version=0, reporting=1, text="Please check the three services."):
+def turn(room, event_id="chat:a:1", version=0, reporting=1, text="Please check the three services.", client=None):
     payload = {"event": {"source_event_id": event_id, "provider": "chat", "account_id": "a",
                          "conversation_id": "r", "thread_id": "", "conversation_key": "ignored-by-host",
                          "actor": {"platform_actor_id": "person"}, "conversation": {},
                          "message": {"message_id": event_id}, "text": text, "facts": ["mention"]},
                **({"delivery_reporting_version": 1} if reporting else {}),
                **({"continuation_version": version} if version else {})}
-    reply = room.client.post("/presence/turn", json=payload, headers=HEADERS)
+    reply = (client or room.client).post("/presence/turn", json=payload, headers=HEADERS)
     assert reply.status_code == 200, reply.text
     return reply.json()
 
@@ -386,10 +386,17 @@ def test_late_and_unknown_confirmations_never_resend_or_rewrite_the_answer(room)
     assert room.h.calls == calls and room.transport.texts() == [ACK, FINAL]
 
 
-def promoted_root(room, monkeypatch, responses):
+class WorkerDeath(BaseException):
+    """The worker process dies here: nothing after it runs."""
+
+
+def promoted_root(room, monkeypatch, responses, *, chat_id=1, project=None, crash=False):
     """A root promoted from this conversation keeps the speaker carrier: the real loop and pipeline run it.
 
-    A response may be a callable of the messages, like a turn's script; ``None`` is a provider that returns nothing."""
+    A response may be a callable of the messages, like a turn's script; ``None`` is a provider that returns nothing.
+    ``chat_id`` is the room it was admitted in (``"place"``: the conversation's own room); ``project`` binds it
+    there, as admission does. ``pending`` holds the pipeline's events for the supervisor. ``crash``: the worker
+    dies inside the result store, after its answer was owed."""
     import queue
 
     from ouroboros import agent_task_pipeline as pipeline, loop
@@ -399,15 +406,22 @@ def promoted_root(room, monkeypatch, responses):
     body = turn(room)
     room.transport.submit("chat:a:1", body)
     root_id = "promoted-place-root"
-    presence = dict(load_task_result(room.data, body["turn_ref"])["metadata"]["presence"])
+    started = load_task_result(room.data, body["turn_ref"])
+    chat_id = started["chat_id"] if chat_id == "place" else chat_id
+    presence = dict(started["metadata"]["presence"])
     metadata = {"presence": presence, "delegation_role": "root"}
+    if project is not None:
+        from ouroboros.projects_registry import bind_task_to_project
+
+        bind_task_to_project(room.data, root_id, project["id"], project["chat_id"], origin={"absent": "system"})
     registry = ToolRegistry(repo_dir=room.h.repo, drive_root=room.data)
     registry._ctx.task_id, registry._ctx.task_metadata, registry._ctx.is_direct_chat = root_id, metadata, False
     registry.register(ToolEntry(name="bridge_send", schema=SEND_SCHEMA, handler=room.transport.tool,
                                 timeout_sec=30, safety_policy="skip"))
-    task = {"id": root_id, "type": "task", "chat_id": 1, "text": "Compile the report", "metadata": metadata,
+    task = {"id": root_id, "type": "task", "chat_id": chat_id, "text": "Compile the report", "metadata": metadata,
             "delegation_role": "root", "_skip_post_task_synthesis": True}
-    write_task_result(room.data, root_id, "running", metadata=metadata, delegation_role="root", root_task_id=root_id)
+    write_task_result(room.data, root_id, "running", metadata=metadata, delegation_role="root", root_task_id=root_id,
+                      chat_id=chat_id)
     responses, inputs = iter(responses), []
 
     def respond(_llm, messages, *_a, **_kw):
@@ -420,9 +434,269 @@ def promoted_root(room, monkeypatch, responses):
         [{"role": "user", "content": "Compile the report"}], registry, SimpleNamespace(default_model=lambda: "test-model"),
         room.data / "logs", lambda *_a, **_kw: None, queue.Queue(), task_id=root_id, drive_root=room.data)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
-    pipeline.emit_task_results(SimpleNamespace(drive_root=room.data, repo_dir=room.h.repo), None, None, [], task,
-                               text, usage, trace, 0.0, room.data / "logs", ctx=registry._ctx)
-    return SimpleNamespace(id=root_id, trace=trace, inputs=inputs, stored=load_task_result(room.data, root_id))
+    if crash:
+        def die(*_a, **_k):
+            raise WorkerDeath()
+
+        monkeypatch.setattr(pipeline, "_store_task_result", die)
+    pending = []
+    try:
+        pipeline.emit_task_results(SimpleNamespace(drive_root=room.data, repo_dir=room.h.repo), None, None, pending,
+                                   task, text, usage, trace, 0.0, room.data / "logs", ctx=registry._ctx)
+    except WorkerDeath:
+        assert crash
+    return SimpleNamespace(id=root_id, trace=trace, inputs=inputs, stored=load_task_result(room.data, root_id),
+                           pending=pending, chat_id=chat_id)
+
+
+def supervise(root, monkeypatch, events):
+    """The supervisor's own send handler and bus for the pipeline's events: canonical rows and live frames.
+    No connector is reached; the place hears only what ``Transport`` polls."""
+    from collections import deque
+
+    from ouroboros.utils import append_jsonl
+    from supervisor import events_chat_delivery as delivery
+    from supervisor import message_bus
+
+    frames, bridge = [], message_bus.LocalChatBridge({})
+    bridge._broadcast_fn = frames.append
+    for name, value in (("DATA_DIR", root), ("get_bridge", lambda: bridge), ("load_state", lambda: {"owner_id": 1}),
+                        ("publish_event", lambda *_a, **_k: None)):
+        monkeypatch.setattr(message_bus, name, value)
+    monkeypatch.setattr(delivery, "_DELIVERED_MESSAGE_IDS", deque(maxlen=256))
+    ctx = SimpleNamespace(DRIVE_ROOT=root, RUNNING={}, append_jsonl=append_jsonl, send_with_budget=message_bus.send_with_budget)
+    for event in events:
+        if event.get("type") == "send_message":
+            delivery._handle_send_message(event, ctx)
+    return frames
+
+
+def room_speech(root, chat_id, task_id):
+    from ouroboros.gateway.history import _assemble_history_response
+
+    messages = json.loads(_assemble_history_response(root, chat_id, 20, 0))["messages"]
+    return [m["text"] for m in messages if m.get("task_id") == task_id and m.get("role") == "assistant"]
+
+
+@pytest.mark.parametrize("case", ["speech", "silent", "held"])
+def test_a_promoted_place_root_in_a_project_answers_there_once_beside_its_conversation(room, monkeypatch, case):
+    """Its conversation hears the Presence result; the internal Project it lives in keeps the ordinary final,
+    once, through the owed outbox, whatever the place's state or an earlier acknowledgement; ``silent=True``
+    keeps no chat row anywhere and its words stay the run's internal note."""
+    from ouroboros.projects_registry import create_project
+    from supervisor.terminal_delivery import pending_deliveries
+
+    project = create_project(room.data, "report", name="Report")
+    answer = "The compiled report is attached above."
+
+    def pause_then_finish(_messages):
+        places.edit_place(room.data, room.place.place_id, "set_state", author="owner", state="paused")
+        return finish(answer=answer)
+
+    final = {"speech": finish(answer=answer), "silent": finish(silent=True, answer=NOTE), "held": pause_then_finish}
+    root = promoted_root(room, monkeypatch, [send(text=ACK, request_id="root"), final[case]],
+                         chat_id=project["chat_id"], project=project)
+    sends = [event for event in root.pending if event.get("type") == "send_message"]
+    assert [event.get("type") for event in root.pending].count("presence_result") == 1
+    before = room.transport.texts()
+    room.transport.work[root.id] = "chat:a:1"
+    room.transport.poll()
+    outward = room.transport.texts()[len(before):]
+    owed = [row for row in pending_deliveries(room.data, strict=True) if row.get("task_id") == root.id]
+    supervise(room.data, monkeypatch, root.pending)
+    assert room.transport.texts() == before + outward  # the local final reached no connector
+    if case == "silent":
+        assert sends == owed == outward == [] and room_speech(room.data, project["chat_id"], root.id) == []
+        assert root.stored["result"] == NOTE and root.stored["wake_silent"] is True
+        return
+    assert [event["chat_id"] for event in sends] == [project["chat_id"]]
+    assert [row["delivery_id"] for row in owed] == [sends[0]["delivery_id"]]  # owed before it left
+    assert room_speech(room.data, project["chat_id"], root.id) == [answer]
+    assert answer not in room_speech(room.data, 1, root.id)  # Main keeps its own completion mirror
+    assert not [row for row in pending_deliveries(room.data, strict=True) if row.get("task_id") == root.id]
+    assert outward == ([] if case == "held" else [answer])
+    assert root.stored["metadata"]["presence_outcome"] == ("silent" if case == "held" else "message")
+
+
+@pytest.mark.parametrize("case", ["held", "speech", "silent", "unbound", "live"])
+def test_an_inline_turn_whose_work_lives_in_a_project_answers_there_once(room, monkeypatch, case):
+    """An inline turn turned into a Project mid-flight (the owner's Turn into project, the mind's move_to_project:
+    a binding) keeps the chosen Project contract: its ordinary final is owed to that Project before the turn returns,
+    whatever its place hears. The inline runner hands back no buffered events: without a live bus the outbox replay
+    delivers it, with one it leaves at once; either way once. Unbound, the place alone hears it; silent stays a note."""
+    import queue
+
+    from ouroboros import dialogue_store
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from supervisor import terminal_delivery as td
+    from tests._cancel_intents_shared import _CaptureQueue
+
+    project = create_project(room.data, "report", name="Report")
+    bus = queue.Queue()
+    if case == "live":  # the Host's own runner passes the supervisor bus (``host_service._default_presence_runner``)
+        made = room.h.factory
+        monkeypatch.setattr(room.h, "factory", lambda **kwargs: made(**{**kwargs, "event_queue": bus}))
+
+    def bind_then_finish(_messages):
+        tid = room.h.agents[-1].tools._ctx.task_id
+        if case != "unbound":
+            bind_task_to_project(room.data, tid, project["id"], project["chat_id"], origin={"absent": "system"})
+        if case == "held":
+            places.edit_place(room.data, room.place.place_id, "set_state", author="owner", state="paused")
+        return finish(silent=True, answer=NOTE) if case == "silent" else finish(answer=FINAL)
+
+    room.h.script = [bind_then_finish]
+    body = turn(room)
+    tid = body["turn_ref"]
+    view, stored = settle(room, body)
+    owed = [row for row in td.pending_deliveries(room.data, strict=True) if row.get("task_id") == tid]
+    live = []
+    while not bus.empty():
+        event = bus.get_nowait()
+        live += [event] if event.get("type") == "send_message" and event.get("task_id") == tid else []
+    monkeypatch.setattr(td, "_REPLAY_MIN_AGE_SEC", 0.0)
+    replayed = _CaptureQueue()
+    supervise(room.data, monkeypatch, live)
+    td.replay_pending_deliveries(room.data, event_queue=replayed)
+    supervise(room.data, monkeypatch, replayed.events)
+    td.replay_pending_deliveries(room.data, event_queue=replayed)  # nothing left to send again
+    local = room_speech(room.data, project["chat_id"], tid)
+    heard = room.transport.texts()
+    if case in {"silent", "unbound"}:
+        assert owed == live == replayed.events == [] and local == []
+        assert heard == ([] if case == "silent" else [FINAL])
+        assert stored["result"] == (NOTE if case == "silent" else FINAL)
+        return
+    assert [(row["chat_id"], row["text"]) for row in owed] == [(project["chat_id"], FINAL)]  # owed before it returned
+    assert len(live) == (case == "live") and len(replayed.events) == (case != "live")
+    assert [event["delivery_id"] for event in live + replayed.events] == [owed[0]["delivery_id"]]
+    assert local == [FINAL]  # once, in the Project's durable history
+    assert FINAL not in room_speech(room.data, 1, tid)  # no Main mirror of the final
+    assert not [row for row in td.pending_deliveries(room.data, strict=True) if row.get("task_id") == tid]
+    assert heard == ([] if case == "held" else [FINAL])  # the place hears only its own reply
+    assert (view["outcome"], stored["metadata"]["presence_outcome"]) == (("silent",) * 2 if case == "held"
+                                                                         else ("message",) * 2)
+    place_room = stored["chat_id"]
+    assert not [entry.row for entry in dialogue_store.iter_rows(room.data, "chat")  # no local final in the place room
+                if entry.row.get("task_id") == tid and entry.row.get("chat_id") == place_room
+                and entry.row.get("direction") == "out" and entry.row.get("type") != "presence_delivery"]
+
+
+@pytest.mark.parametrize("admitted", [1, "place"])
+def test_a_promoted_place_root_outside_any_project_answers_only_its_conversation(room, monkeypatch, admitted):
+    """No internal Project, no local final: Main, or a place room whose id passes the Project range."""
+    from ouroboros.contracts.chat_id_policy import is_project_chat_id
+    from supervisor.terminal_delivery import pending_deliveries
+
+    answer = "The compiled report is attached above."
+    root = promoted_root(room, monkeypatch, [finish(answer=answer)], chat_id=admitted)
+    assert admitted == 1 or is_project_chat_id(root.chat_id)
+    assert [event.get("type") for event in root.pending if event.get("type") in {"send_message", "presence_result"}] == [
+        "presence_result"]
+    assert not [row for row in pending_deliveries(room.data, strict=True) if row.get("task_id") == root.id]
+    room.transport.work[root.id] = "chat:a:1"
+    room.transport.poll()
+    assert room.transport.texts().count(answer) == 1
+    supervise(room.data, monkeypatch, root.pending)
+    # Its words exist once, as the place's own record of what was said there: no ordinary final in any room.
+    assert [(row["type"], row["text"]) for row in receipts(room, root.id)] == [("presence_delivery", answer)]
+    from ouroboros import dialogue_store
+    assert [entry.row for entry in dialogue_store.iter_rows(room.data, "chat") if entry.row.get("task_id") == root.id
+            and entry.row.get("direction") == "out" and entry.row.get("type") != "presence_delivery"] == []
+
+
+CARRIER = {"binding_id": "b1", "transport_skill": "bridge", "event": {"conversation_key": KEY, "source_event_id": "e1"}}
+
+
+@pytest.mark.parametrize("shape,admitted,local", [
+    ("promoted", "bound", True), ("scheduled", "born_in_project", True), ("continued", "original_bound", True),
+    ("promoted", "main", False), ("scheduled", "place_room", False), ("continued", "registered_unbound", False)])
+def test_each_presence_carrier_root_answers_in_the_project_it_actually_lives_in(tmp_path, monkeypatch, shape,
+                                                                                 admitted, local):
+    """Promoted, schedule-born and hard-timeout-continued roots keep their Presence result; the room rule alone
+    (a binding, an admitted registered Project chat, a continued root's original) proves a Project, never a number
+    or a registration."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
+    project = create_project(tmp_path, "report", name="Report")
+    tid = {"promoted": "carrier-root", "scheduled": "carrier-schedule", "continued": "carrier-retry"}[shape]
+    lineage = ({"root_task_id": "carrier-original", "original_task_id": "carrier-original",
+                "timeout_retry_from": "carrier-original"} if shape == "continued" else {"root_task_id": tid})
+    chat = {"born_in_project": project["chat_id"], "place_room": 1_234_567}.get(admitted, 1)
+    if admitted in {"bound", "original_bound"}:
+        bind_task_to_project(tmp_path, lineage["root_task_id"], project["id"], project["chat_id"], origin={"absent": "system"})
+    metadata = {"presence": dict(CARRIER), **({"schedule_occurrence": {"schedule_id": "s1"}} if shape == "scheduled" else {})}
+    task = {"id": tid, "type": "task", "chat_id": chat, "text": "Compile the report", "metadata": metadata,
+            "delegation_role": "root", "_skip_post_task_synthesis": True, **lineage,
+            **({"project_id": project["id"]} if admitted == "registered_unbound" else {})}
+    write_task_result(tmp_path, tid, "running", metadata=metadata, delegation_role="root", chat_id=chat, **lineage)
+    pending = []
+    pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, pending, task,
+                               "The report is compiled.", {"terminal_origin": "model_final"},
+                               {"tool_calls": [], "reasoning_notes": []}, 0.0, tmp_path / "logs",
+                               ctx=SimpleNamespace(task_id=tid, task_metadata=metadata, drive_root=tmp_path))
+    kinds = [event.get("type") for event in pending if event.get("type") in {"send_message", "presence_result"}]
+    assert kinds == (["presence_result", "send_message"] if local else ["presence_result"])
+    if local:
+        final = next(event for event in pending if event.get("type") == "send_message")
+        assert (final["chat_id"], final["text"]) == (project["chat_id"], "The report is compiled.")
+        assert final["delivery_id"].startswith(f"final:{tid}:")
+
+
+@pytest.mark.parametrize("bound,admitted", [(True, 1_234_567), (False, 1), (False, 1_234_567)])
+def test_a_project_room_unreadable_at_finalization_stays_owed_until_the_room_rule_reads(tmp_path, monkeypatch, bound,
+                                                                                       admitted):
+    """A strict room read that cannot answer when the root finishes is unknown, never "no Project": its final is
+    owed without an address (never the conversation's room, which may be a place), and that debt holds the Done
+    card and so Main's completion mirror. The existing outbox replay addresses it once the read answers: the
+    Project the root lives in, once, or nothing when it lives in none. Its conversation hears the Presence result
+    as before."""
+    from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.projects_registry import _registry_path, bind_task_to_project, create_project
+    from ouroboros.terminal_projection import _delivery_disposition
+    from supervisor import terminal_delivery as td
+    from tests._cancel_intents_shared import _CaptureQueue
+
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
+    monkeypatch.setattr(td, "_REPLAY_MIN_AGE_SEC", 0.0)
+    project = create_project(tmp_path, "report", name="Report")
+    tid, answer = "carrier-unread", "The report is compiled."
+    if bound:
+        bind_task_to_project(tmp_path, tid, project["id"], project["chat_id"], origin={"absent": "system"})
+    metadata = {"presence": dict(CARRIER)}
+    task = {"id": tid, "type": "task", "chat_id": admitted, "text": "Compile the report", "metadata": metadata,
+            "delegation_role": "root", "root_task_id": tid, "_skip_post_task_synthesis": True}
+    write_task_result(tmp_path, tid, "running", metadata=metadata, delegation_role="root", chat_id=admitted,
+                      root_task_id=tid)
+    registry = _registry_path(tmp_path)
+    moving = registry.with_name(registry.name + ".moving")
+    registry.rename(moving)  # missing beside its commit witness: the registry is unavailable, not empty
+    pending = []
+    pipeline.emit_task_results(SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, pending, task,
+                               answer, {"terminal_origin": "model_final"}, {"tool_calls": [], "reasoning_notes": []},
+                               0.0, tmp_path / "logs", ctx=SimpleNamespace(task_id=tid, task_metadata=metadata,
+                                                                            drive_root=tmp_path))
+    assert [event.get("type") for event in pending if event.get("type") in {"send_message", "presence_result"}] == [
+        "presence_result"]
+    owed = [row for row in td.pending_deliveries(tmp_path, strict=True) if row.get("task_id") == tid]
+    assert [(row["text"], row.get("chat_id")) for row in owed] == [(answer, None)]
+    assert _delivery_disposition(tmp_path, tid)["state"] == "owed"  # the Done card and Main mirror wait
+    bus = _CaptureQueue()
+    assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [] and bus.events == []  # still unknown
+    assert td.pending_deliveries(tmp_path, strict=True) == owed  # unaddressed, no dispatch spent
+    moving.rename(registry)
+    replayed = td.replay_pending_deliveries(tmp_path, event_queue=bus)
+    assert replayed == ([owed[0]["delivery_id"]] if bound else [])
+    assert [(event["chat_id"], event["text"]) for event in bus.events] == ([(project["chat_id"], answer)] if bound
+                                                                           else [])
+    supervise(tmp_path, monkeypatch, bus.events)
+    assert room_speech(tmp_path, project["chat_id"], tid) == ([answer] if bound else [])
+    assert room_speech(tmp_path, 1, tid) == room_speech(tmp_path, admitted, tid) == []
+    assert not [row for row in td.pending_deliveries(tmp_path, strict=True) if row.get("task_id") == tid]
+    assert _delivery_disposition(tmp_path, tid)["state"] == ("delivered" if bound else "")
+    assert td.replay_pending_deliveries(tmp_path, event_queue=bus) == [] and len(bus.events) == int(bound)
 
 
 @pytest.mark.parametrize("silent", [False, True])

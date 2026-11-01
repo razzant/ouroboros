@@ -365,8 +365,10 @@ def get_tools() -> List[ToolEntry]:
                                                "owner's main chat, for a substantive message that needs the owner "
                                                "there while this work lives in an owner-visible Project room. One "
                                                "message: the Project shows it too, and it is read once; it is not "
-                                               "this task's answer. A Presence root reports privately to Main only, "
-                                               "with host-bound source attribution, including from Silent places. "
+                                               "this task's answer. A Presence root reports privately, with host-bound "
+                                               "source attribution, including from Silent places: Main keeps its "
+                                               "address, the Project its work lives in (if any) shows the same row, "
+                                               "and its place never sees it. "
                                                "Delegated and agent-to-agent work cannot use it."},
             }, "required": ["text"]},
         }, _send_user_message),

@@ -380,8 +380,13 @@ def _plan(root: pathlib.Path, stream: str, plan: List[Dict[str, Any]]) -> Dict[s
             ds._set_meta(conn, ds.APPEARANCES_AWAITING, sorted({*(ds._meta(conn, ds.APPEARANCES_AWAITING) or []), *planned}))
             # Planned segments are tracked by awaiting, including on first cutover. Cross only a
             # previously derived prefix, never older-body live rows still below the frontier.
-            conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
-                         (json.dumps(end), ds.APPEARANCES_MARK, json.dumps(int(marks["next_seq"]))))
+            moved = [conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                                  (json.dumps(end), key, json.dumps(int(marks["next_seq"])))).rowcount
+                     for key in (ds.APPEARANCES_MARK, ds.APPEARANCES_COVERED)]
+            if moved[1]:  # covered by plan alone: owed until this body's rule derives them (its import)
+                from ouroboros.room_appearances import owe_planned
+
+                owe_planned(conn, int(marks["next_seq"]), end)
         conn.execute("UPDATE streams SET next_seq=max(next_seq, ?), files_seq=max(files_seq, ?), "
                      "cutover_seq=coalesce(cutover_seq, ?) WHERE stream=?",
                      (end, total if not shifted else files_seq, total, stream))
@@ -439,6 +444,9 @@ def record_imported(conn: Any, keys: List[Tuple[str, int]], lower: int, upper: i
     awaiting = ds._meta(conn, ds.APPEARANCES_AWAITING) or []
     if segment in awaiting:
         ds._set_meta(conn, ds.APPEARANCES_AWAITING, [entry for entry in awaiting if entry != segment])
+    from ouroboros.room_appearances import imported_here
+
+    imported_here(conn, lower, upper)  # this body's rule derived them: what planning owed the pass for them ends
 
 
 def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:

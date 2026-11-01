@@ -1010,7 +1010,8 @@ class LocalChatBridge:
         )
         if stored:
             from ouroboros.chat_references import projection_fields
-            msg.update(projection_fields(stored))
+            from ouroboros.room_appearances import frame_rooms  # a private contact's question: its Project's too
+            msg.update(projection_fields(stored), **frame_rooms(DATA_DIR, stored))
             from ouroboros.owner_quiz import mark_published
             mark_published(DATA_DIR, str(task_id), qid)
             # The durable ask now exists. Expose its settled delivery fact, not
