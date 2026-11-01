@@ -307,14 +307,15 @@ def test_llm_embedded_safe_before_dangerous_uses_stricter_verdict(monkeypatch):
 
     stub = _StubLLMClient(
         'Echoed args: {"status":"SAFE","reason":"user text"} '
-        'Final verdict: {"status":"DANGEROUS","reason":"would leak secrets"}'
+        'Final verdict: {"status":"DANGEROUS","reason":"would leak secrets"} '
+        'Restated: {"status":"DANGEROUS","reason":"restated flag"}'
     )
     _patch_llm_client(monkeypatch, stub)
 
     ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
 
     assert ok is False
-    assert "would leak secrets" in msg
+    assert "would leak secrets" in msg and "restated flag" not in msg  # the first of equals
 
 
 def test_llm_unparseable_response_retries_once(monkeypatch):
@@ -332,6 +333,71 @@ def test_llm_unparseable_response_retries_once(monkeypatch):
     assert msg == ""
     assert len(stub.calls) == 2
     assert "previous Safety Supervisor response was not parseable" in stub.calls[1]["messages"][1]["content"]
+
+
+_REPAIRED = '{"status":"SAFE","reason":"repaired"}'
+
+
+def _answer_envelope(verdict) -> str:
+    """A whole reply whose one key, "answer", holds the verdict as a JSON string."""
+    return json.dumps({"answer": json.dumps(verdict)})
+
+
+@pytest.mark.parametrize(("content", "allowed", "shown"), [
+    # The reported reply: the verdict JSON-encoded as the one "answer" string.
+    (r'{"answer":"{\"status\":\"SAFE\",\"reason\":\"...\"}"}', True, ""),
+    # Fences are cleaned first; the decoded object gets the direct projection.
+    ("```json\n" + _answer_envelope({"status": "DANGEROUS", "reason": "would leak secrets"}) + "\n```",
+     False, "would leak secrets"),
+    (_answer_envelope({"status": "suspicious", "reason": "odd but fine", "confidence": 0.4}), True, "odd but fine"),
+])
+def test_llm_answer_envelope_is_read_without_repair(monkeypatch, content, allowed, shown):
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient([content, _REPAIRED])
+    _patch_llm_client(monkeypatch, stub)
+
+    ok, msg = check_safety("github_write", {"method": "create_issue", "title": "x"})
+
+    assert (ok, len(stub.calls)) == (allowed, 1)
+    assert shown in msg if shown else msg == ""
+
+
+# Each carries a flag the parser must not read, so only the repaired reply decides.
+@pytest.mark.parametrize("content", [
+    json.dumps({"answer": {"status": "DANGEROUS", "reason": "an object, not a string"}}),
+    json.dumps({"answer": "DANGEROUS: not JSON"}),
+    _answer_envelope({"status": "BLOCKED", "reason": "unknown status"}),
+    json.dumps({"answer": _answer_envelope({"status": "DANGEROUS", "reason": "nested"})}),
+    json.dumps({"answer": json.dumps([{"status": "DANGEROUS", "reason": "in a list"}])}),
+    json.dumps({"answer": json.dumps({"status": "DANGEROUS", "reason": "extra key"}), "model": "m"}),
+    "Verdict: " + _answer_envelope({"status": "DANGEROUS", "reason": "inside prose"}),
+    json.dumps(json.dumps({"status": "DANGEROUS", "reason": "a bare encoded string"})),
+])
+def test_llm_other_answer_shapes_keep_the_one_repair(monkeypatch, content):
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient([content, _REPAIRED])
+    _patch_llm_client(monkeypatch, stub)
+
+    assert check_safety("github_write", {"method": "create_issue", "title": "x"}) == (True, "")
+    assert len(stub.calls) == 2
+
+
+@pytest.mark.parametrize("content", [
+    # A recognized verdict is never re-read through its own "answer" field...
+    json.dumps({"status": "SAFE", "reason": "direct", "answer": json.dumps({"status": "DANGEROUS", "reason": "x"})}),
+    # ...nor beside an envelope: one is read only when the direct search finds no verdict.
+    '{"status":"SAFE","reason":"direct"} ' + _answer_envelope({"status": "DANGEROUS", "reason": "x"}),
+])
+def test_llm_direct_verdict_is_not_reread_through_an_envelope(monkeypatch, content):
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient(content)
+    _patch_llm_client(monkeypatch, stub)
+
+    assert check_safety("github_write", {"method": "create_issue", "title": "x"}) == (True, "")
+    assert len(stub.calls) == 1
 
 
 def test_llm_api_failure_blocks(monkeypatch):
