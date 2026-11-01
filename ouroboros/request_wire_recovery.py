@@ -9,8 +9,9 @@ Actions are ``set_value``, ``drop_field`` and ``replace_dialect``, at most
 ``_MAX_COMPOSED_ACTIONS`` per call. A positive enum bound to the effort field needs no
 scalar echo: the retry value is the highest comparable lower tier, or the known minimum
 when every advertised tier is higher. Negative quotes prescribe nothing, a value
-rejection never drops its carrier, and the mandatory-reasoning floor and the
-unsupported-carrier drop remain. Only a normalized success bound to the exact settled
+rejection never drops its carrier (a refusal that names a sampling knob's single allowed
+value drops that knob: the drop is the value fix), and the mandatory-reasoning floor and
+the unsupported-carrier drop remain. Only a normalized success bound to the exact settled
 physical capture teaches ``state/request_wire_compatibility.json`` (entries expire after
 14 days); unsettled attempts never teach. A returned response discloses
 ``usage.request_wire`` after ``validate_wire_attempt_identity`` even when monetary
@@ -806,16 +807,37 @@ def _classify_action(
     *,
     evidence: _WireRejection,
 ) -> Optional[PendingWireAction]:
-    status_code, message = evidence.status, evidence.message
-    if (
-        status_code is None
-        or not 400 <= status_code < 500
-        or status_code in _NON_COMPATIBILITY_4XX
-    ):
+    """One classification pass: the shared refusal-family guards, the whole legacy
+    ladder, then one fallback.
+
+    The guards and the legacy ladder own every recovery already known — the marker
+    gate (a structured ``value_constraint`` and the thinking-refusal shape included,
+    which no marker list can represent), the effort ladder and the named-field loop.
+    The single-value sampling rule is a pure FALLBACK: consulted
+    only when that ladder produced no action under the same guards, it never runs
+    before or instead of an existing recovery.
+    """
+    if (evidence.status is None or not 400 <= evidence.status < 500
+            or evidence.status in _NON_COMPATIBILITY_4XX):
         return None
-    low = str(message or "").lower()
+    low = str(evidence.message or "").lower()
     if any(token in evidence.code for token in ("quota", "rate_limit", "billing", "auth", "context", "policy")):
         return None
+    legacy = _legacy_classify_action(registered, evidence=evidence, low=low)
+    if legacy is not None:
+        return legacy
+    fallback = _sampling_value_drop(registered.candidate.physical_payload(), evidence, low)
+    if fallback is None:
+        return None
+    return PendingWireAction(registered.candidate.accepted_profile, fallback)
+
+
+def _legacy_classify_action(
+    registered: _RegisteredCandidate,
+    *,
+    evidence: _WireRejection,
+    low: str,
+) -> Optional[PendingWireAction]:
     candidate = registered.candidate
     profile = candidate.accepted_profile
     payload = candidate.physical_payload()
@@ -991,6 +1013,76 @@ def _field_less_hint_drop(payload: Mapping[str, Any], evidence: _WireRejection, 
             and _field_is_present(payload, "cache_control")):
         return {"kind": "drop_field", "fields": ["cache_control"], "reason_code": "provider_unsupported_field"}
     return None
+
+
+# A provider that accepts exactly one value of a sampling knob says so in prose; Kimi's
+# coding endpoint answers any other ``temperature`` with HTTP 400 "invalid temperature:
+# only 1 is allowed for this model". The refusal is recognised by its explicit sentence
+# SHAPE — the shape itself names the subject field, so binding is structural, never
+# co-occurrence — and the single value is anchored POSITIVELY as ever: it must end its
+# clause (end of message, a clause-final ``.``, ``;`` or ``)``, or the predicate
+# "is/are allowed/supported"), so a list or range of allowed values ("can only be 0 and
+# 1", "can only be 0 to 2", "0 | 1", "0, 1") never matches: each of those values is
+# followed by a continuation, not by an anchor.
+_SAMPLING_VALUE_TOKEN = r"['\"]?[-+]?\d+(?:\.\d+)?['\"]?"
+_SAMPLING_VALUE_ANCHOR = r"(?=\s*(?:$|[.;)]|\b(?:is|are)\s+(?:allowed|supported)\b))"
+_SAMPLING_KNOB = r"(?P<field>temperature|top_p|top_k)"
+# The three shapes a provider actually writes. The wording set is closed on purpose —
+# anything else keeps today's behavior — and a hyphenated compound
+# ("temperature-less") is not the knob.
+_SAMPLING_VALUE_SHAPES = tuple(re.compile(pattern) for pattern in (
+    # A. the Kimi shape: invalid <field>: only <v> is allowed / is supported.
+    rf"\binvalid\s+{_SAMPLING_KNOB}\s*:\s*only\s+{_SAMPLING_VALUE_TOKEN}{_SAMPLING_VALUE_ANCHOR}",
+    # B. <field> (can|may|must) only be <v>.
+    rf"\b{_SAMPLING_KNOB}\s+(?:can|may|must)\s+only\s+be\s+{_SAMPLING_VALUE_TOKEN}{_SAMPLING_VALUE_ANCHOR}",
+    # C. only <v> is allowed for <field> — the predicate names the subject itself.
+    rf"only\s+{_SAMPLING_VALUE_TOKEN}\s+is\s+allowed\s+for\s+{_SAMPLING_KNOB}(?![\w-])",
+))
+
+
+def _sampling_value_drop(
+    payload: Mapping[str, Any],
+    evidence: _WireRejection,
+    low: str,
+) -> Optional[Dict[str, Any]]:
+    """The drop for a 400/422 refusal whose explicit sentence shape names a sampling
+    field's single allowed value.
+
+    The host's sampling hints (the review lane's ``default_temperature`` among them) are
+    optional knobs: a provider that accepts exactly one value of one rejects the hint's
+    VALUE, not the field's existence, so dropping the knob is the value fix — the
+    provider default is that one value. The subject is bound STRUCTURALLY: one of three
+    explicit sentence shapes must name the sampling field as its own subject
+    ("invalid temperature: only 1 is allowed", "temperature can only be 1", "only 1 is
+    allowed for temperature"), the single value must be anchored to the end of its
+    clause (a list or range of allowed values prescribes nothing), and a structured
+    ``param`` (a namespaced validator's leaf, e.g. ``body.temperature``, included) must
+    agree with the captured field. A message no shape captures — a wording outside the
+    three, a prescription about another field, a knob merely mentioned elsewhere —
+    keeps today's behavior, and two different fields shaped at once binds nothing. The
+    rule runs only after the whole legacy classifier declined — guards, marker gate
+    with ``thinking_refused`` and ``value_constraint`` alike, effort ladder and
+    named-field loop — so it never pre-empts a more specific recovery. Like every
+    reactive drop this is learned only if the retry succeeds.
+    """
+    if evidence.status not in {400, 422}:
+        return None
+    # Each shape names its own subject; the shapes alone decide what is bound — nothing
+    # co-occurs with anything. Exactly one distinct field drops that knob; none, or two
+    # different fields shaped at once (in one sentence or in two), keeps today's behavior
+    # (the provider's error stands).
+    bound = {
+        match.group("field")
+        for shape in _SAMPLING_VALUE_SHAPES
+        for match in shape.finditer(low)
+    }
+    named = next(iter(bound)) if len(bound) == 1 else ""
+    if evidence.param and named != evidence.param.rsplit(".", 1)[-1]:
+        return None
+    if not named or not _field_is_present(payload, named):
+        return None
+    # The provider pinned the VALUE; the knob's default on that route is that value.
+    return {"kind": "drop_field", "fields": [named], "reason_code": "provider_prescribed_value"}
 
 
 def _parameter_filter_refusal(evidence: _WireRejection) -> bool:
