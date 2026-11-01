@@ -612,11 +612,15 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
 
 
 def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse a safety JSON object from a model response.
+    """Parse the ``{"status", "reason"}`` verdict from a Safety model response.
 
-    Safety reviewers occasionally wrap JSON in prose despite the prompt. We
-    accept the first object that has the expected shape, but still fail closed
-    when no valid object exists.
+    Models occasionally wrap the JSON in prose or code fences despite the prompt.
+    The whole reply and every outermost ``{...}`` in it are candidates; the
+    strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
+    equals), so a quoted SAFE cannot outrank a direct flag. Only when no candidate
+    carries a verdict is the whole reply read as ``{"answer": "<verdict JSON>"}``
+    with no other key: that string is decoded once, never searched. Otherwise
+    None: the caller fails closed.
     """
     clean = text.replace("```json", "").replace("```", "").strip()
     candidates = [clean]
@@ -646,17 +650,26 @@ def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
                 start = -1
     best: Dict[str, Any] | None = None
     rank = {"SAFE": 1, "SUSPICIOUS": 2, "DANGEROUS": 3}
+
+    def verdict_of(raw: str) -> Optional[Dict[str, Any]]:
+        obj = json.loads(raw)
+        status = str(obj.get("status") or "").upper() if isinstance(obj, dict) else ""
+        return {"status": status, "reason": str(obj.get("reason") or "")} if status in rank else None
+
     for candidate in candidates:
         try:
-            obj = json.loads(candidate)
+            found = verdict_of(candidate)
         except json.JSONDecodeError:
             continue
-        if not isinstance(obj, dict):
-            continue
-        status = str(obj.get("status") or "").upper()
-        if status in {"SAFE", "SUSPICIOUS", "DANGEROUS"}:
-            if best is None or rank[status] > rank[str(best.get("status") or "").upper()]:
-                best = {"status": status, "reason": str(obj.get("reason") or "")}
+        if found and (best is None or rank[found["status"]] > rank[best["status"]]):
+            best = found
+    if best is None:
+        try:
+            envelope = json.loads(clean)
+            if isinstance(envelope, dict) and list(envelope) == ["answer"] and isinstance(envelope["answer"], str):
+                best = verdict_of(envelope["answer"])
+        except (ValueError, RecursionError):  # a degenerate payload stays unparseable, as before
+            pass
     return best
 
 

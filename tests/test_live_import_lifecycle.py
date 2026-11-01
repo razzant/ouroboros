@@ -185,13 +185,13 @@ def test_source_unload_and_settlement_refuse_only_live_calls(publication, monkey
     monkeypatch.setattr(installer, "settle_pending_update", lambda *a, **kw: settled.append(name) or {"status": "none"})
     work = Work()
     with registry.extension_work_scope(spec, work):
-        for operation in (lambda: installer._unload(name), lambda: installer.settle_before_replacement(tmp_path, name)):
+        for operation in (lambda: installer._unload(tmp_path, name), lambda: installer.settle_before_replacement(tmp_path, name)):
             with pytest.raises(installer.SkillInstallError) as exc:
                 operation()
             assert exc.value.code == "live_call_active"
             assert registry._extensions[name] is bundle and not work.cancelled and not settled
     installer.settle_before_replacement(tmp_path, name)
-    installer._unload(name)
+    installer._unload(tmp_path, name)
     assert settled == [name] and name not in registry._extensions
 
 
