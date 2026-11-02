@@ -66,7 +66,7 @@ from typing import Any, Callable, Dict, Hashable, Iterable, List, Tuple
 
 import pytest
 
-from tests._cost_driver import ACTIVITIES
+from tests._cost_driver import ACTIVITIES, name_owed, refused, schedule_child_job
 from tests._cost_meter import EXECUTION, HISTORY, VM_STEP, CostMeter, tagged
 from tests._scale_root import worktree_root
 from tests._turn_law import hold_turn_law, readers_of, turn_gap
@@ -397,10 +397,13 @@ def test_b10_main_s_turn_carries_the_newest_open_row(measured):
 # ---- B6: the rest law of the named maintenance jobs ---------------------------------------------
 
 def second_run(run: Callable[[pathlib.Path], Any], root: pathlib.Path) -> Dict[str, int]:
-    """The counters of a job's second run over the inputs its first run left."""
-    run(root)
+    """The counters of a job's second run over the inputs its first run left. Each run returns its report, read
+    outside the count: a refused run did nothing, so no count of it is a rest (``refused``; #2465)."""
+    first = run(root)
+    assert not refused(first), ("the first run", refused(first), first)
     with CostMeter(root) as meter:
-        tagged("rest", lambda: run(root))
+        second = tagged("rest", lambda: run(root))
+    assert not refused(second, rest=True), ("the second run", refused(second, rest=True), second)
     return meter.snapshot("rest")["counts"]
 
 
@@ -429,14 +432,30 @@ JOB_NAMES = tuple(getattr(_maintenance(), "JOBS", {}))
 
 
 def job_runner(name: str) -> Callable[[pathlib.Path], Any]:
-    """One named job's run in this process: ``maintenance.run_job(root, name)``."""
+    """One named job's run in this process (``maintenance.run_job``), reported as the child's pass reports it."""
     from tests._store_shared import as_install
 
     maintenance = _maintenance()
 
     def run(root: pathlib.Path) -> Any:
         with as_install(root):  # the maintenance child runs as the install it maintains
-            return maintenance.run_job(root, name, should_stop=lambda: False)
+            outcome = maintenance.run_job(root, name, should_stop=lambda: False)
+        return {"status": "completed", "jobs": {} if outcome is None else {name: outcome}}
+    return run
+
+
+def pass_runner() -> Callable[[pathlib.Path], Any]:
+    """The child's whole pass in this process (``maintenance.run``), as the install it maintains, like a job: from
+    any other install every job is refused (``StoreForeign``) and the pass costs almost nothing (#2465)."""
+    from tests._store_shared import as_install
+
+    maintenance = _maintenance()
+    if maintenance is None or not callable(getattr(maintenance, "run", None)):
+        pytest.skip("the maintenance child's pass does not exist on this tree yet")
+
+    def run(root: pathlib.Path) -> Any:
+        with as_install(root):
+            return maintenance.run(root, should_stop=lambda: False)
     return run
 
 
@@ -451,15 +470,17 @@ def _rests_at_every_size(measured: Dict[Any, Any], run: Callable[[pathlib.Path],
 def run_after_activity(run: Callable[[pathlib.Path], Any], root: pathlib.Path, what: str, phase: str,
                        k: int) -> Dict[str, int]:
     """The counters of a job's run after it rested and one ordinary activity nobody here owns happened
-    (``ACTIVITIES[phase]``, the driver's own shapes, as the install it maintains)."""
+    (``ACTIVITIES[phase]``, the driver's own shapes, as the install it maintains); reports read as ``second_run``'s."""
     from tests._store_shared import as_install
 
-    run(root)
-    run(root)
+    for before in (run(root), run(root)):  # it rested
+        assert not refused(before), (phase, what, "before the activity", refused(before), before)
     with as_install(root):
         ACTIVITIES[phase](root, f"job-{what}", k)
     with CostMeter(root) as meter:
-        tagged(phase, lambda: run(root))
+        after = tagged(phase, lambda: run(root))
+    assert not refused(after), (phase, what, refused(after), after)
+    name_owed(f"{phase} after {what}", after)  # owed work left pending: not refused, debt the next pass inherits
     return meter.snapshot(phase)["counts"]
 
 
@@ -476,10 +497,19 @@ def test_b6_each_job_rests_on_its_second_run(measured, name):
 
 
 def test_b6_the_maintenance_pass_rests_on_its_second_run(measured):
-    maintenance = _maintenance()
-    if maintenance is None or not callable(getattr(maintenance, "run", None)):
-        pytest.skip("the maintenance child's pass does not exist on this tree yet")
-    _rests_at_every_size(measured, lambda root: maintenance.run(root, should_stop=lambda: False), "maintenance.run")
+    """The whole pass, as a job: its first run does the work a seeded due job owes (the child's own scheduled job,
+    ``schedule_child_job``), whose row keeps it done (read outside the count); its second run rests, so it did not."""
+    from ouroboros import maintenance_jobs
+    from tests._store_shared import as_install
+
+    roots = [pathlib.Path(measured[k]["root"]) for k in (K_SMALL, measured["large"])]
+    for root in roots:
+        with as_install(root):
+            seeded = schedule_child_job(root)
+    _rests_at_every_size(measured, pass_runner(), "maintenance.run")  # each run's own report is read there
+    for root in roots:
+        with as_install(root):
+            assert (maintenance_jobs.job(root, seeded) or {}).get("state") == "done", (root, seeded)
 
 
 # The install is never idle: between two passes one ordinary activity nobody here owns happens
@@ -504,10 +534,7 @@ def test_b6_each_job_costs_the_same_after_unrelated_activity(measured, phase, na
 
 @pytest.mark.parametrize("phase,name", _activity_params(ACTIVITY_JOB_GAPS, ("maintenance.run",)))
 def test_b6_the_maintenance_pass_costs_the_same_after_unrelated_activity(measured, phase, name):
-    maintenance = _maintenance()
-    if maintenance is None or not callable(getattr(maintenance, "run", None)):
-        pytest.skip("the maintenance child's pass does not exist on this tree yet")
-    _same_cost_after_activity(measured, lambda root: maintenance.run(root, should_stop=lambda: False), name, phase)
+    _same_cost_after_activity(measured, pass_runner(), name, phase)
 
 
 # ---- B7: the rest law of every recurring pass; B8: the producer and loop boundaries --------------------
@@ -562,6 +589,14 @@ def _duty_pass(measured: Dict[Any, Any], name: str, k: int, phase: str) -> Dict[
     assert entry is not None, f"{name} was not driven at k={k}"
     snapshot = entry.get(phase)
     assert snapshot is not None, f"{name} has no {phase} pass at k={k} (companion: {entry.get('companion')!r})"
+    # Each child reports under its pass's tag (``_drain``): refused, that pass measured nothing (#2465); pending is owed
+    # work, refused in the counted rest, named elsewhere. The rest answers for its preparation's refusals, not pending.
+    reports = measured[k].get("child_reports", {})
+    tags = [phase, *(p for p in entry if phase == "rest" and (p == "first" or p.startswith("settle")))]
+    children = [(f"D:{name}:{tag}", lines) for tag in tags for report in reports.get(f"D:{name}:{tag}", [])
+                if (lines := refused(report, rest=tag == "rest"))]
+    assert not children, (name, k, children)
+    name_owed(f"D:{name}:{phase} at k={k}", *reports.get(f"D:{name}:{phase}", []))
     return snapshot
 
 
@@ -578,6 +613,7 @@ def _growing(little: Dict[str, Any], big: Dict[str, Any]) -> List[tuple]:
 
 def _companion_counter(measured: Dict[Any, Any], name: str, k: int, phase: str, counter: Any) -> int:
     if counter == "child_spawn":  # the child's spawn is recorded under the boundary that requested the look
+        _duty_pass(measured, name, k, phase)  # and the child did that pass's jobs
         return measured[k].get("child_spawns", []).count(f"D:{name}:{phase}")
     if isinstance(counter, tuple):  # one kind of work reached through several doors
         return sum(_companion_counter(measured, name, k, phase, door) for door in counter)
@@ -728,12 +764,17 @@ def test_the_contract_catches_a_history_sized_listing_made_in_one_call(tmp_path,
     assert (counted[K_SMALL]["dir_entries:archive"], counted[30]["dir_entries:archive"]) == expected
 
 
+@pytest.mark.parametrize("story, refusing", [("done done done", ""), ("done pending done", "rest"),
+    ("pending done pending", ""), ("failed done done", "first rest"), ("raised done done", "first rest")])
 @pytest.mark.parametrize("look_ends", ["inside_the_pass", "during_the_drain"])
-def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp_path, monkeypatch, look_ends):
+def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp_path, monkeypatch, recwarn, look_ends,
+                                                                             story, refusing):
     """A pass whose look spawned the child owns the child's jobs: the driver runs them under the pass's
     tag whether the look's thread ended inside the pass (its spawn recorded before the drain began) or
     ends while the drain joins it. A spawn baseline read after the pass takes the early spawn for an
-    old one and measures no child jobs, with no error to show for it."""
+    old one and measures no child jobs, with no error to show for it. B7 reads what each pass's child (``story``:
+    first, rest, unrelated) reported on that pass alone: a refusal fails it and the rest it prepared; pending fails
+    the counted rest only, elsewhere it is owed work, named, that a later pass may do."""
     import threading
     import time
     from types import SimpleNamespace
@@ -742,8 +783,14 @@ def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp
     from tests._cost_driver import _measured_pass
     from tests._cost_meter import tag_of
 
-    runs: List[str] = []
-    monkeypatch.setattr(maintenance, "run", lambda _root, **_kwargs: runs.append(tag_of()))
+    runs, states = [], dict(zip(("D:duty:first", "D:duty:rest", "D:duty:unrelated"), story.split()))
+
+    def run(_root, **_kwargs):
+        runs.append(tag_of())
+        if states[runs[-1]] == "raised":
+            raise RuntimeError("the child's pass died")
+        return {"status": "completed", "jobs": {"custody_trash": {"state": states[runs[-1]], "items": 0}}}
+    monkeypatch.setattr(maintenance, "run", run)
     monkeypatch.setattr(maintenance, "child", SimpleNamespace(owed=lambda: False))
     dispatcher = SimpleNamespace(_DELIVERY_WAKE=threading.Event(), _tick_maintenance_child=lambda: None)
     result: Dict[str, Any] = {"errors": [], "child_spawns": ["D:earlier:first"], "_started": time.monotonic()}
@@ -758,8 +805,14 @@ def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp
             threading.Thread(target=lambda: (time.sleep(0.2), spawn()), name="maintenance-child").start()
 
     with CostMeter(tmp_path) as meter:
-        _measured_pass(meter, "D:duty:first", look, dispatcher, tmp_path, threading.Event(), result)
-    assert result["errors"] == [] and runs == ["D:duty:first"], (look_ends, runs, result["child_spawns"])
+        passes = {tag.split(":")[-1]: _measured_pass(meter, tag, look, dispatcher, tmp_path, threading.Event(), result)
+                  for tag in states}
+    assert result["errors"] == [] and runs == list(states), (look_ends, runs, result["child_spawns"])
+    for phase, state in zip(passes, story.split()):
+        named, refuses = len(recwarn), phase in refusing.split()
+        with pytest.raises(AssertionError, match="custody|Runtime") if refuses else contextlib.nullcontext():
+            _duty_pass({K_SMALL: {**result, "duties": {"duty": passes}}}, "duty", K_SMALL, phase)  # as B7 reads it
+        assert (len(recwarn) > named) is (state == "pending" and phase != "rest"), (phase, [*map(str, recwarn)])
 
 
 @pytest.mark.parametrize("extra", ["none", "sql", "body", "legacy_scan", "missing_headers"])
@@ -864,12 +917,12 @@ def test_the_rest_law_catches_a_job_that_redoes_its_work(tmp_path, rests):
     done = tmp_path / "state" / "job.done"
     done.parent.mkdir()
 
-    def job(root: pathlib.Path) -> None:
-        if rests and done.exists():
-            return
-        with open(root / "archive" / "chat_0001.jsonl", encoding="utf-8") as handle:
-            [json.loads(line) for line in handle]
-        done.write_text("done", encoding="utf-8")
+    def job(root: pathlib.Path) -> Dict[str, Any]:  # reported as a job is (``job_runner``)
+        if not (rests and done.exists()):
+            with open(root / "archive" / "chat_0001.jsonl", encoding="utf-8") as handle:
+                [json.loads(line) for line in handle]
+            done.write_text("done", encoding="utf-8")
+        return {"status": "completed", "jobs": {}}
 
     assert bool(rest_breaches(second_run(job, tmp_path))) is not rests
 

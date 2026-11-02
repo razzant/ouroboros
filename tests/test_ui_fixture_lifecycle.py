@@ -9,6 +9,7 @@ under test here, not the repository's bytes.
 from __future__ import annotations
 
 from contextlib import ExitStack, nullcontext, suppress
+import io
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,7 @@ import json, os, pathlib, subprocess, sys, time
 from ouroboros.platform_layer import subprocess_new_group_kwargs
 receipt, entered, ready = map(pathlib.Path, sys.argv[1:4])
 entered.write_text("entered", encoding="utf-8")
+print("fixture tree stderr", file=sys.stderr, flush=True)
 child = subprocess.Popen(
     [sys.executable, "-c",
      "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('ready', encoding='utf-8'); time.sleep(90)",
@@ -140,7 +142,7 @@ def fixture_probe(tmp_path, monkeypatch, source):
                     _gone(previous.proc.pid) and _gone(previous.child)
                 )
             run = SimpleNamespace(
-                index=self.index, container=self, proc=None, child=0,
+                index=self.index, container=self, proc=None, child=0, tmpdir=Path(kwargs["env"]["TMPDIR"]),
                 receipt=tmp_path / f"tree-{len(probe.runs)}.json",
                 entered=tmp_path / f"entered-{len(probe.runs)}",
                 ready=tmp_path / f"ready-{len(probe.runs)}",
@@ -266,7 +268,7 @@ def test_ui_fixture_reaps_descendants_after_parent_exit_or_normal_stop(fixture_p
 
 
 @pytest.mark.parametrize("stage", ["health", "supervisor"])
-def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, stage):
+def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, stage, capsys):
     probe = fixture_probe
     probe.fail_at = stage
     with pytest.raises(RuntimeError, match=f"injected {stage} failure"):
@@ -274,6 +276,24 @@ def test_ui_fixture_reaps_after_readiness_failure(fixture_probe, stage):
     assert len(probe.runs) == 1
     _assert_stopped(probe, probe.runs[0])
     _assert_owner_deletes(probe)  # the failed start was reaped clean, so nothing pins the copy
+    # The server's own stderr outlives the case's scratch: a manager child's traceback lands nowhere else.
+    reported = [line for line in capsys.readouterr().err.splitlines() if line.startswith("SERVER_STARTUP_LOG ")]
+    assert "fixture tree stderr" in (Path(reported[0].split(" ", 1)[1]) / "server-stdio.log").read_text(encoding="utf-8")
+
+
+def test_supervisor_readiness_failure_names_the_servers_own_error(monkeypatch):
+    answer = json.dumps({"supervisor_ready": False, "supervisor_error": "Supervisor init failed: boom"}).encode()
+    reads = iter([io.BytesIO(answer)])
+
+    def urlopen(*_args, **_kwargs):
+        try:
+            return next(reads)
+        except StopIteration:
+            raise TimeoutError("timed out") from None  # A later slow read must not replace the server's own words.
+
+    monkeypatch.setattr(ui.urllib.request, "urlopen", urlopen)
+    with pytest.raises(RuntimeError, match="did not become ready: Supervisor init failed: boom"):
+        ui._wait_supervisor_ready("http://127.0.0.1:9", timeout_sec=1)
 
 
 def test_ui_fixture_restart_retires_one_container_before_spawning_another(fixture_probe):
@@ -290,6 +310,8 @@ def test_ui_fixture_restart_retires_one_container_before_spawning_another(fixtur
     assert second.proc.poll() is None and not _gone(second.child)
     gen.close()
     _assert_stopped(probe, second)
+    # One temp for the case's every generation; only the run's owner removes it, after the run.
+    assert first.tmpdir == second.tmpdir and second.tmpdir.is_dir()
     _assert_owner_deletes(probe)
 
 
@@ -308,6 +330,7 @@ def test_cases_boot_from_the_owners_one_copy_with_their_own_roots_and_overlay(fi
     gen, second = probe.open()
     assert second["repo_dir"] == first["repo_dir"] == probe.owner.path
     assert second["data_dir"] != first["data_dir"] and second["candidate"] is not first["candidate"]
+    assert second["env"]["TMPDIR"] != first["env"]["TMPDIR"]
     assert second["candidate_version"] == first["candidate_version"] == probe.owner.version_text
     assert (probe.owner.path / VERSION_PATH).read_text(encoding="utf-8").strip() == probe.owner.version_text
     gen.close()

@@ -2,7 +2,8 @@
 
 Each counts work only as long as the code it watches keeps one idiom: a lock file is created by an
 exclusive ``os.open`` (``platform_layer``), a stored dialogue row is decoded by ``dialogue_store.decode``,
-a host name is resolved through ``socket.getaddrinfo``. These checks live apart from
+a host name is resolved through ``socket.getaddrinfo``, a maintenance pass names refused work in its report
+(``maintenance.run``). These checks live apart from
 tests/test_cost_contract.py so that a change to those modules re-runs them in seconds (the commit
 gate selects a test module by its direct imports) instead of booting the contract's two installs.
 """
@@ -92,3 +93,32 @@ def test_the_turn_law_s_batched_rows_are_the_rows_append_stores(tmp_path):
         finally:
             conn.close()
     assert stored[0] == stored[1] and len(stored[0][0]) == len(rows)
+
+
+@pytest.mark.parametrize("pass_", ["bound", "unbound", "returned_failed", "left_pending"])
+def test_the_driver_reads_the_work_a_maintenance_pass_reports_it_did_not_do(tmp_path, monkeypatch, pass_):
+    """``refused`` (tests/_cost_driver.py) reads ``maintenance.run``'s own report: a pass pointed at another install has
+    every job refused (``StoreForeign``, #2465); a job may return ``failed`` without raising while the pass reports
+    ``completed``; a job left ``pending`` is owed work, refused only at rest. A bound pass at rest refuses nothing."""
+    import contextlib
+
+    from ouroboros import maintenance
+    from tests._cost_driver import refused
+    from tests._store_shared import as_install
+
+    (root := tmp_path / "data").mkdir()
+
+    def run(bound: bool) -> dict:
+        with as_install(root) if bound else contextlib.nullcontext():
+            return maintenance.run(root, should_stop=lambda: False)
+    assert not refused(run(True))  # bound: the root mints its own identity, as at an install's first boot
+    if pass_ in ("returned_failed", "left_pending"):  # returned, not raised: custody_trash while a drive stays stuck
+        outcome = {"state": "failed" if pass_ == "returned_failed" else "pending", "items": 0}
+        monkeypatch.setitem(maintenance.JOBS, "custody_trash", (lambda *_: True, lambda *_: outcome))
+    report = run(pass_ != "unbound")
+    if pass_ == "unbound":
+        assert refused(report) == ["pass failed", *(f"{name}: failed" for name in maintenance.JOBS)], report
+    else:
+        named = ["custody_trash: failed"] if pass_ == "returned_failed" else []
+        assert report["status"] == "completed" and refused(report) == named, report
+        assert refused(report, rest=True) == (["custody_trash: pending"] if pass_ == "left_pending" else named)

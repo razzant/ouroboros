@@ -118,6 +118,8 @@ def main() -> int:
     try:
         env = boundary(root, repo, keep=(
             "OUROBOROS_RUN_UI_SMOKE", "OUROBOROS_EXPECT_BROWSER_ENGINES",
+            # A person's explicit engine for env-driven UI tests. The hermetic gate keeps scrubbing it.
+            "OUROBOROS_UI_BROWSER_ENGINE",
             "OUROBOROS_PREFLIGHT_TEST_WORKERS", "OUROBOROS_PREFLIGHT_SERIAL",
             # CI requires these test dependencies; without them a missing plugin or Node skips.
             "OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS", "OUROBOROS_PREFLIGHT_REQUIRE_NODE",

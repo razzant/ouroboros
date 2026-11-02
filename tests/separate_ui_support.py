@@ -436,16 +436,17 @@ def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, se
     ``ui_dir`` lets a client-entry test exercise selected files through this same core instead
     of mistaking separately hosted files for the core's selected setup/sign-in pages.
     """
-    from ouroboros.test_environment import isolated_environment
+    from ouroboros.test_environment import isolated_environment, owned_process_temp
+    from ouroboros.test_evidence import keep_startup_log
     from tests.candidate_checkout import candidate_checkout, require_candidate_interpreter
 
-    # ``root`` itself holds the isolated home, data and tmp: macOS caps a socket path at 104
-    # bytes, and the core's worker manager listens beneath TMPDIR.
+    # ``root`` itself holds the isolated home and data. macOS caps a socket path at 104 bytes and the
+    # core's worker manager listens beneath TMPDIR: short under a launcher, else ``root/tmp``.
     root.mkdir(parents=True, exist_ok=True)
     checkout = root / "repo"
     with ExitStack() as stack:
         candidate = stack.enter_context(candidate_checkout(REPO_ROOT, checkout, origin_proof=True))
-        env = isolated_environment(root, checkout)
+        env = isolated_environment(root, checkout, process_temp=owned_process_temp())
         data_dir = Path(env["OUROBOROS_DATA_DIR"])
         values = dict(settings or {})
         model = ModelStub()  # a fresh install points its setup at it
@@ -476,7 +477,8 @@ def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, se
         require_candidate_interpreter(_python(), env, checkout)
         core = Core(root, checkout, candidate, env, port, root / "core.log", model)
         try:
-            core.start(configured=provider)
+            with keep_startup_log(root, "core.log"):
+                core.start(configured=provider)
             yield core
         finally:
             core.stop()

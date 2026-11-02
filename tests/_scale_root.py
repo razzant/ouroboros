@@ -50,7 +50,9 @@ Run in its own interpreter with ``OUROBOROS_DATA_DIR`` set to the root (the writ
 the process data root then write there): ``python -m tests._scale_root ROOT K OUT.json``. The
 build names ``<home>/worktrees`` the process's worktree root, as the measured boot must too; the
 meter's execution root is the copies' own folder inside it, so resolving the configured root on a
-pass is no walk of a checkout.
+pass is no walk of a checkout. The root's configured budget (state and ``settings.json``) is the limit its
+money is settled under (``spend_limit_usd``), so an owner's turn has room at every size; ``facts["budget"]``
+records that limit, the settled spend and what remains, as admission reads them.
 """
 
 from __future__ import annotations
@@ -479,10 +481,19 @@ LIMIT_REFERENCE_K = 30
 
 
 def spend_limit_usd(k: int) -> float:
-    """The global limit the synthetic money is reserved under: the k=30 root's $100, or proportionally more
-    for a larger root (every unit settles ``ABSENT_OWNERS_PER_K`` attempts: the known spend grows with the
-    shape, and a fixed limit refused the k=100 root's reservations once it reached $100)."""
+    """The global limit the synthetic money is reserved under, and the root's configured budget (``build``): the
+    k=30 root's $100, or proportionally more for a larger root (every unit settles ``ABSENT_OWNERS_PER_K``
+    attempts: the known spend grows with the shape, and a fixed $100 refused the k=100 root's reservations once it
+    reached it, then its owner's turns before their first request: #2407)."""
     return GLOBAL_LIMIT_USD * max(1.0, k / LIMIT_REFERENCE_K)
+
+
+def _budget(root: pathlib.Path, limit: float) -> Dict[str, float]:
+    """The root's money as admission reads it (``usage_projection``): the limit, the settled spend, what remains."""
+    from ouroboros.usage_accounting import usage_projection
+
+    projection = usage_projection(root, global_limit_usd=limit)
+    return {key: projection[key] for key in ("limit_usd", "settled_usd", "remaining_known_usd")}
 
 
 def money(root: pathlib.Path, task_id: str, *, category: str = "", cost: float = 0.4,
@@ -657,10 +668,11 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     root = pathlib.Path(root)
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "state").mkdir(parents=True, exist_ok=True)
-    state.init(root, 100.0)
+    limit = spend_limit_usd(k)  # the budget the history's money is settled under, so a turn still has room
+    state.init(root, limit)
     state.init_state()  # a first boot's state, before any history exists
     # No fallback model: the turn law (B10) ends a turn at its first model request, which the driver refuses.
-    (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": 100, "OUROBOROS_MAX_WORKERS": 2,
+    (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": limit, "OUROBOROS_MAX_WORKERS": 2,
                                                     "OUROBOROS_MODEL_FALLBACKS": []}), encoding="utf-8")
     facts: Dict[str, Any] = {"k": k}
     steps: Dict[str, float] = {}
@@ -687,6 +699,7 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     facts["packs"] = step("packed", lambda: _packed(root, k))
     facts["plan_asks"] = step("plan_asks", lambda: _plan_asks(root, k))
     step("metrics_cursor", lambda: _forget_metrics_cursor(root))
+    facts["budget"] = _budget(root, limit)
     facts["build_seconds"] = round(time.monotonic() - started, 2)
     facts["build_steps"] = steps
     return facts

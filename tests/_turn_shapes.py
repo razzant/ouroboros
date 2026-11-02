@@ -181,15 +181,20 @@ def steady_state(root: pathlib.Path) -> Dict[str, Any]:
     (``boot_listings``). An install that does not reach it fails the driver: no law reads a fill."""
     from ouroboros import maintenance
     from ouroboros.chronicle_store import ChronicleStore
+    from tests._cost_driver import refused
 
     jobs: Dict[str, Any] = {}
+    refusals: List[str] = []
     for _attempt in range(3):
         if not maintenance.due(root):
             break
-        jobs.update(maintenance.run(root, should_stop=lambda: False)["jobs"])
+        report = maintenance.run(root, should_stop=lambda: False)
+        jobs.update(report["jobs"])
+        refusals += refused(report)  # a refused job left nothing done: no steady state follows from it
     tail, due = ChronicleStore(root).tail_state() or {}, maintenance.due(root)
-    if not tail.get("complete") or due:
-        raise RuntimeError(f"the install did not reach its steady state: tail {tail}, still due {due}, ran {jobs}")
+    if not tail.get("complete") or due or refusals:
+        raise RuntimeError(f"the install did not reach its steady state: tail {tail}, still due {due}, "
+                           f"refused {refusals}, ran {jobs}")
     return {"child_jobs": jobs, "catalogue": boot_catalogue(), "listings": boot_listings(root)}
 
 
