@@ -93,7 +93,7 @@ Attach file/paste/drop stage attachments without count/size rejection; Send uplo
 
 #### Direct turns and the activity block
 
-Main/Project native turns have no queue rows. `supervisor.active_activity.DirectActivityRegistry` keeps actors through preparation/delivery; Stop/Hurry/quiz/steering address them, census/typing present them. They read Preparing · start step (census `turn_phase`), then the call's word (§6). Writer drain, custody and restart census include them; owner turns never hold the own clock.
+Main/Project turns own RUNNING conversation-lane rows, never PENDING (§5); the census reads them (`conversation_lane.lane_turn_rows`) and the inline executors' actors (`DirectActivityRegistry`). Stop/Hurry/quiz/steering address them, census/typing present them. They read Preparing · start step (census `turn_phase`, carrier `direct_turn_phase` frames), then the call's word (§6); owner turns never hold the own clock.
 
 `_is_direct_chat` survives result, terminal, summary, history and census, keeping Project-native replies local; managed/transferred turns stay mirror-eligible. `_emit_progress.narration`/`.reasoning`, replayed via `_PROGRESS_META_FIELDS`, let only model speech take titles/collapsed lines.
 

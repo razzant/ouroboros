@@ -94,9 +94,8 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
   one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3); one
-  validated census per tree for every consumer (`tree_census.writer_facts`); exact reuse by source
-  identity, never time, each pinned by an identity law against a fresh read
-  (`memory_view.capture_story`, `skill_discovery_reuse.py`).
+  census per tree for every consumer (`tree_census.writer_facts`); exact reuse by source identity,
+  never time, pinned against a fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`).
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
