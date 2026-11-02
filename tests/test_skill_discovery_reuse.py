@@ -168,11 +168,14 @@ def test_the_runtime_mode_facet_keys_the_load(install, monkeypatch):
 
 
 def test_callers_get_their_own_copy(install):
+    """Callers assign a skill's fields and its review's and manifest's (``skill.enabled = …``, ``skill.review = …``):
+    each gets its own objects, the kept skill never moves."""
     data, counts = install
     pristine = _dump([loader.find_skill(data, "beta")])
     beta = loader.find_skill(data, "beta")
-    beta.enabled, beta.review.status, beta.manifest.description = True, "pass", "changed by a caller"
-    beta.review.findings.append({"verdict": "PASS"})
+    beta.enabled, beta.source, beta.review.status, beta.manifest.description = True, "x", "pass", "changed by a caller"
+    other = loader.find_skill(data, "beta")
+    other.review = SkillReviewState(status="pass")
     assert _dump([loader.find_skill(data, "beta")]) == pristine and counts["loads"] == 1
 
 

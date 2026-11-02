@@ -20,8 +20,10 @@ the rule the payload digests already trust: a write, truncation, ``utime``, rena
 moves a change time the caller cannot set back. The identity is taken after the read it covers, and kept only when
 no change time lies within ``_RACY_NS`` of the read's start, so a write during the read or in its coarse clock tick
 is read again next time. On Windows or a filesystem the store does not call local nothing is kept: discovery reads
-everything every time, as before. Each caller gets its own copy (callers assign ``enabled``, ``review``, ``source``).
-Nothing is written, and no process shares another's answers.
+everything every time, as before. Each caller gets its own skill, review and manifest objects, since callers assign
+their fields (``enabled``, ``review``, ``source``); the values inside are shared and no caller mutates them in place,
+as no reader of a parsed view does (a deep copy would cost more than the reviews' JSON it saves parsing). Nothing is
+written, and no process shares another's answers.
 """
 from __future__ import annotations
 
@@ -84,6 +86,15 @@ def _trusted(keys: Dict[str, Any], started: int) -> bool:
     return all(key == _MISSING or key is not None and key[1][2] < started - _RACY_NS for key in keys.values())
 
 
+def _own(loaded: Any) -> Any:
+    """A caller's own skill, review and manifest objects over the shared values inside them (None stays None)."""
+    if loaded is None:
+        return None
+    own = copy.copy(loaded)
+    own.review, own.manifest = copy.copy(loaded.review), copy.copy(loaded.manifest)
+    return own
+
+
 def _kept(memo: "OrderedDict[Tuple[Any, ...], Any]", key: Tuple[Any, ...], held: Any) -> None:
     memo.pop(key, None)
     memo[key] = held
@@ -138,10 +149,10 @@ def reused_skill(key: Tuple[Any, ...], skill_dir: Any, state_dir: Any, load: Cal
 
     held = _SKILLS.get(key)
     if held is not None and identity(held[1]) == held[0]:
-        return copy.deepcopy(held[1])
+        return _own(held[1])
     started = time.time_ns()
     loaded = load()
     keys = identity(loaded)
     if _trusted(keys, started):
-        _kept(_SKILLS, key, (keys, copy.deepcopy(loaded)))
+        _kept(_SKILLS, key, (keys, _own(loaded)))
     return loaded
