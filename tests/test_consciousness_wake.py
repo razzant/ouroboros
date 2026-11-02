@@ -125,9 +125,14 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
     template = REPO.joinpath("prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8")
     clock.root.joinpath("repo/prompts/CONSCIOUSNESS.md").write_text(template, encoding="utf-8")
     assert clock.clock.tick(T0 + clock_tests.FLOOR) == "launched"
-    accepted_a = clock.store[OBSERVATION_STATE_KEY]
-    seed_wake(clock.root, task_id="wake0001", result="A's whole note.", wake_summary="A's line.")
-    clock.clock._wake_finished("wake0001", True)
+    # A's carrier accepted the boundary; it rides A's row to the clock at A's terminal.
+    launched_a = clock.launches[-1]["task"]["metadata"]
+    accepted_a = launched_a["wake_observation"]["accepted_boundary"]
+    assert OBSERVATION_STATE_KEY not in clock.store
+    seed_wake(clock.root, task_id="wake0001", result="A's whole note.", wake_summary="A's line.",
+              metadata=launched_a)
+    clock.finish("wake0001", True)  # the carrier's terminal settles the wake and lays A's boundary
+    assert clock.store[OBSERVATION_STATE_KEY] == accepted_a
     clock.receipt["task_id"] = "wake0002"
     clock.clock._next_wake_at = T0 + 2 * clock_tests.FLOOR
     with monkeypatch.context() as fault:
@@ -145,7 +150,7 @@ def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(cl
     seed_wake(clock.root, task_id="wake0002", status="interrupted", outcome_axes={}, terminal_time=None,
               result="B's whole note.\n\nStill unfinished.", wake_summary="B's line.")
     seed_wake(clock.root, task_id="newer-foreign", result="Never use the newest task's note.")
-    clock.clock._wake_finished("wake0002", True)
+    clock.finish("wake0002", True)
     if restart:
         clock.clock = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: 7,
                                               now=T0 + 2 * clock_tests.FLOOR)

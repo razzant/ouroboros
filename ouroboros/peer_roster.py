@@ -353,7 +353,10 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task
 def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bool = False,
                   canonical_root: Optional[pathlib.Path] = None,
                   queue_row: Optional[Dict[str, Any]] = None,
-                  trees: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+                  trees: Optional[Dict[str, Dict[str, Any]]] = None,
+                  results: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """One roster row. ``results`` is the ONE read of every listed root's stored result
+    (``_stored_results``): a turn reads its horizon in one transaction, never a root at a time."""
     row = {
         "task_id": task_id,
         "title": str(task.get("title") or "").strip(),
@@ -361,7 +364,9 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
         "project_id": str(task.get("project_id") or ""),
         "status": status,
         "drive_root": str(task.get("child_drive_root") or task.get("drive_root") or ""),
-        "direct_chat": direct,
+        # A live direct conversation: the retired fragment's rows, and the conversation lane's RUNNING
+        # rows (an owner turn carried by the pool is still the owner's conversation, never a task).
+        "direct_chat": bool(direct or task.get("_is_direct_chat")),
     }
     queue_row = queue_row if isinstance(queue_row, dict) else {}
     # Focus is durably written before the supervisor projection event.  Read
@@ -372,8 +377,15 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
     stored: Dict[str, Any] = {}
     if canonical_root is not None:
         try:
-            from ouroboros.task_results import load_task_result
-            loaded = load_task_result(pathlib.Path(canonical_root), task_id, strict=True)
+            if results is not None:
+                if results.get("_unavailable"):
+                    raise results["_unavailable"]
+                loaded = results.get(task_id)
+                if isinstance(loaded, dict) and loaded.get("_refused") is not None:
+                    raise loaded["_refused"]
+            else:
+                from ouroboros.task_results import load_task_result
+                loaded = load_task_result(pathlib.Path(canonical_root), task_id, strict=True)
             stored = loaded if isinstance(loaded, dict) else {}
             if stored.get("status"):
                 if str(stored.get("status")) in SETTLED_STATUSES:
@@ -430,6 +442,42 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
     return row
 
 
+def _stored_results(root: pathlib.Path, task_ids: List[str]) -> Dict[str, Any]:
+    """Every listed root's stored result in ONE read transaction (``task_store.documents_by_ids``):
+    the roster shows every live root and costs the turn one round trip, however many roots live
+    (B10: a Main turn reads pages, not roots). A store that cannot be read is one aggregate fact
+    (``_unavailable``) every row then discloses; a row the strict admission refuses
+    (``task_results._admit_stored``: an identity or status that does not bind) is named on ITS
+    row (``{"_refused": exc}``) and never reads as an absent result or an ended wait."""
+    from ouroboros.task_results import _admit_stored, _normalize_swarm_efficiency, validate_task_id
+    from ouroboros.task_store import documents_by_ids
+
+    if not task_ids:
+        return {}
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[task_id] = validate_task_id(task_id)
+        except ValueError:
+            valid[task_id] = ""
+    try:
+        documents = documents_by_ids(root, sorted({tid for tid in valid.values() if tid}))
+    except Exception as exc:
+        return {"_unavailable": exc}
+    results: Dict[str, Any] = {}
+    for task_id, tid in valid.items():
+        data = documents.get(tid) if tid else None
+        if data is None:
+            continue
+        try:
+            _admit_stored(data, tid, strict=True, noun="task result authority")
+        except Exception as exc:
+            results[task_id] = {"_refused": exc}
+            continue
+        results[task_id] = _normalize_swarm_efficiency(data)
+    return results
+
+
 def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Every host-listed active independent root, compact (id, title, room, status).
 
@@ -444,7 +492,7 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     observation = queue_snapshot_observation(snapshot)
     gaps: List[str] = []
     trees = _live_trees(root, snapshot, gaps)
-    rows: List[Dict[str, Any]] = []
+    listed: List[tuple] = []  # (task_id, task, status, direct, queue_row), in roster order
     seen: set[str] = set()
     if not (snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid")):
         for status_key in ("running", "pending"):
@@ -460,8 +508,7 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
                 ):
                     continue
                 seen.add(task_id)
-                rows.append(_compact_root(task_id, task, status=status_key, canonical_root=root, queue_row=row,
-                                          trees=trees))
+                listed.append((task_id, task, status_key, False, row))
     fragment = load_queue_document(root, DIRECT_ROOTS_FRAGMENT.name)
     direct_observation = {**queue_snapshot_observation(fragment), "source": "state/direct_roots.json"}
     for row in fragment.get("roots") or []:
@@ -470,7 +517,12 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
         task_id = str(row.get("task_id") or "").strip()
         if task_id and task_id not in seen:
             seen.add(task_id)
-            rows.append(_compact_root(task_id, row, status="running", direct=True, canonical_root=root, trees=trees))
+            listed.append((task_id, row, "running", True, None))
+    results = _stored_results(root, [task_id for task_id, *_rest in listed])
+    rows: List[Dict[str, Any]] = [
+        _compact_root(task_id, task, status=status, direct=direct, canonical_root=root, queue_row=queue_row,
+                      trees=trees, results=results)
+        for task_id, task, status, direct, queue_row in listed]
     return {
         "roots": rows,
         "incomplete": bool(fragment.get("incomplete")) or not bool(observation.get("fresh"))

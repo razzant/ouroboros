@@ -178,6 +178,23 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/agent_dispatch.py"),
     "task_focus_updated": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/project_journal.py"),
+    # --- the conversation lane's carrier frames (a carrier's start facts, bound facts and title) --
+    "direct_turn_phase": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="a carrier's start phase lands on its RUNNING row for the census"),
+    "direct_turn_bound": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="the Project basis the carrier bound lands on its RUNNING row (snapshot, park, restore)"),
+    "task_named": _handled(
+        "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
+        note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),
+    # --- a Host-admitted Presence turn's body in a carrier: its envelope and its settlement --
+    "presence_turn_initial": _handled(
+        "ouroboros.presence_carrier", "ouroboros/presence_carrier.py",
+        note="a continuing author's initial envelope resolves the Host's initial future"),
+    "presence_turn_settled": _handled(
+        "ouroboros.presence_carrier", "ouroboros/presence_carrier.py",
+        note="the body's result or error by value resolves the Host's future and frees the row"),
     "task_done": _handled(
         "supervisor.events_task_done", "ouroboros/agent_task_pipeline.py",
         "supervisor/queue.py", "supervisor/task_reaper.py", "supervisor/worker_health.py", idle_input=True),

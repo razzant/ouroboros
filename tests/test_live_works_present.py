@@ -151,8 +151,10 @@ def test_roster_discloses_both_unreadable_task_and_project_enrichment(tmp_path, 
     _fixture(tmp_path)
     def busy(*_args, **_kwargs):
         raise StoreBusy("busy")
+    from ouroboros import task_store
+
     monkeypatch.setattr(projects_registry, "project_binding_for_task", busy)
-    monkeypatch.setattr(task_results, "load_task_result", busy)
+    monkeypatch.setattr(task_store, "documents_by_ids", busy)  # the roster's one read of every root's result
     roster = independent_roots(tmp_path)
     assert roster["incomplete"] is True
     assert all(row["unavailable"] == {"task_result": "StoreBusy", "project": "StoreBusy"}

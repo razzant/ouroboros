@@ -861,7 +861,8 @@ def retire_or_replace_worker(wid: int, slot: Any) -> str:
         fenced = project_fenced(slot)
     if not last:
         return "retired" if retire_worker(wid, slot) else ""
-    return "replaced" if not fenced and is_worker_slot(slot) and _spawn_worker_slot(wid, slot, lane=slot.lane) else ""
+    return ("replaced" if not fenced and is_worker_slot(slot)
+            and _spawn_worker_slot(wid, slot, lane=getattr(slot, "lane", LANE_PROJECT)) else "")
 
 
 def request_worker_quiescence(slot: Any) -> None:

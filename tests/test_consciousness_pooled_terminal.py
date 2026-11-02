@@ -40,7 +40,7 @@ def pooled(clock, terminal_context, monkeypatch):
     from supervisor import queue
 
     ctx, worker, pushed = terminal_context
-    handed_off = _launched(clock)
+    _launched(clock)  # the lane admits the wake; no direct stack hands it off, so nothing calls the clock back
     owner = execution_owner_record(clock.root, {"id": WAKE, "_attempt": 1}, "pooled")
     task = {"id": WAKE, "type": "task", "_attempt": 1, "chat_id": 7, "metadata": dict(OWN), "_execution_owner": owner}
     ctx.RUNNING.clear()
@@ -51,8 +51,7 @@ def pooled(clock, terminal_context, monkeypatch):
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(clock_module.time, "time", lambda: FINISH)
     deadline = clock.clock.next_wake_at
-    handed_off(WAKE, True)  # the direct stack returned over its handoff: this ended no logical wake
-    assert clock.clock.live_wake() == WAKE and clock.clock.next_wake_at == deadline
+    assert clock.clock.live_wake() == WAKE and clock.clock.next_wake_at == deadline  # the row is the custody
     assert LAST_WAKE_STATE_KEY not in clock.store
     return SimpleNamespace(clock=clock.clock, store=clock.store, launches=clock.launches, receipt=clock.receipt,
                            root=clock.root, ctx=ctx, worker=worker, pushed=pushed, owner=owner, task=task,

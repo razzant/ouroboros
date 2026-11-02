@@ -137,7 +137,8 @@ def lane_row(workers_module: Any, task: Dict[str, Any], *, wid: int = 97, execut
     owner.update(lane=LANE_CONVERSATION, executor=executor)
     task["_execution_owner"] = owner
     task.setdefault("root_task_id", str(task["id"]))
-    proc = SimpleNamespace(pid=pid, is_alive=lambda: True, exitcode=None)
+    proc = SimpleNamespace(pid=pid, is_alive=lambda: True, exitcode=None,  # a stop can join and terminate it
+                           join=lambda *_a, **_k: None, terminate=lambda: None, kill=lambda: None)
     slot = workers_module.Worker(wid, proc, SimpleNamespace(put=lambda row: None), busy_task_id=str(task["id"]),
                                  lane=LANE_CONVERSATION, executor=executor)
     slot.booting, slot.reaping = False, False

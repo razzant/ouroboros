@@ -148,7 +148,7 @@ def test_a_dispatch_that_raises_settles_the_waiter_and_reraises(lane):
 
 def test_a_remote_author_accepts_mail_only_while_its_durable_intake_is_open(tmp_path):
     from ouroboros.conversation_lease import (
-        accept_author_mail, author_intake_accepting, bind_author_intake, close_author_intake, open_author_intake,
+        accept_author_mail, author_intake_accepting, close_author_intake, open_author_intake,
     )
 
     root = tmp_path
@@ -168,10 +168,7 @@ def test_a_remote_author_accepts_mail_only_while_its_durable_intake_is_open(tmp_
     assert accept_author_mail(root, "author-1", "other-key", append) is False
     close_author_intake(root, "author-1")
     assert accept_author_mail(root, "author-1", "key-1", append) is False and appended == [1]
-    # The agent's end of the turn closes the fact.
-    released = []
-    agent = SimpleNamespace(_release_turn=lambda: released.append(True))
-    bind_author_intake(agent, root, "author-2", "key-2")
-    assert author_intake_accepting(root, "author-2", "key-2")
-    agent._release_turn()
-    assert released == [True] and not author_intake_accepting(root, "author-2", "key-2")
+    # The runner opens the fact before the body and closes it in its own finally once the body returned
+    # (``presence_runner.run_presence_turn``), after the wait scope closed: never inside the agent's release.
+    close_author_intake(root, "author-1")  # closing twice is quiet
+    assert not author_intake_accepting(root, "author-1", "key-1")
