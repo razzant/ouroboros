@@ -879,3 +879,28 @@ def test_a_carried_version_2_author_answers_early_from_its_carrier(v2, monkeypat
     finally:
         stop.set()
         thread.join(BARRIER)
+
+
+def test_the_authors_durable_intake_closes_with_its_final_drain_before_the_turn_returns(v2):
+    """Review M10: a Host in another process reads only the author's durable intake fact. It closes with the
+    loop's own admission, before the final drain reads, so between the final closure and the turn's return a
+    remote arrival is refused (it becomes its own turn), never acknowledged to an author that will not read it."""
+    from ouroboros.conversation_lease import author_intake_accepting
+    from ouroboros.presence_bindings import conversation_key
+
+    h, go = v2, threading.Event()
+    h.script = [held(go, finish_call("Answer."))]
+    h.terminal.clear()
+    thread, _box = post_later(h, 1)
+    ref, key = turn_ref(h, 1), conversation_key("chat", "a", "r", "")
+    try:
+        wait_until(lambda: len(h.calls) == 1, "the author's first model call")
+        assert author_intake_accepting(h.root, ref, key)  # its loop reads mail: a remote Host may offer it
+        go.set()
+        assert h.closed.wait(BARRIER)  # the final closure passed; the turn has not returned yet
+        assert not author_intake_accepting(h.root, ref, key)
+    finally:
+        go.set()
+        h.terminal.set()
+        thread.join(BARRIER)
+    assert settled(h, ref)["text"] == "Answer."

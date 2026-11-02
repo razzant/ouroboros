@@ -1282,8 +1282,7 @@ def run_presence_turn(
             from ouroboros.conversation_lease import close_author_intake, open_author_intake
             intake_open = False
             try:
-                open_author_intake(Path(drive_root), task_id, event.conversation_key)
-                intake_open = True
+                intake_open = open_author_intake(Path(drive_root), task_id, event.conversation_key)
             except Exception:
                 log.debug("author intake fact not written for %s", task_id, exc_info=True)
             try:

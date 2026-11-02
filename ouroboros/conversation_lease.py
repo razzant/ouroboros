@@ -444,23 +444,67 @@ def _write_intake(drive_root: Any, task_id: str, row: dict) -> None:
     atomic_write_json(_intake_path(drive_root, task_id), row)
 
 
-def open_author_intake(drive_root: Any, task_id: str, conversation_key: str) -> None:
-    """The author's loop reads this conversation's mail from here on (under the mail lock)."""
+def open_author_intake(drive_root: Any, task_id: str, conversation_key: str) -> bool:
+    """The author's loop reads this conversation's mail from here on (under the mail lock).
+
+    False when the lock could not be taken: nothing is opened, so no arrival is accepted that the lock
+    could not order (the author still reads its own mailbox; a remote Host refuses, and the arrival
+    becomes its own turn)."""
     from ouroboros.task_custody import task_mail_lock
 
-    with task_mail_lock(drive_root, task_id):
+    with task_mail_lock(drive_root, task_id) as locked:
+        if not locked:
+            return False
         _write_intake(drive_root, task_id, {"accepting": True, "conversation_key": conversation_key, "pid": os.getpid()})
+        return True
 
 
-def close_author_intake(drive_root: Any, task_id: str) -> None:
-    """The author's loop stopped reading: an arrival offered from now on is refused (under the mail lock)."""
+def close_author_intake(drive_root: Any, task_id: str) -> bool:
+    """The author's loop stopped reading: an arrival offered from now on is refused (under the mail lock).
+
+    The fact is removed even when the lock could not be taken (it must never outlive its reader); False
+    then discloses that an arrival racing the close may have landed unread."""
     from ouroboros.task_custody import task_mail_lock
 
-    with task_mail_lock(drive_root, task_id):
+    with task_mail_lock(drive_root, task_id) as locked:
         try:
             _intake_path(drive_root, task_id).unlink()
         except OSError:
             pass
+        if not locked:
+            log.warning("author intake of %s closed without its mail lock; a racing arrival may be unread", task_id)
+        return bool(locked)
+
+
+def follow_loop_admission(ctx: Any, accepting: bool) -> None:
+    """A carried Presence author's durable intake follows its loop's own admission (the final drain).
+
+    A Host in another process reads only this fact, so it moves with the loop under the mail lock:
+    closed BEFORE the final drain reads (an arrival either lands first and is drained, or is refused
+    and becomes its own turn), reopened when the loop reads mail again (an owner follow-up, a reopened
+    final). Only the writer's own process moves its fact; a turn with no intake row has none to follow."""
+    metadata = getattr(ctx, "task_metadata", None)
+    root, task_id = getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or "")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("presence"), dict) or root is None or not task_id:
+        return
+    from ouroboros.task_custody import task_mail_lock
+
+    try:
+        path = _intake_path(root, task_id)
+        if not path.exists():
+            return
+        with task_mail_lock(root, task_id) as locked:
+            row = json.loads(path.read_text(encoding="utf-8"))
+            if row.get("pid") != os.getpid() or bool(row.get("accepting")) is bool(accepting):
+                return
+            if not locked:
+                if accepting:
+                    return  # never reopened unordered: the loop's own mailbox stays its only intake
+                log.warning("author intake of %s closed without its mail lock; a racing arrival may be unread",
+                            task_id)
+            _write_intake(root, task_id, {**row, "accepting": bool(accepting)})
+    except (OSError, ValueError):
+        log.debug("author intake of %s did not follow its loop's admission", task_id, exc_info=True)
 
 
 def accept_author_mail(drive_root, author: str, conversation_key: str, append: Callable[..., bool]) -> bool:

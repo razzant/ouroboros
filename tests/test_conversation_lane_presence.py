@@ -399,3 +399,45 @@ def test_a_carried_presence_author_gets_no_generic_owner_wait_and_parks_its_revi
     assert seen == {"generic": None, "review": pooled_wait}
     settled = [frame for frame in list(frames.queue) if frame.get("type") == "presence_turn_settled"]
     assert len(settled) == 1 and settled[0]["error"] is None
+
+
+def test_a_durable_intake_follows_its_loops_admission_under_the_mail_lock(tmp_path, monkeypatch):
+    """Review M10: the loop's admission transitions move a Presence author's durable intake (closed before the final
+    drain, reopened for a follow-up); only the writer's own process moves its fact, a non-Presence turn has none,
+    and open/close honour the mail lock (an unordered open is refused, a close never leaves the fact standing)."""
+    import contextlib
+    import json
+
+    from ouroboros import task_custody
+    from ouroboros.conversation_lease import (
+        _intake_path, accept_author_mail, close_author_intake, follow_loop_admission, open_author_intake,
+    )
+
+    (tmp_path / "memory" / "owner_mailbox").mkdir(parents=True)
+    appended = []
+
+    def append(admit=None):
+        if admit is not None and not admit():
+            return False
+        appended.append(1)
+        return True
+
+    author = SimpleNamespace(task_id="author-m10", drive_root=tmp_path, task_metadata={"presence": {"binding_id": "b"}})
+    assert open_author_intake(tmp_path, "author-m10", "key") is True
+    follow_loop_admission(author, False)  # the final drain is about to read
+    assert accept_author_mail(tmp_path, "author-m10", "key", append) is False and appended == []
+    follow_loop_admission(author, True)  # an owner follow-up reopened the loop
+    assert accept_author_mail(tmp_path, "author-m10", "key", append) is True and appended == [1]
+    follow_loop_admission(SimpleNamespace(task_id="author-m10", drive_root=tmp_path, task_metadata={}), False)
+    assert accept_author_mail(tmp_path, "author-m10", "key", append) is True  # a non-Presence turn moves nothing
+    path = _intake_path(tmp_path, "author-m10")
+    path.write_text(json.dumps({**json.loads(path.read_text()), "pid": 1}))
+    follow_loop_admission(author, False)
+    assert json.loads(path.read_text())["accepting"] is True  # another process's fact is its own
+    close_author_intake(tmp_path, "author-m10")
+
+    monkeypatch.setattr(task_custody, "task_mail_lock", lambda *_a, **_k: contextlib.nullcontext(False))
+    assert open_author_intake(tmp_path, "author-unordered", "key") is False
+    assert not _intake_path(tmp_path, "author-unordered").exists()
+    _intake_path(tmp_path, "author-held").write_text('{"accepting": true, "conversation_key": "key", "pid": 1}')
+    assert close_author_intake(tmp_path, "author-held") is False and not _intake_path(tmp_path, "author-held").exists()
