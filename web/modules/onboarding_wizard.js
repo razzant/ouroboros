@@ -18,7 +18,7 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
 import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
 import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
-    configuredApiProviders, apiProviderLabel } from './route_editor_primitives.js';
+    configuredApiProviders, apiProviderLabel, compatibleEndpoint } from './route_editor_primitives.js';
 import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
@@ -115,6 +115,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     const stepScrollPositions = new Map();
     let suggestedVisionModel = null;
     let connectionsEditor = null;
+    let footerObserver = null;
     let compatibleCatalogs = {};
     const compatibleCard = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const starterSkills = createStarterSkillsRow(); // the Summary's Starter skills row keeps its ticks across renders
@@ -309,6 +310,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             retry.hidden = !state.agentsConnected.length && !agentsStep?.previewError;
             retry.disabled = Boolean(catalogRequest || agentsStep?.previewPending);
         }
+        const accessRow = document.getElementById('onboarding-access-row');
+        if (accessRow) accessRow.hidden = Boolean(note?.hidden && retry?.hidden);
         const recover = document.getElementById('skip-presets-btn');
         if (recover) {
             recover.hidden = !shouldOfferPresetSkip();
@@ -325,6 +328,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         // started against the previous provider/local/model/settings draft;
         // an owner-edited actor list ignores this through its own dirty gate.
         agentsStep?.invalidateGeneratedPreview();
+        // Key rows read their facts from this draft: a legacy pair's row follows the OpenAI key beside it.
+        connectionsEditor?.refresh(draftSettings());
         syncCurrentStepActionState();
     }
 
@@ -451,7 +456,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     function validateCurrentStep() {
-        if (['accounts', 'providers'].includes(state.currentStep)) return validateProvidersStep();
+        if (state.currentStep === 'accounts') return validateProvidersStep();
         if (state.currentStep === 'models') return validateModelsStep();
         if (state.currentStep === 'review_mode') return validateReviewStep();
         if (state.currentStep === 'budget') return validateBudgetStep();
@@ -462,13 +467,11 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const error = validateCurrentStep();
         state.error = error;
         if (error) return syncCurrentStepActionState();
-        if (['accounts', 'providers'].includes(state.currentStep)) applyModelDefaults(false);
-        if (['accounts', 'providers', 'models', 'review_mode', 'budget'].includes(state.currentStep)) {
-            // Preview is enrichment, never a navigation or model-discovery gate. Refresh (also Retry) in the background
-            // after a valid draft; it replaces generated rows only and keeps owner-edited models, reviewers and subagents.
-            // Finish checks the receipt only if generated rows still own the editor.
-            if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
-        }
+        if (state.currentStep === 'accounts') applyModelDefaults(false);
+        // Preview is enrichment, never a navigation or model-discovery gate. Refresh (also Retry) in the background
+        // after a valid draft; it replaces generated rows only and keeps owner-edited models, reviewers and subagents.
+        // Finish checks the receipt only if generated rows still own the editor.
+        if (agentsStep) void agentsStep.refreshSubagentsPreview({ force: true });
         const index = STEP_ORDER.indexOf(state.currentStep);
         if (index >= 0 && index < STEP_ORDER.length - 1) {
             navigateStep(STEP_ORDER[index + 1]);
@@ -586,21 +589,17 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             ] : [['Budget', 'Subscription quota · wait and auto-continue on reset']]),
             ...MODEL_SLOTS.map((slot) => [slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
-        if (trim(state.openrouterKey)) rows.splice(1, 0, ['OpenRouter', 'configured']);
-        if (trim(state.openaiKey)) rows.splice(1, 0, ['OpenAI', 'configured']);
-        if (trim(state.cloudruKey)) rows.splice(1, 0, ['Cloud.ru', 'configured']);
-        if (trim(state.minimaxKey)) rows.splice(1, 0, ['MiniMax', 'configured']);
-        if (trim(state.deepseekKey)) rows.splice(1, 0, ['DeepSeek', 'configured']);
-        if (trim(state.zaiKey)) rows.splice(1, 0, ['Z.ai (GLM)', trim(state.zaiPlan) === 'coding' ? 'configured · coding plan' : 'configured']);
-        if (trim(state.anthropicKey)) rows.splice(1, 0, ['Anthropic', 'configured']);
-        if (hasLocalModel()) {
-            rows.splice(
-                1,
-                0,
-                ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
-                ['Local routing', localRoutingLabel(state.localRoutingMode)],
-            );
-        }
+        const compatible = compatibleEndpoint(draftSettings());
+        const keys = [
+            ['anthropicKey', 'Anthropic'], ['zaiKey', 'Z.ai (GLM)', trim(state.zaiPlan) === 'coding' ? 'configured · coding plan' : ''],
+            ['deepseekKey', 'DeepSeek'], ['minimaxKey', 'MiniMax'], ['cloudruKey', 'Cloud.ru'],
+            ['openaiKey', 'OpenAI', compatible.legacy && compatible.baseUrl ? `configured · also used by the legacy address ${compatible.baseUrl}` : ''],
+            ['openrouterKey', 'OpenRouter'],
+        ].filter(([key]) => trim(state[key])).map(([, label, value]) => [label, value || 'configured']);
+        rows.splice(1, 0, ...(hasLocalModel() ? [
+            ['Local source', trim(state.localSource) + (trim(state.localFilename) ? ` / ${trim(state.localFilename)}` : '')],
+            ['Local routing', localRoutingLabel(state.localRoutingMode)],
+        ] : []), ...keys);
         rows.push(['Agents', agentsSummaryValue()]);
         rows.push(['Reviewers', reviewPoolRows(catalogDraft()).map(reviewerSummary).join(' · ')
             || 'None — the main model reviews alone']);
@@ -695,27 +694,18 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             `;
         }
 
-        function renderProvidersStep({ embedded = false } = {}) {
-        const selectedProfile = activeProviderProfile();
+        // The provider fields, compatible servers and local model inside Accounts' API disclosure.
+        function renderProvidersStep() {
         const localPreset = trim(state.localPreset);
         const localSourceOpen = state.localSourceOpen || hasLocalModel();
         const moreProvidersOpen = state.moreProvidersOpen || hasMoreProviderValue();
         return `
-            ${embedded ? '' : `<div class="step-header">
-                <div>
-                    <h2 class="step-title">${escapeHtml(STEP_META.providers?.title || 'API access')}</h2>
-                    <p class="step-copy">${escapeHtml(STEP_META.providers?.copy || '')}</p>
-                </div>
-            </div>
-                <div class="panel-card">
-                    <h3>Keys first, routing second</h3>
-                    <p>${escapeHtml(PROVIDER_PROFILES[selectedProfile]?.providerCopy || '')}</p>
-                </div>`}
                 <div class="field-grid">
                     ${primaryProviderFields().map(providerKeyField).join('')}
                 </div>
             <div data-settings-panel="providers">
-                ${providerSettingsCard({ ...compatibleCard, title: 'Custom OpenAI-compatible servers', open: Boolean(state.compatibleBaseUrl || state.connections?.length) })}
+                ${providerSettingsCard({ ...compatibleCard, title: 'Custom OpenAI-compatible servers',
+                    open: Boolean(state.compatibleBaseUrl || state.legacyCompatibleBaseUrl || state.connections?.length) })}
             </div>
             <details class="wizard-collapse" data-collapse="more-providers" ${moreProvidersOpen ? 'open' : ''}>
                 <summary>
@@ -762,25 +752,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         `;
     }
 
-    function renderAgentsStep() {
-        // SKIPPABLE by construction: `validateCurrentStep` returns '' for this
-        // step, so Continue is never disabled and no field here can block
-        // finishing. An agent plan is an amplifier, never an admission gate.
-        return `
-            <div class="step-header">
-                <div>
-                    <h2 class="step-title">${escapeHtml(STEP_META.agents.title)}</h2>
-                    <p class="step-copy">${escapeHtml(STEP_META.agents.copy)}</p>
-                </div>
-            </div>
-            ${agentsStepHtml()}
-        `;
-    }
-
     function bindAgentsStep() {
         if (!agentsStep) {
             agentsStep = createAgentsStep({
-                isVisible: () => ['accounts', 'agents', 'models', 'budget'].includes(state.currentStep),
+                isVisible: () => ['accounts', 'models', 'budget'].includes(state.currentStep),
                 onChange: (connected) => {
                     state.agentsConnected = connected;
                     void refreshModelSources();
@@ -810,13 +785,14 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                 <p class="step-copy">Start with Codex, or connect API access. You can add more accounts any time.</p>
             </div></div>
             ${agentsStepHtml({ compact: true, showRoster: false })}
-            <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
-            <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
+            <div id="onboarding-access-row" class="wizard-access-row" hidden>
+                <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
+                <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
+            </div>
             <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() ? 'open' : ''}>
                 <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() ? 'Configured' : 'Optional'}</span></summary>
-                <div class="wizard-collapse-body">${renderProvidersStep({ embedded: true })}</div>
+                <div class="wizard-collapse-body">${renderProvidersStep()}</div>
             </details>
-            <div class="wizard-inline-note">Subscription limits still apply. This connection does not enable paid credits or change your provider's spending limits.</div>
         `;
     }
 
@@ -1020,8 +996,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     function renderStepContent() {
         if (state.currentStep === 'accounts') return renderAccountsStep();
         if (state.completedRestartMode) return renderRestartRequiredScreen();
-        if (state.currentStep === 'providers') return renderProvidersStep();
-        if (state.currentStep === 'agents') return renderAgentsStep();
         if (state.currentStep === 'models') return renderModelsStep();
         if (state.currentStep === 'review_mode') return renderReviewModeStep();
         if (state.currentStep === 'budget') return renderBudgetStep();
@@ -1034,8 +1008,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             const done = STEP_ORDER.indexOf(state.currentStep) > index;
             const meta = STEP_META[stepId];
             return `
-                <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}">
-                    <div class="wizard-step-index">Step ${index + 1}</div>
+                <div class="wizard-step ${active ? 'active' : ''} ${done ? 'done' : ''}"${active ? ' aria-current="step"' : ''}>
+                    <div class="wizard-step-index"><span class="wizard-step-word">Step&nbsp;</span>${index + 1}</div>
                     <p class="wizard-step-title">${escapeHtml(meta.title)}</p>
                     <p class="wizard-step-copy">${escapeHtml(meta.railCopy || '')}</p>
                 </div>
@@ -1059,18 +1033,12 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             : 'Continue';
         root.innerHTML = `
             <div class="wizard-shell">
-                <div class="wizard-header">
-                    <div>
-                        <h1 class="wizard-title">Ouroboros</h1>
-                        <p class="wizard-subtitle">Your accounts, your models, one Ouroboros.</p>
-                    </div>
-                    <div class="wizard-badge">Step ${index + 1} of ${STEP_ORDER.length}</div>
-                </div>
-                <div class="wizard-steps">${stepCards()}</div>
+                <div class="wizard-steps" role="group" aria-label="Step ${index + 1} of ${STEP_ORDER.length}">${stepCards()}</div>
                 <div class="wizard-content">
                     ${renderStepContent()}
                     ${state.completedRestartMode ? '' : `
                     <div class="wizard-footer">
+                        <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                         <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-secondary" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
@@ -1084,7 +1052,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
                             ` : ''}
                         </div>
                     </div>
-                    <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
                     `}
                 </div>
             </div>
@@ -1094,6 +1061,32 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         disposeLanguage?.();   // the Language block lives on the summary step only; its binder owns its listeners
         disposeLanguage = state.currentStep === 'summary' && !state.completedRestartMode ? bindLanguageSettings(root, { staged: state.languageChoice, stage: (value) => { state.languageChoice = value; } }) : null;
         renderLocalStatus();
+        observeFooter();
+        revealCurrentStep();
+    }
+
+    // The page's scroll padding clears the pinned footer by its real height, which a wrapped reason changes.
+    function observeFooter() {
+        footerObserver?.disconnect();
+        const footer = root.querySelector('.wizard-footer');
+        const measure = () => document.documentElement.style.setProperty('--wizard-footer-height', `${footer?.getBoundingClientRect().height || 0}px`);
+        measure();
+        footerObserver = footer ? new ResizeObserver(measure) : null;
+        footerObserver?.observe(footer);
+    }
+
+    // WebKit's own reveal of a keyboard-focused control ignores the page's scroll padding and can stop under the
+    // footer; this one honours it. A pointer's click on a button never moves it out from under the pointer.
+    function clearFooterOnFocus(event) {
+        const target = event.target;
+        if (target instanceof Element && target.matches(':focus-visible') && !target.closest('.wizard-footer')) target.scrollIntoView({ block: 'nearest' });
+    }
+
+    // A rail narrower than its steps scrolls sideways: the current step, the one place this page says where you are, stays in it.
+    function revealCurrentStep() {
+        const rail = root.querySelector('.wizard-steps');
+        const current = rail?.querySelector('.wizard-step.active');
+        if (current && rail.scrollWidth > rail.clientWidth) rail.scrollLeft = current.offsetLeft - rail.offsetLeft - (rail.clientWidth - current.offsetWidth) / 2;
     }
 
         function bindClearButtons() {
@@ -1275,8 +1268,10 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             const source = select.value;
             const name = source.split('@')[1] || '';
             const row = name ? state.connections.find((entry) => entry.kind === 'openai-compatible' && entry.name === name) : null;
-            const payload = { baseUrl: name ? row?.base_url : state.compatibleBaseUrl,
-                apiKey: name ? row?.api_key || '' : state.compatibleApiKey, ...(name ? { connection: name } : {}) };
+            // The built-in source sends the one pair the draft reaches, naming whose key a kept one is.
+            const { baseUrl, apiKey, apiKeySetting } = name ? { baseUrl: row?.base_url, apiKey: row?.api_key || '' }
+                : compatibleEndpoint(draftSettings());
+            const payload = { baseUrl, apiKey, ...(name ? { connection: name } : { apiKeySetting }) };
             const sent = JSON.stringify(payload);
             status.textContent = 'Loading…';
             button.disabled = true;
@@ -1565,8 +1560,6 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             if (!disposed) syncCurrentStepActionState();
         });
         if (state.currentStep === 'accounts') { bindProvidersStep(); bindAgentsStep(); }
-        if (state.currentStep === 'providers') bindProvidersStep();
-        if (state.currentStep === 'agents') bindAgentsStep();
         if (state.currentStep === 'models') bindModelsStep();
         if (state.currentStep === 'review_mode') bindReviewModeStep();
         if (state.currentStep === 'budget') bindBudgetStep();
@@ -1574,14 +1567,17 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
 
     applyModelDefaults(false);
+    root.addEventListener('focusin', clearFooterOnFocus);
     window.addEventListener('pagehide', (event) => {
         if (event.persisted) return;
         disposed = true;
+        root.removeEventListener('focusin', clearFooterOnFocus);
         disposeLanguage?.();
         catalogGeneration += 1;
         catalogRequest?.controller.abort();
         modelRoles.destroy();
         connectionsEditor?.destroy();
+        footerObserver?.disconnect();
         resetSecretReveals(root);
         starterSkills.destroy();
     });

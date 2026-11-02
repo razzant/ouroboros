@@ -213,6 +213,16 @@ test('a row says what is true of its key now: status, use, and who provides it',
     assert.deepEqual(connectionRowFacts({ enabled: true, configured: false, usedBy: ['Light'] }),
         { tone: 'neutral', label: 'No key', meta: 'Used by Light' });
     assert.deepEqual(connectionRowFacts({ draft: true, usedBy: ['Main'] }), { tone: 'neutral', label: 'Not saved', meta: '' });
+    // A built-in compatible row served by the legacy pair names that address and where it is edited.
+    const legacyAddress = 'http://127.0.0.1:8080/v1';
+    assert.deepEqual(connectionRowFacts({ configured: true, usedBy: ['Main'], legacyAddress }), { tone: 'ok', label: 'Ready',
+        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts · used by Main' });
+    assert.deepEqual(connectionRowFacts({ configured: false, usedBy: ['Main'], legacyAddress }), { tone: 'neutral', label: 'No key',
+        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts · used by Main' });
+    assert.equal(connectionRowFacts({ configured: true, source: 'environment', legacyAddress }).meta,
+        'Provided by environment · not used by any role');
+    assert.equal(connectionRowFacts({ enabled: false, legacyAddress }).label, 'Disabled');
+    assert.equal(connectionRowFacts({ draft: true, legacyAddress }).meta, '', 'an edited row says nothing it cannot vouch for');
 
     const usage = connectionUsage({ ...SETTINGS, OUROBOROS_SUBAGENTS: { items: [
         { route: { kind: 'api_model', target_id: 'openrouter@claude-credits::openai/gpt-6' } },

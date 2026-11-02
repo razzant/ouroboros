@@ -115,17 +115,17 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
 2. **Return to `next`.** After a correct password the form answers `303` to `next`. A JSON client posts `{"password", "next"?}` to `/auth/login` and receives `200 {ok: true, next}` with the cookie. A wrong password answers `401` and sets no session.
 3. **What `next` accepts.** It must be a same-origin path: it starts with one `/`, and contains no backslash, no control characters (tab and newline included) and no quotes or angle brackets. Anything else becomes `/`.
 
-**A custom login page** submits JSON to the same `POST /auth/login`, displays its 401 error in its own UI and navigates using the successful response's sanitized `next`. No HTML placeholders or private bootstrap are required. HTML form POST keeps the builtin behavior: a wrong password returns the builtin form with 401, a correct one redirects with 303. Use JSON to retain custom error presentation. `GET /auth/login?builtin=1` always opens the builtin form while the gate is active.
+**A custom login page** submits JSON to the same `POST /auth/login`, displays its 401 error in its own UI and navigates using the successful response's sanitized `next`. No HTML placeholders or private bootstrap are required. HTML form POST keeps the builtin behavior: a wrong password returns the builtin form with 401, a correct one redirects with 303. `GET /auth/login?builtin=1` always opens the builtin form while the gate is active.
 
-**The session.** It is an HttpOnly, SameSite=Lax cookie named `ouroboros_auth`. It is `Secure` when the core sees TLS. It lasts 30 days, and a core that loses its key file signs everyone out.
+**The session.** An HttpOnly, SameSite=Lax cookie named `ouroboros_auth`, `Secure` when the core sees TLS, lasting 30 days; a core that loses its key file signs everyone out.
 
 **When a session expires:**
 - **Requests:** they start answering 401. Run the same login steps.
 - **Failed changes:** never resend a change that failed before or during sign-in. Read the current state again and let the person decide.
 
-**The WebSocket.** An unauthenticated `/ws` is refused before the connection is accepted (HTTP 403 during the handshake). Browsers report it as close code 1006, never a custom code. Recognise sign-in problems through an HTTP probe, not through WebSocket close codes.
+**The WebSocket.** An unauthenticated `/ws` is refused at the handshake (HTTP 403). Browsers report it as close code 1006: recognise sign-in problems through an HTTP probe, never close codes.
 
-**Signing out.** `GET` or `POST /auth/logout` revokes that authentication context's widget file leases, deletes the cookie and answers `303` to `next`. This adds no global session-revocation store. Login/logout answer 404 when the gate is inactive; those names never serve selected files. Other `/auth/` paths serve the optional public bundle even without the gate: missing files answer 404, unsupported methods 405. With no bundle those paths answer 404.
+**Signing out.** `GET` or `POST /auth/logout` revokes that authentication context's widget file leases, deletes the cookie and answers `303` to `next`. Login/logout answer 404 when the gate is inactive; those names never serve selected files. Other `/auth/` paths serve the optional public bundle even without the gate: missing files answer 404, unsupported methods 405. With no bundle those paths answer 404.
 
 ## 4. First contact and setup
 
@@ -149,19 +149,19 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
 
   A credential that is already configured reads as `secretPlaceholder`, never the secret itself.
 - **`modelDefaults`** per provider profile, `modelSuggestions` and `localPresets`.
-- **`freshInstall`**, for display only. The server checks it again when setup completes.
+- **`freshInstall`**, display only; completion checks it again.
 
-Setup can also check what it is about to save: `POST /api/providers/test` probes one provider (a failed probe is `200` with `ok: false`; a kept key for a changed address or weakened TLS check is `400` `masked_key_endpoint_changed`), `POST /api/openai-compatible/models` lists the models of an OpenAI-compatible endpoint, `GET /api/model-catalog` lists selectable models (§14), and the local-model routes start and test a local model (§14). None of them saves anything.
+Setup can also check, without saving: `POST /api/providers/test` probes one provider (a failed probe is `200`, `ok: false`), `POST /api/openai-compatible/models` lists a compatible endpoint's models, `GET /api/model-catalog` lists selectable models and the local-model routes start and test a local model (both §14). The first two refuse a kept key for another endpoint (scheme, host, port or path) or, in the test, a weakened TLS check with `400` `masked_key_endpoint_changed`. For the built-in endpoint they name the key setting of the pair the draft reaches (`api_key_setting`; listing: `apiKeySetting`); the test then probes that pair alone and takes its fields as overrides. Unnamed, its blank dedicated address blanks the legacy one too.
 
 To finish setup, send `POST /api/onboarding/complete`:
-- **The body:** the settings to save, keyed by each row's `settingKey`. Add `subscriptionsConnected` and `skipSubscriptionPresets` as needed, and optionally `OUROBOROS_SUBAGENTS` and `allow_empty_review_pool`. A credential field left as `secretPlaceholder` keeps the stored value. Give each save its own `attempt_id` (16–128 letters, digits, `-` or `_`), made before you send it: it is how you can ask about this save later.
+- **The body:** the settings to save, keyed by each row's `settingKey`. Add `subscriptionsConnected` and `skipSubscriptionPresets` as needed, and optionally `OUROBOROS_SUBAGENTS` and `allow_empty_review_pool`. A credential field left as `secretPlaceholder` keeps the stored value. Give each save its own `attempt_id` (16–128 letters, digits, `-` or `_`), made before you send it: it names this save later.
 - **What it does:** this is the only setup writer. Settings, the next-start access mode and the completion record are saved together, or not at all.
 - **On success:** `200 OnboardingCompleteResponse`. `restart_required` says whether access settings apply only after a restart.
-- **If agent accounts can't be checked:** `503` with `can_skip: true` means the connected agent accounts could not be verified and nothing was saved. Resend with `skipSubscriptionPresets: true` to finish without agent defaults.
+- **If agent accounts can't be checked:** `503` with `can_skip: true`: nothing was saved. Resend with `skipSubscriptionPresets: true` to finish without agent defaults.
 - **Other refusals:** these follow §9's `saved` rules.
 - **When the answer is unknown** (`saved: null`, a dropped connection, or a reply that is not the endpoint's JSON), read that save back with `GET /api/onboarding/complete?attempt=<attempt_id>` (`OnboardingAttemptResponse`, writes nothing). `saved: true` means the settings now hold this attempt's write; its `receipt`, once the whole completion has finished, is the success envelope to act on. `saved: false` repeats a refusal recorded before anything was written; `null` confirms nothing: still running, never received, or replaced by a later save. `GET /api/onboarding` cannot answer this: on a configured install it says 204 whatever happened to this save.
 
-**Mapping setup state to the save body.** For `providerFields`, `modelSlots` and `budgetFields`, copy `initialState[row.stateKey]` to `row.settingKey`. The fixed fields map as follows:
+**Mapping setup state to the save body.** For `providerFields`, `modelSlots` and `budgetFields`, copy `initialState[row.stateKey]` to `row.settingKey`. Fixed fields:
 
 | Initial-state field | Completion-body key |
 |---|---|
@@ -179,9 +179,9 @@ To finish setup, send `POST /api/onboarding/complete`:
 | `processingPreference` | `OUROBOROS_PROCESSING_PREFERENCE` |
 | `modelProcessingPreferences` | `OUROBOROS_MODEL_PROCESSING_PREFERENCES` |
 
-`providerProfile` is derived from configured access, not saved. `localPreset` selects values from `localPresets`, not a saved key. Each `providerProfiles` entry contains display strings `label`, `providerCopy` and `modelCopy`. The model-role maps accept JSON objects or JSON text. Role keys are `main`, `light`, `vision`, `consciousness`, `deep_review`, `websearch` and `fallback`; `fallback` holds an ordered array. Processing choices are `standard`, `fast`, `economy`, or empty to inherit.
+`providerProfile` (derived from configured access), `localPreset` (a `localPresets` choice) and `legacyCompatibleBaseUrl` are not save keys; the last, an older install's `OPENAI_BASE_URL`, pairs with `OPENAI_API_KEY` while `OPENAI_COMPATIBLE_BASE_URL` is empty, and only Settings edits it. `providerProfiles` entries hold display strings `label`, `providerCopy` and `modelCopy`. The model-role maps accept JSON objects or JSON text. Role keys are `main`, `light`, `vision`, `consciousness`, `deep_review`, `websearch` and `fallback`; `fallback` holds an ordered array. Processing choices are `standard`, `fast`, `economy`, or empty to inherit.
 
-**Keyless endpoint example.** On a fresh core, this is structurally sufficient when the endpoint and model are the operator's intended access:
+**Keyless endpoint example.** On a fresh core this is structurally sufficient for an intended endpoint and model:
 
 ```json
 {
@@ -193,7 +193,7 @@ To finish setup, send `POST /api/onboarding/complete`:
 }
 ```
 
-Replace `<model-id>` with the endpoint's model id. An empty review pool is an explicit choice, not a production recommendation. Setup validates configuration, not reachability or successful generation; test the provider separately. Optional model slots may be blank to keep inheritance. Completion on an existing install is still a settings write, not an idempotent readiness check. `400` rejects input, `403` is a permission refusal, and `409 onboarding_state_changed` means the settings changed before commit. Apply the `saved` rules to failures.
+An empty review pool is an explicit choice, not a production recommendation. Setup validates configuration, not reachability or successful generation; test the provider separately. Optional model slots may be blank to keep inheritance. Completion on an existing install is still a settings write, not an idempotent readiness check. `400` rejects input, `403` is a permission refusal, and `409 onboarding_state_changed` means the settings changed before commit.
 
 `POST /api/onboarding/subagents/preview` takes the same body and returns, without saving, the agent roster and the model settings setup would produce.
 
@@ -205,7 +205,7 @@ The HTTP completion receipt is the save result. Closing a window or receiving a 
 - **A setup iframe inside the builtin or copied builtin client:** send `parent.postMessage({type: 'ouroboros:onboarding-complete', restart_required, runtime_mode}, location.origin)`. That parent's overlay owns its transition and restart display. This is a client convention; another parent can define its own handoff. Do not call the parent's setup-window bridge or close the main window.
 - **A plain top-level page:** navigate to `/` only when no restart is needed. Otherwise show that setup was saved but the new access mode is pending, and use the ordinary restart workflow (§15). A navigation alone does not apply a boot-pinned setting.
 
-On a failed or unknown save, retain the form and read the attempt back as above; only its `receipt` is a successful completion. Do not send a completion message for anything else or blindly save again. The native `onboarding_finished` method only reports the HTTP result, and introduces no second settings writer.
+On a failed or unknown save, retain the form and read the attempt back as above; only its `receipt` is a successful completion. Do not send a completion message for anything else or blindly save again. `onboarding_finished` only reports the HTTP result; it is no second settings writer.
 
 ## 5. Conversation: live events and history
 

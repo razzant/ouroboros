@@ -141,6 +141,8 @@ OWNERS = {"ouroboros/provider_models.py", "ouroboros/llm_routing.py",
 JUSTIFIED = {
     "ouroboros/contracts/plugin_api.py": "frozen skill ABI: FORBIDDEN_SKILL_SETTINGS declares the owner-granted keys",
     "ouroboros/colab_bootstrap.py": "settings writer: copies Colab secrets into the built-in flat settings",
+    "ouroboros/gateway/contracts.py": "ABI: Provider Test's closed selector names a built-in pair by its key setting; reads no value",
+    "ouroboros/gateway/management_contracts.py": "ABI: discovery's closed selector names a built-in pair by its key setting; reads no value",
     "ouroboros/settings_setup_contract.py": "onboarding writer: the wizard's fields are the built-in settings it saves",
     "supervisor/state.py": "OpenRouter ground-truth drift diagnostic of the built-in key; never a money owner",
     "scripts/run_external_review.py": "operator wrapper: provisions the built-in keys from the operator's own secrets",
