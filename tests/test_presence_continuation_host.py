@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
 
-import functools
 import json
 import pathlib
 import time
@@ -372,8 +371,6 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
     h = host
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr("tests.presence_legacy_helpers._INITIATION_MARGIN_SEC", 0.5)
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     gate = threading.Event()
     callers_scope = usage_accounting.UsageScope(task_id="the-initiating-task", root_task_id="the-initiating-task")
     seen = {}
@@ -382,12 +379,13 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
         from ouroboros.model_wait import dispatch_deadline_remaining_sec
 
         assert gate.wait(30)
-        # On the turn's own thread, after the caller's bound passed: its one-second operation
-        # deadline was never adopted (only the explicit calendar bounds the turn), and the
-        # turn's own controls (Stop, calendar, ceiling) report nothing.
-        assert dispatch_deadline_remaining_sec() > 86_400
+        # On the turn's own carrier, after the caller's bound passed: the initiated turn is a conversation-lane
+        # turn (one execution model), admitted from durable facts and started from no caller context — the
+        # caller's one-second operation deadline was never adopted, and neither was its explicit calendar (the
+        # retired proactive thread carried that); the turn's own controls (Stop, calendar, ceiling) report nothing.
+        assert dispatch_deadline_remaining_sec() is None
         assert h.ctxs[0].model_wait_context.control_reason() is None
-        # The caller's money attribution stays with the caller; its explicit calendar carries.
+        # The caller's money attribution stays with the caller.
         seen.update(scope=usage_accounting.current_usage_scope(), calendar=_CALENDAR.get())
         return finish("final", message="Hello from the initiated cycle.")
 
@@ -407,8 +405,8 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
     stored = load_task_result(h.data, result["turn_ref"])
     assert stored["status"] == "completed" and stored["metadata"]["presence_result_text"] == "Hello from the initiated cycle."
     assert h.calls == 1
-    # The caller's money attribution stayed with the caller; its explicit calendar carried.
-    assert seen["scope"] is not callers_scope and "2099-01-01T00:00:00+00:00" in seen["calendar"]
+    # The caller's money attribution stayed with the caller; the carrier started from no caller context.
+    assert seen["scope"] is not callers_scope and not seen["calendar"]
 
 
 def _proactive_id(h, prompt, dedupe):
@@ -423,8 +421,6 @@ def _proactive_id(h, prompt, dedupe):
 def test_an_initiated_continuing_envelope_reaches_the_initiating_call(host, monkeypatch):
     """Finding 4: the initiating call is a version-1 consumer; a continuing author's first envelope reaches it."""
     h = host
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     h.script = author(deliver)
     result = _initiate(h, "Report the status.", "release")
     assert (result["status"], result["outcome"], result["text"], result["output_ref"]) == ("continuing", "deferred", "", "")

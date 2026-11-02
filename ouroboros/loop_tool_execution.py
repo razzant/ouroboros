@@ -81,9 +81,11 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     # Tools share the cognitive-operation idle lease;
     # a timeout/late notice deliberately does NOT close the lease because the
     # worker thread may still be running after the logical caller returned.
+    # The settlement row (``CALL_SETTLED``) closes it: every call publishes it
+    # before its ``tool_call_finished`` frame, so that frame states no change.
     operation_id = str(enriched.get("invocation_id") or enriched.get("tool_call_id") or "")
     event_type = str(enriched.get("type") or "")
-    if operation_id and event_type in {"tool_call_started", "tool_call_finished", CALL_SETTLED}:
+    if operation_id and event_type in {"tool_call_started", CALL_SETTLED}:
         emit_cognitive_operation_event(
             event_queue,
             task_id=str(enriched.get("task_id") or getattr(tool_ctx, "task_id", "") or ""),

@@ -183,6 +183,12 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
     """
     if global_ceiling is _CURRENT_TASK_CEILING:
         global_ceiling = get_task_abs_ceiling_sec()
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if owner.get("lane") == "conversation" and owner.get("kind") in {"direct", "presence"}:
+        # An owner's or a correspondent's turn carried by the conversation lane has no
+        # project ceiling: it runs as long as its dialogue lives (#1959, "the bubble is the
+        # work"), as it did in the server process; Stop and its own deadline bound it.
+        global_ceiling = None
     bounds = [float(value) for value in (explicit_execution_timeout_sec(task), global_ceiling) if value is not None]
     return min(bounds) if bounds else None
 

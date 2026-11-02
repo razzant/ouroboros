@@ -166,8 +166,7 @@ def test_the_delegated_reconciler_reads_its_candidates_before_it_reads_liveness(
     run = dc.RunCustody(task_id="late-task", run_id="run-1", route_id="fixture", model="m")
     seen: list = []
 
-    def reading_candidates(root, where="", params=()):
-        assert (where, params) == (current.HELD_WHERE, ("held",))
+    def reading_candidates(root):  # the open-only candidate read (``open_held_runs``)
         live.add("late-task")  # admitted while current candidates are read
         return {run.run_id: run}
 
@@ -175,12 +174,12 @@ def test_the_delegated_reconciler_reads_its_candidates_before_it_reads_liveness(
     monkeypatch.setattr(dcr, "_reconcile_each", lambda root, runs, factory, **kwargs:
                         seen.append([c.run_id for c in runs]) or [])
 
-    monkeypatch.setattr(current, "runs", reading_candidates)
+    monkeypatch.setattr(current, "open_held_runs", reading_candidates)
     dc.reconcile_orphaned_runs(tmp_path, running_task_ids=lambda: set(live))
     assert seen == [[]], "a run whose owner was admitted during the read is spared"
 
     live.clear()
-    monkeypatch.setattr(current, "runs", lambda root, where="", params=(): {run.run_id: run})
+    monkeypatch.setattr(current, "open_held_runs", lambda root: {run.run_id: run})
     dc.reconcile_orphaned_runs(tmp_path, running_task_ids=lambda: set(live))
     assert seen[-1] == ["run-1"], "a genuinely orphaned run is still reconciled"
 

@@ -44,16 +44,26 @@ WORKER_PROCESS_ENV = "OUROBOROS_IN_WORKER"
 
 
 def in_worker_process() -> bool:
-    """Return True inside a supervisor worker process.
-
-    Worker processes disable system proxy resolution (``trust_env=False`` /
-    ``ProxyHandler({})``) on every HTTP client they create. This is the central
-    network-transport policy that keeps workers fork-safe: the macOS
-    ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes
-    (SIGSEGV) on the child side of a multi-threaded fork. It is also a clean,
-    proxy-free default for spawned workers on every platform.
-    """
+    """Return True inside a supervisor worker process (a process fact: ownership, lifelines, custody)."""
     return os.environ.get(WORKER_PROCESS_ENV) == "1"
+
+
+# The spawner's transport policy for a child: "1" forbids OS proxy resolution (``trust_env=False`` /
+# ``ProxyHandler({})``) on every HTTP client the child creates. It is the fork-safety rule — the macOS
+# ``_scproxy.get_proxies`` -> ``SCDynamicStoreCopyProxies`` lookup crashes (SIGSEGV) on the child side
+# of a multi-threaded fork — stated by the parent for the start method it used; a spawned or
+# forkserver child keeps the server's own policy, so a conversation carried by a worker reaches the
+# model the way the server would (owner decision 1A, trap 1).
+TRANSPORT_NO_PROXY_ENV = "OUROBOROS_TRANSPORT_NO_PROXY"
+
+
+def transport_no_proxy() -> bool:
+    """Whether this process must avoid OS proxy lookup: the spawner's explicit fact, else the legacy
+    worker default for a child that received none."""
+    stated = os.environ.get(TRANSPORT_NO_PROXY_ENV)
+    if stated in ("0", "1"):
+        return stated == "1"
+    return in_worker_process()
 
 
 def emit_log_event(

@@ -36,16 +36,30 @@ def _direct(monkeypatch, turns):
 
 @pytest.mark.parametrize("order", list(itertools.permutations(["own", "focus", "child"])))
 def test_only_admitted_clock_actor_finishes_once_in_any_order(clock, monkeypatch, order):
+    """The boundary the carrier accepted rides the launched task; only the admitted clock actor's own
+    terminal lays it in the store (``_settle_wake`` reads the carrier's row), and only once."""
+    from ouroboros.task_results import write_task_result
+
     _launched(clock)
-    boundary = clock.store[OBSERVATION_STATE_KEY]
+    launched = clock.launches[-1]["task"]
+    boundary = launched["metadata"]["wake_observation"]["accepted_boundary"]
+    assert OBSERVATION_STATE_KEY not in clock.store  # accepted in the carrier, persisted at the terminal
+    write_task_result(clock.root, "wake0001", "failed", chat_id=7, _is_direct_chat=True,
+                      metadata=launched["metadata"], execution_owner=launched["_execution_owner"])
     before = clock.clock.next_wake_at
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
     for cause in order:
         task_id, metadata = {"own": ("wake0001", OWN), "focus": ("focus1", FOCUS),
                              "child": ("kid1", STARTED)}[cause]
-        clock.clock._wake_finished(task_id, False, metadata=metadata)
-        assert clock.clock.next_wake_at == (T0 + 5000 + DEFAULT * 2 if "own" in order[:order.index(cause) + 1] else before)
-        assert clock.store[OBSERVATION_STATE_KEY] == boundary
+        if cause == "own":
+            clock.clock._wake_finished(task_id, False, metadata=metadata)  # the live row keeps custody: no settle
+            assert clock.clock.next_wake_at == before
+            clock.finish(task_id, False)  # the carrier's terminal row, the pooled settlement, the row's release
+        else:
+            clock.clock._wake_finished(task_id, False, metadata=metadata)
+        own_done = "own" in order[:order.index(cause) + 1]
+        assert clock.clock.next_wake_at == (T0 + 5000 + DEFAULT * 2 if own_done else before)
+        assert (clock.store.get(OBSERVATION_STATE_KEY) == boundary) is own_done
     settled = clock.clock.next_wake_at
     clock.clock._wake_finished("wake0001", False, metadata=OWN)
     clock.clock._wake_finished("wake0001", True, metadata=FOCUS)  # id alone is insufficient

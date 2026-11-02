@@ -307,7 +307,7 @@ def resume_warm_owner_pause_root(task_id: str, *, selected_by: str = "",
                 q.BUDGET_ROOT_FENCES.pop(root_task_id, None)
                 held_siblings, _markers, _rebound = hold_root_resume_descendants(
                     q, root_task_id, latch, grant, actor_id=task_id)
-            persisted = q.persist_queue_snapshot(reason="owner_pause_warm_resumed")
+            persisted = q.publish_queue_snapshot(reason="owner_pause_warm_resumed")  # durable before release
     else:
         persisted = True
     q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
@@ -599,7 +599,7 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         # so its descendants wait for explicit selection exactly as when a latch lifts (Q9).
         held_siblings, released_markers, rebound_holds = hold_root_resume_descendants(
             q, root_task_id, {"fence_id": owner_fence_id, "cause": "owner_pause"}, grant, actor_id=task_id)
-    if not q.persist_queue_snapshot(reason="budget_exact_resume_granted"):
+    if not q.publish_queue_snapshot(reason="budget_exact_resume_granted"):  # durable before the grant stands
         task.pop("_budget_pause_resume", None)
         task["_budget_pause"] = prior_pause
         if released_hold is not None:

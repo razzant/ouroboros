@@ -356,8 +356,8 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
             "LEGACY_BLOCKED",
             "⚠️ WRITE_BLOCKED: new content for 'notes.txt' is 9% of original "
             "(11 -> 1 chars). This looks like accidental truncation. "
-            "Use edit_text for surgical edits, or pass force=true to confirm an "
-            "intentional rewrite.",
+            "If the removal is intended, repeat the same call with force=true; "
+            "this confirms shrinking every file in the call.",
         ),
         ("search_code", {"query": ""}, "LEGACY_TOOL_ERROR", "⚠️ SEARCH_ERROR: query is required."),
         (

@@ -29,7 +29,7 @@ from ouroboros.task_results import (
     STATUS_SCHEDULED,  # noqa: F401 -- facade name tests read
     load_task_result,
 )
-from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
+from ouroboros.cost_projection import LIVE_ROOT_COSTS, carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
 from ouroboros.subagent_messages import subagent_message_meta  # noqa: F401
 from supervisor.cognitive_operations import EVENT_HANDLERS as _CEH, _handle_cognitive_operation  # noqa: F401
 from supervisor.task_model_wait import EVENT_HANDLERS as _MWH
@@ -181,6 +181,11 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         "round_id": round_id,
         "call_attempt": call_attempt,
     }
+    if phase != "observed":
+        # A call opened (its reservation is an open ledger row) or closed: the root's live cost figure is
+        # read again at the next flush, so the card says "up to" while the call is in flight (RV_MAIN M7).
+        root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta, dict) else None
+        LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or evt.get("root_task_id") or task_id)
     if phase == "started":
         updated = {**identity, "started_at": time.time()}
     elif not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):
@@ -305,6 +310,21 @@ from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional pu
 )
 from supervisor.worker_owner_wait import handle_owner_wait  # noqa: E402
 from supervisor.worker_pool_lifecycle import handle_worker_quiescent  # noqa: E402
+from supervisor.conversation_lane import handle_direct_turn_bound, handle_direct_turn_phase, handle_task_named  # noqa: E402
+
+
+def handle_presence_turn_initial(evt: Dict[str, Any], ctx: Any) -> None:
+    """A carrier published a continuing author's initial envelope (lazy: the dispatcher does not import Presence)."""
+    from ouroboros.presence_carrier import handle_presence_turn_initial as handler
+
+    handler(evt, ctx)
+
+
+def handle_presence_turn_settled(evt: Dict[str, Any], ctx: Any) -> None:
+    """A carrier's Presence turn ended: its Host waiter, row and slot are released (lazy, as above)."""
+    from ouroboros.presence_carrier import handle_presence_turn_settled as handler
+
+    handler(evt, ctx)
 
 from supervisor.events_mind_controls import handle_mind_task_control
 
@@ -313,6 +333,12 @@ EVENT_HANDLERS = {
     "external_wait_lease": _handle_external_wait_lease,
     "owner_wait": handle_owner_wait,
     "worker_quiescent": handle_worker_quiescent,
+    # A conversation carrier's frames: its start phases for the census, its coined title.
+    "direct_turn_phase": handle_direct_turn_phase,
+    "direct_turn_bound": handle_direct_turn_bound,
+    "task_named": handle_task_named,
+    "presence_turn_initial": handle_presence_turn_initial,
+    "presence_turn_settled": handle_presence_turn_settled,
     **_CEH,
     **_MWH,
     **_CDE,

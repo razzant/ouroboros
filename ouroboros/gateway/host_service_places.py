@@ -137,6 +137,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
     from ouroboros.presence_admission import PresenceAdmissionError
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_continuation import continuation_version, turn_response
+    from ouroboros.presence_executions import PresenceTurnInterrupted
     from ouroboros.presence_runner import (
         PresenceTurnError,
         PresenceTurnEvent,
@@ -266,16 +267,22 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             if not ctx.rate_limiter.allow(f"{skill_name}:presence"):
                 return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")
             budget = f"{skill_name}:presence"
-            execution, _started = ctx.presence_turns.start_or_join(
-                turn_id, identity=identity,
+            from ouroboros.presence_carrier import dispatch_presence_turn
+
+            # The body runs in a conversation-lane carrier (owner decision 1A): the Host keeps
+            # authentication, capture, dedup and this reservation; the carrier takes the gate
+            # (version 2 never waits in it: a busy resource is a typed retry) and reports its
+            # initial envelope and terminal as frames that resolve the futures below. A process
+            # with no started pool generation is a physical fact the lane degrades on (2A): the same
+            # body on a thread of this process, disclosed in the chat and the vitals, never undisclosed.
+            execution, _started = await host._bounded_host_read(ctx, functools.partial(
+                ctx.presence_turns.start_or_dispatch, turn_id, identity=identity,
                 reserve=functools.partial(ctx._enter_inflight, budget),
                 release=functools.partial(ctx._leave_inflight, budget),
-                # Version 2 never waits in the gate: a busy resource is a typed retry (``admit_configured_gate``).
-                admit=functools.partial(ctx.admit_presence_gate, event.conversation_key, wait=continuing < 2),
-                run=lambda lease: ctx.presence_runner(
-                    admission=admission, event=event, staged_files=staged_files, admitted=lease,
-                ),
-            )
+                dispatch=functools.partial(
+                    dispatch_presence_turn, drive_root=ctx.data_dir, skill_name=skill_name, admission=admission,
+                    event=event, event_payload=event_payload, staged_files=staged_files, gate_wait=continuing < 2),
+            ))
             if execution is None:
                 return _presence_error("too many in-flight presence requests", 429, "presence_capacity_full", "retry")
             # Versions 1 and 2 take a continuing author's initial envelope; v0 waits for its terminal.
@@ -289,6 +296,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
                                    else 429 if exc.code == "presence_capacity_full" else 409)
     except PresenceTurnNotStarted as exc:
         return _presence_error(str(exc), 503, "presence_turn_not_started", "retry")
+    except PresenceTurnInterrupted as exc:  # its carrier ended unreported: the resend reads the durable row
+        return _presence_error(str(exc), 503, "presence_turn_interrupted", "retry")
     except OSError as exc:
         return _presence_error(str(exc), 400, "presence_io_unavailable", "retry")
     except ValueError as exc:

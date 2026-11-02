@@ -359,13 +359,18 @@ def test_cold_rebind_reads_only_active_and_accepted_pending_carriers(tmp_path, m
     env = _setup(tmp_path, monkeypatch)
     _park(env, tmp_path, monkeypatch)
     env.workers.PENDING.extend({"id": f"queued-{i}"} for i in range(100))
-    original, read = bp.budget_pause_row, []
-    def exact(root, task_id):
-        read.append(task_id)
-        return original(root, task_id)
-    monkeypatch.setattr(bp, "budget_pause_row", exact)
+    from ouroboros import store_hot_facts
+
+    original, read = store_hot_facts.cold_custody_rows, []
+
+    def exact(root, task_ids):
+        read.append(sorted(task_ids))
+        return original(root, task_ids)
+
+    monkeypatch.setattr(store_hot_facts, "cold_custody_rows", exact)
+    monkeypatch.setattr(bp, "budget_pause_row", lambda *_a: pytest.fail("one row, one read: the selection serves it"))
     assert sc.reconcile(env.q, runtime=env.runtime) == {"sleeper"}
-    assert read == ["sleeper"]
+    assert read == [["sleeper"]]
 
 
 def test_body_acceptance_keeps_a_late_local_writer_as_its_actual_hold(tmp_path, monkeypatch):

@@ -153,16 +153,13 @@ def test_a_press_on_a_continued_tasks_card_reaches_its_successor(tmp_path, monke
 
 
 def test_a_head_a_press_started_reads_the_card_frame(tmp_path, monkeypatch):
-    import queue as queue_mod
-
-    import supervisor.workers as workers
+    """The carrier's first step rebuilds the card frame from the stored press for the model."""
     from ouroboros.gateway.card_decision import card_press_model_text
+    from tests.test_attachment_staging import carried_turn
 
     card = _card(tmp_path, 1)
     record_submission(tmp_path, card["card_id"], request_id="r1", action_id="book", label="Book it", values=None,
                       once=False, revision=1)
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue_mod.Queue())
 
     class _Agent:
         task = None
@@ -173,14 +170,14 @@ def test_a_head_a_press_started_reads_the_card_frame(tmp_path, monkeypatch):
 
     agent = _Agent()
     press = {"task_id": "task-1", "card_id": card["card_id"], "request_id": "r1"}
-    workers._run_chat_task(agent, 1, "Book it", None,
-                           task_metadata={"client_message_id": f"card_input:{card['card_id']}:r1", "card_press": press})
+    carried_turn(monkeypatch, tmp_path, agent, 1, "Book it", None,
+                 task_metadata={"client_message_id": f"card_input:{card['card_id']}:r1", "card_press": press})
     assert agent.task["text"] == (f"[Card input] The owner pressed «Book it» on the card «Flights» that task task-1 showed "
                                   f"(card {card['card_id']}).")
     lost = card_press_model_text(tmp_path, {**press, "request_id": "gone"}, "Book it")
     assert lost == "[Card input] On a card of task task-1 that can no longer be read, the owner pressed:\nBook it"
     plain = _Agent()
-    workers._run_chat_task(plain, 1, "Book it", None, task_metadata={"client_message_id": "m-2"})
+    carried_turn(monkeypatch, tmp_path, plain, 1, "Book it", None, task_metadata={"client_message_id": "m-2"})
     assert plain.task["text"] == "Book it"
 
 

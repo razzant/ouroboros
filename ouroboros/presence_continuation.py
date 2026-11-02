@@ -236,8 +236,11 @@ def presence_review_wait(binding: ReviewWaitBinding, ctx: Any, checkpoint: dict,
         if not private_main_contact(block, binding.task_id) or checkpoint.get("reason") != "owner":
             raise ValueError("Presence can park only for its review or private owner question")
     lent = _yield_conversation(binding, ctx, checkpoint)
+    # A carried author parks through the pooled owner wait its carrier bound to the lease (the slot is lent);
+    # an author run by a Host thread keeps the in-process wait. Neither is the agent's generic capability.
+    wait = getattr(binding.lease, "review_wait", None)
     try:
-        outcome = direct_owner_wait(ctx, checkpoint)
+        outcome = wait(ctx, checkpoint) if callable(wait) else direct_owner_wait(ctx, checkpoint)
     except BaseException:
         if lent:
             ctx._presence_conversation_lost = "task_ended"
@@ -905,46 +908,9 @@ def work_view(stored: Mapping[str, Any], ref: str, drive_root=None) -> tuple[int
                  "output_ref": result.output_ref, "child_work_ref": result.work_ref or common["child_work_ref"], **anchor}
 
 
-def start_proactive_turn(*, admission: Any, event: Any, repo_dir: Path, drive_root: Path,
-                         event_queue: Any, wait_sec: float | None) -> Any:
-    """Start an initiated turn under its own execution and return its first envelope.
-
-    The initiating tool is a version-1 consumer: it waits only for the first envelope
-    (a continuing author's, or the terminal), within its own operation bound. When that
-    bound ends first the turn's actual refs come back with status ``running``. The turn's
-    thread starts from the caller's settings and explicit calendar deadlines only
-    (``independent_turn_context``): the author keeps its own task controls.
-    """
-    import concurrent.futures
-
-    from ouroboros.model_wait import independent_turn_context
-    from ouroboros.presence_runner import (
-        PROACTIVE_TURNS, PresenceTurnError, PresenceTurnResult, _configured_gate, _retry_target,
-        presence_event_identity, presence_turn_task_id, run_presence_turn,
-    )
-
-    gate = _configured_gate(Path(drive_root))
-    turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
-    identity = presence_event_identity(admission.binding_id, event)
-    execution, _started = PROACTIVE_TURNS.start_thread(
-        turn_id, identity=identity, admit=functools.partial(gate.acquire, event.conversation_key),
-        run=lambda lease: run_presence_turn(admission=admission, event=event, repo_dir=repo_dir,
-                                            drive_root=drive_root, event_queue=event_queue, admitted=lease),
-        context=independent_turn_context())
-    try:
-        return execution.initial.result(timeout=wait_sec)
-    except concurrent.futures.TimeoutError:
-        try:  # the physical task a lost-and-retried attempt moved to, read without claiming it
-            physical = _retry_target(Path(drive_root), turn_id, identity)
-        except PresenceTurnError:
-            physical = turn_id
-        return PresenceTurnResult(outcome="", text="", task_id=physical, status="running",
-                                  continuation_ref=physical, continuation_version=CONTINUATION_VERSION)
-
-
 __all__ = [
     "CONTINUATION_VERSION", "CONTINUATION_VERSIONS", "EARLY_CONTINUATION_VERSION", "HARD_STOPS",
     "answer_early", "bind_review_wait", "continuation_version", "conversation_lost", "covered_send",
     "note_place_delivery", "output_ref", "presence_review_wait", "replay_envelope", "reentry_note", "reply_anchor",
-    "selection_for", "start_proactive_turn", "terminal_output", "turn_response", "uncovered_wake", "work_view",
+    "selection_for", "terminal_output", "turn_response", "uncovered_wake", "work_view",
 ]

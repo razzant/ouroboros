@@ -172,3 +172,22 @@ def test_the_live_view_is_the_same_object_until_the_document_or_operator_variabl
     assert second[0] is not first[0] and second[1]["OPENROUTER_API_KEY"] == "router-old"  # the saved key still wins
     save_owner(_document("new"))
     assert route_choice.route_settings_view()[1]["OPENROUTER_API_KEY"] == "router-new"
+
+
+def test_the_web_search_source_moves_with_its_model_within_a_task(monkeypatch):
+    """Source and Model are one choice: a save during a task reaches its next search together, never the
+    new Model under the Source the task started with."""
+    from ouroboros.search_routes import resolve_web_search_route
+
+    search = {"ANTHROPIC_API_KEY": "anthropic-key"}
+    save_owner(_document("old", OUROBOROS_WEBSEARCH_BACKEND="anthropic", OUROBOROS_WEBSEARCH_MODEL="anthropic::old-search", **search))
+    task = subagent_runtime.apply_task_start_settings()
+    with config.task_settings_scope(task):
+        first = resolve_web_search_route()
+        assert first["source"] == "anthropic"
+        assert [leg["model"] for leg in first["legs"] + first["unavailable"]] == ["old-search"]
+        save_owner(_document("old", OUROBOROS_WEBSEARCH_BACKEND="openai", OUROBOROS_WEBSEARCH_MODEL="gpt-new", **search))
+        second = resolve_web_search_route()
+        assert second["source"] == "openai" and "error" not in second and "ignored_legacy_model" not in second
+        assert [(leg["source"], leg["model"]) for leg in second["legs"]] == [("openai", "gpt-new")]
+        assert task.environ["OUROBOROS_WEBSEARCH_BACKEND"] == "anthropic"  # the entry snapshot itself is untouched

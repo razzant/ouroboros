@@ -10,12 +10,26 @@ import sys
 
 from ouroboros.provider_models import legacy_openai_base
 
-SEARCH_MODELS = {"openai": "gpt-5.2", "openrouter": "openai/gpt-5.2", "anthropic": "claude-sonnet-4-6", "ddgs": ""}
+# The model Ouroboros recommends for each built-in source, the one home of that choice: curated, never
+# a ranking of model names or catalogs. A blank saved Model follows it; a saved model stays as saved.
+# Checked 2026-11-01; re-check the source's own guide before changing its row:
+# OpenAI recommends gpt-5.5 with Responses web_search (developers.openai.com/api/docs/guides/tools-web-search);
+# OpenRouter lists openrouter:web_search on the openai/gpt-5.5 endpoints
+# (openrouter.ai/docs/guides/features/server-tools/web-search; GET /api/v1/models/openai/gpt-5.5/endpoints);
+# Anthropic lists claude-sonnet-5-5 (platform.claude.com/docs/en/about-claude/models/overview), and its
+# web_search_20250305 tool (llm_anthropic.py) serves every model. If stale: a retired id fails its own
+# leg loudly (Auto then tries the next source); a superseded one keeps answering until a release moves it.
+SEARCH_MODELS = {"openai": "gpt-5.5", "openrouter": "openai/gpt-5.5", "anthropic": "claude-sonnet-5-5", "ddgs": ""}
 SEARCH_BACKENDS = {"openai": "openai_responses", "openrouter": "openrouter_server_tool", "anthropic": "anthropic_server_tool", "ddgs": "ddgs"}
 
 
-def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict:
-    """Resolve from an explicit settings document, else from what this process's dispatch reads."""
+def resolve_web_search_route(*, backend=None, model=None, settings=None, per_call=False) -> dict:
+    """Resolve from an explicit settings document, else from what this process's dispatch reads.
+
+    ``model`` stands in for the saved selection (a Settings draft keeps the saved meaning). With
+    ``per_call`` a nonblank ``model`` is the one a ``web_search`` call named, and it is mandatory:
+    only legs that send that model are candidates, so a model no built-in transport serves is an
+    error, never Auto's other models or ddgs."""
     from ouroboros.config import runtime_setting
 
     setting = settings.get if settings is not None else runtime_setting
@@ -23,8 +37,11 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict
     source = source.strip().lower()
     selected = str(setting("OUROBOROS_WEBSEARCH_MODEL") or "") if model is None else str(model or "")
     selected = selected.strip()
+    strict = per_call and bool(selected)
     result = {"scope": "builtin_web_search", "source": source, "model": selected, "legs": [], "unavailable": [],
-              "note": "Applies only to built-in web_search; skills, MCP and browser tools remain independent choices."}
+              "note": "Applies only to built-in web_search; skills, MCP and browser tools remain independent choices."
+                      + (" This call named its model: only these legs send it (a routed model or named connection has one),"
+                         " and no other model or ddgs substitutes." if strict else "")}
     if source not in {"auto", *SEARCH_MODELS}:
         return {**result, "error": "Unknown web search source"}
     from ouroboros.provider_models import parse_model_route
@@ -40,29 +57,35 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict
                    "Direct search sources require a native model id"
                    if sep and prefix in {"openai", "anthropic"} and "/" in native else "")
     if source == "ddgs":
+        if strict:  # a named model is never silently dropped
+            return {**result, "error": "The ddgs source takes no model; omit model to search with ddgs"}
         candidates = [("ddgs", "")]  # ddgs takes no model: a saved model of any route is irrelevant here
-    elif unsupported and source != "auto":
-        return {**result, "error": unsupported}  # a strict source never substitutes another model
+    elif unsupported and (strict or source != "auto"):
+        return {**result, "error": unsupported}  # a strict source or a named model never substitutes another
     elif source == "auto":
         if unsupported:
             # Auto keeps the legs that need no model and says the selection is not applied.
             result["unapplied_model"] = selected
-            result["note"] += f" {unsupported}, so Auto does not apply the saved model and uses provider defaults."
+            result["note"] += f" {unsupported}, so Auto does not apply the saved model and uses the recommended models."
             candidates = [("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", "")]
         elif not selected:
             candidates = list(SEARCH_MODELS.items())
-        elif sep:
-            if prefix == "openrouter" and "/" not in native:
-                native = f"openai/{native}"
-            candidates = ([("openai", native), ("openrouter", f"openai/{native}")] if prefix == "openai"
-                          else [(prefix, native)]) + [("ddgs", "")]
-        elif "/" in selected:
-            # A saved legacy anthropic/<model> keeps the owner's model on the direct Anthropic leg too.
-            candidates = [("openrouter", selected), ("anthropic", legacy_anthropic or SEARCH_MODELS["anthropic"]),
-                          ("ddgs", "")]
         else:
-            candidates = [("openai", selected), ("openrouter", f"openai/{selected}"),
-                          ("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", "")]
+            # The selection's own legs send its model; Auto's recommendation and ddgs follow only a saved one.
+            if sep:
+                if prefix == "openrouter" and "/" not in native:
+                    native = f"openai/{native}"
+                own = ([("openai", native), ("openrouter", f"openai/{native}")] if prefix == "openai" and not strict
+                       else [(prefix, native)])  # a named route or connection is the call's whole choice
+                rest = [("ddgs", "")]
+            elif "/" in selected:
+                # A legacy anthropic/<model> keeps the owner's model on the direct Anthropic leg too.
+                own = [("openrouter", selected)] + ([("anthropic", legacy_anthropic)] if legacy_anthropic else [])
+                rest = ([] if legacy_anthropic else [("anthropic", SEARCH_MODELS["anthropic"])]) + [("ddgs", "")]
+            else:
+                own = [("openai", selected), ("openrouter", f"openai/{selected}")]
+                rest = [("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", "")]
+            candidates = own if strict else own + rest
     else:
         if sep and prefix != source:
             return {**result, "error": "The selected model belongs to a different search source"}
@@ -100,6 +123,17 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict
                **({"connection": leg_connection} if leg_connection else {})}
         result["unavailable" if reason else "legs"].append({**leg, "unavailable_reason": reason} if reason else leg)
     return result
+
+
+def named_connection_routes() -> list[dict]:
+    """The resolver's own verdict on a call naming each configured named connection under the configured
+    Source: the legs it may use and those it cannot, with their cause. For availability and diagnostics only:
+    an omitted call never tries a named connection, and only a selection or a call that names one sends on it."""
+    from ouroboros.provider_connections import configured_connections
+    from ouroboros.provider_models import connection_id
+
+    return [resolve_web_search_route(model=f"{connection_id(kind, name)}::{SEARCH_MODELS[kind]}", per_call=True)
+            for kind, name in configured_connections() if name and kind in SEARCH_MODELS]
 
 
 def _leg_configured(source: str, connection: str, settings) -> bool:

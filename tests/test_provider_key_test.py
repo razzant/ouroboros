@@ -810,6 +810,17 @@ def test_provider_test_and_active_model_enumeration_never_select_legacy_heavy():
     }) == "anthropic::claude-opus-5-5"
 
 
+def test_provider_test_never_reads_the_web_search_model_as_a_chat_route():
+    """A bare search id is OpenAI-native in search grammar (``search_routes``), never an OpenRouter chat id:
+    testing a key picks the kind's chat routes or its maintained default, not the search slot."""
+    from ouroboros.settings_defaults import OPENROUTER_DEFAULTS
+
+    settings = {"OUROBOROS_MODEL": "openai::owner-main", "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2"}
+    assert provider_api._provider_test_model("openrouter", settings) == OPENROUTER_DEFAULTS["main"]
+    assert provider_api._provider_test_model("openrouter", {**settings, "OUROBOROS_MODEL_LIGHT": "vendor/light"}) == "vendor/light"
+    assert provider_api._provider_test_model("openai", settings) == "openai::owner-main"
+
+
 @pytest.mark.parametrize("retired_key", [
     "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "OUROBOROS_REVIEW_MODELS",
     "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",

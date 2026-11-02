@@ -310,11 +310,11 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         prior = candidate.get("admitted_dispatch")
         if not projections:
             candidate["admitted_dispatch"] = "possible"
-            if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+            if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
                 candidate["admitted_dispatch"] = prior
                 return None
             return []
-        if queue.persist_queue_snapshot(reason="worker_launch_locator") is not True:
+        if queue.publish_queue_snapshot(reason="worker_launch_locator") is not True:
             return None
         committed = commit_dispatch_marks(candidate, projections)
         if committed is False:
@@ -323,7 +323,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         witness = _COMMITTED_UNSENT[task_id] = {"row": candidate, "attempt": candidate.get("_attempt"),
                                                 "projections": projections, "unsubmitted": unsubmitted}
         if committed is None:  # it may have landed: never replayable, retried here before any put
-            queue.persist_queue_snapshot(reason="worker_launch_unknown")
+            queue.publish_queue_snapshot(reason="worker_launch_unknown")
             return None
     else:
         from ouroboros.task_results import load_task_result
@@ -333,7 +333,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
             recommitted = commit_dispatch_marks(candidate, witness["projections"])
             if recommitted is not True:  # refused now (terminal, Stop, owner hold) or unresolved: no put;
                 return recommitted       # the row stays in custody
-    if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+    if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
         return None
     return witness["projections"]
 
@@ -786,8 +786,10 @@ def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_remaining
     from supervisor.worker_owner_wait import maintain_owner_wait_capacity
-
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity, worker_ready
+    from supervisor.conversation_lane import reconcile_under_project_fence
+    from supervisor.worker_pool_lifecycle import (
+        _WORKER_LIFECYCLE_LOCK, is_project_slot, reconcile_worker_capacity, worker_ready,
+    )
 
     # The loop never waits behind an off-loop respawn or generation stop holding the lifecycle
     # serializer (teardowns kill and join outside it): the whole turn defers to the next tick, so
@@ -796,6 +798,8 @@ def assign_tasks() -> None:
         return
     try:
         maintain_owner_wait_capacity()
+        if _pool()._WORKER_POOL_DISABLED_REASON:
+            reconcile_under_project_fence()
     finally:
         _WORKER_LIFECYCLE_LOCK.release()
     _tick_parked_work(queue)  # custody observation may wait on a remote operation
@@ -952,7 +956,9 @@ def assign_tasks() -> None:
         refused_this_pass = set()  # failed physical claims are not residual demand,
         deferred_this_pass = set()  # unless contention deferred them: the same work retries
         for w in _pool().WORKERS.values():
-            while (w.busy_task_id is None and worker_ready(w) and not getattr(w, "resume_hold", "")
+            # Queued work goes to project slots only; routing admits the conversation lane's carriers.
+            while (is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
+                    and not getattr(w, "resume_hold", "")
                     and getattr(w, "active_capacity", True) and _pool().PENDING):
                 chosen_idx, blocked = _choose_candidate(
                     queue, remaining, unresolved_invalid_id_set, refused_this_pass, _started_projection(), set())

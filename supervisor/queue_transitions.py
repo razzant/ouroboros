@@ -511,7 +511,7 @@ def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",
                     return {"ok": False, "error": "sleep_retention_unwritable"}
                 located.update(parked)
                 located.pop("_owner_wait_resume", None)
-                if not q.persist_queue_snapshot(reason="saved_pause_retained"):
+                if not q.publish_queue_snapshot(reason="saved_pause_retained"):  # durable before the Resume proceeds
                     return {"ok": False, "error": "snapshot_not_persisted"}
         exact = bool(located is not None and isinstance(located.get("_budget_pause"), dict)
                      and located["_budget_pause"].get("exact_continuation"))

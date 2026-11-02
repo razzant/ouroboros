@@ -1,7 +1,6 @@
 """R11 integration checks: synthetic roots and fake provider construction only."""
 from dataclasses import replace
 import json
-import queue
 from types import SimpleNamespace
 
 import pytest
@@ -58,21 +57,25 @@ def test_legacy_nonphysical_preparation_refusal_is_still_terminalized_once(direc
     from ouroboros.task_results import load_task_result, write_task_result
     from ouroboros.tools.tool_context import ToolContext
     from ouroboros.utils import append_jsonl
-    from supervisor import direct_pause, worker_chat_lane, workers
+    from supervisor import inline_carrier, worker_chat_lane, worker_process, workers
+    from tests.conversation_carrier_support import lane_rows
     from tests.test_context_minimum_view_unfit import FACTS
 
     world = direct_call
-    bus, finished, failures = queue.Queue(), [], []
+    bus, finished, failures = world.bus, [], []
     world.turn.catalog_model = SimpleNamespace(facts=FACTS)
     world.turn.publish = finished.append
-    monkeypatch.setattr(workers, "get_event_q", lambda: bus)
     monkeypatch.setattr(worker_chat_lane, "append_jsonl", append_jsonl)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: None)
-    monkeypatch.setattr(direct_pause, "recover_direct_pause",
-        lambda *a, **kw: pytest.fail("capacity refusal entered budget-pause recovery"))
+    # The call's own close and refusal claim the failure: it never reaches the generic exception
+    # terminal, and so never the budget-pause recovery that rail consults.
+    monkeypatch.setattr(worker_process, "_record_task_exception",
+        lambda *a, **kw: pytest.fail("capacity refusal entered the generic exception rail"))
 
     def prepare(task):
         write_task_result(tmp_path, task["id"], "running", chat_id=1, _is_direct_chat=True)
+        agent.tools._ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"],
+                                      current_chat_id=1, is_direct_chat=True)
         # The new ordinary fitter admits this soft shortfall. Keep compatibility
         # with an already prepared legacy refusal and its once-only terminalization.
         error = MinimumViewUnfit('Legacy work-room refusal', fixed_tokens=75_000, memory_tokens=1_000,
@@ -83,11 +86,9 @@ def test_legacy_nonphysical_preparation_refusal_is_still_terminalized_once(direc
 
     agent = SimpleNamespace(handle_task=prepare, env=SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path),
                             memory=None, llm=None, tools=SimpleNamespace(_ctx=None))
-    admitted = worker_chat_lane._admit_chat_task(agent, 1, "Open the call.", realtime_turn=world.turn)
-    task_id = admitted["task"]["id"]
-    agent.tools._ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task_id,
-                                  current_chat_id=1, is_direct_chat=True)
-    assert worker_chat_lane._execute_chat_task(admitted) is False
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: agent)
+    worker_chat_lane.handle_chat_direct(1, "Open the call.", realtime_turn=world.turn)
+    [task_id] = list(lane_rows(workers))
     error, = failures
     assert error.physical is False and error.deficit_tokens == 0
     assert error.work_room_deficit_tokens > 0
@@ -100,7 +101,7 @@ def test_legacy_nonphysical_preparation_refusal_is_still_terminalized_once(direc
     assert refusal["physical"] is False and refusal["deficit_tokens"] == 0
     assert refusal["fit"]["measurement"]["work_room_deficit_tokens"] == error.work_room_deficit_tokens
     assert [row["ok"] for row in rows if row["type"] == "task_eval"] == [False]
-    worker_chat_lane._close_failed_call(admitted, error)
+    inline_carrier._close_failed_call({"task": {"id": task_id}, "realtime_turn": world.turn}, error)
     assert len(finished) == 1
     assert not world.other.closed and not world.notices
 

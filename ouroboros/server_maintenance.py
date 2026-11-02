@@ -132,6 +132,19 @@ def orphan_reconcile_write_guard(task_id: str, *, stop_event: Any = None):
         yield not _stop_requested(stop_event) and (not queue.INITIALIZED or queue.task_settlement_liveness(task_id) is False)
 
 
+def queue_owned_task_ids() -> frozenset:
+    """The ids the queue holds now (RUNNING, PENDING, a busy slot): ``orphan_reconcile_write_guard``
+    refuses every one of them (``task_settlement_liveness`` is True), so the periodic orphan
+    reconcile excludes them unread instead of projecting each to a write it would refuse."""
+    from supervisor import queue, workers
+
+    if not queue.INITIALIZED:
+        return frozenset()  # no supervisor here: its guard refuses nothing
+    with queue._queue_lock:
+        return frozenset({*queue.RUNNING, *(str(task.get("id") or "") for task in queue.PENDING),
+                          *(w.busy_task_id for w in workers.WORKERS.values() if w.busy_task_id)} - {""})
+
+
 def _stop_requested(stop_event: Any = None) -> bool:
     """Closed generation, stop or restart: no mutation or daemon start afterward.
     The per-generation token also keeps an old off-loop pass from writing."""
@@ -324,9 +337,11 @@ def _periodic_supervisor_maintenance(
     last_custody_reap: list, last_review_reconcile: list, *, stop_event: Any = None,
 ) -> None:
     """Throttled upkeep on the supervisor tick, nothing history-sized inline (INV-24).
-    Each tick starts the schedule duty when its previous pass ended;
+    A tick starts the schedule duty when a pass is due (``schedule_time.pass_due``)
+    and its previous pass ended;
     the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
-    plus the held-Continue re-check while a pending Continue waits under its writer hold; every 600 s
+    plus the held-Continue re-check while a pending Continue waits under its writer hold, and owes the
+    owner-Pause look (started by the tick that finds it owed, or that a member transition marked); every 600 s
     the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
     retirers); every 300 s the reconcile
     block (zombie heal, the age-only retirers, drive settlement, then the maintenance dispatcher). The first
@@ -357,6 +372,14 @@ def _periodic_supervisor_maintenance(
         # A writer hold installs no root fence: the held row itself is the cheap
         # scheduling hint, and the off-loop pass re-reads the queue under its lock.
         held = (host_duty("held_continuation_recheck"),) if held_continuation_predecessors(queue.PENDING) else ()
+        # A remote run's end has no transition: its tree is due on this cadence, not on every tick. A pass
+        # still running is this cadence's look (never back to back): its stall is journaled like any duty's.
+        from supervisor.owner_pause_control import request_settlement_look
+
+        if _OWNER_PAUSE_SWEEP_LOCK.locked():
+            _duty_busy(_OWNER_PAUSE_SWEEP_LOCK, BODY_MAINTENANCE_INTERVAL_SEC)
+        else:
+            request_settlement_look()
         for duty in (*TWENTY_SECOND_DUTIES, *held):  # the one 20 s group of HOST_DUTIES, dispatched together
             if duty.latch.acquire(blocking=False):
                 _start_maintenance_thread(duty.latch, duty.name, duty.run,
@@ -373,9 +396,11 @@ def _periodic_supervisor_maintenance(
         _LAST_COLD_CUSTODY_SWEEP[0] = now
         _start_maintenance_thread(_COLD_CUSTODY_SWEEP_LOCK, "cold-custody", _run_cold_custody,
                                   (stop_event, _COLD_CUSTODY_SWEEP_LOCK))
-    # Presence is only a cheap scheduling hint. The off-loop owner re-reads
-    # the exact fences; a network stop must never run on the assignment tick.
-    if queue.BUDGET_ROOT_FENCES and _OWNER_PAUSE_SWEEP_LOCK.acquire(blocking=False):
+    # A cheap scheduling hint. The off-loop owner re-reads the exact fences and reads
+    # nothing for a tree at rest; a network stop must never run on the assignment tick.
+    from supervisor.owner_pause_control import settlement_look_owed
+
+    if settlement_look_owed(queue) and _OWNER_PAUSE_SWEEP_LOCK.acquire(blocking=False):
         latch = _OWNER_PAUSE_SWEEP_LOCK
         _start_maintenance_thread(latch, "owner_pause_settlement", _run_terminal_duty,
                                   (pathlib.Path(DATA_DIR), "owner_pause_settlement", latch, stop_event))
@@ -397,8 +422,12 @@ def _periodic_supervisor_maintenance(
     from ouroboros.maintenance import child as maintenance_child
     if maintenance_child.owed():  # a process's first look, or a job scheduled since: reserve the slot only
         _tick_maintenance_child()
-    # Every tick, as the inline pass ran before; a pass still running (a slow preparation) skips this one.
-    if _SCHEDULE_SWEEP_LOCK.acquire(blocking=False):
+    # When a pass has something new to decide (a due instant, a table write, rows waiting on other
+    # facts: ``schedule_time.pass_due``), never merely per tick; a pass still running skips this one.
+    from supervisor.schedule_time import pass_due
+    if not pass_due(queue.DRIVE_ROOT, now):
+        pass
+    elif _SCHEDULE_SWEEP_LOCK.acquire(blocking=False):
         _start_maintenance_thread(_SCHEDULE_SWEEP_LOCK, "schedule-admission", _run_schedule_duty,
                                   (stop_event, _SCHEDULE_SWEEP_LOCK))
     else:
@@ -1221,7 +1250,7 @@ def _periodic_zombie_reconcile(*, stop_event: Any = None) -> None:
 
         expired_quizzes: list = []
         reconcile_orphaned_running_tasks(
-            DATA_DIR, expired_quizzes=expired_quizzes, boot=False,
+            DATA_DIR, exclude_task_ids=queue_owned_task_ids(), expired_quizzes=expired_quizzes, boot=False,
             write_guard=lambda task_id: orphan_reconcile_write_guard(task_id, stop_event=stop_event),
         )
         _publish_expired_quiz_frames(expired_quizzes)

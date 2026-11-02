@@ -938,6 +938,20 @@ def tree_model_requests(root_drive: Any, root_task_id: str) -> list:
     return usage_store.decode_attempts(captured)
 
 
+def trees_model_requests(root_drive: Any, root_task_ids: Iterable[str]) -> Dict[str, list]:
+    """``tree_model_requests`` of many roots in ONE read: a reader over every paused tree pays one
+    transaction, not one per tree. Raises when unreadable: unknown, never none."""
+    from ouroboros import usage_store
+
+    roots = sorted({str(root) for root in root_task_ids})
+    with usage_store.read(root_drive) as txn:
+        captured = txn.open_attempt_rows(root_task_ids=roots)
+    grouped: Dict[str, list] = {root: [] for root in roots}
+    for attempt in usage_store.decode_attempts(captured):
+        grouped.setdefault(str(attempt.get("root_task_id") or ""), []).append(attempt)
+    return grouped
+
+
 @contextmanager
 def tool_handoff(source: Any, name: str):
     """Bind one actual invocation; its existing future owns local completion.

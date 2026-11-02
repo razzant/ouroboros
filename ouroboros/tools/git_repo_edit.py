@@ -36,8 +36,13 @@ def _check_shrink_guard(
     binding: ResolvedResourceBinding,
     new_content: str,
     force: bool = False,
+    *,
+    recovery: str = "",
 ) -> Optional[str]:
-    """Block likely accidental tracked-file truncation unless force=True."""
+    """Block likely accidental tracked-file truncation unless force=True.
+
+    ``recovery`` replaces the full-write next step; exact editors pass
+    ``edit_ops.EXACT_EDIT_SHRINK_RECOVERY``."""
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
     if force or mode_has_unrestricted_agency(_git()._current_runtime_mode()):
@@ -61,8 +66,8 @@ def _check_shrink_guard(
             return (
                 f"⚠️ WRITE_BLOCKED: new content for '{file_path}' is {pct}% of original "
                 f"({old_len} -> {new_len} chars). This looks like accidental truncation. "
-                f"Use edit_text for surgical edits, or pass force=true to confirm "
-                f"intentional rewrite."
+                + (recovery or "Use edit_text for surgical edits, or pass force=true to confirm "
+                   "intentional rewrite.")
             )
     except Exception:
         pass
@@ -385,7 +390,12 @@ def _str_replace_editor(
     new_content, _match_err = _git()._str_match_replace(content, old_str, new_str, path, "EDIT_TEXT_ERROR")
     if _match_err:
         return publish_no_effect(ctx, _match_err, tool_name="edit_text")
-    from ouroboros.tools.edit_ops import _edit_content_block, edit_syntax_note, newline_normalization_note
+    from ouroboros.tools.edit_ops import (
+        EXACT_EDIT_SHRINK_RECOVERY,
+        _edit_content_block,
+        edit_syntax_note,
+        newline_normalization_note,
+    )
 
     newline_note = newline_normalization_note(target)
     if binding is not None and (content_block := _edit_content_block(binding, new_content, force)):
@@ -393,12 +403,11 @@ def _str_replace_editor(
     syntax_note = edit_syntax_note(binding, new_content)
     if binding is None and data_skill_target is not None:
         # Deferral 5: a data-plane skill payload edited via the active_workspace route gets
-        # the SAME shrink guard as the root=skill_payload editor — no silent >30% truncation
-        # of a payload file. (Intentional large rewrites go through root=skill_payload, which
-        # carries the force escape hatch.)
+        # the SAME shrink guard, force confirmation and exact-edit next step as the
+        # root=skill_payload editor — no silent >30% truncation of a payload file.
         from ouroboros.tools.core import _check_data_shrink_guard
 
-        _shrink_block = _check_data_shrink_guard(target, new_content, force)
+        _shrink_block = _check_data_shrink_guard(target, new_content, force, recovery=EXACT_EDIT_SHRINK_RECOVERY)
         if _shrink_block:
             return publish_no_effect(ctx, _shrink_block, tool_name="edit_text")
     # X3 hash-bind: the ADMITTED repair task's payload edits CAS-check the

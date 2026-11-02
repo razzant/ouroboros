@@ -739,12 +739,22 @@ def _root_post_task_blocking(
         or bool(str(task.get("workspace_mode") or "").strip())
         or project_task
     )
-    if (is_presence_task(task) and task.get("_is_direct_chat")
-            and not in_worker_process() and not split_drive):
-        # The native adapter receives the durable result on return. Its request
-        # must not wait for synthesis; pooled/forked workers retain their custody.
+    if presence_request_waits(task) and not split_drive:
+        # A Host request waits on this turn's durable result (the admission's fact,
+        # whatever process carries the turn): it must not wait for synthesis.
+        # Pooled/forked work retains its custody.
         blocking = False
     return blocking
+
+
+def presence_request_waits(task: Dict[str, Any]) -> bool:
+    """Whether a Presence request is waiting on this turn's result: the Host's admission stamps
+    ``metadata.presence_request_waits`` on the turn it runs for a waiting connector call. A legacy
+    row carries no stamp and is read as the inline Presence turn it was."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if "presence_request_waits" in metadata:
+        return bool(metadata["presence_request_waits"])
+    return bool(is_presence_task(task) and task.get("_is_direct_chat") and not in_worker_process())
 
 
 def _deliver_answer_first(env: Any, task: Dict[str, Any], event_queue: Any, pending_events: List[Dict[str, Any]],

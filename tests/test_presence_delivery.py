@@ -397,7 +397,6 @@ def test_inbound_initiated_and_receipt_paths_derive_one_conversation_identity(tm
         events.append(kwargs["event"])
         return PresenceTurnResult(outcome="silent", text="", task_id="turn", work_ref="")
 
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn", runner)  # the initiate path's runner
     client = TestClient(create_host_service_app(tmp_path, presence_runner=runner))
     initiate = next(item for item in get_tools() if item.name == "initiate_presence")
     identities = {}

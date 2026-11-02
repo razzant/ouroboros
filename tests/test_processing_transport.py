@@ -29,7 +29,7 @@ def transport(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(pricing, "estimate_cost_optional", lambda *a, **kw: None)
     monkeypatch.setattr(ua, "estimate_cost_optional", lambda *a, **kw: None)
-    monkeypatch.setattr("ouroboros.llm.in_worker_process", lambda: False)
+    monkeypatch.setattr("ouroboros.llm.transport_no_proxy", lambda: False)  # the spawner's transport policy fact
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", True)
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_CACHE", {})
     monkeypatch.setattr(LLMClient, "_get_supported_parameters", lambda *a: None)

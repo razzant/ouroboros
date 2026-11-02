@@ -233,13 +233,15 @@ def _str_match_replace(
 
 
 def _check_data_shrink_guard(
-    target: pathlib.Path, new_content: str, force: bool = False
+    target: pathlib.Path, new_content: str, force: bool = False, *, recovery: str = ""
 ) -> "str | None":
     """Block likely accidental truncation of an EXISTING data-plane file on OVERWRITE,
     unless force=True (deferral 5). Mirrors the repo shrink-guard
     (``git._check_shrink_guard``) but WITHOUT the ``git ls-files`` tracking check — the
     data plane is not a git tree. Skips a non-existent target (a fresh create is any
-    size) and appends (the caller only invokes this on overwrite). Never raises."""
+    size) and appends (the caller only invokes this on overwrite). ``recovery``
+    replaces the full-write next step; exact editors pass
+    ``edit_ops.EXACT_EDIT_SHRINK_RECOVERY``. Never raises."""
     from ouroboros.config import get_runtime_mode
     from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 
@@ -255,8 +257,8 @@ def _check_data_shrink_guard(
             return (
                 f"⚠️ WRITE_BLOCKED: new content for '{target.name}' is {pct}% of original "
                 f"({old_len} -> {new_len} chars). This looks like accidental truncation. "
-                f"Use edit_text for surgical edits, or pass force=true to confirm an "
-                f"intentional rewrite."
+                + (recovery or "Use edit_text for surgical edits, or pass force=true to confirm an "
+                   "intentional rewrite.")
             )
     except Exception:
         return None

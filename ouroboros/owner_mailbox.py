@@ -99,17 +99,21 @@ def _ack_path(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
     return pathlib.Path(drive_root) / _MAILBOX_DIR / f"{validate_task_id(task_id)}.acks.jsonl"
 
 
-def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any]) -> bool:
+def _append_mail(drive_root: pathlib.Path, task_id: str, path: pathlib.Path, entry: Dict[str, Any],
+                 admit: Optional[Any] = None) -> bool:
     """Append one mailbox row under the task's mail lock (``task_custody.task_mail_lock``,
     on the canonical side), so a row can never land between a settlement's custody read and
     the unlink or drive move it permits (a sender after that recreates the mailbox, which
     the next settlement holds). Never held across a copy: a publisher's custody lock is a
-    different lock, so a long copy-back never blocks a sender."""
+    different lock, so a long copy-back never blocks a sender. ``admit`` is a check run
+    INSIDE the lock before the write (a remote author's intake fact): False writes nothing."""
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
         if locked and entry.get("provenance") == "place_event" and _holds(path, entry["msg_id"]):
             return True
+        if locked and admit is not None and not admit():
+            return False
         return bool(locked and append_jsonl(path, entry))
 
 
@@ -372,6 +376,7 @@ def write_task_message(
     sender_origin: Optional[Dict[str, Any]] = None,
     reply_to: Optional[Dict[str, Any]] = None,
     place_arrival: Optional[Dict[str, Any]] = None,
+    admit: Optional[Any] = None,
 ) -> bool:
     """Write an addressed task-tree message without forging owner provenance.
 
@@ -415,7 +420,7 @@ def write_task_message(
     if provenance == "system" and isinstance(work_attention, dict):
         entry["work_attention"] = dict(work_attention)
     try:
-        return _append_mail(drive_root, task_id, path, entry)
+        return _append_mail(drive_root, task_id, path, entry, admit=admit)
     except StoreForeign:
         raise
     except Exception:
