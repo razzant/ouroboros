@@ -324,7 +324,8 @@ def _periodic_supervisor_maintenance(
     last_custody_reap: list, last_review_reconcile: list, *, stop_event: Any = None,
 ) -> None:
     """Throttled upkeep on the supervisor tick, nothing history-sized inline (INV-24).
-    Each tick starts the schedule duty when its previous pass ended;
+    A tick starts the schedule duty when a pass is due (``schedule_time.pass_due``)
+    and its previous pass ended;
     the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
     plus the held-Continue re-check while a pending Continue waits under its writer hold; every 600 s
     the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
@@ -397,8 +398,12 @@ def _periodic_supervisor_maintenance(
     from ouroboros.maintenance import child as maintenance_child
     if maintenance_child.owed():  # a process's first look, or a job scheduled since: reserve the slot only
         _tick_maintenance_child()
-    # Every tick, as the inline pass ran before; a pass still running (a slow preparation) skips this one.
-    if _SCHEDULE_SWEEP_LOCK.acquire(blocking=False):
+    # When a pass has something new to decide (a due instant, a table write, rows waiting on other
+    # facts: ``schedule_time.pass_due``), never merely per tick; a pass still running skips this one.
+    from supervisor.schedule_time import pass_due
+    if not pass_due(queue.DRIVE_ROOT, now):
+        pass
+    elif _SCHEDULE_SWEEP_LOCK.acquire(blocking=False):
         _start_maintenance_thread(_SCHEDULE_SWEEP_LOCK, "schedule-admission", _run_schedule_duty,
                                   (stop_event, _SCHEDULE_SWEEP_LOCK))
     else:

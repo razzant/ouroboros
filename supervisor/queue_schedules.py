@@ -748,14 +748,14 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
     root = _queue().DRIVE_ROOT
     from supervisor.followup_policy import control_guard, scan_policy, refresh_policy
 
-    # Copy the table while its writers are excluded. Policy reads below own no Q
-    # or table lock; a changed row/restart is retried rather than overwritten.
-    with schedule_transaction(root):
-        try:
-            snapshot = copy.deepcopy(load_schedule_store(root))
-        except ScheduleStoreUnreadable:
-            log.error("Scheduled task store is unreadable; skipping this scheduler pass")
-            return
+    # Its one writer seam replaces the table atomically, so a plain read is one whole committed
+    # version: no Q or table lock is taken just to copy it. Policy reads below own neither; the
+    # decisions re-read the table under both, and a row changed in between is retried there.
+    try:
+        snapshot = load_schedule_store(root)
+    except ScheduleStoreUnreadable:
+        log.error("Scheduled task store is unreadable; skipping this scheduler pass")
+        return
     outcomes = _scan_outcomes(root, snapshot)
     observed = scan_policy(root, snapshot)
     from ouroboros.retention import age_cutoff, get_gc_retention_days
@@ -918,6 +918,11 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 if not _audit_schedule_mutation(phase="outcome", result="removed", before=before, **audit):
                     log.error("schedule %s removed but its audit outcome is incomplete", before.get("id"))
             _queue().persist_queue_snapshot(reason="scheduled_tasks")
+        # Still under the table lock: no other writer can land between this pass's decision
+        # (and its own write) and the identity it records, so any later write wakes a pass.
+        from supervisor.schedule_time import note_pass, table_identity
+
+        note_pass(root, data, table_identity(_scheduled_tasks_path(root)), cutoff, now_utc)
     notes.deliver(due_notes, root)
     occurrences.retain_deferred(data.get("tasks") or [])
     prepared = []
