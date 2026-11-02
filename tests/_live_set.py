@@ -470,6 +470,12 @@ def measure(meter: Any, srv: Any, client: Any, result: Dict[str, Any], root: pat
         if table is None:
             table = _passes(meter, srv, client, root, stubs, stop)
         out["stages"][stage] = _one_stage(meter, stage, table, root, stubs, stop, result)
+        if stage == STAGES[0]:
+            # The smallest set's rest again, once every pass has met it: a pass the table runs before another's first
+            # run (the skills' state the extension reconcile writes, the schedule's wake) would count that run's
+            # effect as the next axis's growth. Its first runs stay the markers law's baseline.
+            for name, entry in _one_stage(meter, f"{stage}-steady", table, root, stubs, stop, result).items():
+                out["stages"][stage][name]["rest"] = entry["rest"]
     for stage in (STAGES[0], STAGES[-1]):
         change[stage] = _published_change(meter, root, stage, result, stop)
     largest = change[STAGES[-1]]

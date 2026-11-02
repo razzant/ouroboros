@@ -47,8 +47,6 @@ GROWTH = {"running": 50, "paused": 20, "pending": 61, "held": 122, "schedules": 
 # it lands; ``UNASSIGNED`` is a breach of E2 no unit of the sprint owns, kept in view rather than averaged away.
 LC, LD, LB, LE = "LC", "LD", "LB", "LE"
 UNASSIGNED = "no unit of this sprint"
-QUEUE_DOC_PER_ROW = ("task_status.effective_task_result parses the whole queue document once per row it looks at, under "
-                     "reconcile_orphaned_running_tasks every 300 s")
 QUEUE_DOC_PER_PASS = "_startup_live_task_ids parses the whole queue document once per 600 s pass"
 
 GAPS: Dict[tuple, str] = {
@@ -67,10 +65,6 @@ GAPS: Dict[tuple, str] = {
     ("paused", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.21 -> 4.3 MB)",
     ("pending", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (4.3 -> 7.2 MB)",
     ("held", "custody-maintenance"): f"{UNASSIGNED}: a 600 s pass whose three audits decode every held run (decodes 94 -> 587)",
-    ("running", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW} (begins 28 -> 77, 10 MB read)",
-    ("paused", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW}, and budget_pause_row per member (begins 77 -> 224, 216 MB read)",
-    ("pending", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW}: the document it parses 240 times grew (216 -> 361 MB read), and "
-                                          "recover_interrupted_preparations lists every open document (decodes 1,031 -> 1,091)",
     ("held", "delegated-body"): f"{UNASSIGNED}: the body's tick decodes every held run to find the ones it owes (decodes 5 -> 504)",
 }
 REST_GAPS: Dict[str, str] = {
@@ -80,7 +74,6 @@ REST_GAPS: Dict[str, str] = {
     "state": f"{LE} L6: an unchanged revision rebuilds the answer (10 task bodies, 23 usage reads)",
     "publication": f"{LB} L5: queue.alive replaced and synced on every unchanged publication",
     "custody-maintenance": f"{UNASSIGNED}: a 600 s pass over unchanged inputs reads 10 task bodies (delegate_terminal's refresh)",
-    "reconcile-maintenance": f"{UNASSIGNED}: a 300 s pass over unchanged inputs reads 52 task bodies (obligations.result_rows, the orphan reconcile)",
 }
 # (pass -> counts its own work allows at rest). The duty exists to look at the open attempts: one indexed read, zero rows here.
 ALLOWED_AT_REST = {"abandoned_usage_reconciliation": {"usage_row_reads": 1}}
