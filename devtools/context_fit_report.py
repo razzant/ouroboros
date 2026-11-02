@@ -305,11 +305,12 @@ def tool_facts(registry, result, *, requested_mode, requested_count):
 
 def report(root, room, window, reserve, mode='max', snapshot=False, session_provider=None, caller='direct'):
     from devtools._context_fit_readonly import readonly_inputs, server_alive, snapshot_root
+    from ouroboros.test_environment import default_temp_parent
     root = Path(root).resolve(strict=True)
     source_root = root
-    if server_alive(root) and not snapshot:
+    if not snapshot and server_alive(root):  # --snapshot measures a private copy and never probes liveness
         raise ValueError('The data root has a live server or uncertain admission; use --snapshot')
-    with tempfile.TemporaryDirectory(prefix='context-fit-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='context-fit-', dir=default_temp_parent()) as directory:
         scratch = Path(directory)
         if snapshot:
             copied = scratch / 'data'

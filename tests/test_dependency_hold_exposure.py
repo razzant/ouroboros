@@ -384,7 +384,7 @@ def test_a_child_held_after_its_parent_armed_a_warm_sleep_reaches_the_mind_first
         assert '"task_id": "plain"' in notice and held[0]["identity"] in notice and '"cause": "authority"' in notice
         ctx = registry._ctx
         assert ctx._held_dependencies_seen["plain"] == held[0]["identity"] and not ctx._model_sleep
-        saved = json.loads(working_checkpoint.checkpoint_path(tmp_path, "root-1", ctx.task_attempt).read_text())
+        saved = json.loads(working_checkpoint.checkpoint_path(tmp_path, "root-1", ctx.task_attempt).read_text(encoding="utf-8"))
         assert saved["held_dependencies_seen"]["plain"] == held[0]["identity"], "durable before this model round"
         assert notice in [row.get("content") for row in saved["messages"]]
         return _turn(_sleep("again", tasks=["plain"]))
