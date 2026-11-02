@@ -1232,9 +1232,8 @@ def spawn_workers(n: int = 0) -> None:
     threading.Thread(target=_verify_worker_sha_after_spawn, args=(dict(new_workers), events_cursor, 1, spawned_at), daemon=True).start()
 
 
-@_serialized_worker_lifecycle
 def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
-    """Under Q: the slots a stop owns, marked ``reaping``.
+    """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
 
     ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
     """
@@ -1300,6 +1299,7 @@ def _confirm_dead_slots(doomed: List[Worker]) -> tuple:
     return dead_pids, unconfirmed_pids
 
 
+@_serialized_worker_lifecycle  # one global order, lifecycle before Q: every spawn holds them the same way
 def kill_workers(
     force: bool = True,
     *,

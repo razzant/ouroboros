@@ -7,6 +7,7 @@ on ``execution_owner`` are additive and old rows decode as they did.
 """
 
 import queue as stdqueue
+import threading
 import time
 
 import pytest
@@ -20,6 +21,8 @@ from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa
 from tests.worker_pool_support import affirm_ready
 
 pytestmark = pytest.mark.serial
+
+_THREAD = threading.Thread  # the real class: the pool fixture stubs ``threading.Thread`` for the pool's own threads
 
 # The shared pool fixture stubs the lane's maintenance; these tests read the real one.
 _REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane
@@ -267,3 +270,89 @@ def test_a_turn_admitted_while_the_spare_boots_is_dispatched_through_a_marker_wi
     conversation_lane.reconcile_conversation_lane()
     assert meta["worker_id"] == 7 and spare.busy_task_id == meta["task"]["id"]
     assert len(pool.created) == 0  # the window forbade a spawn, as it should
+
+
+class _ObservedLifecycle:
+    """The real lifecycle serializer, observed: every thread that begins a blocking acquire is named."""
+
+    def __init__(self, inner):
+        self._inner, self.waiting = inner, []
+
+    def acquire(self, blocking=True, timeout=-1):
+        if blocking:
+            self.waiting.append(threading.current_thread().name)
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self):
+        self._inner.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+class _BoundedQ:
+    """Q itself, taken with a bound: a reversed lock order fails this test instead of hanging the run."""
+
+    def __init__(self, inner, bound):
+        self._inner, self._bound = inner, bound
+
+    def __enter__(self):
+        if not self._inner.acquire(timeout=self._bound):
+            raise TimeoutError("Q is held by a thread that waits for the lifecycle serializer")
+        return self
+
+    def __exit__(self, *exc):
+        self._inner.release()
+
+
+def test_a_stop_never_holds_q_while_a_carrier_spawn_holds_the_lifecycle_serializer(pool, monkeypatch):
+    """One global lock order, lifecycle before Q (review C1). A carrier spawn (``replenish_after_claim`` from a
+    Host thread, the tick's reconcile) holds the lifecycle serializer through its process start and then takes Q
+    to install the slot; a stop on another thread (Restart, shutdown) must wait for the serializer BEFORE it takes
+    Q. The spawn is the real ``_spawn_worker_slot``: its process start returns once the stop is blocked on the
+    serializer, and its Q is bounded, so the reversed order (Q, then the serializer) fails here, not in a hang."""
+    _stop_doubles(monkeypatch)
+    add_slot(0, lane=LANE_PROJECT)
+    serializer = _ObservedLifecycle(lifecycle._WORKER_LIFECYCLE_LOCK)
+    monkeypatch.setattr(lifecycle, "_WORKER_LIFECYCLE_LOCK", serializer)
+    monkeypatch.setattr(lifecycle, "_queue_lock", _BoundedQ(queue._queue_lock, 5.0))
+
+    def start_once_the_stop_waits(ctx, wid, *args):
+        deadline = time.monotonic() + 10
+        while "stopper" not in serializer.waiting and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert "stopper" in serializer.waiting, "the stop never reached the lifecycle serializer"
+        return Process(7000 + wid)
+
+    monkeypatch.setattr("supervisor.worker_process.spawn_worker_process", start_once_the_stop_waits)
+    holding, spawned, stopped, failures = threading.Event(), [], [], []
+
+    def spawner():
+        try:
+            with serializer:
+                holding.set()
+                spawned.append(lifecycle._spawn_worker_slot(5, lane=LANE_CONVERSATION))
+        except BaseException as exc:
+            failures.append(exc)
+            holding.set()
+
+    def stopper():
+        try:
+            stopped.append(workers.kill_workers(lanes=frozenset({LANE_PROJECT})))
+        except BaseException as exc:
+            failures.append(exc)
+
+    spawn_thread = _THREAD(target=spawner, name="spawner", daemon=True)
+    stop_thread = _THREAD(target=stopper, name="stopper", daemon=True)
+    spawn_thread.start()
+    assert holding.wait(10)
+    stop_thread.start()
+    spawn_thread.join(30)
+    stop_thread.join(30)
+    assert not spawn_thread.is_alive() and not stop_thread.is_alive()
+    assert failures == [] and spawned == [True] and stopped == [True]
+    assert workers.WORKERS[5].lane == LANE_CONVERSATION and 0 not in workers.WORKERS  # the project stop spared the carrier
