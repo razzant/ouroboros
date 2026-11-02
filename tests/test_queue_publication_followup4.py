@@ -246,3 +246,25 @@ def test_a_raising_pause_barrier_answers_the_typed_refusal_and_runs_outside_q(tm
     assert answer == {"ok": False, "error": "pause_record_unwritable", "detail": "fixture: the encoder failed"}
 
 
+# ---- R6: a kept saved queue is skipped before any row is copied -----------------------------------
+
+def test_a_kept_saved_queue_costs_no_capture_per_tick(published, monkeypatch):
+    root, _now = published
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    (root / "state/queue_snapshot.json").write_text(
+        json.dumps({"pending": [{"id": "saved", "task": {"id": "saved"}}], "running": []}), encoding="utf-8")
+    queue_publication.tick_publisher_started()
+    queue.persist_queue_snapshot("startup")  # a mark; the saved queue is not in this process's custody
+    assert queue_publication.publish_queue_changes() is None, "kept: the first tick decides it"
+    assert queue_publication._STATE["kept"] is not None
+    captures, censuses = [], []
+    capture, census = queue_publication._capture, queue_publication._census
+    monkeypatch.setattr(queue_publication, "_capture", lambda *a, **k: captures.append(1) or capture(*a, **k))
+    monkeypatch.setattr(queue_publication, "_census", lambda: censuses.append(1) or census())
+    for _ in range(3):
+        assert queue_publication.publish_queue_changes() is None
+    assert captures == [] and censuses == [], "a kept saved queue is known from the memo, before any copy or census"
+    # A change of custody (the restore read it, or work was admitted) decides again.
+    queue.PENDING.append(_task("admitted"))
+    queue.persist_queue_snapshot("admit")
+    assert queue_publication.publish_queue_changes() is True and captures == [1]

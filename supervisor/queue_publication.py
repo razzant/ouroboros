@@ -183,6 +183,8 @@ def publish_queue_changes() -> Optional[bool]:
     published = _queue().QUEUE_PUBLICATION
     direct_moved = published is not None and published[1].get("direct_roots.json") != machine_json(direct)
     with _queue()._queue_lock:
+        if _kept_by_memo():
+            return None  # the saved queue is still kept: decided once, not copied or counted again
         # The census: what the rows publish without a transition (worker reports mutate RUNNING in place
         # with no mark). One small identity per tick, so a changed fact is published and an unchanged
         # live set still captures, serializes and writes nothing. A failed write is itself a reason to
@@ -239,23 +241,33 @@ def _census() -> str:
     return machine_json([rows, _pool_counts()])
 
 
+def _custody_key() -> tuple:
+    """Under Q: what the kept decision depends on (the revision, and whether a restore owns the saved queue)."""
+    from supervisor.queue_snapshot import _RESTORED, _RESTORING
+
+    key = str(_queue().QUEUE_SNAPSHOT_PATH.absolute())
+    return (_STATE["revision"], key in _RESTORED, _RESTORING.get(key))
+
+
+def _kept_by_memo() -> bool:
+    """Under Q: the saved queue was decided kept at this same custody, so nothing is copied or counted."""
+    return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
+
+
 def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
+    if _kept_by_memo():
+        return None
     census = _census() if census is None else census
     _STATE["capture_seq"] += 1
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
     budget_root_fences = [_frozen(row) for row in _queue().BUDGET_ROOT_FENCES.values()]
-    key = str(_queue().QUEUE_SNAPSHOT_PATH.absolute())
-    from supervisor.queue_snapshot import _RESTORED, _RESTORING
-
-    custody = (_STATE["revision"], key in _RESTORED, _RESTORING.get(key))
-    if _STATE["kept"] == custody or _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
-                                                       acceptance_fences, budget_root_fences, (direct or {}).get("roots")):
-        if _STATE["kept"] != custody:
-            log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
-        _STATE["kept"] = custody
+    if _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
+                          acceptance_fences, budget_root_fences, (direct or {}).get("roots")):
+        log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
+        _STATE["kept"] = _custody_key()
         return None
     pending_rows = []
     for t in pending_items:
