@@ -200,6 +200,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
     from ouroboros.owner_pause import (
         OwnerPauseRefused, fence_closed, install_fence, launch_lock, read_fence,
     )
+    from ouroboros.task_carrier import execution_kind
     from ouroboros.task_results import resolve_task_lineage
     from ouroboros.store import acquisition_budget, StoreBusy
     from ouroboros.control_actor import control_actor, observed_control_stop
@@ -217,6 +218,8 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
         if getattr(actor, "_realtime_turn", None) is not None:
             return {"ok": False, "error": "realtime_pause_unsupported"}
         task, lane = _locate_root_locked(q, task_id)
+        if task is not None and execution_kind(task) == "presence":  # its lane row: nothing saves that stack (#2566)
+            return {"ok": False, "error": "presence_pause_unsupported"}
         if task is None and late_row is not None:
             task, lane = late_row, "late"
         if task is None:

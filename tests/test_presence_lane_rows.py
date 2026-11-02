@@ -73,3 +73,31 @@ def test_a_presence_turns_lane_row_is_its_places_conversation_in_every_mind_view
     assert f"{task_id} · " in seen["note"] and "live place conversation turn" in seen["note"]
     assert all(row.get("inline_presence") for row in seen["moved_addressable"])  # a local author's own door only
     assert task_id in seen["moved_works"][0] and task_id not in seen["moved_works"][1]
+
+
+def test_pause_of_a_presence_turns_lane_row_refuses_at_every_door_and_changes_nothing(root):
+    """Review N6: the lane row makes the turn a found task, so the Pause door accepted it and the author held its
+    conversation lock, its Presence slot, a carrier and the Host's reservation until Resume. Nothing saves a
+    Presence turn's stack (#2566, chapter 12): every door refuses it typed and writes nothing, as for the
+    in-server author."""
+    from ouroboros.owner_pause import read_fence
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue as q
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests.test_presence_project_activity import _pause_doors
+
+    seen = {}
+
+    def scenario(author, task):
+        tid = task["id"]
+        _admit_lane_row(task)
+        before = load_task_result(root, tid, strict=True)
+        seen["owner"] = request_owner_pause(tid, request_id="pause-lane")
+        seen["http"], seen["mind"] = _pause_doors(root, tid, "lane")
+        seen["unchanged"] = load_task_result(root, tid, strict=True) == before
+        seen["fence"], seen["latch"] = read_fence(root, tid), tid in q.BUDGET_ROOT_FENCES
+
+    _live_turn(root, scenario)
+    assert seen["owner"] == seen["mind"] == {"ok": False, "error": "presence_pause_unsupported"}
+    assert seen["http"] == (409, "presence_pause_unsupported")
+    assert not seen["fence"] and seen["latch"] is False and seen["unchanged"] is True
