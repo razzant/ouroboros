@@ -122,7 +122,8 @@ def _governance_blocks(env: Any, core: Any, *, mode: str, reference_docs: Callab
     sections, development = reference_docs(
         env,
         context_mode="low" if core.compact_reference_docs else mode,
-        include_development=core.docs_need_development,
+        include_development=core.docs_need_development or core.development_required,
+        required_book=core.development_required,
         architecture_text=core.architecture_md,
         development_text=core.development_md,
         books=core.reference_books,
@@ -141,14 +142,15 @@ def render_governance(governance: Tuple[Any, ...], addressed: Optional[Mapping[s
 def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "",
                    mode: str = "", addressed: Optional[Mapping[str, str]] = None) -> List[Dict[str, Any]]:
     # All stable items precede C; D is its own block only for the full handbook: Max without it carries the
-    # handbook's chapter map at the head of B, spending no breakpoint. The mode picks the connections map's
-    # form in B. Never create an empty cache boundary.
+    # handbook's chapter map at the head of B, spending no breakpoint; a compact mode's D is a direct requirement
+    # (A' keeps its map). The mode picks the connections map's form in B. Never create an empty cache boundary.
     addressed = addressed or {}
     common, *handbook = render_governance(governance, addressed)
     semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
     dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
-    stable = (common, *(handbook if core.docs_need_development else ()), "\n\n".join(part for part in (
-        *(() if core.docs_need_development else handbook), semi, core.connections[mode == "nano"], story) if part))
+    own_block = core.docs_need_development or core.development_required
+    stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (
+        *(() if own_block else handbook), semi, core.connections[mode == "nano"], story) if part))
     head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
             for text in stable if text.strip()] + [

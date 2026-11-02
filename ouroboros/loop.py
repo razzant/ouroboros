@@ -262,7 +262,9 @@ def _provider_unavailable_result(
             control_reason=control_reason, wait_cause=wait_cause,
         )
     if is_context_overflow:
-        reason = "context_overflow" if ctx.accumulated_usage.get("reason_code") == "context_overflow" else "llm_api_error"
+        from ouroboros.context_view_facts import size_refusal_cause  # a required handbook's known unfit keeps its cause
+
+        reason = size_refusal_cause(ctx.accumulated_usage)
         # Stamped before composing, as every rail is: the composer may end it on the owner's Stop now.
         ctx.accumulated_usage.update(
             execution_status=RESULT_INFRA_FAILED,
