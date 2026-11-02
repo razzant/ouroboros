@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from contextlib import closing
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -23,6 +24,18 @@ def offline_fixture(root):
     for path in root.rglob('*.sqlite'):
         with closing(sqlite3.connect(path)) as db:
             assert db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0] == 0
+
+
+def opens_inside(database, root):
+    """Whether a sqlite3.connect name lands in ``root``, by path components under the root's own rules, so ``data2``
+    stays outside ``data``. A file URI is read as SQLite reads it: percent-decoded, a Windows drive after the path's
+    leading slash (file:///D:/a is D:\\a). Searching for the root's text would miss what as_uri rewrites: a Windows
+    root's backslashes, any space or non-ASCII letter."""
+    name = os.fsdecode(database)
+    if name.startswith('file:'):
+        name = unquote(urlsplit(name).path)
+        name = name.lstrip('/') if root.drive else name
+    return type(root)(name).is_relative_to(root)
 
 
 def test_measurement_uses_ordinary_scale_fitter_and_composition(tmp_path, monkeypatch):
@@ -82,8 +95,9 @@ def test_real_scale_root_read_only_report(tmp_path, monkeypatch, capsys, stored_
     before = fingerprint(root)
     connected = []
     original = sqlite3.connect
+    source = root.resolve()
     def connect(database, *args, **kwargs):
-        if str(root) in str(database):
+        if opens_inside(database, source):
             connected.append(str(database))
             assert 'mode=ro&immutable=1' in str(database)
         return original(database, *args, **kwargs)
@@ -242,7 +256,7 @@ def test_snapshot_measures_a_held_root_and_its_wal_without_probing_liveness(tmp_
         connect = sqlite3.connect
 
         def recorded(database, *args, **kwargs):
-            opened.append(str(database))
+            opened.append(os.fsdecode(database))
             return connect(database, *args, **kwargs)
         monkeypatch.setattr(readonly, 'server_alive', lambda path: pytest.fail('--snapshot probed liveness'))
         monkeypatch.setattr(readonly, 'snapshot_root', copy_then_read)
@@ -251,8 +265,11 @@ def test_snapshot_measures_a_held_root_and_its_wal_without_probing_liveness(tmp_
         result = report(root, 1, 92000, 10000, snapshot=True)
         assert result['snapshot'] and result['verdict'] == 'fits', result
         assert fingerprint(root) == before
-        source = str(root.resolve())
-        assert opened and not [database for database in opened if source in database]
+        source = root.resolve()
+        stored = dialogue_store.path(source)
+        assert opens_inside(stored, source) and opens_inside(stored.as_uri() + '?mode=ro&immutable=1', source), \
+            'premise: this observer sees a source database in both spellings, on this platform'
+        assert opened and not [database for database in opened if opens_inside(database, source)]
         [(copied, rows)] = copies
         assert rows == 1 and copied.is_relative_to(platform_temp) and not copied.is_relative_to(root)
         assert server.poll() is None
@@ -264,6 +281,36 @@ def test_snapshot_measures_a_held_root_and_its_wal_without_probing_liveness(tmp_
         writer.close()
         server.kill()
         server.wait()
+
+
+def test_source_observers_place_each_spelling_by_path_components():
+    """Each platform's rules on any host, not a native run: a plain path or a file URI lands in its root whatever
+    as_uri encoded on the way; a sibling root, another drive and SQLite's in-memory name do not."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    encoded = '%D0%90%D0%BD%D1%82%D0%BE%D0%BD%20%D0%A0'  # as_uri's spelling of 'Антон Р'
+    windows, posix = PureWindowsPath('D:/a/Антон Р/data'), PurePosixPath('/a/Антон Р/data')
+    for root, name, inside in (
+        (windows, f'file:///D:/a/{encoded}/data/state/dialog.sqlite?mode=ro&immutable=1', True),
+        (windows, f'file://localhost/d:/a/{encoded}/data/state/dialog.sqlite?mode=rw', True),
+        (windows, (windows / 'state/dialog.sqlite').as_uri(), True),
+        (windows, 'D:\\a\\Антон Р\\data\\state\\dialog.sqlite', True),
+        (windows, f'file:///D:/a/{encoded}/data2/state/dialog.sqlite?mode=ro', False),
+        (windows, 'D:\\a\\Антон Р\\data2\\state\\dialog.sqlite', False),
+        (windows, f'file:///E:/a/{encoded}/data/state/dialog.sqlite', False),
+        (windows, ':memory:', False),
+        (posix, f'file:///a/{encoded}/data/state/dialog.sqlite?mode=ro&immutable=1', True),
+        (posix, f'file:/a/{encoded}/data?mode=rw', True),
+        (posix, (posix / 'state/dialog.sqlite').as_uri(), True),
+        (posix, '/a/Антон Р/data/state/dialog.sqlite', True),
+        (posix, posix / 'state/dialog.sqlite', True),
+        (posix, os.fsencode('/a/Антон Р/data/state/dialog.sqlite'), True),
+        (posix, f'file:///a/{encoded}/data2/state/dialog.sqlite?mode=ro', False),
+        (posix, '/a/Антон Р/data2/state/dialog.sqlite', False),
+        (posix, f'file:///b/{encoded}/data/state/dialog.sqlite', False),
+        (posix, ':memory:', False),
+    ):
+        assert opens_inside(name, root) is inside, (root, name)
 
 
 def test_store_writes_by_file_uri_are_refused_where_the_platform_places_them(tmp_path, monkeypatch):

@@ -906,6 +906,7 @@ def test_handler_offloads_complete_sync_builder(monkeypatch, tmp_path):
 
     monkeypatch.setattr(preflight.asyncio, "to_thread", fake_to_thread)
     request = types.SimpleNamespace(
+        json=lambda: asyncio.sleep(0, {}),  # the body ``{}``: no destination
         path_params={"skill": "demo"},
         app=types.SimpleNamespace(
             state=types.SimpleNamespace(

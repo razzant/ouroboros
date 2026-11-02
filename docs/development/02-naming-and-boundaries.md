@@ -290,40 +290,36 @@ is where a deliberate exception states its reason.
 
 ### External facts: unknown is not no
 
-External model/provider facts (inputs, capacity, prices, ids, availability) can change
-without an Ouroboros release.
+Model/provider inputs, capacity, prices, ids and availability change independently.
 
-1. Exact-route evidence, not lists: the route's own metadata or refusal, a dated probe
-   beside a provider-keyed wire projection with a recovery path, or the owner's
-   setting; never a model name, prefix or family, nor another route's catalog.
-2. Unknown is not no. Without evidence the owner's input, the tool and the explicit
-   request go through unchanged and the route answers; no shipped literal may drop
-   input, refuse a tool, rewrite a saved choice or narrow a request.
-3. Disclose a refusal as one request's outcome and repair that attempt; a durable "no"
-   needs scoped evidence of absence.
-4. A limit of our own transport is a fact about Ouroboros, declared at the lane and
-   named as such in what the model reads.
-5. A retained wire fact (the table) keeps source and date, exact scope and what happens
-   when stale either way; requested, sent and provider-reported values stay distinct.
+1. Use exact-route metadata/refusals, dated probes beside provider-keyed wire
+   projections with recovery, or owner settings; never infer from names, prefixes,
+   families or another route's catalog.
+2. Unknown is not no: pass input, tools and explicit requests unchanged. Unevidenced
+   literals cannot drop input, refuse tools, rewrite saved choices or narrow requests.
+3. A refusal describes one request; repair that attempt. Durable absence needs scoped evidence.
+4. Declare our transport limits at their lane and name them to the model as Ouroboros's.
+5. Retained wire facts below keep source/date, exact scope and both stale risks;
+   requested, sent and provider-reported values remain distinct.
 
-Guards: `tests/test_image_capability_contract.py` keeps unseen models' images on
-image-capable transports, `tests/test_model_name_invariance.py` unevidenced payloads
-name-independent (exceptions below); `tests/test_tristate_truthiness_guard.py` forbids
-truth-testing yes/no/unknown. Provenance grants no runtime authority; probes live in
-cited docstrings or contracts.
+Guards: `tests/test_image_capability_contract.py` preserves unseen models' images;
+`tests/test_model_name_invariance.py` checks name-independent unevidenced payloads
+(exceptions below); `tests/test_tristate_truthiness_guard.py` forbids truth-testing
+tri-state facts. Provenance grants no runtime authority; cited docstrings/contracts hold probes.
 
 | Location | Fact | Evidence & re-probe | If stale |
 |---|---|---|---|
 | `ouroboros/tools/imagegen.py`; `ouroboros/gateways/image_api.py` | Image wire facts | [Dated sources](../IMAGE_GENERATION.md#direct-api-contracts); re-check each exact route | Stale positives refuse requests; negatives hide capability |
 | `ouroboros/llm_attempt.py::supports_message_cache_control` | Cache markers OpenRouter accepts or translates (`anthropic/`, `google/gemini-`, `openai/`) | `openai/`: OpenRouter caching guide in docstring, no live probe; re-probe before widening, never by name resemblance | False positive invalidates a request; false negative loses the prompt cache |
 | `ouroboros/request_wire_recovery.py` | A compatible route refuses a cache hint | Its refusal after a repaired success, 14 days per route profile | A fixed server regains hints at expiry |
-| `ouroboros/llm_attempt.py::openai_family_model` | OpenAI's public API checks caches only at message ends without an explicit breakpoint | Docstring probe; before widening, re-probe `cached_tokens` across two conversations, never a substring such as `gpt` | Stale positive moves the cache boundary for a prefix-caching family; stale negative pays cold prefixes |
+| `ouroboros/provider_models.py::MINIMAX_FLASH_EFFORT_ALIASES` | Direct MiniMax-M3.1-Flash: low/medium/high/xhigh/max; absent=max, none=400 | [Docs](https://platform.minimax.io/docs/api-reference/text-openai-api.md), 2026-11-01; recheck before widening; no live send | Removed: none fails; stale: new tiers rewritten |
+| `ouroboros/llm_attempt.py::openai_family_model` | OpenAI's public API checks caches only at message ends without an explicit breakpoint | Docstring probe; before widening, re-probe `cached_tokens` across two conversations, never a substring such as `gpt` | Stale positive moves a prefix-caching family's boundary; stale negative pays cold prefixes |
 | `ouroboros/transcript_prefix.py` | Anthropic prefix binding (Opus 5.5/Fable 5.1/Sonnet 5.5/Haiku 5.5): signed reasoning is bound to system/tools/history; accounts created from 2026-08-31 return 400 on mismatch, older log unless opted in. On prefix changes, Ouroboros retires signed `anthropic-*` blocks on all routes/accounts (owner decision 2026-10-21) | [Anthropic migration guide, Breaking change 3](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide#breaking-changes); direct Opus 5.5 probe 2026-10-21 | Re-probe exact route/account before edits; excess trust causes 400s, excess retirement loses reasoning |
 | `ouroboros/llm_openai_compatible.py` OpenRouter `extra_body.provider.require_parameters` for `anthropic/` | Anthropic models on OpenRouter route only to endpoints accepting every sent parameter | Undated; OpenRouter per-endpoint `supported_parameters` (`/api/v1/models/{author}/{slug}/endpoints`); a declared exception of `tests/test_model_name_invariance.py` | Stale positive narrows failover; stale negative routes to an endpoint that drops or refuses a parameter |
-| `ouroboros/reasoning_artifacts.py::SIGNED_PORTABLE` and its sealed classifier | Which families' sealed reasoning artifacts survive a same-model cross-provider replay; readable artifacts are portable by shape | Short vouched roster plus a shape-first classifier that fails closed on unreadable artifacts; extend only by a fresh cross-provider replay probe of the exact family | False positive 400s the replayed turn (strip-and-retry is the net); false negative pins a portable transcript to one endpoint |
+| `ouroboros/reasoning_artifacts.py::SIGNED_PORTABLE` and its sealed classifier | Which families' sealed reasoning artifacts survive a same-model cross-provider replay; readable artifacts are portable by shape | Vouched roster and shape-first classifier, fail-closed on unreadable artifacts; extend only by fresh cross-provider replay of that family | False positive 400s the replayed turn (strip-and-retry is the net); false negative pins a portable transcript to one endpoint |
 | `ouroboros/provider_models.py::_ANTHROPIC_MODEL_ALIASES` / `migrate_model_value` | Direct-provider id spelling compatibility | Shipped mapping; a catalog confirms a current id, not whether a saved spelling was intentional; retire an alias only through a documented window | Removing an alias breaks upgrades; guessing one silently reroutes |
 | `ouroboros/server_runtime.py::_SHIPPED_LEGACY_HEAVY_DEFAULTS`, `_SCOPE_REVIEW_PRIOR_DEFAULTS`, `_normalize_direct_scope_review_model` | Only the retired Heavy/scope keys classify exact former Ouroboros defaults; active slots keep saved ids; no retired-model list exists | Release history, under regression tests; a catalog shows availability, never intent | Over-broad classification overwrites an owner's choice; a retired model fails loudly at first call |
-| `ouroboros/pricing.py::get_pricing`; `ouroboros/llm_pricing.py::fetch_openrouter_pricing` / `fetch_cloudru_pricing` | Exact-route model tariffs | Live catalog fetch with nullable unknowns; provider-settled usage wins; no runtime tariff table | A static price looks authoritative after becoming wrong and corrupts admission |
+| `ouroboros/pricing.py::get_pricing`; `ouroboros/llm_pricing.py::fetch_openrouter_pricing` / `fetch_cloudru_pricing` | Exact-route model tariffs | Live catalog fetch with nullable unknowns; provider-settled usage wins; no runtime tariff table | A stale static price corrupts admission |
 | `ouroboros/llm_claudexor.py::cache_key_for_model` | Codex prefix reuse across conversations needs one `prompt_cache_key` + `session_id`; per-conversation turn states stay valid under it | Measurement in the docstring; re-measure cache reads and turn state across two conversations before changing the scope | Stale positive pays cold prefixes or breaks turn state |
 | `ouroboros/llm_openai_compatible.py` DeepSeek send projection | Thinking accepts only `auto`/`none` tool choice; required and named calls return 400 | Probe beside the projection and its transport tests; re-probe the exact endpoint when the dialect changes | Removed early, forced calls break; kept after a change, supported thinking is suppressed |
 | `ouroboros/provider_models.py::ZAI_REASONING_EFFORT_ALIASES` (Z.ai send projection) | GLM-5.3 accepts only `low`/`high`/`max`, serves an absent tier at max, cannot disable thinking, takes forced tool_choice with thinking on; GLM-5.2 accepts the wider scale | Probe beside the projection and its tests; re-probe when the enum or a GLM release changes | Dropping the projection bills every call at max; a stale one rewrites tiers the provider accepts |

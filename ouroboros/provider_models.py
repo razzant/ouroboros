@@ -108,6 +108,18 @@ def normalize_zai_reasoning_effort(value: str) -> str:
     return ZAI_REASONING_EFFORT_ALIASES.get(normalized, "low")
 
 
+# MiniMax's global/China OpenAI docs (2026-11-01; no live send) list five tiers
+# for this exact model, default to max and reject none. Other models keep their
+# requested tier. Evidence and re-check policy: DEVELOPMENT "External facts".
+MINIMAX_FLASH_MODEL = "MiniMax-M3.1-Flash"
+MINIMAX_FLASH_EFFORT_ALIASES = {"none": "low", "minimal": "low", "ultra": "max"}
+
+
+def normalize_minimax_reasoning_effort(model: str, value: str) -> str:
+    """Project one canonical tier for one exact direct MiniMax model."""
+    return MINIMAX_FLASH_EFFORT_ALIASES.get(value, value) if model == MINIMAX_FLASH_MODEL else value
+
+
 @dataclass(frozen=True)
 class KindSpec:
     """One API connection kind: its label, its fields in order as ``(row_field,

@@ -189,11 +189,15 @@ def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
     attempts = ["\\\\attacker.example\\share\\secret.bin", "//attacker.example/share/secret.bin"]
     # pathlib.Path cannot be subclassed (its __new__ swaps in the concrete
     # flavour class), so observe probes by patching the concrete class's
-    # methods instead. Scoped to this test and restored in finally.
+    # methods instead. These methods are inherited from Path: a manual
+    # getattr/setattr "restore" would leave own copies on the concrete class
+    # that shadow every later monkeypatch of Path. MonkeyPatch's undo deletes
+    # what was not the class's own, so inheritance is restored exactly.
     import pathlib as _pl
     concrete = type(_pl.Path("/"))
+    spied = ("resolve", "is_file", "stat")
+    own_before = {name: name in vars(concrete) for name in spied}
     probed: list = []
-    originals = {}
 
     def _spy(name):
         real = getattr(concrete, name)
@@ -202,12 +206,11 @@ def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
             probed.append((name, str(self)))
             return real(self, *args, **kwargs)
 
-        return real, wrapper
+        return wrapper
 
-    for name in ("resolve", "is_file", "stat"):
-        originals[name], wrapper = _spy(name)
-        setattr(concrete, name, wrapper)
-    try:
+    with pytest.MonkeyPatch.context() as mp:
+        for name in spied:
+            mp.setattr(concrete, name, _spy(name))
         for raw_path in attempts:
             async def run(rp=raw_path):
                 orig = api_mod.httpx.AsyncClient
@@ -218,9 +221,7 @@ def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
                     api_mod.httpx.AsyncClient = orig
             with pytest.raises(Exception):
                 asyncio.run(run())
-    finally:
-        for name, real in originals.items():
-            setattr(concrete, name, real)
+    assert {name: name in vars(concrete) for name in spied} == own_before
     # Every filesystem probe stayed inside the store (no network-style path
     # was ever resolved, stated or opened).
     assert probed, "expected at least one filesystem probe to be observed"
