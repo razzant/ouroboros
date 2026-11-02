@@ -1,7 +1,7 @@
 """The four traps a lane carrier would fall into if a process predicate stood for a fact (A5), and the
 wake's preparation as the carrier's first step (A6).
 
-Transport: the spawner states the proxy policy for the start method it used; a spawned carrier keeps
+Transport: the spawner states the proxy policy to every child; a spawned or forkserver carrier keeps
 the server's. Presence post-task: the Host's waiting request is an admission fact on the task.
 Detach: the verb's "already in background" is the carrier's lane, never the process; a detach
 transfers its exact bound runs like any cold sleep. Wakes: the clock admits with the facts only its
@@ -36,7 +36,9 @@ class _FakeProcess:
         pass
 
 
-def test_spawn_states_no_proxy_only_for_a_forked_child():
+def test_every_child_is_told_the_spawners_transport_policy(monkeypatch):
+    """Review M3: a spawned or forkserver child is TOLD the server's own policy (proxies honoured), never left to
+    the unstated worker default (no proxy); a forked child is told to avoid OS proxy lookup (fork safety)."""
     from supervisor import worker_process
 
     captured = []
@@ -52,12 +54,80 @@ def test_spawn_states_no_proxy_only_for_a_forked_child():
             captured.append(args)
             return _FakeProcess()
 
+    monkeypatch.delenv(utils.TRANSPORT_NO_PROXY_ENV, raising=False)
+    monkeypatch.delenv(utils.WORKER_PROCESS_ENV, raising=False)
     for method, expected in (("spawn", False), ("forkserver", False), ("fork", True)):
         captured.clear()
         worker_process.spawn_worker_process(Ctx(method), 0, None, None, "/repo", "/data")
-        # The flag rides only with a forked child; a spawned child keeps the seven-argument entry
-        # (``worker_main``'s ``transport_no_proxy`` defaults), so every stub of the entry stays valid.
-        assert (len(captured[0]) == 8 and captured[0][-1] is True) if expected else len(captured[0]) == 7, method
+        assert len(captured[0]) == 8 and captured[0][-1] is expected, method
+    monkeypatch.setenv(utils.TRANSPORT_NO_PROXY_ENV, "1")  # a server whose own policy avoids proxies
+    captured.clear()
+    worker_process.spawn_worker_process(Ctx("spawn"), 0, None, None, "/repo", "/data")
+    assert captured[0][-1] is True
+
+
+def _policy_entry(*args):
+    """The real ``worker_main`` in a real child with only the agent replaced: its task reports the child's policy."""
+    from ouroboros import agent, extension_loader
+    from supervisor.worker_process import worker_main
+
+    class PolicyAgent:
+        def handle_task(self, task):
+            args[2].put(("transport_policy", utils.transport_no_proxy(), utils.in_worker_process()))
+            return []
+
+    agent.make_agent = lambda **_: PolicyAgent()
+    extension_loader.reload_all = lambda *_a, **_k: None
+    worker_main(*args)
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("method", ["spawn", "forkserver"])
+def test_a_spawned_or_forkserver_carrier_keeps_the_servers_proxy_policy(tmp_path, monkeypatch, method):
+    """Trap 1 in the child itself: a carrier started by the default start methods (spawn on macOS/Windows,
+    forkserver on Linux) is a worker AND reaches providers through the proxies the server honours."""
+    import multiprocessing
+    import queue as stdqueue
+    import time
+
+    from supervisor import worker_process
+    from tests._shared import stop_socket_sharer
+
+    if method not in multiprocessing.get_all_start_methods():
+        pytest.skip(f"{method} is not available on this platform")
+    monkeypatch.delenv(utils.TRANSPORT_NO_PROXY_ENV, raising=False)
+    monkeypatch.delenv(utils.WORKER_PROCESS_ENV, raising=False)
+    assert utils.transport_no_proxy() is False  # the server's own policy
+    monkeypatch.setattr(worker_process, "worker_main", _policy_entry)
+    ctx = multiprocessing.get_context(method)
+    incoming, outgoing = ctx.Queue(), ctx.Queue()
+    proc = worker_process.spawn_worker_process(ctx, 0, incoming, outgoing, tmp_path, tmp_path)
+    report = None
+    try:
+        incoming.put({"id": "policy-probe", "type": "task"})
+        deadline = time.monotonic() + 180  # a cold child imports the worker stack on a loaded machine
+        while report is None and time.monotonic() < deadline:
+            try:
+                event = outgoing.get(timeout=1)
+            except stdqueue.Empty:
+                assert proc.is_alive(), ("the child ended before its report", proc.exitcode)
+                continue
+            if isinstance(event, tuple) and event[:1] == ("transport_policy",):
+                report = event
+        assert report == ("transport_policy", False, True), report
+    finally:
+        try:
+            incoming.put(None)  # the worker loop's own end
+            proc.join(timeout=15)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=5)
+        finally:
+            worker_process.close_worker_stop_channel(proc)
+            for channel in (incoming, outgoing):
+                channel.close()
+                channel.cancel_join_thread()
+            stop_socket_sharer()
 
 
 def test_presence_post_task_reads_the_admission_fact_not_the_process():
