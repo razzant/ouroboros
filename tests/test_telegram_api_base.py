@@ -176,7 +176,7 @@ def test_download_falls_back_to_disk_absolute_path(tmp_path):
     assert asyncio.run(run()) == payload
 
 
-def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
+def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path, monkeypatch):
     # Lexical confinement must run BEFORE resolve(), and the test itself must
     # stay hermetic: no exists()/stat() on absolute UNC paths (on Windows the
     # join discards the store and could trigger DNS/SMB traffic). Instead we
@@ -187,13 +187,13 @@ def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
     transport, _ = _fake_server({"file_1.bin": httpx.Response(404, text="not found")})
     c = _client(api_base_url=_BASE, files_dir=str(store))
     attempts = ["\\\\attacker.example\\share\\secret.bin", "//attacker.example/share/secret.bin"]
-    # pathlib.Path cannot be subclassed (its __new__ swaps in the concrete
-    # flavour class), so observe probes by patching the concrete class's
-    # methods instead. Scoped to this test and restored in finally.
+    # Path() selects the platform's concrete class. Scoped monkeypatching must
+    # remove temporary subclass entries rather than shadow inherited methods.
     import pathlib as _pl
     concrete = type(_pl.Path("/"))
     probed: list = []
-    originals = {}
+    missing = object()
+    own_before = {name: concrete.__dict__.get(name, missing) for name in ("resolve", "is_file", "stat")}
 
     def _spy(name):
         real = getattr(concrete, name)
@@ -202,12 +202,11 @@ def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
             probed.append((name, str(self)))
             return real(self, *args, **kwargs)
 
-        return real, wrapper
+        return wrapper
 
-    for name in ("resolve", "is_file", "stat"):
-        originals[name], wrapper = _spy(name)
-        setattr(concrete, name, wrapper)
-    try:
+    with monkeypatch.context() as patch:
+        for name in own_before:
+            patch.setattr(concrete, name, _spy(name))
         for raw_path in attempts:
             async def run(rp=raw_path):
                 orig = api_mod.httpx.AsyncClient
@@ -218,9 +217,8 @@ def test_download_rejects_unresolved_unc_path_before_any_fs_access(tmp_path):
                     api_mod.httpx.AsyncClient = orig
             with pytest.raises(Exception):
                 asyncio.run(run())
-    finally:
-        for name, real in originals.items():
-            setattr(concrete, name, real)
+    for name, original in own_before.items():
+        assert concrete.__dict__.get(name, missing) is original, name
     # Every filesystem probe stayed inside the store (no network-style path
     # was ever resolved, stated or opened).
     assert probed, "expected at least one filesystem probe to be observed"
