@@ -267,14 +267,6 @@ class HostServiceContext:
 
         return broadcast_ws_sync
 
-    def _default_presence_runner(self, **kwargs: Any) -> None:
-        """The Host runs no turn body of its own: a Presence turn's body is a conversation-lane carrier's
-        (owner decision 1A, ``presence_carrier.dispatch_presence_turn``), the degraded executor's when no
-        carrier can start (2A). Kept as the named site the executor inventory scans; it starts nothing."""
-        log.warning("Host presence runner called directly; a turn body is the lane's (%s)",
-                    sorted(kwargs) if kwargs else "no arguments")
-        return None
-
     async def admit_presence_gate(self, conversation_key: str, *, wait: bool = True) -> Any:
         """Coroutine admission into the configured presence gate; the lease the turn runs under."""
         from ouroboros.presence_runner import admit_configured_gate
