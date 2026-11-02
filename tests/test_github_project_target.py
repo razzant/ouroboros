@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.artifacts import actor_source_reference
 from ouroboros.tools import github, github_read
 from ouroboros.tools.registry import ToolContext
 
@@ -150,10 +151,8 @@ def complete_gh(monkeypatch):
                 "digest": f"sha256:{hashlib.sha256(archive_bytes).hexdigest()}",
                 "workflow_run": {"id": 11, "head_sha": SHA}}
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
-    monkeypatch.setattr(github_workflows, "_retain", lambda _ctx, **kw: {
-        "path": f"fixture/{kw['source_id']}.{kw['extension']}", "size": len(kw["data"]),
-        "sha256": hashlib.sha256(kw["data"]).hexdigest(),
-    })
+    # The ref ``_retain`` returns, priced without writing bytes: these cases judge the gh target, not retention.
+    monkeypatch.setattr(github_workflows, "_retain", lambda _ctx, **kw: actor_source_reference(category="tool_results", **kw))
 
     def record(argv, kwargs):
         calls.append((list(argv), kwargs))
