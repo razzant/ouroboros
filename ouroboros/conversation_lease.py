@@ -56,7 +56,9 @@ class PresenceTurnLease:
     A lease minted by a gate can also be LENT at a qualified review wait (#1536): the
     conversation and active slot return to the gate while the same author stays live, and
     ``reacquire`` takes both again, in admission order, before any model or tool step.
-    ``execution`` is the Host turn whose initial envelope that author may publish.
+    ``execution`` is the Host turn whose initial envelope that author may publish; ``review_wait`` the
+    carrier's pooled owner wait its qualified review/private-question park lends the slot through (never the
+    agent's generic owner-wait capability: a Presence author gets no sleep, detach, Pause or budget pause).
     """
 
     def __init__(self, conversation_key: str, resources: ExitStack,
@@ -67,6 +69,7 @@ class PresenceTurnLease:
         self._gate = gate
         self._ended = False
         self.execution: Any = None
+        self.review_wait: Any = None
         self.task_id = ""
         self.intake_agent: Any = None
         self._live_fd: int | None = None

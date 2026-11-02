@@ -244,10 +244,7 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
             def factory(**kwargs):
                 from ouroboros.agent import make_agent
 
-                agent = make_agent(**kwargs)
-                if owner_wait_callback is not None:
-                    agent.owner_wait_callback = owner_wait_callback
-                return agent
+                return make_agent(**kwargs)  # no generic owner wait: Pause, budget pause, detach stay closed
 
             runner = _runner(root)
             # The turn facts, never the physical carrier's. An injected runner (a test's seam, as the
@@ -259,6 +256,9 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
                                event_sink=lambda rows: [out_q.put(dict(r)) for r in rows],
                                request_waits=bool(facts.get("request_waits", True)))
             if runner is run_presence_turn:
+                # This carrier's own runner: its review/private-question park lends the slot through the carrier's
+                # pooled wait, bound to the lease (an injected runner keeps its own in-process wait, as before).
+                lease.review_wait = owner_wait_callback
                 result = runner(repo_dir=Path(repo_dir), drive_root=root, agent_factory=factory, **turn_kwargs)
             else:
                 result = runner(**turn_kwargs)

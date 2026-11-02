@@ -372,3 +372,30 @@ def test_a_version_2_event_finding_the_gate_busy_is_refused_before_any_lane_admi
 
 def _lane_rows():
     return [meta for meta in workers.RUNNING.values() if meta.get("lane") == LANE_CONVERSATION]
+
+
+def test_a_carried_presence_author_gets_no_generic_owner_wait_and_parks_its_review_through_the_carrier(
+        tmp_path, monkeypatch):
+    """Review M9: a Presence agent never holds the generic owner-wait capability (no sleep, detach, owner Pause or
+    budget pause: those rails gate on it). The carrier's pooled wait reaches only the qualified review/private
+    question park, through the turn's lease."""
+    from ouroboros import agent as agent_module, presence_admission
+
+    seen = {}
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **_kw: _admission())
+    monkeypatch.setattr(agent_module, "make_agent", lambda **_kw: SimpleNamespace(owner_wait_callback=None))
+
+    def module_runner(*, agent_factory, admitted, **_kw):  # the carrier's own runner path, with its factory
+        agent = agent_factory(repo_dir=str(tmp_path), drive_root=str(tmp_path), event_queue=None)
+        seen.update(generic=agent.owner_wait_callback, review=getattr(admitted, "review_wait", None))
+        return PresenceTurnResult(outcome="silent", text="", task_id="t")
+
+    monkeypatch.setattr(presence_carrier, "run_presence_turn", module_runner)
+    pooled_wait = object()
+    task = presence_seed_task(admission=_admission(), event=_event(), skill_name="telegram-bot",
+                              event_payload=_payload(_event()), staged_files=[], gate_wait=False)
+    frames = stdqueue.Queue()
+    presence_carrier.carry_presence_turn(task, frames, tmp_path, tmp_path, owner_wait_callback=pooled_wait)
+    assert seen == {"generic": None, "review": pooled_wait}
+    settled = [frame for frame in list(frames.queue) if frame.get("type") == "presence_turn_settled"]
+    assert len(settled) == 1 and settled[0]["error"] is None
