@@ -14,8 +14,8 @@ its publication serves the next reader).
 The revision is read BEFORE the production, so a body is never older than its key (a change landing
 mid-production makes the next probe differ: one more production, never a stale body kept):
 
-``queue``    the published queue documents' generation (``supervisor.queue.QUEUE_PUBLICATION``; the
-             queue's own revision replaces it behind ``_queue_revision``), the PENDING/RUNNING ids and
+``queue``    the queue's revision (``supervisor.queue_publication.queue_revision``, bumped under Q by every
+             mark, so a change is seen before the tick publishes it), the PENDING/RUNNING ids and
              each RUNNING row's live model activity, which the documents do not carry;
 ``stores``   ``meta.commit_seq`` of the data root's current store and of every other root the last
              production read (a task's ``budget_drive_root``); ``usage`` the usage ledger's
@@ -97,18 +97,18 @@ def _failure(exc: BaseException) -> Tuple[str, str]:
 
 
 def _queue_revision() -> Tuple[Any, ...]:
-    """The queue's revision: the published documents' generation, the live ids, and each RUNNING row's model
-    activity (an in-memory fact the documents omit). Read without Q: ``list()`` copies a dict or list whole."""
+    """The queue's revision, the live ids, and each RUNNING row's model activity (an in-memory fact
+    the documents omit). Read without Q: ``list()`` copies a dict or list whole."""
     from supervisor import queue
+    from supervisor.queue_publication import queue_revision
 
-    publication = queue.QUEUE_PUBLICATION
     pending = [str(task.get("id") or "") for task in list(queue.PENDING) if isinstance(task, dict)]
     running = []
     for task_id, meta in list(queue.RUNNING.items()):
         active = (meta.get("active_llm_call") or {}) if isinstance(meta, dict) else {}
         running.append((str(task_id), meta.get("attempt") if isinstance(meta, dict) else None,
                         json.dumps(active.get("model_activity"), sort_keys=True, default=str)))
-    return (publication[2] if publication else None, tuple(pending), tuple(running))
+    return (queue_revision(), tuple(pending), tuple(running))
 
 
 def _store_revision(root: str) -> Any:
