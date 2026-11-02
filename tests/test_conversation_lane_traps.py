@@ -209,3 +209,37 @@ def test_the_clock_admits_with_its_facts_and_the_carrier_prepares_the_wake(monke
     assert task["text"] == "RENDERED:EVENTS" and "_wake_prepare" not in task
     assert task["metadata"]["wake_observation"]["accepted_boundary"] == {"task_id": "w1", "seq": 4}
     assert rendered[0]["previous_wake"] == "prev" and rendered[0]["running"] == 0
+
+
+def test_a_carried_turn_detaches_against_the_servers_published_pool(tmp_path, monkeypatch):
+    """Astra C1: a conversation carrier owns no pool table (its own ``supervisor.workers`` is empty). The verb
+    reads the server's published pool facts, so a started healthy pool (at idle only the lane's spare) admits
+    the handoff, and a disabled one keeps the dialogue in its process with the server's reason."""
+    import json
+
+    from ouroboros import model_detach, model_sleep
+    from supervisor import workers
+
+    monkeypatch.setenv(utils.WORKER_PROCESS_ENV, "1")  # a carrier process ...
+    monkeypatch.setattr(workers, "WORKERS", {})  # ... whose own pool table is empty
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("supervisor.update_merge.active_update_tx", lambda: None)
+    monkeypatch.setattr("ouroboros.native_task_wait.armed_conflict", lambda ctx: "")
+    armed = []
+    monkeypatch.setattr(model_sleep, "request_sleep",
+                        lambda ctx, chosen, mode: armed.append(chosen) or {"reason": "sleep_armed"})
+
+    def publish(**pool):
+        (tmp_path / "state").mkdir(exist_ok=True)
+        (tmp_path / "state" / "queue_snapshot.json").write_text(json.dumps({"pending": [], "running": [], **pool}))
+
+    ctx = SimpleNamespace(task_metadata={"_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION,
+                                                              "executor": EXECUTOR_WORKER}},
+                          task_id="t", _model_sleep=None, _owner_wait_requested="", owner_wait_callback=lambda *a: None)
+    publish(worker_total=0, lane_carrier_total=1, worker_pool_disabled_reason="")
+    accepted = model_detach.arm_detach(ctx, "long work")
+    assert accepted.get("ok") is True and accepted.get("status") == "detach_armed" and len(armed) == 1
+    publish(worker_total=2, lane_carrier_total=1, worker_pool_disabled_reason="worker_crash_storm")
+    refused = model_detach.arm_detach(ctx, "long work")
+    assert refused["error"] == "worker_pool_unavailable" and refused["pool"]["disabled_reason"] == "worker_crash_storm"
+    assert len(armed) == 1

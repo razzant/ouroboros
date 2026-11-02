@@ -149,6 +149,7 @@ _PENDING_FIELDS = (
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
     '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
     '_is_direct_chat', 'detached_at', 'detached_by',
+    '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 
 def _saved_pending_task(row: dict) -> dict:

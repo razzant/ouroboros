@@ -310,3 +310,134 @@ def test_a_presence_turn_whose_carrier_ended_unreported_settles_at_its_published
     events._handle_task_done({"task_id": "pres-answered", "status": "completed", "task_type": "presence",
                               "chat_id": 5}, ctx)
     assert answered.result.result(timeout=1).text == "hello" and released.count("pres-answered") == 1
+
+
+def test_the_carrier_takes_the_hosts_admitted_signal_facts_by_value():
+    """Review K2: the Host admits ``WAKE_FACTS`` plus the authenticated connector's declared signals (its live
+    publication, in the server). The seed carries the facts the Host admitted, and the carrier's re-admission
+    honours them by value, never its own process's registry; a fact nobody vouched for is still refused."""
+    from dataclasses import replace
+
+    from ouroboros.presence_events import presence_turn_event
+
+    event = replace(_event(), facts=("mention", "signal.words"))
+    payload = {"source_event_id": event.source_event_id, "provider": event.provider, "account_id": event.account_id,
+               "conversation_id": event.conversation_id, "thread_id": event.thread_id,
+               "conversation_key": event.conversation_key, "actor": dict(event.actor),
+               "conversation": dict(event.conversation), "message": dict(event.message), "text": event.text,
+               "facts": list(event.facts)}
+    seed = presence_seed_task(admission=_admission(), event=event, skill_name="telegram-bot", event_payload=payload,
+                              staged_files=[], gate_wait=False)
+    vouched = seed[PRESENCE_RUN_KEY]["vouched_facts"]
+    assert vouched == ["mention", "signal.words"]
+    readmitted = presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission(), vouched_facts=vouched)
+    assert readmitted.facts == ("mention", "signal.words")
+    with pytest.raises(PresenceTurnError) as refused:
+        presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission())
+    assert refused.value.code == "presence_event_invalid"
+
+
+def test_a_version_2_event_finding_the_gate_busy_is_refused_before_any_lane_admission(lane, monkeypatch):
+    """Review M11: version 2 never waits in the gate. A busy gate is refused before the lane admits anything (no
+    row, no barrier, no spare claimed, no carrier spawned) with base's answer: the busy resource named, retry
+    after 1 s for the conversation and 5 s for the active-turn cap; a free gate admits the turn as usual."""
+    from ouroboros.conversation_lease import PresenceTurnGate
+
+    monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "1")
+    admission, event = _admission(), _event()
+    other_process = PresenceTurnGate(1, state_root=lane.root / "state")  # another process's view of the same files
+
+    def dispatch_v2():
+        registry = PresenceTurnExecutions()
+        turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)
+        return registry.start_or_dispatch(
+            turn_id, identity="id-v2", reserve=lambda: True, release=lambda: None,
+            dispatch=lambda execution: dispatch_presence_turn(
+                execution, drive_root=lane.root, skill_name="telegram-bot", admission=admission, event=event,
+                event_payload=_payload(event), staged_files=[], gate_wait=False))
+
+    for held_key, busy, retry_after in ((event.conversation_key, "conversation", 1), ("chat:a:other:", "capacity", 5)):
+        holder = other_process.acquire(held_key)
+        try:
+            with pytest.raises(PresenceTurnError) as refused:
+                dispatch_v2()
+        finally:
+            holder.release()
+        assert (refused.value.code, refused.value.field, refused.value.retry_after) == (
+            "presence_capacity_full", busy, retry_after)
+        assert not _lane_rows() and lane.spare.busy_task_id is None and lane.spare.in_q.empty()
+    execution, started = dispatch_v2()
+    assert started and len(_lane_rows()) == 1
+
+
+def _lane_rows():
+    return [meta for meta in workers.RUNNING.values() if meta.get("lane") == LANE_CONVERSATION]
+
+
+def test_a_carried_presence_author_gets_no_generic_owner_wait_and_parks_its_review_through_the_carrier(
+        tmp_path, monkeypatch):
+    """Review M9: a Presence agent never holds the generic owner-wait capability (no sleep, detach, owner Pause or
+    budget pause: those rails gate on it). The carrier's pooled wait reaches only the qualified review/private
+    question park, through the turn's lease."""
+    from ouroboros import agent as agent_module, presence_admission
+
+    seen = {}
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **_kw: _admission())
+    monkeypatch.setattr(agent_module, "make_agent", lambda **_kw: SimpleNamespace(owner_wait_callback=None))
+
+    def module_runner(*, agent_factory, admitted, **_kw):  # the carrier's own runner path, with its factory
+        agent = agent_factory(repo_dir=str(tmp_path), drive_root=str(tmp_path), event_queue=None)
+        seen.update(generic=agent.owner_wait_callback, review=getattr(admitted, "review_wait", None))
+        return PresenceTurnResult(outcome="silent", text="", task_id="t")
+
+    monkeypatch.setattr(presence_carrier, "run_presence_turn", module_runner)
+    pooled_wait = object()
+    task = presence_seed_task(admission=_admission(), event=_event(), skill_name="telegram-bot",
+                              event_payload=_payload(_event()), staged_files=[], gate_wait=False)
+    frames = stdqueue.Queue()
+    presence_carrier.carry_presence_turn(task, frames, tmp_path, tmp_path, owner_wait_callback=pooled_wait)
+    assert seen == {"generic": None, "review": pooled_wait}
+    settled = [frame for frame in list(frames.queue) if frame.get("type") == "presence_turn_settled"]
+    assert len(settled) == 1 and settled[0]["error"] is None
+
+
+def test_a_durable_intake_follows_its_loops_admission_under_the_mail_lock(tmp_path, monkeypatch):
+    """Review M10: the loop's admission transitions move a Presence author's durable intake (closed before the final
+    drain, reopened for a follow-up); only the writer's own process moves its fact, a non-Presence turn has none,
+    and open/close honour the mail lock (an unordered open is refused, a close never leaves the fact standing)."""
+    import contextlib
+    import json
+
+    from ouroboros import task_custody
+    from ouroboros.conversation_lease import (
+        _intake_path, accept_author_mail, close_author_intake, follow_loop_admission, open_author_intake,
+    )
+
+    (tmp_path / "memory" / "owner_mailbox").mkdir(parents=True)
+    appended = []
+
+    def append(admit=None):
+        if admit is not None and not admit():
+            return False
+        appended.append(1)
+        return True
+
+    author = SimpleNamespace(task_id="author-m10", drive_root=tmp_path, task_metadata={"presence": {"binding_id": "b"}})
+    assert open_author_intake(tmp_path, "author-m10", "key") is True
+    follow_loop_admission(author, False)  # the final drain is about to read
+    assert accept_author_mail(tmp_path, "author-m10", "key", append) is False and appended == []
+    follow_loop_admission(author, True)  # an owner follow-up reopened the loop
+    assert accept_author_mail(tmp_path, "author-m10", "key", append) is True and appended == [1]
+    follow_loop_admission(SimpleNamespace(task_id="author-m10", drive_root=tmp_path, task_metadata={}), False)
+    assert accept_author_mail(tmp_path, "author-m10", "key", append) is True  # a non-Presence turn moves nothing
+    path = _intake_path(tmp_path, "author-m10")
+    path.write_text(json.dumps({**json.loads(path.read_text()), "pid": 1}))
+    follow_loop_admission(author, False)
+    assert json.loads(path.read_text())["accepting"] is True  # another process's fact is its own
+    close_author_intake(tmp_path, "author-m10")
+
+    monkeypatch.setattr(task_custody, "task_mail_lock", lambda *_a, **_k: contextlib.nullcontext(False))
+    assert open_author_intake(tmp_path, "author-unordered", "key") is False
+    assert not _intake_path(tmp_path, "author-unordered").exists()
+    _intake_path(tmp_path, "author-held").write_text('{"accepting": true, "conversation_key": "key", "pid": 1}')
+    assert close_author_intake(tmp_path, "author-held") is False and not _intake_path(tmp_path, "author-held").exists()

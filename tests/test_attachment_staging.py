@@ -746,3 +746,38 @@ class TestChatAttachmentUploads:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_a_turn_saved_across_restart_still_stages_its_attachments_in_the_worker(tmp_path, monkeypatch):
+    """Astra C3: a message admitted while a Restart is pending is saved on the durable queue before the lane adds
+    its first-step facts. The saved seed keeps the preparation obligation in the saved queue's own row shape
+    (``_PENDING_FIELDS``), so the worker that runs it after Restart stages its uploads as a carrier would."""
+    from types import SimpleNamespace
+
+    from supervisor import message_bus, queue as supervisor_queue, worker_chat_lane, workers
+    from supervisor.queue_snapshot import _PENDING_FIELDS
+    from supervisor.worker_process import _run_task_body
+    from tests.conversation_carrier_support import isolate_lane_pool
+
+    drive = _drive(tmp_path)
+    isolate_lane_pool(monkeypatch, drive, event_q=queue.Queue())
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
+        send_chat_action=lambda *_a, **_k: None, broadcast=lambda *_a, **_k: None, push_log=lambda *_a, **_k: None))
+    monkeypatch.setattr(workers, "send_with_budget", lambda *_a, **_k: None)
+    monkeypatch.setattr("ouroboros.server_restart.agent_restart_pending", lambda: True)  # intake still open
+    monkeypatch.setattr(supervisor_queue, "RETURNS_NAMED", False)
+    saved = []
+    monkeypatch.setattr(supervisor_queue, "enqueue_with_admission_receipt",
+                        lambda task, **_k: saved.append(dict(task)) or task)
+    assert workers.open_repo_writer_admission()
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF-1.4\n%fake\n")
+    worker_chat_lane.handle_chat_direct(1, "read the attached report", None, task_metadata={
+        "client_message_id": "cm-c3",
+        "chat_attachment_uploads": [{"path": str(report), "label": "report.pdf", "mime": "application/pdf"}]})
+    [seed] = saved
+    restored = {key: seed[key] for key in _PENDING_FIELDS if seed.get(key) is not None}  # what Restart restores
+    agent = _FakeChatAgent()
+    _run_task_body(agent, restored, str(drive), queue.Queue(), str(drive))
+    assert agent.task["attachment_manifest"] and "[ATTACHMENTS]" in agent.task["text"]
+    assert any(path.name.endswith(".pdf") for path in _attach_dir(drive, seed["id"]).iterdir())

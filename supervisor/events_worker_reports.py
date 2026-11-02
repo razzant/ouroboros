@@ -70,6 +70,10 @@ def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
             meta["last_heartbeat_at"] = spoken
             if phase:
                 meta["heartbeat_phase"] = phase
+            if evt.get("_carrier_rss"):  # a lane carrier's own size on its newest beat: the lane's vitals
+                from supervisor.conversation_lane import note_carrier_rss
+
+                note_carrier_rss(getattr(ctx, "WORKERS", {}).get(meta.get("worker_id")), evt["_carrier_rss"])
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
         started_at = float(meta.get("started_at") or 0.0)
         runtime_sec = round(max(0.0, time.time() - started_at), 1) if started_at > 0 else None

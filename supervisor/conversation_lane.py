@@ -23,7 +23,8 @@ one, replenishes it when a turn claims it, retires acknowledged surplus through
 the existing quiescence probe and never spawns while the repo-writer gate is
 closed (a fresh carrier would import a conflicted tree; admission then takes the
 disclosed degraded executor). No number bounds concurrent carriers: the bound is
-spawn success, and the vitals show the carrier count. Called from
+spawn success, and the vitals show the carriers and each one's own RSS, reported
+on its turn's heartbeat (``carrier_vitals``). Called from
 ``reconcile_worker_capacity`` under the lifecycle serializer, before the project
 pool's own growth.
 """
@@ -94,6 +95,36 @@ def idle_carriers() -> list:
             and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", "")]
 
 
+def carrier_rss() -> Dict[str, Any]:
+    """In a carrier: its own resident size now, measured in-process (``update_generation_facts._rss``:
+    psutil's current figure where it ships, else the lifetime peak, labelled); {} when unobserved."""
+    try:
+        from ouroboros.update_generation_facts import _rss
+
+        rss, measure = _rss()
+    except Exception:
+        return {}
+    return {"rss_bytes": int(rss), "rss_measure": measure} if rss is not None else {}
+
+
+def note_carrier_rss(slot: Any, sample: Any) -> None:
+    """In the server: a lane carrier's own report (``carrier_rss``, riding its turn's heartbeat) stays on its slot."""
+    if (isinstance(sample, dict) and type(sample.get("rss_bytes")) is int
+            and getattr(slot, "lane", "") == LANE_CONVERSATION):
+        slot.rss = {"rss_bytes": sample["rss_bytes"], "rss_measure": str(sample.get("rss_measure") or "")}
+
+
+def carrier_vitals() -> Dict[str, Any]:
+    """The lane's carriers for the vitals (owner decision 4A: no number bounds them; the vitals show their
+    count and RSS): how many, how many idle, and each one's last own report in MiB, in slot order (None
+    before its first turn's heartbeat). A section of the per-minute ``supervisor_load`` row; memory only."""
+    carriers = lane_carriers(dict(_pool().WORKERS))  # one copy: a spawn on another thread never breaks the read
+    reports = [getattr(slot, "rss", None) or {} for slot in carriers]
+    return {"carriers": len(carriers), "idle": sum(1 for slot in carriers if slot.busy_task_id is None),
+            "rss_mib": [report["rss_bytes"] // 1048576 if report else None for report in reports],
+            "rss_measure": sorted({report["rss_measure"] for report in reports if report})}
+
+
 def owner_turn(task: Dict[str, Any]) -> bool:
     """A turn the reserved spare is for: the owner's Main or room turn (and its auto-resume) and a Presence
     turn a correspondent waits on (FINAL_PLAN §3: the spare is the conversation lane's). A consciousness wake
@@ -124,6 +155,50 @@ def awaiting_turns() -> List[Dict[str, Any]]:
             if conversation_row(meta) and meta.get("worker_id") is None
             and not isinstance(meta.get("_terminal_file_recovery"), dict)]
     return sorted(rows, key=lambda meta: float(meta.get("started_at") or 0.0))
+
+
+def _held_by_a_stop(rows: List[Dict[str, Any]]) -> set:
+    """The awaiting rows a Stop owns: one read of the durable cancel-intent projection (custody settles them).
+
+    Read only while turns await a carrier; an unreadable projection holds every row for this pass (an unknown
+    is never a start), a quarantined intent row holds its own."""
+    ids = {str(meta["task"].get("id") or "") for meta in rows}
+    if not ids:
+        return set()
+    from ouroboros.cancel_intents import read_active_intents
+
+    try:
+        intents, unseen = read_active_intents(_pool().DRIVE_ROOT, strict=True)
+    except Exception:
+        log.warning("cancel intents unreadable: the awaiting conversation turns wait a pass", exc_info=True)
+        return ids
+    return ids & (set(intents) | set(unseen or ()))
+
+
+def _unpublished(rows: List[Dict[str, Any]]) -> set:
+    """The rows whose admission barrier failed: one barrier now covers them all, else they stay held this pass."""
+    pending = [meta for meta in rows if meta.get("_unpublished")]
+    if not pending:
+        return set()
+    from supervisor import queue
+
+    if queue.publish_queue_snapshot(reason="conversation_turn_admitted") is False:
+        return {str(meta["task"].get("id") or "") for meta in pending}
+    for meta in pending:
+        meta.pop("_unpublished", None)
+    return set()
+
+
+def take_awaiting_turn(task_id: str) -> Any:
+    """Under Q: a Stop's custody takes a lane turn no carrier holds yet out of RUNNING, as it takes a PENDING row.
+
+    No process exists, so custody settles it typed ``cancelled`` with its pre-start cost and publishes its
+    ``task_done``; the turn never reaches a carrier. None for a held row or no lane row (the kill path's)."""
+    meta = _pool().RUNNING.get(str(task_id))
+    if (not conversation_row(meta) or meta.get("worker_id") is not None
+            or isinstance(meta.get("_terminal_file_recovery"), dict)):
+        return None
+    return _pool().RUNNING.pop(str(task_id))
 
 
 def live_turn_count() -> int:
@@ -170,8 +245,12 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     meta = _awaiting_row(row_task, attempt=1, client_message_id=client_message_id, reply_expected=reply_expected,
                          fresh_identity=task.get("_fresh_identity"))
     pool.RUNNING[task_id] = meta
-    # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn.
-    queue.publish_queue_snapshot(reason="conversation_turn_admitted")
+    # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn. A failed
+    # publication keeps the row visibly unstarted (held from every carrier until a later barrier lands).
+    if queue.publish_queue_snapshot(reason="conversation_turn_admitted") is False:
+        meta["_unpublished"] = True
+        log.warning("Conversation turn %s admitted but its row is not on disk yet: no carrier holds it", task_id)
+        return meta
     slot = None if hold_carrier else ready_idle_carrier(for_owner=owner_turn(task))
     if slot is not None:
         hand_to_carrier(meta, slot)
@@ -195,6 +274,7 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
     fuse (FINAL_PLAN §1). The row awaits a carrier again with the turn's own lane facts, published before
     any carrier can hold it; a ready idle carrier takes it now, the disclosed degraded executor on a physical
     fact, otherwise the lane's reconcile hands it the next carrier (the dead slot's replacement among them).
+    A failed barrier keeps the retry visibly unstarted, held from every carrier, as an admission's (``admit_turn``).
     """
     from supervisor import queue
 
@@ -203,7 +283,10 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
     meta = _awaiting_row(task, attempt=int(task.get("_attempt") or 1), client_message_id=prior.get("client_message_id"),
                          reply_expected=prior.get("reply_expected"), fresh_identity=prior.get("fresh_identity"))
     _pool().RUNNING[str(task["id"])] = meta
-    queue.publish_queue_snapshot(reason="conversation_turn_retried")
+    if queue.publish_queue_snapshot(reason="conversation_turn_retried") is False:
+        meta["_unpublished"] = True
+        log.warning("Conversation turn %s retried but its row is not on disk yet: no carrier holds it", task["id"])
+        return meta
     dispatch_awaiting_turns()
     return meta
 
@@ -245,12 +328,17 @@ def dispatch_awaiting_turns() -> int:
     """
     from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, refused_carrier_reason, start_inline_turn
 
+    waiting = awaiting_turns()
+    # A Stop's custody settles its rows; a row not yet on disk waits for its publication: no carrier takes them.
+    held = _held_by_a_stop(waiting) | _unpublished(waiting)
     moved = 0
-    for meta in awaiting_turns():  # a wake waiting for the spare never holds up the owner's turn behind it
+    for meta in waiting:  # a wake waiting for the spare never holds up the owner's turn behind it
+        if str(meta["task"].get("id") or "") in held:
+            continue
         slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
         if slot is not None and hand_to_carrier(meta, slot):
             moved += 1
-    waiting = awaiting_turns()
+    waiting = [meta for meta in awaiting_turns() if str(meta["task"].get("id") or "") not in held]
     if waiting and not any(w.booting and w.busy_task_id is None for w in lane_carriers()):
         reason = refused_carrier_reason()
         if reason:

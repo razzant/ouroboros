@@ -244,4 +244,7 @@ def reopen_for_place_mail(ctx, controls) -> bool:
         if not agent._busy or agent._current_task_id != ctx.task_id:
             return False
         agent._accepting_owner_messages = True
+        from ouroboros.conversation_lease import follow_loop_admission
+
+        follow_loop_admission(ctx, True)  # its ready final reopens for the wake: so does a remote Host's view
     return True

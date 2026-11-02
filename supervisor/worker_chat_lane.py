@@ -437,7 +437,7 @@ def _degrade_if_no_carrier_can_start(meta: Dict[str, Any]) -> None:
     from supervisor.conversation_lane import lane_carriers
     from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, refused_carrier_reason, start_inline_turn
 
-    if meta.get("worker_id") is not None:
+    if meta.get("worker_id") is not None or meta.get("_unpublished"):  # held, or its row not on disk yet
         return
     if any(w.booting and w.busy_task_id is None for w in lane_carriers()):
         return
@@ -646,7 +646,9 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
         return
     if quiet:  # a wake's failure is the clock's and the supervisor's to report, never a chat final
         return
-    progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed", **origin}
+    progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
+    if "origin_message_ref" in correlation:  # an explicit key: the outbound contract scan vouches for the set
+        progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
     if metadata.get("initiator"):
         progress_meta["initiator"] = str(metadata["initiator"])
     try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
@@ -701,6 +703,9 @@ class CarrierTurn:
             self.execution.entered_at = admitted_at
             self.execution.marks = [("accepted", then), ("admitted", then)]
         self.execution.advance("started")
+        from supervisor.active_activity import carry_turn_execution
+
+        carry_turn_execution(self.task_id, self.execution)  # the turn's own wait fact reads it in this carrier
         self.quiet = bool(facts.get("quiet"))
         self.initiator = str(metadata.get("initiator") or "")
         self._namer = None
@@ -712,6 +717,10 @@ class CarrierTurn:
             )
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
+        if kind == "task_heartbeat":  # this carrier's own size rides its turn's beat (the lane's vitals)
+            from supervisor.conversation_lane import carrier_rss
+
+            data["_carrier_rss"] = carrier_rss()
         before = self.execution.phase
         self.execution.observe(kind, data)
         if self.execution.phase != before:
@@ -726,8 +735,10 @@ class CarrierTurn:
 
     def ended(self) -> None:
         """The turn left this carrier: an owner turn that never dispatched records its receipt here."""
-        from supervisor.active_activity import record_direct_turn
+        from supervisor.active_activity import carry_turn_execution, record_direct_turn
 
+        carry_turn_execution(self.task_id, None)
+        self._namer = None  # the namer's closure holds the whole task: nothing of the turn's input stays reachable
         self.execution.ended_at = time.monotonic()
         if self.execution.owner_turn and self.execution.phase != "dispatched":
             try:
@@ -785,13 +796,20 @@ def _announce_turn_start(admitted: Dict[str, Any]) -> None:
 
 
 def _defer_chat_for_restart(task: dict, chat_id: int, metadata: Optional[dict]) -> None:
-    """Use the ordinary durable queue, carrying the same input and attachment sources."""
+    """Use the ordinary durable queue, carrying the same input and attachment sources.
+
+    The seed carries the turn's preparation obligation (``PREPARE_KEY``, kept by the saved queue across the
+    Restart): the worker that runs it after Restart takes the conversation's first step (attachments, Project
+    binding, contract) as a carrier would, never the server."""
     from supervisor import queue
+    from supervisor.active_activity import reply_expected
     from supervisor.conversation_lane import PREPARE_KEY
 
     if task.get("image_base64"):
         _store_inline_image(task, (task.pop("image_base64"), task.get("image_mime") or "image/jpeg"))
-    task.pop(PREPARE_KEY, None)
+    task[PREPARE_KEY] = {"admitted_at": time.time(), "quiet": False, "census": {},
+                         "reply_expected": reply_expected({"metadata": metadata or {}}),
+                         "client_message_id": str((metadata or {}).get("client_message_id") or "")}
     task["drive_root"] = str(_pool().DRIVE_ROOT)
     task["root_task_id"] = str(task["id"])
     admitted = queue.enqueue_with_admission_receipt(task, durable=True)
