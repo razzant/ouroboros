@@ -160,47 +160,71 @@ def drain_worker_events(event_q: Any, ctx: Any, liveness: list, *, on_restart: C
     ``SUPERVISOR_EVENT_BATCH_MAX_EVENTS`` events; the ``SUPERVISOR_EVENT_BATCH_MAX_SEC``
     budget is checked between handlers (a handler already running finishes, so one
     slow handler can overrun it), then the loop runs bridge intake. The bus is one
-    object with two lanes (``supervisor/event_observation.py``): every ``get`` serves
-    the oldest control event while any exists, else the oldest telemetry frame, FIFO
-    inside each lane — the priority lives in the queue, so this ONE consumer takes
-    whatever comes out, never sorts, defers or re-puts. A ``restart_request`` goes to
-    ``on_restart``; every other event is lag-observed and dispatched. The remainder
-    stays queued for the next turn, so a producer that keeps the queue non-empty
-    can never starve owner-message intake. A dequeued event carrying a
-    ``delivery_id`` is released from the bus's outstanding-delivery membership after
-    its handler returned or raised, whichever path it took. A live final answer is
-    stamped as dequeued the moment it is taken (``finalization_timing``), and every
-    event's service time, take to handler return, feeds ``supervisor.loop_load.CONSUMER``
-    by type, with its lag by lane. Returns True
-    when the pass stopped at its bound (a backlog may remain: the caller skips its idle
-    sleep and polls intake without its wait)."""
+    object with two lanes (``supervisor/event_observation.py``) serving the oldest
+    control event while any exists, else the oldest telemetry frame, FIFO inside each
+    lane — the priority lives in the queue, so this ONE consumer takes whatever comes
+    out, never sorts, defers or re-puts. The pass takes its batch in ONE round trip
+    (``drain``; a bus without it, a plain queue, is read one ``get_nowait`` at a time)
+    and serves it in that order; a tail the pass did not serve — its time bound, or a
+    raise out of this loop — goes back to the FRONT of its lanes (``restore_front``),
+    so the next turn serves it first exactly as if it had stayed queued. An event put
+    while the pass runs waits for the next turn, behind at most the batch's own
+    bounded service. A ``restart_request`` goes to ``on_restart``; every other event is
+    lag-observed and dispatched. A producer that keeps the queue non-empty can never
+    starve owner-message intake. A served event carrying a ``delivery_id`` is released
+    from the bus's outstanding-delivery membership after its handler returned or raised,
+    whichever path it took. A live final answer is stamped as dequeued when this
+    consumer starts it (``finalization_timing``), and every event's service time, start
+    to handler return, feeds ``supervisor.loop_load.CONSUMER`` by type, with its lag by
+    lane. Returns True when the pass stopped at its bound (a backlog may remain: the
+    caller skips its idle sleep and polls intake without its wait)."""
     from ouroboros.finalization_timing import stamp_finalization_dequeue
     from supervisor import loop_load
     from supervisor.event_observation import event_lane
     from supervisor.events import dispatch_event
 
     deadline = time.monotonic() + SUPERVISOR_EVENT_BATCH_MAX_SEC
+    take = getattr(event_q, "drain", None)
+    batch = take(SUPERVISOR_EVENT_BATCH_MAX_EVENTS) if callable(take) else None
     drained = 0
-    while drained < SUPERVISOR_EVENT_BATCH_MAX_EVENTS and time.monotonic() < deadline:
-        try:
-            evt = event_q.get_nowait()
-        except queue.Empty:
-            return False
-        drained += 1
-        taken, lag = time.monotonic(), None
-        try:
-            stamp_finalization_dequeue(evt)
-            if evt.get("type") == "restart_request":
-                on_restart(evt, ctx)
-                continue
-            lag = observe_worker_event_lag(liveness, evt)
-            dispatch_event(evt, ctx)
-        finally:
-            served = time.monotonic() - taken
-            _release_delivery(event_q, evt)
-            kind = str(evt.get("type") or "") if isinstance(evt, dict) else ""
-            loop_load.CONSUMER.note(kind, event_lane(evt), served, lag)
-    return True
+    try:
+        while drained < SUPERVISOR_EVENT_BATCH_MAX_EVENTS and time.monotonic() < deadline:
+            if batch is None:
+                try:
+                    evt = event_q.get_nowait()
+                except queue.Empty:
+                    return False
+            elif drained < len(batch):
+                evt = batch[drained][0]
+            else:
+                return False  # the bus held fewer than the bound when the batch was taken
+            drained += 1
+            taken, lag = time.monotonic(), None
+            try:
+                stamp_finalization_dequeue(evt)
+                if evt.get("type") == "restart_request":
+                    on_restart(evt, ctx)
+                    continue
+                lag = observe_worker_event_lag(liveness, evt)
+                dispatch_event(evt, ctx)
+            finally:
+                served = time.monotonic() - taken
+                _release_delivery(event_q, evt)
+                kind = str(evt.get("type") or "") if isinstance(evt, dict) else ""
+                loop_load.CONSUMER.note(kind, event_lane(evt), served, lag)
+        return True
+    finally:
+        if batch is not None and drained < len(batch):
+            _restore_unserved(event_q, batch[drained:])
+
+
+def _restore_unserved(event_q: Any, envelopes: list) -> None:
+    """Hand an unserved batch tail back to the bus's front; a broken manager is logged loudly
+    (those events are lost with it, as the queue itself would be)."""
+    try:
+        event_q.restore_front(envelopes)
+    except Exception:
+        log.error("Could not return %d unserved supervisor events to the bus", len(envelopes), exc_info=True)
 
 
 # The supervisor_load row's window: a reporting cadence, never a gate or a deadline.
