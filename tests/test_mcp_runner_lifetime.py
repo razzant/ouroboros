@@ -92,9 +92,9 @@ def _wire(monkeypatch, server, *, drop_call_response=False):
     # the real ``_run_async`` starts its nested copied-context runner thread.
     real = mcp_client._call_mcp_tool_result
 
-    def from_running_loop(name, arguments):
+    def from_running_loop(name, arguments, ctx=None):
         async def inside():
-            return real(name, arguments)
+            return real(name, arguments, ctx)
         return asyncio.run(inside())
 
     monkeypatch.setattr(mcp_client, "_call_mcp_tool_result", from_running_loop)

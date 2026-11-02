@@ -1,11 +1,7 @@
-"""The verbs a task uses to put something in front of a human.
-
-Photo, video and document delivery to the owner chat; link buttons; and
-``escalate``, the one question verb — an owner quiz card at the root, a
-parent mailbox frame below it. The payload validators for the two structured
-frames (link actions, quiz) live here with the verbs that emit them, because
-they define those wire shapes; ``supervisor.message_bus`` re-validates
-through the same functions on the delivery side.
+"""Task verbs that deliver material or questions to a human: photo/video/document,
+link buttons and ``escalate`` (owner quiz at the root, parent mailbox below).
+The link/quiz payload validators live with their emitting verbs, which own those
+wire shapes; ``supervisor.message_bus`` re-validates through the same functions.
 """
 
 from __future__ import annotations
@@ -24,6 +20,26 @@ from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
 
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _delivery_path(ctx: ToolContext, file_path: str) -> tuple[Optional[pathlib.Path], str]:
+    """The file a delivery verb names, or its published refusal. A relative path means the active workspace
+    (read_file's default root), never the process cwd, and refuses without one; absolute and ``~`` stay as is."""
+    fp = pathlib.Path(file_path).expanduser()
+    if not fp.is_absolute():
+        try:
+            from ouroboros.tools.registry import active_repo_dir_for
+            fp = pathlib.Path(active_repo_dir_for(ctx)).expanduser() / fp
+        except Exception as e:
+            text = f"⚠️ Relative file path {file_path!r} has no active workspace to resolve against: {e}. Name the file by its absolute path."
+            return None, _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
+    return fp.resolve(), ""
+
+
+def _file_not_found(ctx: ToolContext, file_path: str, fp: pathlib.Path) -> str:
+    """A delivery miss; a relative request also names the workspace file it looked for."""
+    where = "" if pathlib.Path(file_path).expanduser().is_absolute() else f" (resolved: {fp})"
+    return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}{where}"))
 
 
 def _detect_image_mime(data: bytes) -> str:
@@ -50,9 +66,11 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     mime = "image/png"
 
     if file_path:
-        fp = pathlib.Path(file_path).expanduser().resolve()
+        fp, refusal = _delivery_path(ctx, file_path)
+        if fp is None:
+            return refusal
         if not fp.exists():
-            return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
+            return _file_not_found(ctx, file_path, fp)
         if fp.stat().st_size > _MAX_PHOTO_FILE_BYTES:
             return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_PHOTO_FILE_BYTES} bytes."))
         try:
@@ -109,9 +127,11 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     if not file_path:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Provide a file_path."))
 
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp, refusal = _delivery_path(ctx, file_path)
+    if fp is None:
+        return refusal
     if not fp.exists():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
+        return _file_not_found(ctx, file_path, fp)
     if fp.stat().st_size > _MAX_VIDEO_FILE_BYTES:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_VIDEO_FILE_BYTES} bytes."))
 
@@ -151,12 +171,14 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     if not file_path:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Provide a file_path."))
 
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp, refusal = _delivery_path(ctx, file_path)
+    if fp is None:
+        return refusal
     if not fp.exists():
         from ouroboros.evidence_packs import materialize_path
         materialize_path(fp)  # a packed checkpoint handle is written back beside its name first
     if not fp.exists() or not fp.is_file():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
+        return _file_not_found(ctx, file_path, fp)
     mime = _detect_document_mime(str(fp))
     # Capture immutable, task-owned bytes before publishing a link. File delivery
     # stays available above the old inline limit without placing the file in RAM.
