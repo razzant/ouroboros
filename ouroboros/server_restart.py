@@ -282,14 +282,17 @@ def _owned_live_task_ids(ctx: Any) -> list:
     in-process direct/ephemeral activities and running post-task synthesis —
     minus every saved pause (``restart_retention``): a task whose checkpoint
     is already stored survives the Restart as the same paused task, and a
-    cancel intent minted for it here would outrank that pause at restore."""
-    from supervisor.restart_retention import census_without_saved_pauses
+    cancel intent minted for it here would outrank that pause at restore. A correspondent's Presence turn
+    is never the owner's to stop here (``restart_retention.presence_turn``): the stop's custody ends it."""
+    from supervisor.restart_retention import census_without_saved_pauses, presence_turn
 
     from ouroboros.post_task_checkpoint import POST_TASK_SYNTHESIS_INFLIGHT, POST_TASK_SYNTHESIS_LOCK
     from supervisor.active_activity import get_direct_activity_registry
 
-    task_ids = list(dict(ctx.RUNNING or {}))
-    task_ids.extend(str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot())
+    task_ids = [tid for tid, meta in dict(ctx.RUNNING or {}).items()
+                if not presence_turn(meta.get("task") if isinstance(meta, dict) else None)]
+    task_ids.extend(str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()
+                    if row.get("kind") != "presence")
     root = str(pathlib.Path(DATA_DIR).resolve(strict=False))
     with POST_TASK_SYNTHESIS_LOCK:
         task_ids.extend(task_id for (path, task_id) in POST_TASK_SYNTHESIS_INFLIGHT if path == root)
@@ -512,14 +515,16 @@ def _live_running_task_ids(ctx: Any) -> list:
 
     Heartbeat staleness belongs to the generic supervisor queue, not to the
     planning-scout wait policy.  The latter intentionally waits until terminal
-    state or its shared cutoff even when a scout heartbeat is stale.
+    state or its shared cutoff even when a scout heartbeat is stale. A correspondent's
+    Presence turn is not the owner's work to wait for (``restart_retention.presence_turn``).
     """
     from supervisor.queue import HEARTBEAT_STALE_SEC
+    from supervisor.restart_retention import presence_turn
 
     now = time.time()
     live = []
     for tid, meta in dict(ctx.RUNNING or {}).items():
-        if not isinstance(meta, dict):
+        if not isinstance(meta, dict) or presence_turn(meta.get("task")):
             continue
         try:
             hb = float(meta.get("last_heartbeat_at") or 0.0)
@@ -538,7 +543,7 @@ def _live_running_task_ids(ctx: Any) -> list:
     # owner-wait handoff, exactly as the update fence treats it (#2191).
     return list(dict.fromkeys(live + [
         entry.activity_id for entry in get_direct_activity_registry().actors()
-        if not is_parked_direct_entry(entry)
+        if not is_parked_direct_entry(entry) and entry.kind != "presence"
     ]))
 
 
