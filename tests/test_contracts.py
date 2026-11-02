@@ -783,7 +783,7 @@ def test_state_response_matches_server_payload():
     """StateResponse declared keys must equal the ``/api/state`` success payload's keys.
 
     The payload is the state publication's produced fields (``state_publication.produced_fields``),
-    the per-request process facts (``state._live_fields``) and the request's bindings pair
+    the per-request process facts (``state_publication.live_fields``) and the request's bindings pair
     (``task_bindings``/``task_bindings_unchanged``, joined by ``state_publication.response_body``).
     The error path returns ``{"error": str}`` with HTTP 500 — outside the frozen contract.
     ``StateResponse`` is total=True, so a missing declared key fails as loudly as a leaked one.
@@ -802,7 +802,7 @@ def test_state_response_matches_server_payload():
 
     gateway = REPO_ROOT / "ouroboros" / "gateway"
     produced = returned_keys(gateway / "state_publication.py", "produced_fields")
-    live = returned_keys(gateway / "state.py", "_live_fields")
+    live = returned_keys(gateway / "state_publication.py", "live_fields")
     bindings = {"task_bindings", "task_bindings_unchanged"}
     assert not produced & live and not (produced | live) & bindings, "a key would be written twice"
     declared = set(StateResponse.__annotations__.keys())

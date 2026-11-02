@@ -367,9 +367,33 @@ _FINALIZING_MEMO: Dict[tuple, tuple] = {}
 _FINALIZING_MEMO_MAX = 1024
 
 
-def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
-    """One signature-keyed read serves outcome, finalizing, retry and question facts.
+def _task_hot_facts(drive_root: Any, task_id: str) -> dict:
+    """What a task's hot row holds, read without its body (inside the census's batched snapshot, without a
+    transaction): ``status``, the post-task phase (``late_phase``, ``finalizing``) and the owner wait's
+    ``state``/``reason``. ``{}`` is an absent row; a read that could not answer is ``{"unavailable": True}``."""
+    from ouroboros.store_hot_facts import read
 
+    try:
+        hot = read(drive_root, task_id)
+    except Exception:
+        return {"unavailable": True}
+    if not hot:
+        return {}
+    synthesis = str(hot.get("post_task_synthesis") or "")
+    return {"status": hot.get("status"), "late_phase": synthesis, "finalizing": post_task_synthesis_is_open(synthesis),
+            "owner_wait": {key: hot[column] for key, column in (("state", "owner_wait_state"),
+                                                                ("reason", "owner_wait_reason")) if hot.get(column)}}
+
+
+def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
+    """Outcome, finalizing, retry and question facts of one census row.
+
+    The hot row answers the post-task phase (``late_phase``, ``finalizing``) and the card on every call. The
+    body is read only when the row's signature ``(write_seq, updated_at)`` moved, and only for the facts that
+    live nowhere else: ``status`` as written, ``reason_code``, ``timeout_retry_from``, ``original_task_id``,
+    ``delegated_runs_unreconciled``, ``model_waits`` (its handoff rows), ``outcome_axes``/``cancel_origin``, an
+    answered root's ``late_work`` title and answer time, the card's ``detached``, the routing row (``chat_id``,
+    ``_is_direct_chat``, ``queued_at``) and the waited quiz (its id, resume reason and display fields).
     ``{}`` is an absent document; a read that could not answer is ``{"unavailable": True}``."""
     from ouroboros.task_store import read_document
     from ouroboros.store_hot_facts import read
@@ -387,7 +411,7 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         return {}
     memo = _FINALIZING_MEMO.get(memo_id)
     if memo is not None and memo[0] == key:
-        return _with_card(memo[1], hot)
+        return _with_hot(memo[1], hot)
     try:
         data, key = read_document(drive_root, task_id, signed=True)
         if not isinstance(data, dict):
@@ -422,8 +446,7 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         # The executor's own terminal fact or nothing: generic ts is never an answer time.
         display["late_work"] = {"title": task_presentation_name(data),
                                 "answered_at": terminal_time_fact(data).get("occurred_at") or ""}
-    facts = {"finalizing": post_task_synthesis_is_open(synthesis), "late_phase": synthesis, "card": card_facts(data),
-             "display": display,
+    facts = {"card": card_facts(data), "display": display,
              # An answered root's census row carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
                      if key in data},
@@ -440,24 +463,21 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     if len(_FINALIZING_MEMO) >= _FINALIZING_MEMO_MAX:
         _FINALIZING_MEMO.clear()
     _FINALIZING_MEMO[memo_id] = (key, facts)
-    return _with_card(facts, hot)
+    return _with_hot(facts, hot)
 
 
-def _with_card(facts: dict, hot: dict) -> dict:
-    """The card from the hot row this poll read, over a copy of the memoized facts: a row-only card
-    write moves no document signature, so the memo alone would show a stale card."""
+def _with_hot(facts: dict, hot: dict) -> dict:
+    """The hot row this poll read over a copy of the memoized body facts: its post-task phase, and its card (a
+    row-only card write moves no document signature, so the memo alone would show a stale card)."""
     from ouroboros.store_task_cards import row_values
 
-    return {**facts, "card": {**facts["card"], **row_values(hot)}}
+    synthesis = str(hot.get("post_task_synthesis") or "")
+    return {**facts, "finalizing": post_task_synthesis_is_open(synthesis), "late_phase": synthesis,
+            "card": {**facts["card"], **row_values(hot)}}
 
 
 def _managed_task_finalizing(drive_root: Any, task_id: str) -> bool:
-    from ouroboros.store_hot_facts import read
-
-    try:
-        return post_task_synthesis_is_open((read(drive_root, task_id) or {}).get("post_task_synthesis"))
-    except Exception:
-        return False
+    return _task_hot_facts(drive_root, task_id).get("finalizing") is True
 
 
 def _pending_resume_available(q: Any, task: dict, *, owner_paused: bool) -> bool:
@@ -741,7 +761,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             # and a review's unsent preparation waits for Resume.
             if latch.get("cause") != "owner_pause" or root_id in visible:
                 continue
-            facts = _task_activity_facts(drive_root, root_id)
+            facts = _task_hot_facts(drive_root, root_id)  # the body only for a root shown below (its row)
             if root_id in active_roots and not (
                     facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
                     or task_has_live_review_operation(drive_root, root_id)):
@@ -760,7 +780,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 phase = "budget_paused"
             else:
                 continue
-            row = dict(facts.get("row") or {})
+            row = dict(_task_activity_facts(drive_root, root_id).get("row") or {})
             live = phase == "budget_pausing" and post_task_synthesis_in_flight(drive_root, root_id)
             visible[root_id] = _activity(root_id, row, phase, _epoch_or_zero(row.get("queued_at")), live=live)
             if work_facts is not None and live:  # its late work still runs
@@ -888,44 +908,7 @@ def current_work_in_room(drive_root: Any, task_bindings: Any, matches: Callable[
     in_room = [str(row["activity_id"]) for row in _chat_activities_snapshot_safe(drive_root, task_bindings, owners_only=True)
                if row.get("activity_id") and row.get("chat_id") is not None
                and matches(row["chat_id"], {**row, "task_id": row["activity_id"]})]
-    return [task_id for task_id in in_room if not _answer_stored(_task_activity_facts(drive_root, task_id).get("late_phase"))]
-
-
-def _worker_counts() -> tuple:
-    """(alive, total) of the worker pool, read from this process's table (no I/O)."""
-    try:
-        from supervisor.workers import WORKERS
-
-        workers = list(WORKERS.values())
-        return sum(1 for worker in workers if worker.proc.is_alive()), len(workers)
-    except Exception:
-        return 0, 0
-
-
-def _live_fields(request: Request, jobs: Dict[str, Any]) -> Dict[str, Any]:
-    """The process facts of ``StateResponse``, read per request without I/O: never part of the publication."""
-    from ouroboros.config import get_context_mode, get_runtime_mode, get_safety_mode, get_skills_repo_path
-
-    supervisor_ready = _state_attr(request, "supervisor_ready_event")
-    get_supervisor_error = _state_attr(request, "get_supervisor_error")
-    app_start = float(_state_attr(request, "app_start", time.time()) or time.time())
-    alive, total = _worker_counts()
-    return {
-        "uptime": int(time.time() - app_start),
-        "workers_alive": alive,
-        "workers_total": total,
-        "supervisor_ready": bool(supervisor_ready.is_set()) if supervisor_ready else False,
-        "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
-        "boot": _live_boot(request, jobs),  # the boot phases the header paints (Starting… → chat ready → Online)
-        "runtime_mode": get_runtime_mode(),
-        "context_mode": get_context_mode(),
-        # Frozen one-window compatibility field. Persistent auto-Low is retired.
-        "context_mode_auto_low": False,
-        "effort_range": effort_range(),  # the owner's range, the tolerant read
-        "safety_mode": get_safety_mode(),
-        "skills_repo_configured": bool(get_skills_repo_path()),
-        "served_ui": _served_ui_state(request),
-    }
+    return [task_id for task_id in in_room if not _answer_stored(_task_hot_facts(drive_root, task_id).get("late_phase"))]
 
 
 def _production(request: Request, direct: Optional[tuple]) -> Dict[str, Any]:
@@ -943,14 +926,14 @@ async def api_state(request: Request) -> Response:
     Served from the data root's display publication (``state_publication``): one production per revision,
     shared by every concurrent reader and encoded once; the process facts and the bindings map the client
     may already hold (``bindings_since``) are added per request."""
-    from ouroboros.gateway.state_publication import AGE_HEADER, GENERATION_HEADER, publisher, response_body
+    from ouroboros.gateway.state_publication import AGE_HEADER, GENERATION_HEADER, live_fields, publisher, response_body
 
     try:
         publication = await publisher(getattr(request.app, "state", None), request_drive_root(request)).current(
             lambda direct: _production(request, direct))
         since = str(request.query_params.get("bindings_since") or "")  # the revision of a map the client holds
         unchanged = bool(since) and since == publication.bindings_revision  # a failed read's "" never is
-        body = response_body(publication, _live_fields(request, publication.jobs), bindings_unchanged=unchanged)
+        body = response_body(publication, live_fields(request, publication.jobs), bindings_unchanged=unchanged)
         response = Response(body, media_type="application/json", headers={
             GENERATION_HEADER: str(publication.generation),
             AGE_HEADER: f"{max(0.0, time.time() - publication.published_at):.3f}"})

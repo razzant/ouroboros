@@ -11,12 +11,20 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import threading
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros.gateway import work_status as ws
 
 log = logging.getLogger(__name__)
+
+# The last projection's stored results per data root, each beside the row signature it was read at
+# (``(write_seq, updated_at)``, the key every census reader memoizes on): the next projection re-reads only a
+# document whose row moved. Replaced whole by each projection, so it keeps one projection's working set, the
+# documents that projection held anyway; the results are shared read-only.
+_RESULTS: Dict[str, Dict[str, Tuple[tuple, dict]]] = {}
+_RESULTS_LOCK = threading.Lock()
 
 _CONTINUE_PREFIX = "Continue: "
 # The census's execution facts for a member (gateway/state.py), never a work's identity.
@@ -39,12 +47,30 @@ def _first_name(*sources: Mapping[str, Any]) -> str:
     return ""
 
 
+def _root_key(drive_root: Any) -> str:
+    return str(pathlib.Path(drive_root).resolve(strict=False))
+
+
+def _signature(drive_root: Any, task_id: str) -> Optional[tuple]:
+    """The task row's signature from its hot row (no body; batched inside ``store_hot_facts.snapshot``)."""
+    from ouroboros.store_hot_facts import read
+
+    try:
+        row = read(drive_root, task_id)
+    except Exception:
+        return None
+    return (row["write_seq"], row["updated_at"]) if row else None
+
+
 class _Observations:
     """Per-snapshot memo of the few stored reads the projection needs."""
 
     def __init__(self, drive_root: Any):
         self.drive_root = drive_root
         self.results: Dict[str, Optional[dict]] = {}
+        self.signatures: Dict[str, tuple] = {}
+        with _RESULTS_LOCK:
+            self.previous = _RESULTS.get(_root_key(drive_root), {})
         self.fences: Dict[str, dict] = {}
         self.stops: Dict[str, frozenset] = {}
         self.reviews: Dict[str, bool] = {}
@@ -52,7 +78,14 @@ class _Observations:
         self.gaps: List[Dict[str, Any]] = []
 
     def result(self, task_id: str) -> Optional[dict]:
+        """The task's stored result: the last projection's when its row has not moved since, else one read."""
         if task_id not in self.results:
+            signature = _signature(self.drive_root, task_id)
+            held = self.previous.get(task_id)
+            if signature is not None and held is not None and held[0] == signature:
+                self.results[task_id] = held[1]
+                self.signatures[task_id] = signature
+                return held[1]
             try:
                 from ouroboros.task_results import load_task_result
 
@@ -61,7 +94,15 @@ class _Observations:
             except Exception:
                 log.debug("Work projection could not read %s", task_id, exc_info=True)
                 self.results[task_id] = None
+            if signature is not None and self.results[task_id] is not None:
+                self.signatures[task_id] = signature
         return self.results[task_id]
+
+    def keep(self) -> None:
+        """Hand this projection's signed results to the next one (only results read at a known signature)."""
+        held = {task_id: (signature, self.results[task_id]) for task_id, signature in self.signatures.items()}
+        with _RESULTS_LOCK:
+            _RESULTS[_root_key(self.drive_root)] = held
 
     def fence(self, root_id: str, drive_root: Any = None) -> dict:
         if root_id not in self.fences:
@@ -88,8 +129,7 @@ class _Observations:
 
     def model_handoffs(self, root_id: str, drive_root: Any = None) -> list:
         if root_id not in self.models:
-            from supervisor.continuation_admission import model_handoffs
-            self.models[root_id] = model_handoffs(drive_root or self.drive_root, root_id)
+            self.models[root_id] = tree_model_handoffs(drive_root or self.drive_root, root_id)
         return self.models[root_id]
 
     def stop_unknown(self, task_id: str, drive_root: Any = None, owner: Optional[Mapping[str, Any]] = None
@@ -97,6 +137,14 @@ class _Observations:
         if task_id not in self.stops:
             self.stops[task_id] = unconfirmed_stops(drive_root or self.drive_root, task_id, owner)
         return self.stops[task_id]
+
+
+def tree_model_handoffs(drive_root: Any, root_id: str) -> list:
+    """A paused tree's unresolved model recipients: the one call site of the tree census the projection reads,
+    so the owner-pause census memo (keyed by the tree's attempt/custody/fence revision) replaces it here."""
+    from supervisor.continuation_admission import model_handoffs
+
+    return model_handoffs(drive_root, root_id)
 
 
 def unconfirmed_stops(drive_root: Any, task_id: str, owner: Optional[Mapping[str, Any]] = None) -> frozenset:
@@ -273,7 +321,19 @@ def works_snapshot(drive_root: Any, owners: Iterable[Mapping[str, Any]], raw_fac
 
 def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
               complete: bool) -> Dict[str, Any]:
+    from ouroboros.store_hot_facts import snapshot
+
     obs = _Observations(drive_root)
+    # The signatures of every result this projection may read, in one short transaction (the hot rows only).
+    known = {str(row.get("activity_id") or "") for row in owners} | set(raw) | set(obs.previous)
+    with snapshot([(drive_root, task_id) for task_id in known if task_id]):
+        projected = _project(drive_root, owners, raw, complete, obs)
+    obs.keep()
+    return projected
+
+
+def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
+             complete: bool, obs: _Observations) -> Dict[str, Any]:
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
         task_id = str(row.get("activity_id") or "")

@@ -311,6 +311,47 @@ def published_jobs(app_state: Any) -> Dict[str, Any]:
     return dict(publication.jobs) if publication is not None else {}
 
 
+# ---- the per-request process facts -----------------------------------------------------------
+
+def _worker_counts() -> Tuple[int, int]:
+    """(alive, total) of the worker pool, read from this process's table (no I/O)."""
+    try:
+        from supervisor.workers import WORKERS
+
+        workers = list(WORKERS.values())
+        return sum(1 for worker in workers if worker.proc.is_alive()), len(workers)
+    except Exception:
+        return 0, 0
+
+
+def live_fields(request: Any, jobs: Dict[str, Any]) -> Dict[str, Any]:
+    """The process facts of ``StateResponse``, read per request without I/O: never part of the publication."""
+    from ouroboros.config import get_context_mode, get_runtime_mode, get_safety_mode, get_skills_repo_path
+    from ouroboros.gateway import state as gateway_state
+    from ouroboros.settings_scales import effort_range
+
+    supervisor_ready = gateway_state._state_attr(request, "supervisor_ready_event")
+    get_supervisor_error = gateway_state._state_attr(request, "get_supervisor_error")
+    app_start = float(gateway_state._state_attr(request, "app_start", time.time()) or time.time())
+    alive, total = _worker_counts()
+    return {
+        "uptime": int(time.time() - app_start),
+        "workers_alive": alive,
+        "workers_total": total,
+        "supervisor_ready": bool(supervisor_ready.is_set()) if supervisor_ready else False,
+        "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
+        "boot": gateway_state._live_boot(request, jobs),  # the boot phases the header paints (Starting… → Online)
+        "runtime_mode": get_runtime_mode(),
+        "context_mode": get_context_mode(),
+        # Frozen one-window compatibility field. Persistent auto-Low is retired.
+        "context_mode_auto_low": False,
+        "effort_range": effort_range(),  # the owner's range, the tolerant read
+        "safety_mode": get_safety_mode(),
+        "skills_repo_configured": bool(get_skills_repo_path()),
+        "served_ui": gateway_state._served_ui_state(request),
+    }
+
+
 # ---- the produced fields ---------------------------------------------------------------------
 
 def _accounting_block(accounting: Dict[str, Any], available: bool, limit: float) -> Dict[str, Any]:
