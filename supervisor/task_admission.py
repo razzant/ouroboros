@@ -822,7 +822,7 @@ def revalidate_project_holds() -> None:
     # Unknown persistence puts the exact original hold back; later passes recheck.
     changed = any(prior != {key: task[key] for key in effects if key in task}
                   for prior, task in zip(before, held))
-    persisted = not changed or queue.persist_queue_snapshot(reason="project_hold_revalidated") is True
+    persisted = not changed or queue.publish_queue_snapshot(reason="project_hold_revalidated") is True
     for task, prior in released:
         if persisted:
             task.pop("_managed_update_resume", None)  # a spent resolver resume never reaches a worker

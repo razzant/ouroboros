@@ -52,7 +52,7 @@ from ouroboros.task_results import (
     load_task_result,
     validate_task_id,
 )
-from ouroboros.queue_observation import load_queue_document, queue_stamp
+from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
 from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
@@ -215,13 +215,13 @@ def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     return load_queue_document(drive_root)
 
 
-# GR7-1a freshness bound for the live-ownership twin. The supervisor persists
-# queue.alive on every main-loop pass (nominally 0.5s apart), so a stamp
-# this old means the writer is gone or badly wedged — the twin can no longer
-# trust it to prove a DEAD worker. Sized well above 2× the nominal tick to
-# absorb ordinary loop hitches (task_done processing, git ops) without turning
-# every cancel into a fail-open pass.
-_SNAPSHOT_OWNERSHIP_FRESH_SEC = 10.0
+# GR7-1a freshness bound for the live-ownership twin. The supervisor refreshes
+# queue.alive inside this bound (``queue_publication.QUEUE_ALIVE_REFRESH_SEC``), so a
+# stamp this old means the writer is gone or badly wedged — the twin can no longer
+# trust it to prove a DEAD worker. Sized well above the refresh cadence to absorb
+# ordinary loop hitches (task_done processing, git ops) without turning every
+# cancel into a fail-open pass. One bound for publisher and readers.
+_SNAPSHOT_OWNERSHIP_FRESH_SEC = QUEUE_ALIVE_FRESH_SEC
 
 
 def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) -> Dict[str, Any]:

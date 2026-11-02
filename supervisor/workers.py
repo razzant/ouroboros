@@ -1240,7 +1240,7 @@ def kill_workers(
             # concurrent ingress can refuse without starting project/workspace
             # side effects while workers are being joined.
             try:
-                fence_persisted = queue.persist_queue_snapshot(reason="worker_pool_disabling") is not False
+                fence_persisted = queue.publish_queue_snapshot(reason="worker_pool_disabling") is not False  # barrier (LB)
             except Exception:
                 fence_persisted = False
                 log.warning("Failed to persist worker-pool disable fence", exc_info=True)
@@ -1489,7 +1489,7 @@ def kill_workers(
     if reconcile_review_custody:
         _reconcile_review_owners(DRIVE_ROOT, dead_pids)
     try:
-        snapshot_ok = queue.persist_queue_snapshot(reason="kill_workers") is not False
+        snapshot_ok = queue.publish_queue_snapshot(reason=stop_source or "kill_workers") is not False  # barrier (LB): the door names the export
     except Exception:
         snapshot_ok = False
         log.warning("Failed to persist queue snapshot after worker shutdown", exc_info=True)
@@ -1992,7 +1992,7 @@ def _drop_cancelled_pending() -> bool:
         try:
             from supervisor import queue
 
-            persisted = queue.persist_queue_snapshot(
+            persisted = queue.publish_queue_snapshot(  # barrier (LB): durable before the row may dispatch
                 reason="cancel_intent_authority_hold_resolved",
             )
         except Exception:

@@ -266,7 +266,7 @@ def test_late_or_unconfirmed_intake_promises_no_execution(runtime, monkeypatch, 
     if fault == "closed":
         runtime.queue.name_queue_returns(runtime.queue.PENDING, "planned_restart")
     else:
-        monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     result = runtime.queue.enqueue_task({"id": "late", "type": "task", "text": "late", "chat_id": 0})
     assert result.get("_admission_blocked") == ("restart_intake_closed" if fault == "closed" else "restart_admission_unconfirmed")
     worker_chat_lane.handle_chat_direct(7, "late Main")
@@ -433,7 +433,7 @@ def test_task_http_consumer_reports_only_durable_admission(runtime, monkeypatch,
     if fault == "closed":
         runtime.queue.name_queue_returns(runtime.queue.PENDING, "planned_restart")
     elif fault == "save_failed":
-        monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     with TestClient(_app(runtime.root, runtime.root / "repo")) as client:
         result = client.post("/api/tasks", json={"description": "HTTP request B", "source": "web", "chat_id": 1})
     assert result.status_code == (200 if fault == "none" else 409), result.text
@@ -454,13 +454,13 @@ def test_unpublished_ack_and_another_attempt_never_claim_success(runtime, monkey
     monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0)
     assert control_runtime._request_restart(runtime.ctx, "same").startswith("RESTART_UNCONFIRMED:")
     event = runtime.events.get_nowait()
-    publish = runtime.queue.persist_queue_snapshot
-    monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", lambda **k: False)
+    publish = runtime.queue.publish_queue_snapshot
+    monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     runtime.server._handle_restart_in_supervisor(event, runtime.host)
     assert runtime.restart.agent_restart_pending()
     assert control_runtime._request_restart(runtime.ctx, "same").startswith("RESTART_UNCONFIRMED:")
     assert runtime.events.empty()
-    monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", publish)
+    monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", publish)
     publish(reason="later_host_publication")
     assert control_runtime._request_restart(runtime.ctx, "same").startswith("Restart requested.")
     runtime.server._handle_restart_in_supervisor({**event, "phase": "ready", "task_attempt": 2}, runtime.host)

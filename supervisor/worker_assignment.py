@@ -310,11 +310,11 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         prior = candidate.get("admitted_dispatch")
         if not projections:
             candidate["admitted_dispatch"] = "possible"
-            if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+            if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
                 candidate["admitted_dispatch"] = prior
                 return None
             return []
-        if queue.persist_queue_snapshot(reason="worker_launch_locator") is not True:
+        if queue.publish_queue_snapshot(reason="worker_launch_locator") is not True:
             return None
         committed = commit_dispatch_marks(candidate, projections)
         if committed is False:
@@ -323,7 +323,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         witness = _COMMITTED_UNSENT[task_id] = {"row": candidate, "attempt": candidate.get("_attempt"),
                                                 "projections": projections, "unsubmitted": unsubmitted}
         if committed is None:  # it may have landed: never replayable, retried here before any put
-            queue.persist_queue_snapshot(reason="worker_launch_unknown")
+            queue.publish_queue_snapshot(reason="worker_launch_unknown")
             return None
     else:
         from ouroboros.task_results import load_task_result
@@ -333,7 +333,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
             recommitted = commit_dispatch_marks(candidate, witness["projections"])
             if recommitted is not True:  # refused now (terminal, Stop, owner hold) or unresolved: no put;
                 return recommitted       # the row stays in custody
-    if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+    if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
         return None
     return witness["projections"]
 

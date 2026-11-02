@@ -341,7 +341,7 @@ def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwner
         if live is not None:
             before = copy.deepcopy(live)
             bind_task(q.DRIVE_ROOT, live, record)
-            if live != before and q.persist_queue_snapshot(reason="followup_binding_repaired") is not True:
+            if live != before and q.publish_queue_snapshot(reason="followup_binding_repaired") is not True:
                 live.clear()
                 live.update(before)
                 return False
@@ -783,7 +783,7 @@ def admit(prepared: List[Dict[str, Any]], *, stop: Optional[Callable[[], bool]] 
             _unqueue(admitted)  # the receipts stand; the rows' claims reconcile next pass
             log.error("Scheduled task store write failed after admission; admitted tasks withdrawn", exc_info=True)
             return
-        if admitted and q.persist_queue_snapshot(reason="scheduled_tasks") is not True:
+        if admitted and q.publish_queue_snapshot(reason="scheduled_tasks") is not True:  # durable or withdrawn
             _unqueue(admitted)  # not durable in the queue: republished from their receipts next pass
             log.error("Queue snapshot failed after scheduled admission; %d task(s) withdrawn", len(admitted))
 
