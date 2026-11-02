@@ -144,6 +144,20 @@ def _held_by_a_stop(rows: List[Dict[str, Any]]) -> set:
     return ids & (set(intents) | set(unseen or ()))
 
 
+def _unpublished(rows: List[Dict[str, Any]]) -> set:
+    """The rows whose admission barrier failed: one barrier now covers them all, else they stay held this pass."""
+    pending = [meta for meta in rows if meta.get("_unpublished")]
+    if not pending:
+        return set()
+    from supervisor import queue
+
+    if queue.publish_queue_snapshot(reason="conversation_turn_admitted") is False:
+        return {str(meta["task"].get("id") or "") for meta in pending}
+    for meta in pending:
+        meta.pop("_unpublished", None)
+    return set()
+
+
 def take_awaiting_turn(task_id: str) -> Any:
     """Under Q: a Stop's custody takes a lane turn no carrier holds yet out of RUNNING, as it takes a PENDING row.
 
@@ -200,8 +214,12 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     meta = _awaiting_row(row_task, attempt=1, client_message_id=client_message_id, reply_expected=reply_expected,
                          fresh_identity=task.get("_fresh_identity"))
     pool.RUNNING[task_id] = meta
-    # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn.
-    queue.publish_queue_snapshot(reason="conversation_turn_admitted")
+    # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn. A failed
+    # publication keeps the row visibly unstarted (held from every carrier until a later barrier lands).
+    if queue.publish_queue_snapshot(reason="conversation_turn_admitted") is False:
+        meta["_unpublished"] = True
+        log.warning("Conversation turn %s admitted but its row is not on disk yet: no carrier holds it", task_id)
+        return meta
     slot = None if hold_carrier else ready_idle_carrier(for_owner=owner_turn(task))
     if slot is not None:
         hand_to_carrier(meta, slot)
@@ -276,10 +294,13 @@ def dispatch_awaiting_turns() -> int:
     from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, refused_carrier_reason, start_inline_turn
 
     waiting = awaiting_turns()
-    held = _held_by_a_stop(waiting)  # a Stop's custody settles these rows: no carrier ever takes them
+    # A Stop's custody settles its rows; a row not yet on disk waits for its publication: no carrier takes them.
+    held = _held_by_a_stop(waiting) | _unpublished(waiting)
     moved = 0
     for meta in waiting:  # a wake waiting for the spare never holds up the owner's turn behind it
-        slot = None if str(meta["task"].get("id") or "") in held else ready_idle_carrier(for_owner=owner_turn(meta["task"]))
+        if str(meta["task"].get("id") or "") in held:
+            continue
+        slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
         if slot is not None and hand_to_carrier(meta, slot):
             moved += 1
     waiting = [meta for meta in awaiting_turns() if str(meta["task"].get("id") or "") not in held]

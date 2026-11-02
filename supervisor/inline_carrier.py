@@ -200,6 +200,8 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
     pool = _pool()
     task = meta["task"]
     task_id = str(task["id"])
+    if meta.get("_unpublished"):  # the row is not on disk yet: no executor may hold the turn (a truthful refusal)
+        raise RuntimeError(f"conversation turn {task_id} was admitted but its row could not be published")
     owner = dict(task.get("_execution_owner") or {})
     owner.update(lane=LANE_CONVERSATION, executor=executor)
     task["_execution_owner"] = owner

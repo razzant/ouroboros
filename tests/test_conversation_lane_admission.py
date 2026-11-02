@@ -281,3 +281,21 @@ def test_a_turn_awaiting_its_carrier_with_a_stop_on_record_is_never_dispatched(l
     handed = _dispatched_once_carriers_are_ready()
     assert free in handed and held not in handed
     assert workers.RUNNING[held]["worker_id"] is None and workers.RUNNING[free]["worker_id"] is not None
+
+
+def test_a_failed_admission_barrier_keeps_the_turn_unstarted_until_its_row_lands(lane, monkeypatch):
+    """Astra M1: the row is on disk before any carrier can hold the turn. A failed barrier (False: the documents
+    on disk are the previous generation's) keeps the row visibly unstarted and the READY spare untouched, pass
+    after pass; once a publication lands, the next dispatch pass hands the turn to the carrier."""
+    from supervisor import queue
+
+    real = queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda reason="": False)
+    worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-m1"})
+    meta = next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION)
+    assert meta["worker_id"] is None and lane.spare.busy_task_id is None and lane.spare.in_q.empty()
+    conversation_lane.dispatch_awaiting_turns()  # the barrier still fails: the turn stays held
+    assert meta["worker_id"] is None and lane.spare.in_q.empty()
+    monkeypatch.setattr(queue, "publish_queue_snapshot", real)
+    conversation_lane.dispatch_awaiting_turns()
+    assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == meta["task"]["id"]

@@ -437,7 +437,7 @@ def _degrade_if_no_carrier_can_start(meta: Dict[str, Any]) -> None:
     from supervisor.conversation_lane import lane_carriers
     from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, refused_carrier_reason, start_inline_turn
 
-    if meta.get("worker_id") is not None:
+    if meta.get("worker_id") is not None or meta.get("_unpublished"):  # held, or its row not on disk yet
         return
     if any(w.booting and w.busy_task_id is None for w in lane_carriers()):
         return
