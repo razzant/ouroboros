@@ -261,7 +261,8 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         // The built-in compatible row's pair is also edited beside it (Settings' legacy address, the OpenAI key a
         // legacy pair travels with): the facts loaded or refreshed stand only while the draft still reaches their pair.
         const moved = builtin && kind === 'openai-compatible' && reachesAnotherPair(pageSettings, flatDraft());
-        const facts = connectionRowFacts({ draft: draft || moved || rowFingerprint(row) !== rowBaselines.get(row), enabled,
+        const changed = draft || moved || rowFingerprint(row) !== rowBaselines.get(row);
+        const facts = connectionRowFacts({ draft: changed, enabled,
             configured: Boolean(entry?.configured), source: entry?.source, usedBy: usage.get(id) || [], legacyAddress: legacy });
         const status = row.querySelector('[data-connection-status]');
         Object.assign(status, { textContent: facts.label, hidden: false });
@@ -281,7 +282,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         // instead, and a legacy pair keeps nothing in this row to clear.
         remove.hidden = builtin && !(entry?.configured && entry.source !== 'environment' && !legacy);
         remove.title = builtin ? 'Clear this key when you save' : draft ? 'Discard this key' : 'Forget this key when you save';
-        const note = cacheHintsNote(listed.find((item) => item?.id === id));
+        const note = changed ? '' : cacheHintsNote(listed.find((item) => item?.id === id));
         Object.assign(row.querySelector('[data-connection-cache]'), { textContent: note, hidden: !note });
     }
 

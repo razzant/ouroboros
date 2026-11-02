@@ -519,6 +519,16 @@ def test_settings_row_describes_the_pair_its_test_sends(direct_server_with_data,
         saved_before = (ui["data_dir"] / "settings.json").read_bytes()
         browser = getattr(pw, engine).launch(headless=True)
         page = browser.new_context(viewport={"width": 980, "height": 780}, device_scale_factor=2).new_page()
+        # Inject only a dated provider fact into the real Settings response: the test exercises its display,
+        # not a paid provider learning a cache-hint refusal. The server and every Test request stay real.
+        def with_cache_hint(route):
+            response = route.fetch()
+            data = response.json()
+            entry = next(item for item in data["_meta"]["connections"] if item["id"] == "openai-compatible")
+            entry["cache_hints"] = {"refused": True, "learned_at": "2026-10-20T10:00:00Z"}
+            route.fulfill(response=response, json=data)
+
+        page.route("**/api/settings", with_cache_hint)
         uncaught = []
         page.on("pageerror", lambda error: uncaught.append(str(error)))
         page.goto(ui["url"], wait_until="domcontentloaded")
@@ -532,6 +542,7 @@ def test_settings_row_describes_the_pair_its_test_sends(direct_server_with_data,
         row = page.locator('[data-provider-card="compatible"] [data-connection-row][data-builtin="1"]')
         official = page.locator('[data-provider-card="openai"] [data-connection-row][data-builtin="1"]')
         status, meta, verdict = (row.locator(f"[data-connection-{part}]") for part in ("status", "meta", "test-status"))
+        cache_note = row.locator("[data-connection-cache]")
         address, key, base = page.locator("#s-openai-base-url"), page.locator("#s-openai"), row.locator('[data-connection-field="base_url"]')
         kept = key.input_value()
         assert kept and kept != LEGACY_KEY, "Settings holds its own mask, never the key"
@@ -551,6 +562,11 @@ def test_settings_row_describes_the_pair_its_test_sends(direct_server_with_data,
         def step(name, row_status, *, shown=None, kept_verdict=None, test=None, answer=None, reached=None):
             """The row as painted, a frame of it, then (when asked) its real Test: what it sent and who heard it."""
             painted_as(name, lambda: expect(status).to_have_text(row_status, timeout=3000))
+            if row_status == "Not saved":
+                painted_as(name, lambda: expect(cache_note).to_be_hidden(timeout=3000))
+            else:
+                painted_as(name, lambda: expect(cache_note).to_be_visible(timeout=3000))
+                painted_as(name, lambda: expect(cache_note).to_contain_text("refused by this server"))
             if shown is None:
                 painted_as(name, lambda: expect(meta).to_be_hidden(timeout=3000))
             else:
