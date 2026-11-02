@@ -270,7 +270,7 @@ def test_a_keep_holds_the_exact_task_not_its_parent_or_child(copies):  # noqa: F
 
 def test_a_kept_drive_is_never_moved_and_a_moved_drive_is_never_called_kept(tmp_path, monkeypatch):
     root = tmp_path / "data"
-    probes = _drives(root, [("kept", "direct", "completed", OLD), ("gone", "direct", "completed", OLD)])
+    _drives(root, [("kept", "direct", "completed", OLD), ("gone", "direct", "completed", OLD)])
     _fake_sizer(monkeypatch)
     monkeypatch.setattr("ouroboros.maintenance.child.request", lambda: None)
     assert owner_keep.set_owner_keep(root, "kept", keep=True, source=KEEP)["status"] == "kept"
