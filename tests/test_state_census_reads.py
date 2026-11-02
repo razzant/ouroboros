@@ -81,7 +81,7 @@ def test_every_paused_root_shares_one_read_of_open_attempts(tmp_path, monkeypatc
     monkeypatch.setattr(owner_pause, "tree_model_requests", lambda root, task_id: single.append(task_id) or [])
     owners = [{"activity_id": f"paused-{n}", "phase": "budget_paused", "kind": "managed_task"} for n in range(3)]
     owners.append({"activity_id": "running-1", "phase": "running", "kind": "managed_task"})
-    wp._project(tmp_path, owners, {}, True, wp._Observations(tmp_path))
+    wp._project(tmp_path, owners, {}, True, wp._Observations(tmp_path), {})
     assert batched == [["paused-0", "paused-1", "paused-2"]], "one read answers every paused root"
     assert single == [], "no paused root reads its open attempts alone"
 

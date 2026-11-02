@@ -427,6 +427,17 @@ def replenish_after_claim() -> None:
         _WORKER_LIFECYCLE_LOCK.release()
 
 
+def reconcile_under_project_fence() -> None:
+    """Reconcile the lane while the project pool is fenced: the crash fuse that fences project slots does
+    not fence the conversation lane, and the fenced ``assign_tasks`` returns before ``reconcile_worker_capacity``,
+    the lane's other caller. A waiting turn is dispatched, a refused spawn noticed, the degraded executor
+    started. Lifecycle serializer held by the caller."""
+    try:
+        reconcile_conversation_lane()
+    except Exception:
+        log.exception("Conversation lane reconcile under the project fence failed")
+
+
 def lane_turn_rows() -> List[Dict[str, Any]]:
     """``active_direct_turns`` rows for the lane's RUNNING turns (the registry's shape), by value.
 

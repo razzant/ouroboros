@@ -782,25 +782,14 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
         return chosen_idx, False
 
 
-def _reconcile_fenced_lane() -> None:
-    """The conversation lane is independent of the project pool's crash fuse (FINAL_PLAN §2, the
-    11.10 recovery channel). Under the fence ``assign_tasks`` returns before ``reconcile_worker_capacity``,
-    the lane's only other caller, so the lane is reconciled here: a waiting turn is dispatched, a
-    refused spawn noticed, the degraded executor started. Lifecycle serializer held by the caller."""
-    from supervisor.conversation_lane import reconcile_conversation_lane
-
-    try:
-        reconcile_conversation_lane()
-    except Exception:
-        log.exception("Conversation lane reconcile under the project fence failed")
-
-
 def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_remaining
     from supervisor.worker_owner_wait import maintain_owner_wait_capacity
-
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity, worker_ready
+    from supervisor.conversation_lane import reconcile_under_project_fence
+    from supervisor.worker_pool_lifecycle import (
+        _WORKER_LIFECYCLE_LOCK, is_project_slot, reconcile_worker_capacity, worker_ready,
+    )
 
     # The loop never waits behind an off-loop respawn or generation stop holding the lifecycle
     # serializer (teardowns kill and join outside it): the whole turn defers to the next tick, so
@@ -810,7 +799,7 @@ def assign_tasks() -> None:
     try:
         maintain_owner_wait_capacity()
         if _pool()._WORKER_POOL_DISABLED_REASON:
-            _reconcile_fenced_lane()
+            reconcile_under_project_fence()
     finally:
         _WORKER_LIFECYCLE_LOCK.release()
     _tick_parked_work(queue)  # custody observation may wait on a remote operation
@@ -966,11 +955,8 @@ def assign_tasks() -> None:
 
         refused_this_pass = set()  # failed physical claims are not residual demand,
         deferred_this_pass = set()  # unless contention deferred them: the same work retries
-        from supervisor.worker_pool_lifecycle import is_project_slot
-
         for w in _pool().WORKERS.values():
-            # Queued work goes to project slots only; the conversation lane's carriers are
-            # admitted by routing and never chosen for PENDING (owner decision 1A).
+            # Queued work goes to project slots only; routing admits the conversation lane's carriers.
             while (is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
                     and not getattr(w, "resume_hold", "")
                     and getattr(w, "active_capacity", True) and _pool().PENDING):
