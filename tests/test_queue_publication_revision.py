@@ -79,11 +79,16 @@ def test_marks_under_q_write_no_bytes_and_the_tick_publishes_the_last_state(publ
     writes, _fsyncs = _writes(monkeypatch)
     encodings = []
     encode = queue_publication.machine_json
-    def no_bytes_under_q(payload):
-        assert not queue._queue_lock._is_owned(), "serialization never runs under Q"
-        encodings.append(1)
-        return encode(payload)
-    monkeypatch.setattr(queue_publication, "machine_json", no_bytes_under_q)
+    def no_payload_bytes_under_q(payload):
+        encoded = encode(payload)
+        if queue._queue_lock._is_owned():
+            # The tick's census of volatile row facts is the one encoding under Q: never a task payload.
+            assert "origin_message_text" not in encoded and OWNER_TEXT[:64] not in encoded and '"text"' not in encoded, \
+                "task payload serialized under Q"
+        else:
+            encodings.append(1)
+        return encoded
+    monkeypatch.setattr(queue_publication, "machine_json", no_payload_bytes_under_q)
     queue_publication.tick_publisher_started()  # this thread is the loop
     revision = queue_publication.queue_revision()
     with queue._queue_lock:

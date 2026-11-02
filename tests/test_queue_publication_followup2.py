@@ -128,3 +128,59 @@ def test_no_runtime_caller_reads_the_marks_value_or_reaches_it_through_getattr()
                     and isinstance(node.args[1], ast.Constant) and node.args[1].value == MARK and rel not in allowed_getattr):
                 offenders.append(f"{rel}:{node.lineno} reaches the mark through getattr")
     assert offenders == [], offenders
+
+
+# ---- M6: a fact changed under Q without a mark is published by the next tick ----------------------
+
+def _running(task_id, now):
+    return {"task": _task(task_id, model_waits={}), "attempt": 1, "worker_id": 3, "started_at": now - 100,
+            "last_heartbeat_at": now - 1, "last_progress_at": now - 50, "budget_paused_sec": 0.0, "soft_sent": False}
+
+
+def test_an_unmarked_change_of_a_published_row_fact_is_published_by_the_tick(published):
+    root, now = published
+    queue.RUNNING["r"] = _running("r", now[0])
+    assert queue.persist_queue_snapshot("start") is True
+    queue_publication.tick_publisher_started()
+    generation = _read(root, "queue.alive")["generation"]
+    assert queue_publication.publish_queue_changes() is True
+    assert _read(root, "queue.alive")["generation"] == generation, "an unchanged live set publishes nothing"
+    # silence_attention.observe: a worker report mutates RUNNING in place under Q with no mark (#1376's source).
+    with queue._queue_lock:
+        queue.RUNNING["r"]["silence_attention"] = {"episode_id": "e1", "state": "pending_attention", "last_progress_at": now[0] - 50}
+    assert queue_publication.publish_queue_changes() is True
+    row = _read(root, "queue_snapshot.json")["running"][0]
+    assert row["silence_attention"]["episode_id"] == "e1" and row["last_progress_at"] == now[0] - 50
+    second = _read(root, "queue.alive")["generation"]
+    assert second != generation, "the census saw the unmarked change"
+    # The progress that revokes the episode (work_diagnostics reads it from the snapshot) is published too.
+    with queue._queue_lock:
+        queue.RUNNING["r"]["last_progress_at"] = now[0] - 10
+    assert queue_publication.publish_queue_changes() is True
+    assert _read(root, "queue_snapshot.json")["running"][0]["last_progress_at"] == now[0] - 10
+    # The quota clock (task_model_wait) and the model waits a worker reports are watched the same way.
+    with queue._queue_lock:
+        queue.RUNNING["r"]["model_wait_quota_clock"] = {"revision": 2, "active": True, "elapsed_sec": 3, "observed_at": now[0]}
+        queue.RUNNING["r"]["task"]["model_waits"] = {"w1": {"state": "waiting", "revision": 1, "task_attempt": 1}}
+    third = _read(root, "queue.alive")["generation"]
+    assert queue_publication.publish_queue_changes() is True
+    row = _read(root, "queue_snapshot.json")["running"][0]
+    assert row["model_wait_quota_clock"]["revision"] == 2 and row["task"]["model_waits"]["w1"]["state"] == "waiting"
+    assert _read(root, "queue.alive")["generation"] != third
+    # Rest law: another tick over the unchanged rows writes no document.
+    fourth = _read(root, "queue.alive")["generation"]
+    assert queue_publication.publish_queue_changes() is True
+    assert _read(root, "queue.alive")["generation"] == fourth
+
+
+def test_the_census_watches_exactly_the_row_facts_the_capture_publishes():
+    """One list for both: a fact the capture writes is a fact the census watches, by construction."""
+    now = 1_800_000_000.0
+    meta = _running("r", now)
+    meta["silence_attention"] = {"state": "pending_attention"}
+    facts = queue_publication._row_facts(meta)
+    assert set(facts) == set(queue_publication._ROW_FACTS) | {"silence_attention", "last_progress_at"}
+    meta["silence_attention"] = {"state": "progress_observed"}
+    assert "last_progress_at" not in queue_publication._row_facts(meta), "ordinary progress rotates nothing"
+
+

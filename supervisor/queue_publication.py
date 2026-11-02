@@ -61,10 +61,18 @@ _FORCED_REASONS = frozenset({"startup", "pre_restart_exit", "server_shutdown"})
 #: so an older body restores it after a rollback (the restart exit; the shutdown kill of every door).
 _EXPORT_REASONS = frozenset({"pre_restart_exit", "server_shutdown"})
 _ALIVE_NAME = "queue.alive"
+#: The RUNNING-row facts a publication carries besides the task. The capture writes exactly these and
+#: the tick's census watches exactly these, so a fact a worker report changes under Q without a mark
+#: (a silence episode, the quota clock, an owner wait) is published by the next tick, and a fact added
+#: here later is watched by construction (RV_MAIN M6).
+_ROW_FACTS = ("attempt", "worker_id", "owner_wait", "started_at", "model_wait_quota_clock",
+              "sleep_parked_at", "budget_paused_sec", "soft_sent")
+#: Task facts a worker reports without a queue transition; every other task fact changes with a mark.
+_REPORTED_TASK_FACTS = ("model_waits", "focus")
 
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last
 # capture written. Kept: the (revision, custody) at which the saved queue was last kept.
-_STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None,
+_STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
 _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
@@ -73,7 +81,8 @@ _PUBLISH_LOCK = threading.Lock()
 def reset() -> None:
     """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher."""
     global _PUBLISHER
-    _STATE.update(revision=0, published=0, reason="", kept=None, alive_heartbeats=None, alive_written_at=0.0)
+    _STATE.update(revision=0, published=0, reason="", kept=None, census=None, alive_heartbeats=None,
+                  alive_written_at=0.0)
     _PUBLISHER = None
 
 
@@ -165,13 +174,16 @@ def publish_queue_changes() -> Optional[bool]:
     direct = collect_direct_roots()
     published = _queue().QUEUE_PUBLICATION
     direct_moved = published is not None and published[1].get("direct_roots.json") != machine_json(direct)
-    if _STATE["revision"] == _STATE["published"] and not direct_moved:
-        outcome = _refresh_alive()
-    else:
-        with _queue()._queue_lock:
-            capture = _capture(_STATE["reason"] or "main_loop", direct)
-        outcome = None if capture is None else _publish(capture)
-    return outcome
+    with _queue()._queue_lock:
+        # The census: what the rows publish without a transition (worker reports mutate RUNNING in place
+        # with no mark). One small identity per tick, so a changed fact is published and an unchanged
+        # live set still captures, serializes and writes nothing.
+        census = _census()
+        moved = _STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
+        capture = _capture(_STATE["reason"] or "main_loop", direct, census=census) if moved else None
+    if not moved:
+        return _refresh_alive()
+    return None if capture is None else _publish(capture)
 
 
 def _frozen(value: Any) -> Any:
@@ -183,8 +195,37 @@ def _frozen(value: Any) -> Any:
     return value
 
 
-def _capture(reason: str, direct: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """The published facts of one RUNNING row besides its task, as the capture writes them.
+
+    Only a dated silence episode is a diagnostic's source authority (#1376): its fact, and while it
+    stays open the progress that revokes it before the recovery lane writes the result. Ordinary
+    progress rotates nothing.
+    """
+    facts = {key: meta.get(key) for key in _ROW_FACTS}
+    facts.update(started_at=float(meta.get("started_at") or 0.0),
+                 budget_paused_sec=float(meta.get("budget_paused_sec") or 0.0), soft_sent=bool(meta.get("soft_sent")))
+    silence = meta.get("silence_attention")
+    if silence:
+        facts["silence_attention"] = silence
+        if isinstance(silence, dict) and silence.get("state") == "pending_attention":
+            facts["last_progress_at"] = meta.get("last_progress_at")
+    return facts
+
+
+def _census() -> str:
+    """Under Q: one small identity of what the rows publish without a transition, and the pool counts."""
+    rows = []
+    for task_id, meta in _queue().RUNNING.items():
+        if isinstance(meta, dict):
+            task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+            rows.append((task_id, _row_facts(meta), {key: task.get(key) for key in _REPORTED_TASK_FACTS}))
+    return machine_json([rows, _pool_counts()])
+
+
+def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
+    _STATE["census"] = _census() if census is None else census
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
@@ -213,22 +254,8 @@ def _capture(reason: str, direct: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     running_rows = []
     for task_id, meta in running_items:
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-        # Only a dated silence episode is a diagnostic's source authority (#1376):
-        # its fact, and while it stays open the progress that revokes it before
-        # the recovery lane writes the result. Ordinary progress rotates nothing.
-        silence = _frozen(meta.get("silence_attention"))
-        running_rows.append({
-            "id": task_id, "type": task.get("type"), "priority": task.get("priority"),
-            "attempt": meta.get("attempt"), "worker_id": meta.get("worker_id"),
-            "owner_wait": _frozen(meta.get("owner_wait")), "started_at": float(meta.get("started_at") or 0.0),
-            **({"silence_attention": silence} if silence else {}),
-            **({"last_progress_at": meta.get("last_progress_at")}
-               if silence and silence.get("state") == "pending_attention" else {}),
-            "model_wait_quota_clock": _frozen(meta.get("model_wait_quota_clock")),
-            "sleep_parked_at": meta.get("sleep_parked_at"),
-            "budget_paused_sec": float(meta.get("budget_paused_sec") or 0.0),
-            "soft_sent": bool(meta.get("soft_sent")), "task": _frozen(task),
-        })
+        running_rows.append({"id": task_id, "type": task.get("type"), "priority": task.get("priority"),
+                             **_frozen(_row_facts(meta)), "task": _frozen(task)})
     from ouroboros.server_restart import _AGENT_RESTART_REPLY, agent_restart_snapshot
 
     return {
