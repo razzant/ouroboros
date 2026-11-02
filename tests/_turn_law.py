@@ -23,12 +23,6 @@ class TurnLawBreach(AssertionError):
 # excuses, each with the growth it may not pass meanwhile: measured at k=30 for the history laws, scaled by the
 # units of history added). Measured 26.10 on the integrated tree in its steady state (tests/_turn_shapes.py).
 TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
-    ("L3", "T:main:broad"): (
-        "10 more running roots in the published queue: peer_roster.independent_roots reads each root's whole body "
-        "(_compact_root -> load_task_result) twice per turn, for the context's live works and the first round's roster "
-        "note: begins +20, statements +180 (02.11). The breadth step did not publish its roots before 02.11, which hid "
-        "this. No unit of the server-saturation sprint removes it; once the lane lands the reads are a carrier's.",
-        {"begins": 24, "statements": 216}),
     ("L3", "T:main:archive"): (
         "40 archived knowledge notes and 40 old rescue snapshots (k=1, the turn after the one that met them): "
         "the knowledge shelf is listed for the index the mind is shown, which counts the archived notes "

@@ -23,15 +23,29 @@ import pytest
 
 from tests._live_set import STAGES
 from tests._stand import CHARS_PER_TOKEN, SHAPES
+from tests._turn_law import readers_of
 from tests.test_cost_contract import COUNT_JITTER, ROUND, measure
-from tests.test_cost_live_set import (ALLOWED_AT_REST, BYTE_JITTER, GAPS, LB, LD, PASSES, PHASE, RECONCILE_WORK, RESTING, REST_GAPS,
-                                      UNASSIGNED, _gap, _gap_mark, live_rest_breaches, live_set_breaches)
+from tests.test_cost_live_set import (
+    ALLOWED_AT_REST,
+    BYTE_JITTER,
+    GAPS,
+    PASSES,
+    PHASE,
+    RECONCILE_WORK,
+    REST_GAPS,
+    RESTING,
+    _gap,
+    _gap_mark,
+    _growing,
+    live_rest_breaches,
+    live_set_breaches,
+)
 
 pytestmark = pytest.mark.scale
 
 K = 1
 # The owner's turn beside others: two read transactions per other live turn, whichever store is asked.
-BESIDE_GAP = (f"{UNASSIGNED}: room_reader.is_reading asks task_drive_status and read_fence for every other live turn in the room "
+BESIDE_GAP = ("no unit of this sprint: room_reader.is_reading asks task_drive_status and read_fence for every other live turn in the room "
               "(4 more read transactions beside 2 others, 8 beside 4); the rows the others added are payload")
 # A pass's flat gap over the whole growth: the union of the axis law's rows for that pass.
 FLAT_GAPS = {name: "; ".join(reason for (_axis, gap_name), reason in GAPS.items() if gap_name == name)
@@ -84,7 +98,6 @@ def test_e2_the_set_was_really_there(stand):
 
 # ---- E3: the heartbeat ---------------------------------------------------------------------------------------------------
 
-@_gap_mark(f"{LD} L4: a root heartbeat costs two store transactions on the drain")
 def test_e3_a_heartbeat_touches_no_store(stand):
     counts = _pass(stand, STAGES[-1], "heartbeat")["counts"]
     assert not {key: counts[key] for key in ("begins", "statements", "connect") if counts.get(key)}, counts
@@ -97,7 +110,6 @@ def test_e3_one_stamp_and_one_frame_per_client(stand):
 
 # ---- E4: the queue's publication -------------------------------------------------------------------------------------------
 
-@_gap_mark(f"{LB} L5: the owner's message rides every row by value")
 def test_e4_the_owner_s_words_appear_once_in_the_document(stand):
     assert stand["live_set"]["change"]["owner_text_copies"] == 1
 
@@ -106,14 +118,12 @@ def test_e4_a_reader_still_gets_the_whole_row(stand):
     assert stand["live_set"]["change"]["reader_sees_owner_text"]
 
 
-@_gap_mark(f"{LB} L5: documents are built, serialized and synced under Q")
 def test_e4_work_under_the_queue_lock_does_not_follow_the_queue_s_bytes(stand):
     little, big = (stand["live_set"]["change"][stage]["counts"] for stage in (STAGES[0], STAGES[-1]))
     assert not {key: big[key] for key in ("under_q:fsync", "under_q:replace") if big.get(key)}, big
     assert big.get("under_q:json_dumps_chars", 0) - little.get("under_q:json_dumps_chars", 0) <= BYTE_JITTER, (little, big)
 
 
-@_gap_mark(f"{LB} L5: queue.alive is synced like the documents")
 def test_e4_the_certificate_is_written_without_a_sync(stand):
     names = stand["live_set"]["change"][STAGES[-1]].get("names", {})
     assert not [name for name in names if name.startswith("fsync") and "queue.alive" in name], names
@@ -142,7 +152,7 @@ def test_e6_the_owner_s_turn_makes_the_same_round_trips_beside_other_turns(stand
     assert facts["others_held"] == SHAPES[stand["shape_name"]].turns - 1, facts["others_held"]
     alone, beside = facts["T:stand:alone"]["counts"], facts["T:stand:beside"]["counts"]
     growth = {key: beside.get(key, 0) - alone.get(key, 0) for key in ROUND}
-    assert not {key: delta for key, delta in growth.items() if delta > COUNT_JITTER}, growth
+    assert not {key: delta for key, delta in growth.items() if delta > COUNT_JITTER}, (growth, readers_of(facts["T:stand:alone"], facts["T:stand:beside"])({"statements": 1}))
 
 
 def test_e6_the_others_were_live_while_it_was_counted(stand):

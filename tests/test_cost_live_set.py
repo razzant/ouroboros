@@ -18,9 +18,8 @@ The laws (FINAL_PLAN E2, E3, E4; counts, never a clock):
 - the heartbeat is an in-memory stamp and one frame; the queue's owner text appears once in its document and nothing is
   serialized or synced under the queue lock; a pass that rests still works on a real change.
 
-Where today's code breaks a law the test is ``xfail(strict=True)`` naming its measured numbers and the unit that removes it
-(``GAPS``), so this file is green now and flips (XPASS) when the unit lands; the row is then deleted. A row with no
-unit is a breach the sprint's plan did not assign: it stays visible here instead of being averaged away.
+A law a tree cannot meet yet is ``xfail(strict=True)`` naming its measured numbers and the unit that removes it (``GAPS``),
+so it stays visible instead of being averaged away, and flips (XPASS) when the unit lands; the row is then deleted.
 """
 
 from __future__ import annotations
@@ -43,35 +42,10 @@ LARGEST = STAGES[-1]
 PASSES = (*DUTY_NAMES, "extension-reconcile", "heartbeat", "state", "publication", "assign", "timeouts")
 # The growth an axis stands for (the VM steps' logarithmic allowance reads it, as the history law reads k).
 GROWTH = {"running": 50, "paused": 20, "pending": 61, "held": 122, "schedules": 35, "markers": 60}
-# Today's numbers below: rest counts at k=1, measured 02.11 on the base (1d88f843b). A unit named here removes the row when
-# it lands; ``UNASSIGNED`` is a breach of E2 no unit of the sprint owns, kept in view rather than averaged away.
-LC, LD, LB, LE = "LC", "LD", "LB", "LE"
-UNASSIGNED = "no unit of this sprint"
-QUEUE_DOC_PER_PASS = "_startup_live_task_ids parses the whole queue document once per 600 s pass"
-
-GAPS: Dict[tuple, str] = {
-    ("running", "cold-custody"): f"{LC} L2: one budget_pause_row transaction per RUNNING row every 3 s (begins 1 -> 50)",
-    ("running", "state"): f"{LE} L6: _task_activity_facts and read_fence per activity row (decodes 145 -> 439, stats 128 -> 520)",
-    ("paused", "owner_pause_settlement"): f"{LC} L1: the census of every fence, each member's strict body (begins 14 -> 284)",
-    ("paused", "state"): f"{LE} L6: the tree census per paused root (begins 15 -> 53)",
-    ("paused", "assign"): f"{LC} L3: _drop_cancelled_pending reads a body per pending row under Q (begins 6 -> 44)",
-    ("pending", "state"): f"{LE} L6: one census row per pending task (decodes 914 -> 1,154, stats 824 -> 1,304)",
-    ("pending", "assign"): f"{LC} L3: _drop_cancelled_pending reads a body per pending row under Q (begins 44 -> 104)",
-    ("held", "state"): f"{LE} L6: 122 held runs decoded to show the open ones (begins 53 -> 71)",
-    ("schedules", "schedule-admission"): f"{LD} L9: every row's policy and receipts on every tick (begins 8 -> 49)",
-    ("markers", "extension-reconcile"): f"{LD} L8: one reconcile per marker of two skills, each publishing a generation "
-                                        "(120 markers: about a child process and a lock each)",
-    ("running", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.16 -> 0.21 MB)",
-    ("paused", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.21 -> 4.3 MB)",
-    ("pending", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (4.3 -> 7.2 MB)",
-}
-REST_GAPS: Dict[str, str] = {
-    "owner_pause_settlement": f"{LC} L1: 20 settled trees re-derived on every pass (122 task bodies, 20 usage reads)",
-    "schedule-admission": f"{LD} L9: 18 task bodies for 35 unchanged rows",
-    "heartbeat": f"{LD} L4: a root heartbeat reads custody and usage (two transactions, one usage read)",
-    "state": f"{LE} L6: an unchanged revision rebuilds the answer (10 task bodies, 23 usage reads)",
-    "publication": f"{LB} L5: queue.alive replaced and synced on every unchanged publication",
-}
+# (axis, pass) and pass -> the breach with its measured numbers and the unit that removes it, a strict xfail until that unit
+# lands, then the row goes. Both empty on 02.11: every row the base (1d88f843b) had was removed by the unit it named.
+GAPS: Dict[tuple, str] = {}
+REST_GAPS: Dict[str, str] = {}
 # (pass -> counts its own work allows at rest). The duty exists to look at the open attempts: one indexed read, zero rows here.
 ALLOWED_AT_REST = {"abandoned_usage_reconciliation": {"usage_row_reads": 1}}
 HISTORY_GAPS: Dict[str, str] = {}
@@ -235,7 +209,6 @@ def test_a_scan_of_the_axis_keeps_the_instrument_honest():
 
 # ---- the heartbeat (E3) --------------------------------------------------------------------------------------------
 
-@_gap_mark(f"{LD} L4: a root heartbeat costs two store transactions (custody, then usage) on the drain")
 def test_a_heartbeat_touches_no_store(live):
     counts = _rest(live, K_SMALL, LARGEST, "heartbeat")["counts"]
     assert not {key: counts[key] for key in ("begins", "statements", "connect") if counts.get(key)}, counts
@@ -255,7 +228,6 @@ def test_a_heartbeat_costs_the_same_with_clients_as_without(live):
 
 # ---- the queue's publication (E4) -------------------------------------------------------------------------------------
 
-@_gap_mark(f"{LB} L5: the owner's message rides every row by value (72 % of the document on 01.11)")
 def test_the_published_queue_carries_the_owner_s_words_once(live):
     copies = live[K_SMALL]["live_set"]["change"]["owner_text_copies"]
     assert copies == 1, f"{copies} copies of one message in the document a restart reads"
@@ -266,7 +238,6 @@ def test_a_reader_of_the_published_queue_still_sees_the_whole_row(live):
     assert live[K_SMALL]["live_set"]["change"]["reader_sees_owner_text"]
 
 
-@_gap_mark(f"{LB} L5: documents are built, serialized and synced under Q (3 fsyncs, 3.3 MB serialized at the largest set)")
 def test_a_published_change_holds_nothing_under_the_queue_lock_but_its_capture(live):
     """E4: what an owner's control waits behind does not grow with the queue's bytes, and no file is touched under Q."""
     little = live[K_SMALL]["live_set"]["change"]["smallest"]["counts"]
@@ -283,7 +254,6 @@ def test_a_change_is_published_though_an_unchanged_queue_is_not(live):
     assert facts["row_published"], facts["row_published"]
 
 
-@_gap_mark(f"{LB} L5: queue.alive is synced like the documents")
 def test_the_liveness_certificate_is_written_without_a_sync(live):
     names = live[K_SMALL]["live_set"]["change"][LARGEST].get("names", {})
     assert not [name for name in names if name.startswith("fsync") and "queue.alive" in name], names
