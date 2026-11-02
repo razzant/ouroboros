@@ -682,13 +682,12 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
     """One addressed input change per duty, after whose arrival the duty has work again (the live set's own six in
     tests/_live_set.py). Each returns what it changed."""
     from ouroboros import delegate_custody as custody
-    from ouroboros import maintenance_jobs, owner_quiz
+    from ouroboros import maintenance_jobs, owner_quiz, store
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.delegate_collection import observe_run
     from ouroboros.late_review_marks import OWED_SET
     from ouroboros.task_results import write_task_result
     from supervisor.terminal_delivery import delivery_id_for, register_pending_delivery
-    from ouroboros import store
 
     companion = facts["companion"]
 
@@ -867,6 +866,9 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
 
 def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str, Any], root: pathlib.Path,
                       facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
+    from ouroboros import utils
+
+    utils._RACY_NS = 0  # a file within a clock tick of its write proves nothing and ends a probe early: bounded by time, not by history
     _chat_frame(meter, client, result, "B4", "cost-contract-1")
     _request(meter, client, result, "B3", "GET", "/api/state")
     _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")

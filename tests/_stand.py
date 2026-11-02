@@ -19,10 +19,21 @@ import pathlib
 import threading
 from typing import Any, Dict, List, NamedTuple
 
-from tests._cost_driver import (_FirstRequest, _boot_census, _boundary, _event_ctx, _lane_rows_ended, _mark, _owner_turn, _summary,
-                                no_carrier_can_start)
+from tests._cost_driver import (
+    _boot_census,
+    _boundary,
+    _event_ctx,
+    _FirstRequest,
+    _lane_rows_ended,
+    _mark,
+    _owner_turn,
+    _summary,
+    no_carrier_can_start,
+)
 from tests._cost_meter import tag_of, tagged
-from tests._live_set import FULL as FULL_SET, Shape, measure as measure_live_set
+from tests._live_set import FULL as FULL_SET
+from tests._live_set import Shape
+from tests._live_set import measure as measure_live_set
 
 CHARS_PER_TOKEN = 4  # the plan's "~125k-token story": what a page's text weighs, read by no law as a limit
 FIRST_ROOM = 6000

@@ -350,12 +350,15 @@ def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measur
     """L2. An integrating turn makes the same round trips and decodes the same dialogue rows at k=1 and k=30:
     Main's (the process's first, the next one, one after activity elsewhere) and a project room's direct turn,
     which integrates as a root task does (BIBLE P1: the whole horizon stays resident there, so its view holds
-    every room's story and a line per live room). Its payload is free: an integrating view shows its story."""
+    every room's story and a line per live room). Its payload is free: an integrating view shows its story. The
+    transactions ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing)
+    bring their statements, as in L3; a read per unit of history still adds 29 transactions."""
     large = measured["large"]
     little, big = at_request(measured, tag, K_SMALL), at_request(measured, tag, large)
     keys = (*ROUND, "rows_decoded")
-    hold_turn_law("L2", tag, _growth(little, big, keys), dict.fromkeys(keys, COUNT_JITTER), readers_of(little, big),
-                  scale=(large - K_SMALL) / 29)
+    per_begin = little["counts"].get("statements", 0) / max(1, little["counts"].get("begins", 0))
+    allowed = {**dict.fromkeys(keys, COUNT_JITTER), "statements": math.ceil(per_begin * COUNT_JITTER)}
+    hold_turn_law("L2", tag, _growth(little, big, keys), allowed, readers_of(little, big), scale=(large - K_SMALL) / 29)
 
 
 @pytest.mark.parametrize("law, tag, before, step", [

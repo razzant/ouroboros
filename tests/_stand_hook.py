@@ -4,8 +4,8 @@ It wraps the doors of cognition where they are defined, before any importer take
 its process and thread: E1 reads which of them ran in the server's own process. It imports nothing of the tree. Knobs, each off
 unless its variable is set: ``STAND_DOOR_LOG``: the rows' file; ``STAND_REFUSE_SPAWN``: while this file exists a worker's spawn is
 refused, the physical fact the degraded executor answers to; ``STAND_MARKER_WINDOW``: while this file exists the repo-writer gate
-reads as an assisted update's (conflict markers in the tree a spawn would import), the other such fact; ``STAND_JOURNAL``: the
-journal mode every store takes;
+reads as an assisted update's, the other such fact: a child started now would import the tree's conflict markers, so its start
+is refused and counted (``spawn_in_marker_window``); ``STAND_JOURNAL``: the journal mode every store takes;
 ``STAND_SAMPLE_LOG``: every quarter second the supervisor's and the event loop's top frames in the server process, counted, and how
 late this sampler itself woke, the wait of any thread that wants the interpreter now (reported facts: E5's look at what the door
 waits behind).
@@ -41,15 +41,18 @@ def _task_of(args, kwargs):
     return ""
 
 
+def _row(door, task_id, caller):
+    row = {"pid": os.getpid(), "door": door, "thread": threading.current_thread().name, "task_id": task_id, "caller": caller, "ts": time.time()}
+    try:
+        with _WRITE, open(_LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+    except OSError:
+        pass
+
+
 def _spied(door, call):
     def spy(*args, **kwargs):
-        row = {"pid": os.getpid(), "door": door, "thread": threading.current_thread().name, "task_id": _task_of(args, kwargs),
-               "caller": sys._getframe(1).f_code.co_name, "ts": time.time()}
-        try:
-            with _WRITE, open(_LOG, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(row) + "\n")
-        except OSError:
-            pass
+        _row(door, _task_of(args, kwargs), sys._getframe(1).f_code.co_name)
         return call(*args, **kwargs)
     return spy
 
@@ -60,11 +63,14 @@ def _patch(module):
         setattr(owner, name, _spied(name, getattr(owner, name)))
     if _JOURNAL and module.__name__ == "ouroboros.store":
         module._journal_mode = lambda *_args: _JOURNAL
-    if _REFUSE and module.__name__ == "supervisor.worker_process":
+    if (_REFUSE or _WINDOW) and module.__name__ == "supervisor.worker_process":
         real = module.spawn_worker_process
 
         def spawn_worker_process(*args, **kwargs):
-            if os.path.exists(_REFUSE):
+            if _WINDOW and os.path.exists(_WINDOW):
+                _row("spawn_in_marker_window", "", sys._getframe(1).f_code.co_name)
+                raise OSError("a child started now would import the tree's conflict markers")
+            if _REFUSE and os.path.exists(_REFUSE):
                 raise OSError("the stand refuses this spawn")
             return real(*args, **kwargs)
 

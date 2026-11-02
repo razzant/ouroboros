@@ -136,7 +136,8 @@ def grow_held(root: pathlib.Path, have: int, want: int, settled: int, facts: Dic
     """Held custody runs: copies of a real held candidate's row (the build's collection wrote it, settled, its patch
     awaiting disposition, its collection attempt recorded over these inputs, so the body has nothing owed), each with
     its finished owner task, and runs still open, whose rows the real emitter writes."""
-    from ouroboros import delegate_custody as custody, store
+    from ouroboros import delegate_custody as custody
+    from ouroboros import store
     from tests._scale_root import _settled_task
 
     template = facts["held_runs"][0]["run_id"]
@@ -234,7 +235,8 @@ def tick_pass(sm: Any, name: str, stop: threading.Event) -> None:
 
 def _passes(meter: Any, srv: Any, client: Any, root: pathlib.Path, stubs: Dict[str, Any],
             stop: threading.Event) -> Dict[str, Callable[[], Any]]:
-    from ouroboros import server_maintenance as sm, utils
+    from ouroboros import server_maintenance as sm
+    from ouroboros import utils
     from ouroboros.config import load_settings
     from ouroboros.delegate_collection import body_runtime
     from ouroboros.extension_reconcile_queue import process_extension_reconcile_requests

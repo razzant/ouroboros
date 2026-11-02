@@ -15,10 +15,9 @@ are no part of a row. A name is what is scanned, not a resolved call: a door rea
 is not seen, which is why the dynamic drives below and the stand (tests/system_e2e/test_stand_server.py, E1, a real
 server with real workers and a spy at each door) hold the law at the doors themselves.
 
-Today's starts that break the class are rows too, with the executor ``SERVER_THREAD``, grouped by the focus they
-start (``FOCI_ON_SERVER_THREADS``). The law over them and the drives are strict xfails naming their remover, so this
-file is green now and a focus that leaves the server turns its row XPASS: the marker and the rows are then removed,
-one focus at a time (conversation lane, wakes, Presence), and a row reclassified by hand is still held by the stand.
+A start that breaks the class could only be a row with the executor ``SERVER_THREAD``, naming the focus it starts, and
+the laws below hold that none exists. A row reclassified by hand is still held by the drives and the stand. This table
+named 25 such starts on the base (1d88f843b); the conversation lane removed them one focus at a time.
 """
 
 from __future__ import annotations
@@ -31,6 +30,9 @@ from typing import Dict, Iterable, List, NamedTuple, Set, Tuple
 
 import pytest
 
+from tests.test_conversation_lane_presence import lane as lane  # noqa: F401 -- fixture
+from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ROOTS = ("ouroboros", "supervisor", "server.py")
 
@@ -42,14 +44,17 @@ DOORS: Dict[str, str | None] = {
     "handle_chat_direct": None, "_run_chat_task": None, "_execute_chat_task": None, "handle_wake_direct": None,  # the lane
     "observe_wake": None, "previous_wake_text": None, "render_wake_message": None, "bind_wake_observation": None,
     "_context_facts": "ouroboros/consciousness.py",  # a wake's preparation
-    "run_presence_turn": None,  # a Presence turn's body
+    "run_worker_task": None, "start_inline_turn": None, "run_inline_turn": None,  # the one task body, and the inline rows' doors
+    "prepare_conversation_task": None, "prepare_wake": None,  # a turn's first step in its carrier
+    "run_presence_turn": None, "carry_presence_turn": None, "start_proactive_turn": None,  # a Presence turn's body
     "_realtime_turn": None,  # a live call's native session, bound to an agent
     "_run_post_task_processing_async": None,  # paid model calls after a task, on their own thread
     "load_extension": None,  # foreign Python imported into this process
 }
 
 WORKER = "worker"  # a worker process's own body
-INSIDE = "inside_handle_task"  # reached only from an agent's task: the row that started the task is its executor
+INSIDE = "inside_handle_task"  # reached only from a task's body: the row that started the task is its executor
+ADMISSION = "admission"  # the server's door: it writes the row and hands the turn to a carrier; the body is not here
 INLINE_CALL = "inline_call"  # owner decision 3A
 INLINE_DEGRADED = "inline_degraded"  # owner decision 2A
 SERVER_THREAD = "server_thread"  # a focus on a server thread: the class this file closes
@@ -58,18 +63,12 @@ RESIDUAL = "residual"  # disclosed: not a focus, a class of its own with its own
 
 # Executors a server thread may run cognition on: exactly the owner's two rows.
 ALLOWED_ON_A_SERVER_THREAD = {INLINE_CALL, INLINE_DEGRADED}
-# The foci today's code still starts on server threads, each with the unit that moves it; a focus's law flips when its
-# rows are gone (sprint server-saturation-20261102, FINAL_PLAN §4 steps 4 to 6).
+# Every focus of the mind (owner decision 1A): none may start on a server thread.
 OWNER_TURN = "owner_turn"
 WAKE = "wake"
 PRESENCE = "presence"
 AUTO_RESUME = "auto_resume"
-FOCI_ON_SERVER_THREADS = {
-    OWNER_TURN: "LA: an owner Main/room turn runs on a daemon thread of the server (server_owner_routing, worker_chat_lane)",
-    WAKE: "LA (L7): a wake's observation, context facts and render run on the supervisor tick and its body on a thread",
-    PRESENCE: "LA: a Presence turn's body runs on a thread of the Host Service's process (presence_runner, host_service)",
-    AUTO_RESUME: "LA: the turn after a planned restart starts as an in-server direct turn (worker_chat_lane)",
-}
+FOCI = (AUTO_RESUME, OWNER_TURN, PRESENCE, WAKE)
 
 
 class Row(NamedTuple):
@@ -84,22 +83,53 @@ INVENTORY: Dict[Site, Row] = {
     # The worker process: the home of every focus.
     ("supervisor/worker_process.py", "spawn_worker_process", "worker_main"): Row(
         WORKER, "the pool's one spawn (ctx.Process), ledgered by _record_worker_processes"),
-    ("supervisor/worker_process.py", "worker_main", "handle_task"): Row(WORKER, "the worker's task body"),
     ("supervisor/worker_process.py", "worker_main", "make_agent"): Row(WORKER, "the worker's own agents"),
-    # An agent's insides: their executor is the row that started its task.
+    ("supervisor/worker_process.py", "worker_main", "run_worker_task"): Row(WORKER, "the worker's loop, one task at a time"),
+    # The server's doors: they admit, and the body runs in a carrier.
+    ("ouroboros/server_owner_routing.py", "_route_owner_message", "handle_chat_direct"): Row(
+        ADMISSION, "from the intake's own stack; a live call keeps a thread of its own, whose door is run_inline_turn below"),
+    ("server.py", "_run_supervisor", "handle_chat_direct"): Row(ADMISSION, "the routing context's door"),
+    ("supervisor/worker_chat_lane.py", "auto_resume_after_restart", "handle_chat_direct"): Row(ADMISSION, "the turn after a planned restart"),
+    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch", "handle_wake_direct"): Row(
+        ADMISSION, "the tick decides when and admits; the wake's preparation is its carrier's first step"),
+    # A task's body and what only it reaches: their executor is the row that started the task.
+    ("supervisor/worker_process.py", "run_worker_task", "make_agent"): Row(INSIDE, "a task with a drive of its own"),
+    ("supervisor/worker_process.py", "_run_task_body", "handle_task"): Row(INSIDE, "the one task body"),
+    ("supervisor/worker_process.py", "_run_task_body", "prepare_conversation_task"): Row(INSIDE, "a conversation turn's first step"),
+    ("supervisor/worker_process.py", "_run_task_body", "carry_presence_turn"): Row(INSIDE, "a Host-admitted Presence turn"),
+    ("supervisor/worker_chat_lane.py", "prepare_conversation_task", "prepare_wake"): Row(INSIDE, "a wake's first step"),
+    ("ouroboros/consciousness_wake.py", "prepare_wake", "observe_wake"): Row(INSIDE, "a wake's observation"),
+    ("ouroboros/consciousness_wake.py", "prepare_wake", "previous_wake_text"): Row(INSIDE, "the last wake's text"),
+    ("ouroboros/consciousness_wake.py", "prepare_wake", "bind_wake_observation"): Row(INSIDE, "the source the wake accepts"),
+    ("ouroboros/consciousness_wake.py", "prepare_wake.render", "render_wake_message"): Row(INSIDE, "the wake's message"),
+    ("ouroboros/presence_carrier.py", "_runner", "run_presence_turn"): Row(INSIDE, "the carrier's runner"),
+    ("ouroboros/presence_carrier.py", "carry_presence_turn", "run_presence_turn"): Row(INSIDE, "the carrier's body for a Host turn"),
+    ("ouroboros/presence_carrier.py", "carry_presence_turn.factory", "make_agent"): Row(INSIDE, "its actor"),
+    ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "handle_task"): Row(INSIDE, "a Presence turn's body"),
+    ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "make_agent"): Row(INSIDE, "its actor"),
     ("ouroboros/agent.py", "OuroborosAgent._prepare_task_context", "build_llm_messages"): Row(INSIDE, "the task's first step"),
     ("ouroboros/agent.py", "OuroborosAgent._handle_task_scoped", "run_llm_loop"): Row(INSIDE, "the task's loop"),
     ("ouroboros/agent.py", "make_agent", "OuroborosAgent"): Row(INSIDE, "the one constructor"),
     ("ouroboros/agent_task_pipeline.py", "_dispatch_root_post_task", "_run_post_task_processing_async"): Row(
         INSIDE, "the root's post-task phase, off the reply path of the process that ran the task"),
     # A live voice call: the loop body is the native session, with a process-local hub and an in-process feature handler.
+    ("supervisor/worker_chat_lane.py", "handle_chat_direct", "run_inline_turn"): Row(INLINE_CALL, "an owner's call"),
+    ("supervisor/inline_carrier.py", "run_inline_turn", "start_inline_turn"): Row(INLINE_CALL, "its thread"),
+    ("supervisor/inline_carrier.py", "start_inline_turn", "_realtime_turn"): Row(INLINE_CALL, "an owner's call binds its turn"),
     ("ouroboros/agent.py", "OuroborosAgent._handle_task_scoped", "_realtime_turn"): Row(INLINE_CALL, "the native session"),
     ("ouroboros/agent.py", "OuroborosAgent._prepare_task_context", "_realtime_turn"): Row(INLINE_CALL, "its context"),
-    ("supervisor/worker_chat_lane.py", "_admit_chat_task", "_realtime_turn"): Row(INLINE_CALL, "an owner's call binds its turn"),
     ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "_realtime_turn"): Row(
         INLINE_CALL, "a Presence call binds its turn"),
     ("ouroboros/presence_call.py", "open_presence_call.run", "run_presence_turn"): Row(
         INLINE_CALL, "a Presence call's body is a live call"),
+    # No carrier can start (spawn refused, a marker window, no pool generation; never "busy"): the same body, disclosed.
+    ("supervisor/worker_chat_lane.py", "_degrade_if_no_carrier_can_start", "start_inline_turn"): Row(
+        INLINE_DEGRADED, "at admission, on inline_carrier.refused_carrier_reason, a physical fact"),
+    ("supervisor/conversation_lane.py", "dispatch_awaiting_turns", "start_inline_turn"): Row(
+        INLINE_DEGRADED, "a turn already waiting, on the same physical fact"),
+    ("supervisor/inline_carrier.py", "start_inline_turn.body", "run_worker_task"): Row(
+        INLINE_DEGRADED, "the worker's task body on this process's thread, the pseudo-slot's (a live call's too)"),
+    ("supervisor/workers.py", "_get_chat_agent", "make_agent"): Row(INLINE_DEGRADED, "an inline row's fresh actor (a live call's too)"),
     # Not cognition, or not a focus: named so that they stay what they are.
     ("ouroboros/consciousness.py", "BackgroundConsciousness.status_snapshot", "_context_facts"): Row(
         DISPLAY, "the state endpoint's small panel reads the same places, causes and roots; no wake is rendered"),
@@ -108,32 +138,9 @@ INVENTORY: Dict[Site, Row] = {
     ("ouroboros/extension_loader.py", "reconcile_extension", "load_extension"): Row(
         RESIDUAL, "pure-Python extensions import in-process (FINAL_PLAN §3.6): a separate class with its own trigger"),
     ("ouroboros/extension_process_runner.py", "_load_child_extension", "load_extension"): Row(WORKER, "the extension's own child"),
-    # The class: foci that still start on server threads.
-    ("ouroboros/server_owner_routing.py", "_route_owner_message._run_direct", "handle_chat_direct"): Row(
-        SERVER_THREAD, "threading.Thread(_run_direct): one thread per owner message", OWNER_TURN),
-    ("server.py", "_run_supervisor", "handle_chat_direct"): Row(SERVER_THREAD, "the routing context's direct lane", OWNER_TURN),
-    ("supervisor/worker_chat_lane.py", "handle_chat_direct", "_run_chat_task"): Row(SERVER_THREAD, "admit and execute", OWNER_TURN),
-    ("supervisor/worker_chat_lane.py", "_run_chat_task", "_execute_chat_task"): Row(SERVER_THREAD, "the turn's body", OWNER_TURN),
-    ("supervisor/worker_chat_lane.py", "_execute_chat_task", "handle_task"): Row(
-        SERVER_THREAD, "every direct turn; once the lane lands, this site is the live call's row or gone", OWNER_TURN),
-    ("supervisor/workers.py", "_get_chat_agent", "make_agent"): Row(SERVER_THREAD, "a fresh actor per direct turn", OWNER_TURN),
-    ("supervisor/worker_chat_lane.py", "auto_resume_after_restart", "handle_chat_direct"): Row(
-        SERVER_THREAD, "threading.Thread(handle_chat_direct)", AUTO_RESUME),
-    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch", "observe_wake"): Row(SERVER_THREAD, "on the tick", WAKE),
-    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch", "_context_facts"): Row(SERVER_THREAD, "on the tick", WAKE),
-    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch", "previous_wake_text"): Row(SERVER_THREAD, "on the tick", WAKE),
-    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch.render", "render_wake_message"): Row(SERVER_THREAD, "on the tick", WAKE),
-    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch.bind_input", "bind_wake_observation"): Row(SERVER_THREAD, "on the tick", WAKE),
-    ("ouroboros/consciousness.py", "BackgroundConsciousness._launch", "handle_wake_direct"): Row(SERVER_THREAD, "on the tick", WAKE),
-    ("supervisor/worker_chat_lane.py", "handle_wake_direct._run", "_execute_chat_task"): Row(
-        SERVER_THREAD, "threading.Thread(_run, name=wake-turn-<id>)", WAKE),
-    ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "handle_task"): Row(
-        SERVER_THREAD, "the turn's body", PRESENCE),
-    ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "make_agent"): Row(SERVER_THREAD, "its actor", PRESENCE),
-    ("ouroboros/gateway/host_service.py", "HostServiceContext._default_presence_runner", "run_presence_turn"): Row(
-        SERVER_THREAD, "PresenceTurnExecutions.start_or_join's thread", PRESENCE),
     ("ouroboros/presence_continuation.py", "start_proactive_turn", "run_presence_turn"): Row(
-        SERVER_THREAD, "PROACTIVE_TURNS.start_thread's thread", PRESENCE),
+        RESIDUAL, "a body on PROACTIVE_TURNS' thread, but no runtime code calls it (tests/presence_legacy_helpers.py only, on the "
+                  "base too); its name is a door, so a caller fails by name"),
 }
 
 
@@ -200,11 +207,6 @@ def _on_server_threads(focus: str = "") -> List[Site]:
                   if row.executor == SERVER_THREAD and focus in ("", row.focus))
 
 
-def _gap(reason: str, *raises: type) -> pytest.MarkDecorator:
-    """Only the law's own failure may count as the known breach: anything else errors by name."""
-    return pytest.mark.xfail(strict=True, reason=reason, raises=raises or AssertionError)
-
-
 # ---- the inventory, both directions ------------------------------------------------------------------------------
 
 def test_every_reference_to_a_door_is_named_and_every_row_still_exists():
@@ -245,24 +247,20 @@ def test_a_door_named_for_one_file_means_only_that_file():
 
 
 def test_every_row_names_a_known_executor_and_a_reason():
-    executors = {WORKER, INSIDE, DISPLAY, RESIDUAL, SERVER_THREAD, *ALLOWED_ON_A_SERVER_THREAD}
+    executors = {WORKER, INSIDE, ADMISSION, DISPLAY, RESIDUAL, SERVER_THREAD, *ALLOWED_ON_A_SERVER_THREAD}
     for site, row in INVENTORY.items():
         assert row.executor in executors and row.why, site
         assert (row.executor == SERVER_THREAD) is bool(row.focus), site
-        assert row.focus in ("", *FOCI_ON_SERVER_THREADS), site
-    assert not set(FOCI_ON_SERVER_THREADS) - {row.focus for row in INVENTORY.values()}, "a focus without a row is closed"
+        assert row.focus in ("", *FOCI), site
 
 
 # ---- the law over the rows: exactly the owner's two ---------------------------------------------------------------
 
-@pytest.mark.parametrize("focus", [pytest.param(focus, marks=_gap(reason))
-                                   for focus, reason in sorted(FOCI_ON_SERVER_THREADS.items())])
+@pytest.mark.parametrize("focus", FOCI)
 def test_no_focus_starts_on_a_server_thread(focus):
-    """Each focus's starts leave the server with the unit that moves it (its rows go, then this marker)."""
     assert not (rows := _on_server_threads(focus)), rows
 
 
-@_gap("LA: inline_degraded does not exist yet, and every direct turn is still the server_thread executor")
 def test_a_server_thread_runs_cognition_only_on_the_two_named_rows():
     """The allowlist is exactly the owner's two rows, 3A and 2A: both exist, and nothing else runs on a server thread."""
     on_threads = {row.executor for row in INVENTORY.values() if row.executor in (SERVER_THREAD, *ALLOWED_ON_A_SERVER_THREAD)}
@@ -272,7 +270,7 @@ def test_a_server_thread_runs_cognition_only_on_the_two_named_rows():
 # ---- the doors, driven: what one intake starts in this process ----------------------------------------------------
 
 class CognitionInThisProcess(AssertionError):
-    """A door ran in the process that answers the owner. Any other failure of a drive is a real one."""
+    """A door ran in the process that answers the owner."""
 
 
 class _ImmediateThread:
@@ -312,7 +310,6 @@ def _spy_on_a_started_thread(started: List[str], door: str):
     return called
 
 
-@_gap(FOCI_ON_SERVER_THREADS[OWNER_TURN], CognitionInThisProcess)
 def test_an_owner_message_starts_no_turn_in_this_process(tmp_path, monkeypatch):
     """The owner's message, routed: nothing in this process runs the turn."""
     from ouroboros import server_owner_routing as routing
@@ -327,7 +324,6 @@ def test_an_owner_message_starts_no_turn_in_this_process(tmp_path, monkeypatch):
     _no_door(started)
 
 
-@_gap(FOCI_ON_SERVER_THREADS[AUTO_RESUME], CognitionInThisProcess)
 def test_auto_resume_starts_no_turn_in_this_process(tmp_path, monkeypatch):
     """The planned restart's verify record is the one trigger of the resume turn: the turn itself runs elsewhere."""
     from supervisor import worker_chat_lane as lane
@@ -377,7 +373,6 @@ def alarm(monkeypatch, tmp_path):
     return SimpleNamespace(clock=clock, started=started)
 
 
-@_gap(FOCI_ON_SERVER_THREADS[WAKE], CognitionInThisProcess)
 def test_a_due_wake_prepares_nothing_on_the_tick(alarm):
     """The tick decides when and admits; the wake's observation, context and render are its carrier's first step
     (one such pass held the supervisor loop 163.8 s on 01.11: 0.009 s of CPU behind other threads)."""
@@ -385,21 +380,31 @@ def test_a_due_wake_prepares_nothing_on_the_tick(alarm):
     _no_door(alarm.started)
 
 
-@_gap(FOCI_ON_SERVER_THREADS[PRESENCE], CognitionInThisProcess)
-def test_a_presence_event_runs_no_turn_body_in_this_process(tmp_path, monkeypatch):
-    """The Host Service's default runner: the turn's body runs in a carrier, the future resolves from its frames."""
-    from ouroboros.gateway.host_service import HostServiceContext
+@pytest.mark.serial  # its fixture rebinds the pool's tables
+def test_a_presence_event_runs_no_turn_body_in_this_process(lane, monkeypatch):
+    """The Host's door over a started lane: the body reaches a carrier's queue, and its future resolves from that carrier's
+    frames (tests/test_conversation_lane_presence.py); nothing here runs it."""
+    from ouroboros import presence_carrier, presence_runner
+    from ouroboros.presence_runner import PresenceTurnExecutions
+    from tests.test_conversation_lane_presence import _payload
+    from tests.test_presence_runner import _admission, _event
 
     started: List[str] = []
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn", _spy(started, "run_presence_turn"))
-    monkeypatch.setattr("supervisor.workers.get_event_q", lambda *_a, **_k: None)
-    HostServiceContext(tmp_path)._default_presence_runner(admission=None, event=None, staged_files=(), admitted=None)
+    monkeypatch.setattr(presence_carrier, "run_presence_turn", _spy(started, "run_presence_turn"))
+    monkeypatch.setattr(presence_carrier, "carry_presence_turn", _spy(started, "carry_presence_turn"))
+    admission, event = _admission(), _event()
+    turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)
+    _execution, began = PresenceTurnExecutions().start_or_dispatch(
+        turn_id, identity="id-1", reserve=lambda: True, release=lambda: None,
+        dispatch=lambda execution: presence_carrier.dispatch_presence_turn(
+            execution, drive_root=lane.root, skill_name="telegram-bot", admission=admission, event=event,
+            event_payload=_payload(event), staged_files=[], gate_wait=True))
+    assert began and lane.spare.in_q.get_nowait()["id"] == turn_id, "the body went to the carrier"
     _no_door(started)
 
 
 @pytest.mark.parametrize("started, breached", [(["handle_task"], True), ([], False)])
 def test_the_drives_fail_on_a_start_and_stay_quiet_without_one(started, breached):
-    """The marker excuses this one failure class: a drive that breaks for another reason fails for real."""
     if breached:
         with pytest.raises(CognitionInThisProcess, match="handle_task"):
             _no_door(started)
