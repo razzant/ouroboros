@@ -42,8 +42,8 @@ from typing import Any
 
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
-    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, RemoteBackends,
-    _osworld_result_ok, cliclick_point, cliclick_keys,
+    _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
+    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys,
 )
 
 _TIMEOUT_SEC = 10
@@ -1161,12 +1161,14 @@ class _ComputerUse(PlaceMixin, RemoteBackends):
         if via == "paste":
             # The model's choice for long or non-ASCII text (cliclick types ~70 chars/s and hit the 18 s cap on
             # 1,281 characters): write the clipboard, then paste. The clipboard is replaced, and said so; it is
-            # written only after the target was verified in front, so a refusal leaves the clipboard alone.
-            if plat == "macos" and _which("cliclick") and _which("pbcopy"):
+            # written only after the target was verified in front, so a refusal leaves the clipboard alone. The
+            # chord is Command + the key that gives V under Command in the active layout (paste_chord.js, the same
+            # program over SSH), never the layout's typed "v".
+            if plat == "macos" and _which("osascript") and _which("pbcopy"):
                 def copy() -> str:
                     rc, _out, err = _pipe(["pbcopy"], text)
                     return "" if rc == 0 else f"pbcopy failed: {err.strip() or rc}"
-                return self._exec_input(["cliclick", "kd:cmd", "t:v", "ku:cmd"], app=app, before=copy,
+                return self._exec_input(list(PASTE_CHORD_ARGV), app=app, before=copy,
                                         raise_policy=raise_policy, connection=connection,
                                         extra={"method": "paste", "clipboard_replaced": True, "chars": len(text)})
             return _json({"ok": False, "error": f"via=paste is supported on local and SSH macOS only (platform={plat})"})

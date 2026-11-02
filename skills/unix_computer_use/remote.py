@@ -168,9 +168,22 @@ _SSH_ACTIVATE = ("B=$({read}); osascript -e 'tell application \"System Events\" 
                  "A=$({read}); echo; echo \"__FRONT_BEFORE__$B\"; echo \"__FRONT_AFTER__$A\"; exit $RC")
 # The Mac's inventory: the listing's own exit code is kept (a pipeline's last command would mask it).
 _SSH_INVENTORY = "lsappinfo list; RC=$?; echo; echo __FRONT__; {read}; exit $RC"
-# SSH paste: the clipboard write and the paste chord are two stages, and the receipt says which ones ran.
-_SSH_PASTE = "printf %s {text} | pbcopy && echo __CLIPBOARD_WRITTEN__ && cliclick kd:cmd t:v ku:cmd"
 _MARKER_LINE = re.compile(r"^__(FRONT_BEFORE|FRONT_AFTER|TARGET_LOST|FRONT_UNREAD|CLIPBOARD_WRITTEN)__.*$\n?", re.M)
+
+# The paste chord (#2589): Command + the key that gives "v" under Command in the active layout, exactly the Command
+# flag; the measurement and the words its refusals use are in paste_chord.js. One program: locally run from its file,
+# over SSH its source through the Mac's own osascript (nothing installed there; no Automation grant).
+_PASTE_CHORD_JS = pathlib.Path(__file__).with_name("paste_chord.js")
+PASTE_CHORD_ARGV = ("osascript", "-l", "JavaScript", str(_PASTE_CHORD_JS))
+
+
+def ssh_paste_command(text: str) -> str:
+    """SSH paste: the clipboard write and the paste chord are two stages of one remote call, and the receipt says which
+    ones ran (the marker between them). The text arrives as UTF-8 bytes, so pbcopy is told so: it decodes with the
+    session's locale, which ssh forwards only when both ends agree to (measured: with none, "Привет" was pasted as
+    "–ü—Ä–∏–≤–µ—Ç" under an ok receipt)."""
+    chord = shlex.join(["osascript", "-l", "JavaScript", "-e", _PASTE_CHORD_JS.read_text(encoding="utf-8")])
+    return f"printf %s {shlex.quote(text)} | LC_ALL=en_US.UTF-8 pbcopy && echo __CLIPBOARD_WRITTEN__ && {chord}"
 
 
 def cliclick_point(x: int, y: int) -> str:
@@ -914,8 +927,9 @@ class RemoteBackends:
         typewrite_code = f"pyautogui.typewrite({text!r}, interval={interval!r})"
         backend = str(conn.get("backend") or "").lower()
         if backend == "ssh_macos" and via == "paste":
-            # The clipboard of the remote Mac is replaced (said in the receipt); the text travels as one quoted argument.
-            command = _SSH_PASTE.format(text=shlex.quote(text))
+            # The clipboard of the remote Mac is replaced (said in the receipt); the text travels as one quoted argument
+            # and the paste chord is the local one (PASTE_CHORD_ARGV), so nothing is installed on the Mac for it.
+            command = ssh_paste_command(text)
             return self._json_text(self._remote_input(conn, "paste", note={"method": "paste", "clipboard_replaced": True, "chars": len(text)},
                                                       timeout=60, target=target, ssh_command=command, raise_policy=raise_policy))
         ctx: dict[str, Any] | None = None

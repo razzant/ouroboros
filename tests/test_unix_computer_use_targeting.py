@@ -59,16 +59,21 @@ def helper_op(argv: list[str]) -> list[str]:
     return [str(a) for a in argv[idx + 1:]]
 
 
-def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""), lsappinfo=True, on_input=None):
+CHORD_POSTED = "paste chord: Command + key code 9 (v under Command in com.apple.keylayout.ABC)\n"
+
+
+def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""), lsappinfo=True, on_input=None,
+        chord=(0, "", CHORD_POSTED)):
     """A faked local Mac: lsappinfo reports ``state['front']``; the native helper answers through ``helper(args, state)``;
-    ``on_input(argv, state)`` runs when cliclick is called (a key that moves the front, for instance)."""
+    ``on_input(argv, state)`` runs when cliclick is called (a key that moves the front, for instance); the paste chord
+    program (``osascript -l JavaScript``) answers ``chord`` (exit code, stdout, stderr)."""
     module = load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
     monkeypatch.setattr(module, "_session_type", lambda: "native")
     tools = {"cliclick", "screencapture", "osascript", "pbcopy"} | ({"lsappinfo"} if lsappinfo else set())
     monkeypatch.setattr(module, "_which", lambda name: f"/usr/bin/{name}" if name in tools else "")
     monkeypatch.setattr(module.time, "sleep", lambda _s: None)
-    state = {"front": front, "calls": [], "helper": [], "clipboard": None}
+    state = {"front": front, "calls": [], "helper": [], "clipboard": None, "chords": []}
 
     def default_helper(args, state):
         op = args[0]
@@ -136,6 +141,10 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""
         if argv[0] == "pbcopy":
             state["clipboard"] = k.get("input")
             return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:3] == ["osascript", "-l", "JavaScript"]:
+            state["chords"].append(argv)
+            rc, out, err = chord
+            return subprocess.CompletedProcess(argv, rc, out, err)
         if argv[0] == "screencapture":
             from PIL import Image
             Image.new("RGB", (64, 40), (1, 2, 3)).save(Path(argv[-1]), format="PNG")
@@ -246,8 +255,15 @@ def test_characters_the_layout_cannot_type_are_an_honest_failure(tmp_path, monke
     assert out["reason"] == "untypable_characters" and out["untyped"] == list("ourbs") and "via=paste" in out["error"]
     shortcut = receipt(api.tools["key"](keys="cmd+s"))
     assert shortcut["reason"] == "untypable_characters" and "layout" in shortcut["error"] and "via=paste" not in shortcut["error"]
+    # The paste chord no longer types the layout's "v" (cliclick's warning above does not reach it); the chord program
+    # says the same words when no key of the layout gives v under Command (measured: Turkmen), and posts nothing.
+    refusal = ("Unable to get key code for v (no key of com.apple.keylayout.Turkmen gives v under Command); "
+               "the paste chord was not sent\n")
+    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", stderr), chord=(0, "", refusal))
     pasted = receipt(api.tools["type_text"](text="x", via="paste"))
     assert pasted["reason"] == "untypable_characters" and "paste chord" in pasted["error"] and "via=paste" not in pasted["error"]
+    assert "V under Command" in pasted["error"] and pasted["untyped"] == ["v"] and inputs(state) == [], pasted
+    assert pasted["clipboard_done"] is True and pasted["observed_effect"] is True and "not sent" in pasted["note"], "the write before it stands"
     module, api, state = mac(tmp_path, monkeypatch)
     assert receipt(api.tools["type_text"](text="ouroboros probe"))["observed_effect"] is True, "a clean dispatch keeps the mark"
 
@@ -385,17 +401,20 @@ def test_type_text_via_paste_writes_the_clipboard_after_the_target_is_verified(t
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["type_text"](text="Привет, мир " * 40, via="paste", app="Keynote"))
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
-    assert state["clipboard"].startswith("Привет") and inputs(state) == [["cliclick", "kd:cmd", "t:v", "ku:cmd"]]
-    assert out["delivered_to"]["app"] == "Keynote"
+    # #2589: the chord is the Command-plane key of the active layout, posted by the chord program, never cliclick t:v.
+    assert state["clipboard"].startswith("Привет") and inputs(state) == [] and state["chords"] == [list(module.PASTE_CHORD_ARGV)]
+    assert out["cmd"] == list(module.PASTE_CHORD_ARGV) and out["cmd"][-1].endswith("paste_chord.js"), "the receipt names what ran"
+    assert out["helper_stderr"] == CHORD_POSTED.strip() and out["delivered_to"]["app"] == "Keynote"
     activate_at = next(i for i, argv in enumerate(state["calls"]) if any(p.endswith("macos_native.py") for p in argv))
     copy_at = next(i for i, argv in enumerate(state["calls"]) if argv[0] == "pbcopy")
-    assert activate_at < copy_at, "the clipboard is written only after the target is verified in front"
+    chord_at = next(i for i, argv in enumerate(state["calls"]) if argv[0] == "osascript")
+    assert activate_at < copy_at < chord_at, "the clipboard is written only after the target is verified in front"
     plain = receipt(api.tools["type_text"](text="hi"))
     assert plain["ok"] is True and inputs(state)[-1] == ["cliclick", "t:hi"] and "method" not in plain
     # A refusal leaves the owner's clipboard alone and says nothing was sent.
     module, api, state = mac(tmp_path, monkeypatch)
     refused = receipt(api.tools["type_text"](text="secret", via="paste", app="NoSuchApp"))
-    assert refused["ok"] is False and state["clipboard"] is None and inputs(state) == []
+    assert refused["ok"] is False and state["clipboard"] is None and inputs(state) == [] and state["chords"] == []
     assert receipt(api.tools["type_text"](text="x", via="clipboard"))["ok"] is False, "an unknown via is refused, not typed"
 
 
@@ -694,16 +713,18 @@ def test_a_sequence_whose_first_combo_is_invalid_keeps_the_switch_mark(tmp_path,
 
 
 def test_a_failed_paste_helper_still_reports_the_clipboard_write(tmp_path, monkeypatch):
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(1, "", "boom"))
+    module, api, state = mac(tmp_path, monkeypatch, chord=(1, "", "execution error: boom (-2700)"))
     out = receipt(api.tools["type_text"](text="secret", via="paste", app="Keynote"))
     assert out["ok"] is False and out["clipboard_replaced"] is True and out["method"] == "paste" and state["clipboard"] == "secret"
     assert out["observed_effect"] is True and out["activation_done"] is True and out["clipboard_done"] is True and "unknown" in out["note"]
+    assert out["cmd"] == list(module.PASTE_CHORD_ARGV) and "boom" in out["error"]
     # Without a switch the completed clipboard write is still an observed effect of its own.
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(1, "", "boom"))
+    module, api, state = mac(tmp_path, monkeypatch, chord=(1, "", "execution error: boom (-2700)"))
     out = receipt(api.tools["type_text"](text="secret", via="paste"))
     assert out["ok"] is False and out["observed_effect"] is True and out["clipboard_done"] is True and "activation_done" not in out
-    warning = "WARNING: Accessibility privileges not enabled. Many actions may fail.\n"
-    module, api, state = mac(tmp_path, monkeypatch, cliclick=(0, "", warning))
+    # The chord program refuses to post without the right to (the words cliclick warns with): nothing was posted.
+    warning = "WARNING: Accessibility privileges not enabled (no right to post input events); the paste chord was not sent\n"
+    module, api, state = mac(tmp_path, monkeypatch, chord=(0, "", warning))
     dropped = receipt(api.tools["type_text"](text="secret", via="paste"))
     assert dropped["reason"] == "permission_denied" and dropped["clipboard_done"] is True and dropped["observed_effect"] is True
     assert "clipboard write" in dropped["note"]
@@ -719,7 +740,7 @@ def test_a_failed_clipboard_write_sends_nothing_and_says_so(tmp_path, monkeypatc
         return original(cmd, *a, **k)
     monkeypatch.setattr(module.subprocess, "run", broken_pbcopy)
     out = receipt(api.tools["type_text"](text="x", via="paste", app="Keynote"))
-    assert out["ok"] is False and "TimeoutExpired" in out["error"] and inputs(state) == [], out
+    assert out["ok"] is False and "TimeoutExpired" in out["error"] and inputs(state) == [] and state["chords"] == [], out
     assert out["note"].startswith("the input was not sent") and out["activation_done"] is True and out["reason"] == "clipboard_failed"
     assert out["dispatched"] is False and "front_at_dispatch" not in out and out["front"]["app"] == "Keynote"
 
