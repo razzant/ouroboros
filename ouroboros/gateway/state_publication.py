@@ -234,9 +234,6 @@ def probe(drive_root: str, roots=frozenset(), *, direct: Optional[Tuple[list, bo
 
 # ---- the single-flight publisher -------------------------------------------------------------
 
-Produce = Callable[[Optional[Tuple[list, bool]], int], Dict[str, Any]]
-
-
 class Publisher:
     """One data root's held publication and its one refresh in flight."""
 
