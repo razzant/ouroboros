@@ -96,7 +96,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             # self_worktree (the trap behind the read-only-audit cancel-storm). It is NOT
             # an acting VALID_WRITE_SURFACES member — it normalizes to the omit path.
             "enum": ["read_only", "self_worktree", "external_workspace", "genesis"],
-            "description": "read_only (default/omitted) keeps the native child/nanny read-only. Acting surfaces: self_worktree copies that Git source's current files for parent patch integration; external_workspace: native children write shared files directly; genesis creates a standalone project. See tool description for integration. Acting surfaces require mutative subagents enabled (default ON in advanced/pro).",
+            "description": "read_only (default/omitted) keeps the native child/nanny read-only. Acting surfaces self_worktree, external_workspace (native children write shared files directly) and genesis are defined with their integration in the tool description; they require mutative subagents enabled (default ON in advanced/pro).",
         },
         "write_root": {"type": "string", "description": "external_workspace project directory, with or without Git; never runtime data, including installed skills. Omit for a new cooperative shared Git tree. Ignored for self_worktree (source: workspace_root), read_only and genesis (own empty root)."},
         "directory_strategy": {

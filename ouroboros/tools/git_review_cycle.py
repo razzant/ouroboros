@@ -245,6 +245,14 @@ def _revalidation_outcome(ctx, commit_message, commit_start, before, after, *, w
     }
 
 
+def _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests):
+    """A resumed attempt's free collection still owes this call's tests before Git, on the reviewed bytes (#2410)."""
+    return _git()._preflight_and_tests_gate(
+        ctx, commit_message, commit_start, classification_paths=[], skip_tests=skip_tests, landing=True,
+    ) or _revalidation_outcome(ctx, commit_message, commit_start, post_fingerprint,
+                               _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir)))
+
+
 def _publish_pending_review(ctx: ToolContext, message: str, custody_lost: bool) -> str:
     """Both pending handbacks preserve custody facts beside their returned text."""
     return _publish_tool_result(ctx, ToolResult(
@@ -695,11 +703,14 @@ def _reviewed_stage_cycle(
             gate_outcome["message"] = _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="LEGACY_BLOCKED", text=gate_outcome["message"]))
             return gate_outcome
+    # Only a call resuming its own open attempt continues that call, whose checks ran before its wave was sent;
+    # a new call collecting the completed round's usable verdict at $0 (``_free_cycle_gate``) owes its own (#2410).
+    resumes_open = bool(getattr(ctx, "_review_reconcile_only", False) and getattr(ctx, "_review_resume_pending", False))
     binding_error = _git()._review_binding_precondition_error(
         pre_fingerprint, require_release_tag=require_release_tag
     )
     if binding_error:
-        if not bool(getattr(ctx, "_review_reconcile_only", False)):
+        if not resumes_open:
             _git()._record_commit_attempt(
                 ctx,
                 commit_message,
@@ -729,10 +740,10 @@ def _reviewed_stage_cycle(
     ctx._commit_review_evidence = (
         pending_commit_review_evidence(ctx) if getattr(ctx, "_review_reconcile_only", False)
         else capture_commit_review_evidence(ctx) if advisory_replay is None else {})
-    if getattr(ctx, "_review_reconcile_only", False):  # the seats' frozen exhibit, never this call's tests
+    if resumes_open:  # the seats' frozen exhibit, never this call's tests
         ctx._preflight_execution = pending_commit_review_evidence(ctx, "preflight_execution") or {"status": "unobserved"}
     preflight_gate_outcome = None
-    if not bool(getattr(ctx, "_review_reconcile_only", False)):
+    if not resumes_open:
         preflight_gate_outcome = _git()._preflight_and_tests_gate(
             ctx, commit_message, commit_start,
             classification_paths=classification_paths,
@@ -743,15 +754,17 @@ def _reviewed_stage_cycle(
             goal=goal, scope=scope, review_only=review_only,
         )
     if preflight_gate_outcome is not None:
+        ctx._review_reconcile_only = False  # refused before collecting: leak no no-dispatch flag (as above)
         _release_review_evidence_if_settled(ctx)
         return preflight_gate_outcome
-    if not bool(getattr(ctx, "_review_reconcile_only", False)):
+    if not resumes_open:
         after_preflight = _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
         changed = compute_snapshot_hash(pathlib.Path(ctx.repo_dir), commit_message, paths=snapshot_paths) != prepared_snapshot
         revalidation = _revalidation_outcome(
             ctx, commit_message, commit_start, pre_fingerprint, after_preflight, worktree_changed=changed,
         )
         if revalidation is not None:
+            ctx._review_reconcile_only = False
             _release_review_evidence_if_settled(ctx)
             return revalidation
     _git()._record_commit_attempt(
@@ -826,12 +839,16 @@ def _reviewed_stage_cycle(
     from ouroboros.review_custody import review_retry_cancelled
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
 
-    if review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx):
-        blocked, combined_msg, block_reason = True, "⚠️ REVIEW_STOPPED: owner cancellation or deadline prevents this commit.", "owner_stopped"
     material = (blocked or combined_findings or getattr(ctx, "_last_review_critical_findings", [])
                 or getattr(ctx, "_last_review_advisory_findings", []) or scope_advisory
                 or getattr(ctx, "_last_review_block_reason", "") or triad_block_reason
                 or getattr(ctx, "_review_degraded_reasons", []) or advisory_replay is not None)
+    if (resumes_open and not review_only and not (blocked or hand_back_all or (ordinary_advisory and material))
+            and not (review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx))
+            and (owed := _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests))):
+        return owed  # the owner-control decision below follows these owed tests, so it gates Git (#2410)
+    if review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx):
+        blocked, combined_msg, block_reason = True, "⚠️ REVIEW_STOPPED: owner cancellation or deadline prevents this commit.", "owner_stopped"
     if (author_source is None and (hand_back_all or (ordinary_advisory and material))
             and block_reason != "owner_stopped"):
         return _return_commit_feedback(ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint,

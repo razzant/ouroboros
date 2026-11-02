@@ -221,7 +221,7 @@ def test_custody_lost_error_actor_remains_pending_for_plan_review(tmp_path):
     assert actor.late_result_pending is True
 
 
-def test_failed_commit_roster_stamp_drops_unsent_process_local_reservation(
+def test_failed_commit_roster_reservation_drops_unsent_process_local_reservation(
     monkeypatch,
 ):
     from types import SimpleNamespace
@@ -230,11 +230,11 @@ def test_failed_commit_roster_stamp_drops_unsent_process_local_reservation(
 
     ctx = SimpleNamespace(_triad_withheld_seat_records=[])
 
-    def fail_stamp(_ctx):
+    def fail_reservation(_ctx):
         raise RuntimeError("write-ahead unavailable")
 
     monkeypatch.setattr(
-        "ouroboros.review_dispatch.stamp_review_paid_on_dispatch", fail_stamp,
+        "ouroboros.review_dispatch.reserve_review_roster", fail_reservation,
     )
     with pytest.raises(RuntimeError, match="write-ahead unavailable"):
         _reserve_parallel_review_roster(
@@ -261,10 +261,8 @@ def test_spent_owner_window_does_not_stamp_zero_dispatch_commit_roster(
         _triad_withheld_seat_records=[],
         task_metadata={"deadline_at": "2000-01-01T00:00:00Z"},
     )
-    monkeypatch.setattr(
-        "ouroboros.review_dispatch.stamp_review_paid_on_dispatch",
-        lambda _ctx: stamp_calls.append("paid"),
-    )
+    for name in ("stamp_review_paid_on_dispatch", "reserve_review_roster"):
+        monkeypatch.setattr(f"ouroboros.review_dispatch.{name}", lambda _ctx, name=name: stamp_calls.append(name))
 
     _reserve_parallel_review_roster(
         ctx,

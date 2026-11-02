@@ -1276,9 +1276,10 @@ _DESCRIPTION = (
     "own result review composes freely. Omitted reviewers mean the whole pool. Under Auto ask when another mind's "
     "check could change what you deliver, or when your human asks for a careful check. It is unavailable when "
     "task review is Off, and it has its own paid-cycle count. The same subject, surface, panel and ask return the "
-    "settled record free (reused=true), even after a guide changed; enforcement is recorded and on another "
-    "root never locks anything. Returns JSON {record_id, aggregate, per_question, panel, rows, subject, checklist, "
-    "tests, cost, reused, findings} (+ report for subject=system)."
+    "settled verdict free (reused=true), even after a guide changed; after a settled wave formed no verdict they "
+    "buy a new wave, while a running or unknown one is collected, never resent. Enforcement is recorded and on "
+    "another root never locks anything. Returns JSON {record_id, aggregate, per_question, panel, rows, subject, "
+    "checklist, tests, cost, reused, findings} (+ report for subject=system)."
 )
 
 

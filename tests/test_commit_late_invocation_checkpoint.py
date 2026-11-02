@@ -39,6 +39,10 @@ def reserved(tmp_path):
                            "parts": [("change",), ("change", "coupling")]}},
     )
     attempt = load(ctx)
+    # The reservation owns the roster before any worker starts; the paid fact waits for a send.
+    assert attempt.status == "reviewing" and not attempt.paid and attempt.review_owner_pid
+    ctx._review_paid_stamp()  # what the first seat's route does at its physical dispatch
+    attempt = load(ctx)
     assert attempt.status == "reviewing" and attempt.paid
     return ctx
 
