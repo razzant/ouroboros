@@ -1,9 +1,9 @@
 """One header for every page and the Project panel (docs/DESIGN.md "Shell", plan P5, owner Q3=A, Q4=A, 19.10 A).
 
 Docked: no visible title where the sidebar names the page (the h2 stays); the page's tabs or location take its place
-and its actions the end; the Project keeps its name, and a header with nothing to show renders no bar. Stack: one
-row of at most 56px, `title · status · consciousness … Panic`, tabs under it, the title one line and ellipsized first;
-Restart and the budget in the status Shade. No ⋯, no More, no icon for a place."""
+and its actions the end; the Project keeps its name on one line, and a header with nothing to show renders no bar.
+Stack: one row of at most 56px, `title · status · consciousness … Panic`, tabs under it, the title one line and
+ellipsized first; Restart and the budget in the status Shade. No ⋯, no More, no icon for a place."""
 from __future__ import annotations
 
 import re
@@ -74,6 +74,27 @@ def test_the_place_name_wins_over_the_status_word_and_the_status_keeps_its_targe
     assert "min-width: var(--touch-target-min)" in trigger and "5ch" not in trigger
     title = _rule(room_work, ":is(.chat-page-header, .project-panel-bar) .app-page-title-row > .app-page-title {")
     assert "flex: 0 1 auto" in title and "min-width: 0" in title and "text-overflow: ellipsis" in title
+
+
+def test_a_project_name_keeps_one_line_and_its_capsules_float_over_the_transcript():
+    # Owner 2026-11-01 (A·14): the name keeps one line at the controls' size and weight and ends in an ellipsis, so its
+    # capsule keeps the bar's height; the whole name is its hover text and heads the work list; only a phone gives a
+    # cut name the chip's word. Nothing is drawn or clipped under the bar: the capsules float over the transcript.
+    room_work = _read("web/room_work.css")
+    title = _rule(room_work, ".project-panel-bar .app-page-title-row > .app-page-title {")
+    assert "font-size: var(--type-body)" in title and "font-weight: 600" in title, title
+    assert "line-clamp" not in title and "white-space" not in title, "one line: the shared rule's nowrap and ellipsis"
+    shared = _rule(room_work, ":is(.chat-page-header, .project-panel-bar) .app-page-title-row > .app-page-title {")
+    assert "white-space: nowrap" in shared and "text-overflow: ellipsis" in shared, shared
+    capsule = _rule(room_work, ":is(.chat-page-header, .project-panel-bar) .app-page-title-row {")
+    assert "height: var(--chrome-control-h)" in capsule, capsule
+    assert ".project-panel-bar .app-page-title-row {" not in room_work, "no Project capsule grows past the chrome height"
+    assert "clip-path" not in room_work and "mask" not in room_work, "no band, clip or mask under the bar"
+    head = _rule(room_work, ".rw-title {")
+    assert "font-size: var(--type-section)" in head and "overflow-wrap: anywhere" in head, head
+    app_js = _read("web/app.js")
+    # The name's own direction: in a right-to-left interface its ellipsis cuts a Latin name's end, never its start.
+    assert "projectPanelTitle?.setAttribute('dir', 'auto');" in app_js
 
 
 def test_main_title_is_the_registry_label_and_the_panel_bar_keeps_its_hooks():
