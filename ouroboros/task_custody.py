@@ -1399,15 +1399,18 @@ def _remove_entry(entry: pathlib.Path) -> None:
 
 def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0) -> None:
     """Remove the staging a crashed settlement left behind (older than ``min_age_sec``, so a
-    running settlement keeps its own); staging is a private copy, unserved and unreferenced."""
+    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A scratch
+    release's entry holds its record, the only one: the next release pass publishes it instead."""
     import time
+
+    from ouroboros.workspace_preflight import _RELEASE_MARK
 
     root = pathlib.Path(canonical_root) / _STAGING_DIR
     if not root.is_dir() or root.is_symlink():
         return
     for entry in root.iterdir():
         try:
-            if time.time() - entry.lstat().st_mtime >= min_age_sec:
+            if _RELEASE_MARK not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
                 _remove_entry(entry)
         except OSError:
             continue

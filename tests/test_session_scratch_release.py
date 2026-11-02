@@ -141,6 +141,41 @@ def test_a_pass_stopped_after_the_record_left_the_drive_is_finished_by_the_next(
     assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
 
 
+def test_an_aged_staged_release_outlives_the_leftover_sweep_and_is_published(tmp_path, monkeypatch):
+    data, scratch = _started(tmp_path)
+    staging, trash, real_replace = data / "state" / "custody_staging", data / "state" / "custody_trash", os.replace
+    monkeypatch.setattr(os, "replace", lambda src, dst: (_ for _ in ()).throw(PermissionError("no trash"))
+                        if pathlib.Path(dst).parent == trash else real_replace(src, dst))
+    assert release_finished_scratch(data, OVER)["errors"]
+    monkeypatch.setattr(os, "replace", real_replace)
+    settlement = staging / "task-7-0123456789ab"  # a crashed drive settlement's own leftover
+    settlement.mkdir()
+    for entry in staging.iterdir():
+        os.utime(entry, (1, 1))  # both two hours (and more) old
+    task_custody.sweep_custody_leftovers(data)
+    [kept] = list(staging.iterdir())
+    assert "+scratch-" in kept.name, "the settlement's leftover goes, the release's sole record stays"
+    release_finished_scratch(data, OVER)
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
+
+
+@pytest.mark.parametrize("junction", ["note_folder", "record_folder"])
+def test_a_windows_junction_is_never_followed(tmp_path, monkeypatch, junction):
+    data, scratch = _started(tmp_path)
+    target = str(data / OPEN_SCRATCH_DIR / "task-1") if junction == "note_folder" else str(_record(data).parent)
+    real_lstat = os.lstat
+
+    class _Junction:  # what Windows reports for a directory junction: a directory with the reparse attribute
+        def __init__(self, seen):
+            self.st_mode, self.st_file_attributes = seen.st_mode, 0x400
+
+    monkeypatch.setattr(os, "lstat", lambda path, *a, **k: _Junction(real_lstat(path, *a, **k))
+                        if os.fspath(path) == target else real_lstat(path, *a, **k))
+    report = release_finished_scratch(data, OVER)
+    assert report["released"] == [] and _record(data).is_file() and scratch.is_dir()
+    assert not (data / "state" / "custody_trash").exists() or not any((data / "state" / "custody_trash").iterdir())
+
+
 def test_a_record_folder_that_outlives_its_release_names_no_scratch(tmp_path, monkeypatch):
     from ouroboros import force_remove
 
