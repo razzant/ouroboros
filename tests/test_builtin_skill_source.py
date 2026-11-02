@@ -376,7 +376,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.4.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.1" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
@@ -386,6 +386,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     ("telegram", "7f71fe8d29c975e25b35a235e1c821e1b547674f", "1.3.1"),
     ("telegram", "6014e8896dabe371f5c06cf8adc5dc9902f53c2d", "1.3.2"),
     ("telegram", "08ed0f824df498a1c43c8ff9e04dd42e5c64ee76", "1.3.3"),
+    ("telegram", "de5daf1a8d8831b51a1ad3592ff1bf520d76c857", "1.4.0"),  # 1.4.1 declares secret_fields
     ("unix_computer_use", "ec3fc6e5b5ae5ee99a746b5e1a0f6343a41926d4", "0.4.2"),
     ("unix_computer_use", "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d", "0.4.3"),
     ("unix_computer_use", "9e2bd962903044a6516917bcb10a933b2d1acafd", "0.5.0"),
@@ -434,13 +435,17 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
 @pytest.mark.parametrize("name,previous_release,previous_version", [
     (name, 'd51b09bd61944f2e4d000f2fcce5e9a890f209fc', '0.1.0')
     for name in ('live_conversation', 'gemini_live', 'grok_realtime', 'openai_realtime')
-] + [('live_conversation', '96816f122', '0.1.1')])
+] + [('live_conversation', '96816f122', '0.1.1'),
+     ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
-def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, name, previous_release, previous_version, edited):
+def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
+                                                                               previous_version, edited):
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import compute_content_hash, save_enabled
     from tests.test_builtin_skill_platforms import git_payload
 
+    # The Unix release applies on macOS/Linux only; pin a host it applies to.
+    monkeypatch.setattr("ouroboros.contracts.skill_manifest.host_platform", lambda: "linux")
     seeds, drive = env
     repo = pathlib.Path(__file__).resolve().parents[1]
     git_payload(previous_release, f"skills/{name}", seeds / name)
@@ -463,7 +468,8 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.29', 'grok_realtime': '0.1.10', 'gemini_live': '0.1.19', 'openai_realtime': '0.1.9'}.get(name, '0.1.1')
+        version = {'live_conversation': '0.1.29', 'grok_realtime': '0.1.11', 'gemini_live': '0.1.20', 'openai_realtime': '0.1.9',
+                   'unix_computer_use': '0.6.1'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
         assert compute_content_hash(installed) != previous_hash

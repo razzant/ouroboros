@@ -44,12 +44,16 @@ def _ui_client_routes() -> list[BaseRoute]:
 
 
 def _owner_answer_routes() -> list[BaseRoute]:
-    """The owner's answers: decision cards (``/api/decisions``, every family) and the
-    living cards Ouroboros shows in its messages (``/api/cards/*``: reads, pins)."""
+    """The owner's answers: decision cards (``/api/decisions``, every family), the protected
+    form of an integration-secret request whose values never pass through that ingress
+    (``/api/decisions/secret``), and the living cards Ouroboros shows in its messages
+    (``/api/cards/*``: reads, pins)."""
     from ouroboros.gateway.cards import card_routes
+    from ouroboros.gateway.secret_decision import api_secret_decision
     from ouroboros.gateway.task_decision import api_decision_answer
 
-    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]), *card_routes()]
+    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]),
+            Route("/api/decisions/secret", endpoint=api_secret_decision, methods=["POST"]), *card_routes()]
 
 
 def collect_routes(

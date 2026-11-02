@@ -646,6 +646,7 @@ def _task_from_schedule(record: Dict[str, Any], *, task_id: str = "") -> Dict[st
     from ouroboros.consciousness_authority import stamp_scheduled_work
     stamp_scheduled_work(task, record, raw_metadata)
     task["task_contract"] = build_task_contract(apply_consciousness_authority(task))
+    task["task_contract"].pop("context_requires_development", None)  # start_task's answer alone, no template's
     workspace = task["task_contract"]["workspace"]
     if presence_metadata_binding(metadata) is not None and workspace["root"]:
         task.update(

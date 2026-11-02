@@ -381,6 +381,22 @@ _NO_REVISION = ("No plan revision is recorded. Ask the council to read the reque
                 "affected_paths ([] for no files), plan.")
 
 
+def _room_facts(participant: Mapping[str, Any]) -> str:
+    """What the own room reached this seat, each fact apart: rows delivered inline, what file reads covered of the
+    exact snapshot. Neither says what it understood, and 0 file characters never means it saw no room. The rows were
+    counted before any send: a seat never sent was delivered none, and a pending outcome says the delivery may not have
+    gone. A stored row with no provenance or measured status (an older projector's paged brief or blank 0 of N) measured
+    nothing of the room."""
+    inline, read, facts = participant.get("room_delivery"), participant.get("room_read_coverage"), []
+    if isinstance(inline, Mapping) and participant.get("status") != "not_dispatched":
+        facts.append(f"{inline.get('conversation_inline_rows', 0)} of {inline.get('conversation_rows', 0)} conversation rows inline"
+                     + (", counted for a delivery that may not have been sent"
+                        if participant.get("status") == "pending" else ""))
+    if isinstance(read, Mapping) and read.get("provenance") and read.get("status") in {"complete", "incomplete"}:
+        facts.append(f"file reads covered {read.get('covered_chars', 0)} of {read.get('complete_chars', 0)} chars ({read['provenance']})")
+    return f" [room: {'; '.join(facts)}]" if facts else ""
+
+
 def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None,
                   legacy_error: Optional[Mapping[str, str]] = None) -> str:
     """The read view as text: current revision (a reading's asks before it), council, open objections, gate facts."""
@@ -420,7 +436,7 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             elif p["status"] == "pending" and p.get("unresolved"):
                 tag = ("pending — outcome unknown" + (f" ({p['error']})" if p.get("error") else "")
                        + "; a reply may still arrive, and a new ask to it may pay twice")
-            parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}")
+            parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}{_room_facts(p)}")
         lines.append(f"- ask {ask['ask_id']} on {plan_record.ask_subject(ask['revision'])}"
                      + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
         if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold

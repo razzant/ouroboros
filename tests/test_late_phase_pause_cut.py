@@ -1,13 +1,13 @@
 """The owner's Pause ends an answered root's post-answer upkeep at once; nothing is saved.
 
 Real consumers end to end: the owner's Pause ingress, the post-task stage
-coordinator and its fallback-draft stage adapter, the shared Light transport (a
-knowledge read, then its answer — one Light operation of two physical sends), the
-usage ledger's physical-send gate, the activity census, held Continues and the
-maintenance pass that ends a Pause an earlier version saved. The retired scratchpad
-pass (#918) used to be that first paid stage; the fallback stage's draft selection is
-now stood in for by that same two-send operation (``_fallback_stand_in``), and the
-seeded scratchpad proves no stage touches it. Only the model transport is a
+coordinator and its fallback-draft stage adapter, the Light transport (one
+physical send per call; the stage makes two calls), the usage ledger's physical-send
+gate, the activity census, held Continues and the maintenance pass that ends a Pause
+an earlier version saved. The retired scratchpad pass (#918) used to be that first
+paid stage; the fallback stage's draft selection is now stood in for by those two
+Light calls (``_fallback_stand_in``), and the seeded scratchpad proves no stage
+touches it. Only the model transport is a
 deterministic fake, and it still goes through ``execute_physical_attempt`` — the real
 reservation and owner-fence gate. A Pause an earlier version saved keeps the stage
 names that version had.
@@ -56,19 +56,15 @@ class Light:
 
             prompt = str(messages[0]["content"])
             kind = "draft" if DRAFT in prompt else "other"
-            answered = messages[-1].get("role") == "tool"  # the read came back: this send answers
             scope = current_usage_scope()
 
             def send():
-                light.sends.append({"kind": kind, "prompt": prompt, "scope": scope, "answer": answered})
+                light.sends.append({"kind": kind, "prompt": prompt, "scope": scope})
                 pending = light.hooks.get(kind) or []
                 hook = pending.pop(0) if pending else None  # one per send of this kind, in order
                 if hook is not None:
                     hook()
                 usage = {"prompt_tokens": 1, "completion_tokens": 1}
-                if kind == "draft" and not answered:
-                    return {"content": "", "tool_calls": [{"id": "list", "type": "function", "function": {
-                        "name": "knowledge_list", "arguments": "{}"}}]}, usage
                 if kind == "draft":
                     return {"content": json.dumps({"text": f"draft-{len(light.sends)}", "quotes": []})}, usage
                 return {"content": f"{kind}-{len(light.sends)}"}, usage
@@ -84,17 +80,15 @@ class Light:
 
 
 def _fallback_stand_in(monkeypatch) -> None:
-    """The late phase's first paid stage: the real ``_run_memory_fallback_draft`` adapter around one
-    Light operation of two physical sends through the shared transport, in place of the fallback's
-    draft selection (which needs an activated chronicle with a unit to draft)."""
+    """The late phase's first paid stage: the real ``_run_memory_fallback_draft`` adapter around two
+    physical sends through the Light transport, one per call as the fallback writer sends, in place of
+    the fallback's draft selection (which needs an activated chronicle with a unit to draft)."""
     from ouroboros import consolidator, memory_fallback
-    from ouroboros.tools.registry import ToolContext
 
     def run_fallback_draft(env, task, llm, _drive_logs, _trace):
-        ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id=str(task.get("id") or ""))
-        _text, usage = consolidator._call_consolidation_llm(
-            llm, f"{DRAFT}: draft one page from the closed records.", memory_fallback.LABEL,
-            knowledge=consolidator.KnowledgeReadContext(ctx))
+        usage = consolidator._merge_consolidation_usage(*(consolidator._call_consolidation_llm(
+            llm, f"{DRAFT}: draft the {part} page from the closed records.", memory_fallback.LABEL)[1]
+            for part in ("first", "second")))
         errors = list(usage.get("_consolidation_errors") or [])
         return memory_fallback.FallbackRun("failed" if errors else "nothing", usage=usage, errors=errors)
 
@@ -197,8 +191,8 @@ def _census(f) -> dict:
     return {row["activity_id"]: row["phase"] for row in rows}
 
 
-def _during_read(f, act, cap=3.0, **kwargs):
-    """Run ``act`` while the draft operation's first send (its read) is on the wire."""
+def _during_first_send(f, act, cap=3.0, **kwargs):
+    """Run ``act`` while the draft stage's first send is on the wire."""
     entered, release, answer = threading.Event(), threading.Event(), {}
 
     def hook():
@@ -216,11 +210,11 @@ def _during_read(f, act, cap=3.0, **kwargs):
     return answer
 
 
-def _pause_during_read(f, request_id="late-pause", cap=3.0, **kwargs):
-    """The owner's Pause lands while the draft operation's first send (its read) is on the wire."""
+def _pause_during_first_send(f, request_id="late-pause", cap=3.0, **kwargs):
+    """The owner's Pause lands while the draft stage's first send is on the wire."""
     from supervisor.owner_pause_control import request_owner_pause
 
-    return _during_read(f, lambda: request_owner_pause(ROOT, request_id=request_id), cap=cap, **kwargs)
+    return _during_first_send(f, lambda: request_owner_pause(ROOT, request_id=request_id), cap=cap, **kwargs)
 
 
 def _stop(f) -> None:
@@ -279,10 +273,10 @@ def test_pause_during_the_upkeep_ends_it_at_once_with_the_skip_disclosed_and_the
     from ouroboros.owner_pause import read_fence
 
     before_blocks = _scratch(f)
-    pause = _pause_during_read(f)
+    pause = _pause_during_first_send(f)
     assert pause["ok"] and pause["root_task_id"] == ROOT, pause
     assert pause["state"] == "requested"  # accepted while the upkeep was still running
-    # The read on the wire finished; the answering send never got a physical send, nor did promotion.
+    # The send on the wire finished; the stage's next send never got a physical send, nor did promotion.
     assert f.light.kinds() == ["draft"] and f.stages == []
     row = _row(f)
     assert row["status"] == "completed" and row["result"] == ANSWER
@@ -336,7 +330,7 @@ def test_a_stop_still_ends_the_upkeep_at_once(late):
     """Stop alone skips the rest of the upkeep as before, and saves nothing either."""
     f = late
 
-    _during_read(f, lambda: _stop(f))
+    _during_first_send(f, lambda: _stop(f))
     stopped = _row(f)["root_phase_checkpoint"]
     assert stopped["post_task_synthesis"] == "degraded"
     assert stopped["post_task_stop_reason"] == "cancelled:skipped=promotion"
@@ -370,7 +364,7 @@ def test_a_stop_beside_the_pause_is_what_the_disclosure_names(late, monkeypatch,
         if order == "both_before_the_next_send":
             _stop(f)
 
-    _during_read(f, pause_and_stop)
+    _during_first_send(f, pause_and_stop)
     checkpoint = _row(f)["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded" and checkpoint["post_task_stop_reason"] == expected
     assert f.light.kinds() == ["draft"] and f.stages == [] and "post_task_pause" not in checkpoint
@@ -420,7 +414,7 @@ def test_running_upkeep_holds_a_continue_until_it_ends(late):
         observed["released"] = release_settled_continuations(ROOT)
         return ack
 
-    ack = _during_read(f, admit)
+    ack = _during_first_send(f, admit)
     assert ack["ok"] and ack["held"], ack
     assert {"kind": "late_phase_running", "task_id": ROOT} in ack["blockers"]
     assert observed == {"released": []}, "a running upkeep keeps the successor held"
@@ -435,7 +429,7 @@ def test_a_continue_is_never_held_by_upkeep_the_pause_ended(late):
     from supervisor.continuation_admission import admit_continuation, conflicting_writers
 
     _continue_eligible(f)
-    assert _pause_during_read(f)["ok"] and _phase(f) == "degraded"
+    assert _pause_during_first_send(f)["ok"] and _phase(f) == "degraded"
     assert not [b for b in conflicting_writers(f.q, ROOT, drive_root=f.root) if str(b.get("kind")).startswith("late_phase")]
     ack = admit_continuation(ROOT, action_nonce="late-continue-0002")
     assert ack["ok"] and not ack.get("held"), ack

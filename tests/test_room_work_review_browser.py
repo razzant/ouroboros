@@ -22,7 +22,10 @@ from tests.test_room_work_browser import (
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
-def test_last_cardless_project_turn_returns_focus_to_its_own_composer(room_ui):
+def test_last_cardless_project_turn_returns_focus_to_its_own_trigger(room_ui):
+    """The list closed by Escape after the Project's last cardless turn ended hands focus back to that Project's own
+    status control: its title keeps opening the list (the room's whole name heads it, DESIGN "Room work status"), so
+    the control stays enabled and focus never falls to the document or into another room."""
     transport = Transport(room_ui["page"], projects=[PROJECT], history={1: [], 42: []},
                           activities=[activity("last-project-turn", kind="direct_chat", chat_id=42)])
     page = open_app(room_ui, transport)
@@ -35,13 +38,14 @@ def test_last_cardless_project_turn_returns_focus_to_its_own_composer(room_ui):
     transport.refresh()
     wait_facts(page, "project", lambda f: f["rows"][0]["settled"], "retained ended row")
     page.keyboard.press("Escape")
-    # Closing returns focus immediately; only the inert picture waits for its fold.
-    assert page.locator("#project-panel .chat-input").evaluate("el => el === document.activeElement")
-    current = wait_facts(page, "project", lambda f: f["surfaceHidden"] and f["disabled"], "the ended list folded away")
+    # Closing returns focus to the trigger immediately; only the inert picture waits for its fold.
+    assert trigger(page, "project").evaluate("el => el === document.activeElement")
+    current = wait_facts(page, "project", lambda f: f["surfaceHidden"], "the ended list folded away")
     evidence("project-ended-focus", current)
     capture(page, "project-ended-focus")
-    assert current["surfaceHidden"] and current["disabled"], current
-    assert page.locator("#project-panel .chat-input").evaluate("el => el === document.activeElement"), current
+    assert current["surfaceHidden"] and not current["disabled"], current
+    assert current["active"]["isTrigger"], current
+    assert trigger(page, "project").evaluate("el => el === document.activeElement"), current
     assert transport.posts == [], transport.posts
 
 

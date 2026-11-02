@@ -18,6 +18,7 @@ from ouroboros import chat_chain as cc, dialogue_store as ds, maintenance, memor
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from tests import _memory_inventory_shared as shared
+from tests._store_shared import independent_writer
 
 ROW_META = mi.row_meta
 LIGHT = {"kind": "helper", "route": "configured-light"}
@@ -202,7 +203,7 @@ def test_a_stored_prefix_whose_last_row_no_longer_answers_is_read_live(tmp_path,
     shared.world(tmp_path)
     _fill(tmp_path)
     anchor = ChronicleStore(tmp_path).tail_state()["anchor"]
-    with sqlite3.connect(ds.path(tmp_path)) as db:  # the file keeps its identity, its last stored row does not
+    with independent_writer(ds.path(tmp_path)) as db:  # the file keeps its identity, its last stored row does not
         body = json.loads(db.execute("SELECT body FROM dialogue WHERE stream='chat' AND seq=?", (anchor[0],)).fetchone()[0])
         db.execute("UPDATE dialogue SET body=? WHERE stream='chat' AND seq=?",
                    (json.dumps({**body, "text": "another history"}), anchor[0]))
@@ -269,7 +270,7 @@ def test_a_place_arrival_whose_source_pointer_lands_after_it_was_stored_reads_as
     arrival = ds.append(tmp_path, "chat", shared.msg("2026-09-04T00:00:00+00:00", "a guest wrote", chat_id=4242,
                                                      type="place_arrival", place_id="p1"))
     _fill(tmp_path)
-    with sqlite3.connect(ds.path(tmp_path)) as db:  # the intake points at the place's context after the append
+    with independent_writer(ds.path(tmp_path)) as db:  # the intake points at the place's context after the append
         db.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
                    (json.dumps({"place_context_source_ref": {"kind": "place_context", "id": "c1"}}), arrival.seq))
     assert isinstance(ds.row_at(tmp_path, "chat", arrival.seq).row, SourceProjection)

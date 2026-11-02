@@ -570,6 +570,7 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
             "host_added": bool(participant.host_added), "dispatched": sid in base_facts and base_facts[sid]["status"] == "pending",
             "continued": bool(prepared.continued.get(sid)), "slot": frozen_seat(participant.slot),
             "delivery_ref": delivery_refs.get(sid), **base_facts[sid],
+            **(_room_delivery(prepared.delivery.get("dialogue_delivery", {}).get(sid)) if base_facts[sid]["status"] == "pending" else {}),
         })
     record = plan_record.append_ask(state_root, task_id, {
         "ask_id": prepared.ask_id, "ts": utc_now_iso(), "revision": number, "message": prepared.message,
@@ -628,6 +629,13 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
 
 
 # ------------------------------------------------------------------ settlement
+
+def _room_delivery(facts: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The room this seat's delivery carries inline, counted at the barrier before any send and never revised. Whether it
+    went is the seat's own dispatch outcome, which its readers join to it; what file reads cover is a fact apart."""
+    keys = ("conversation_rows", "conversation_inline_rows", "other_rows")
+    return {"room_delivery": {key: int(facts.get(key) or 0) for key in keys}} if facts and facts.get("snapshot_lines") else {}
+
 
 def _dialogue_carrier(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     """The ask row's carrier of the own-room snapshot every participant saw: the exact source

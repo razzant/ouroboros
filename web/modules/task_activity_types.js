@@ -49,8 +49,8 @@
  * @property {number} chat_id
  * @property {string} project_id
  * @property {string} client_message_id  // empty for managed queue rows
- * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; parked direct turns retain ID/kind
+ * @property {string} kind  // direct_chat | managed_task | presence — presentational label; membership in this census, not kind, decides liveness
+ * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; presence: preparing | working; parked direct turns retain ID/kind
  * @property {number} started_at
  */
 /**

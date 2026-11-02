@@ -570,6 +570,8 @@ def _typed_fact(meta: Mapping[str, Any]) -> str:
     if name == "delivery":
         state = _mapping(_mapping(meta.get("transport")).get("delivery")).get("state")
         name = f"delivery {state or 'state not recorded'}"
+    elif not name and (event := _mapping(_mapping(meta.get("quiz")).get("secret_outcome")).get("event")):
+        name = f"secret request {event}"  # the form's host outcome (``memory_inventory.row_meta``), never a value
     return name
 
 

@@ -397,7 +397,8 @@ def test_an_xdg_entry_whose_appimage_is_gone_follows_the_new_file_and_keeps_its_
     path = tmp_path / ".config/autostart/ouroboros.desktop"
     path.parent.mkdir(parents=True)
     old = tmp_path / "Ouroboros-7.8.0 (old).AppImage"
-    path.write_text(f'[Desktop Entry]\nType=Application\nName=Ouroboros\nExec="{old}" --launch-intent automatic\n'
+    # The older copy's own entry, escaped: a raw Windows path is not a valid quoted Exec program.
+    path.write_text(f'[Desktop Entry]\nType=Application\nName=Ouroboros\nExec={startup._desktop_command(old)}\n'
                     "Terminal=false\nX-GNOME-Autostart-enabled=false\n", encoding="utf-8")
     old.touch()
     assert startup.follow_moved_app() is False, "a copy that still exists stays other_copy"

@@ -4,6 +4,7 @@ function reviewNodeKey(node) {
     if (Object.hasOwn(dataset, 'reviewHydrateStatus')) return 'hydrate-status';
     if (Object.hasOwn(dataset, 'reviewAuthorDecision')) return 'author-decision';
     if (dataset.reviewOpinion) return `opinion:${dataset.reviewOpinion}`;
+    if (dataset.reviewWaveFailure) return `wave-failure:${dataset.reviewWaveFailure}`;
     if (dataset.reviewFacts) return `facts:${dataset.reviewFacts}`;
     if (dataset.reviewReadUrl) return `read:${dataset.reviewReadUrl}`;
     if (dataset.reviewGroup) return `group:${dataset.reviewGroup}`;

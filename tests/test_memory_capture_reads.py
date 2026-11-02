@@ -238,14 +238,12 @@ def test_warm_lineage_reads_every_task_the_author_rule_asks_about():
 
 def test_documents_by_ids_keys_each_document_by_its_stored_row(tmp_path):
     from ouroboros import task_results, task_store
-    from tests._store_shared import seed_result
-
-    import sqlite3
     from ouroboros.store import store_path
+    from tests._store_shared import independent_writer, seed_result
 
     seed_result(tmp_path, "good", {"status": "completed", "root_task_id": "good", "is_root_task": True})
     seed_result(tmp_path, "zbad", {"status": "completed", "root_task_id": "elsewhere"})
-    with sqlite3.connect(store_path(tmp_path)) as conn:  # a damaged body that names another task
+    with independent_writer(store_path(tmp_path)) as conn:  # a damaged body that names another task
         conn.execute("UPDATE task_bodies SET body=json_set(body, '$.task_id', 'good') WHERE task_id='zbad'")
     documents = task_store.documents_by_ids(tmp_path, ["good", "zbad"])
     assert documents["good"]["root_task_id"] == "good" and documents["zbad"]["root_task_id"] == "elsewhere"

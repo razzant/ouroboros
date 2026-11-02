@@ -379,17 +379,23 @@ def facts(row: Dict[str, Any]) -> Dict[str, Any]:
         value = row.get(key)
         return "" if value is None or isinstance(value, (dict, list)) else str(value)
 
-    origin = None
-    ref = row.get("origin_message_ref")
-    if isinstance(ref, dict) and ref.get("client_message_id"):
-        try:
-            origin = f"{int(ref.get('chat_id') or 0)}:{ref['client_message_id']}"
-        except (TypeError, ValueError):
-            origin = None
     return {"ts": text("ts"), "chat_id": chat_id, "task_id": text("task_id") or None,
             "parent_task_id": text("parent_task_id") or None, "root_task_id": text("root_task_id") or None,
             "subagent_task_id": text("subagent_task_id") or None, "direction": text("direction"),
-            "kind": text("type") or None, "client_message_id": text("client_message_id") or None, "origin": origin}
+            "kind": text("type") or None, "client_message_id": text("client_message_id") or None,
+            "origin": origin_key(row.get("origin_message_ref")) or None}
+
+
+def origin_key(ref: Any) -> str:
+    """The owner message an ``origin_message_ref`` names, ``<chat_id>:<client_message_id>`` (a Host
+    Service ``operation_ref``): the discovery key of the dialogue's ``origin`` column and of a task's
+    own top-level origin (``store_hot_facts.task_columns``); "" for none. Authority stays with the ref."""
+    if not isinstance(ref, dict) or not ref.get("client_message_id"):
+        return ""
+    try:
+        return f"{int(ref.get('chat_id') or 0)}:{ref['client_message_id']}"
+    except (TypeError, ValueError, OverflowError):
+        return ""
 
 
 def stream_row(stream: str, columns: Dict[str, Any]) -> bool:

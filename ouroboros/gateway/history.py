@@ -865,11 +865,11 @@ def _collect_chat_rows(
                     _qid = str(quiz.get("quiz_id") or "")
                     _live = _quiz_source(_qtid)["quizzes"].get(_qid) or answered.get((_qtid, _qid))
                     if isinstance(_live, dict):
-                        from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection
+                        from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_projection
                         if delivery := question_delivery_projection(_live):
                             quiz["question_delivery"] = delivery
                         quiz["state"] = str(_live.get("state") or quiz.get("state") or "open")
-                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials"):
+                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials", *SECRET_FIELDS):
                             if key in _live:
                                 quiz[key] = _live[key]
                         if _live.get("host_facts") and not quiz.get("host_facts"):

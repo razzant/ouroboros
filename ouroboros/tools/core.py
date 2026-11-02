@@ -1401,7 +1401,7 @@ def get_tools() -> List[ToolEntry]:
                 "Use after browse_page(output='screenshot') or browser_action(action='screenshot')."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to image (preferred)"},
+                "file_path": {"type": "string", "description": "Local image path (preferred): relative to the active workspace, or absolute."},
                 "image_base64": {"type": "string", "description": "Base64-encoded image data or __last_screenshot__"},
                 "caption": {"type": "string", "description": "Optional caption for the photo"},
             }, "required": []},
@@ -1410,7 +1410,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "send_video",
             "description": "Send a local video file to the owner's chat, with an optional caption. Requires file_path.",
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the video."},
+                "file_path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the video"},
             }, "required": ["file_path"]},
         }, _send_video),
@@ -1423,7 +1423,7 @@ def get_tools() -> List[ToolEntry]:
                 "the owner can download, rather than only describing it or sending a screenshot."
             ),
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to the document/file"},
+                "file_path": {"type": "string", "description": "Local file path: relative to the active workspace, or absolute."},
                 "caption": {"type": "string", "description": "Optional caption for the file"},
             }, "required": ["file_path"]},
         }, _send_file),

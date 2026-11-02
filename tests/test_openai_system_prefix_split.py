@@ -579,6 +579,28 @@ def test_explicit_cache_affinity_still_wins_and_a_reroute_still_rotates(monkeypa
     assert pinned["extra_body"]["session_id"] == explicit, "rotation works on the copy it was given"
 
 
+def test_direct_openai_keys_a_prompt_without_a_leading_system_by_its_declared_affinity():
+    """Direct OpenAI keys the cache by the leading system prefix; a prompt without one
+    falls back to the caller-declared affinity (``_explicit_cache_affinity_identity``)
+    and gets no key without either, while a leading system still owns the key."""
+    target = {"provider": "openai", "resolved_model": "gpt-5.6-sol", "usage_model": "openai/gpt-5.6-sol"}
+    client = LLMClient(api_key="unused")
+    prompt = [{"role": "user", "content": "Summarize this source."}]
+
+    def build(messages, **kwargs):
+        return client._build_remote_kwargs(dict(target), messages, "low", 128, "auto", None, None,
+                                           skip_capability_fetch=True, **kwargs)
+
+    keyed = build(prompt, cache_affinity="plan_review:task-1")
+    assert keyed["prompt_cache_key"] == LLMClient._explicit_cache_affinity_identity(
+        "openai/gpt-5.6-sol", "plan_review:task-1")
+    assert "prompt_cache_key" not in build(prompt), "no leading system and no affinity: no key"
+    assert "cache_control" not in str(keyed["messages"]), "direct Chat Completions carries no markers"
+    system = [{"role": "system", "content": "stable policy"}, *prompt]
+    assert build(system, cache_affinity="plan_review:task-1")["prompt_cache_key"] == (
+        LLMClient._prompt_cache_identity("openai/gpt-5.6-sol", system))
+
+
 # ---------------------------------------------------------------------------
 # (f) usage.wire_layout is host-owned
 # ---------------------------------------------------------------------------

@@ -10134,6 +10134,96 @@ body.keyboard-open .project-panel {
     color: var(--text-meta);
 }
 
+/* Integration-secret request (DESIGN "Quiz card" → Secret request): the card names the asked
+   fields and the Settings key each writes, then the host's facts; the masked fields live only in
+   the shared modal, in Settings' own secret row. No free answer, no draft. */
+.chat-secret-request {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1, 4px);
+    min-inline-size: 0;
+}
+.chat-secret-fields,
+.chat-secret-readers,
+.secret-request-readers {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.chat-secret-readers:empty,
+.secret-request-readers:empty,
+.secret-request-readers-title:empty { display: none; }
+.secret-request-readers-title { margin: 0 0 calc(-1 * var(--space-2, 8px)); }
+.chat-secret-field {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-2, 8px);
+    align-items: baseline;
+    min-inline-size: 0;
+}
+.chat-secret-field-id {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.chat-secret-field-key,
+.chat-secret-reader,
+.secret-request-readers-title,
+.secret-request-reader {
+    font-size: var(--type-meta);
+    line-height: var(--line-meta, 1.35);
+    color: var(--text-meta);
+    overflow-wrap: anywhere;
+}
+.chat-secret-status,
+.secret-request-late,
+.secret-request-warning,
+.secret-request-error {
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+.chat-secret-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2, 8px);
+}
+.secret-request-backdrop .secret-request-dialog {
+    margin-block: auto;
+}
+body.keyboard-open .secret-request-backdrop .secret-request-dialog {
+    margin-block: 0 auto;
+}
+.secret-request-dialog {
+    max-width: 480px;
+}
+/* Keep this reading surface opaque even under the theme's shared floating-sheet rule. */
+:root[data-theme] .marketplace-modal.secret-request-dialog {
+    background-color: var(--bg-secondary);
+}
+.secret-request-body,
+.secret-request-fields {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3, 12px);
+}
+.secret-request-intro {
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta, 1.35);
+}
+.secret-request-label {
+    font-size: var(--type-body);
+    color: var(--text-primary);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.secret-request-check { align-self: flex-start; }
+
 /* D12: always-visible compact copy icon in the bubble's bottom-right corner. The Reply control joins it in
    one control row (docs/DESIGN.md "Replies"), and so do the registered message actions between them
    (message_actions.js): the same 24px square, ink and rhythm, one --space-2 gap. */

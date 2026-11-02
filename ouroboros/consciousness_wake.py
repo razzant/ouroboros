@@ -161,8 +161,11 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
     """One answered card of the window: stamps, the recorded answer, a question preview.
 
     The owner's own words are the answer itself, so the comment is rendered whole;
-    only the question is a (named) preview. No verdict on what the answer meant.
+    only the question is a (named) preview. No verdict on what the answer meant. A secret
+    request's answer is the host's typed outcome: its event, plugin and field ids, never a value.
     """
+    from ouroboros.owner_quiz import secret_outcome_block, secret_outcome_summary
+
     parts = []
     for key, word in (("answered_at", "answered"), ("asked_at", "asked")):
         stamp = _parse_iso(block.get(key))
@@ -170,7 +173,9 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
     options = block.get("options") if isinstance(block.get("options"), list) else []
     index = block.get("answered_index")
     comment = str(block.get("comment") or "")
-    if isinstance(index, int) and not isinstance(index, bool):
+    if secret_outcome_block(block) is block:
+        answer = f"host outcome {secret_outcome_summary(block)}"
+    elif isinstance(index, int) and not isinstance(index, bool):
         label = str(options[index]) if 0 <= index < len(options) else "label unavailable"
         answer = f"chose option {index + 1}: {label}"
         if comment.strip():
