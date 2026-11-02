@@ -240,6 +240,22 @@ def test_the_copy_holds_the_runtime_inputs_dirty_edits_included_and_nothing_else
     assert all(f"('{name}', " in shipped for name in check.RUNTIME_INPUTS)  # what the app bundle ships
 
 
+def test_the_identity_order_is_posix_component_order_under_windows_path_rules_too(tmp_path, monkeypatch):
+    """A Windows Path compares case-folded, so the same bytes once digested in another order there. The order is
+    case-sensitive components everywhere: the prefix pair keeps it apart from whole-string order, which would move
+    today's POSIX digests; Windows path rules are applied on any host here, not in a native run."""
+    names = ("docs/install.json", "docs/install/index.html", "web/alpha.css", "web/Zeta.css", "server.py", "VERSION")
+    for name in names:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    order = ["VERSION", "docs/install/index.html", "docs/install.json", "server.py", "web/Zeta.css", "web/alpha.css"]
+    assert [path.as_posix() for path in check.product_files(tmp_path)] == order
+    identity = check.source_identity(tmp_path)
+    monkeypatch.setattr(check, "Path", pathlib.PureWindowsPath)
+    assert [path.as_posix() for path in check.product_files(tmp_path)] == order
+    assert check.source_identity(tmp_path) == identity
+
+
 def test_a_host_without_macos_reports_unsupported_and_writes_its_report(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(check.sys, "platform", "linux")
     out = tmp_path / "evidence"

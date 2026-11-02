@@ -9,32 +9,36 @@ import sqlite3
 import sys
 import tempfile
 from unittest.mock import patch
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 
 def server_alive(root):
+    """Whether a server may hold ``root``: anything short of proof that none does counts as live.
+
+    Nothing is signalled (on Windows ``os.kill(pid, 0)`` is CTRL_C_EVENT to the pid's console group): a recorded
+    pid clears only when ``pid_provably_gone``. The admission lock is tried on the existing file, read-only,
+    through the descriptor lock ``admit_data_root`` holds (same flock / LockFileEx range); none is created."""
+    from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock, pid_provably_gone
     for relative in ('state/server_process.json', 'server.pid', 'state/server.pid', 'ouroboros.pid'):
         path = root / relative
         if not path.exists():
             continue
         try:
-            value = json.loads(path.read_text())
+            value = json.loads(path.read_text(encoding='utf-8'))
             pid = int(value.get('pid', 0) if isinstance(value, dict) else value)
-            if pid > 0:
-                os.kill(pid, 0)
+            if pid > 0 and not pid_provably_gone(pid):
                 return True
-        except ProcessLookupError:
-            pass
         except (OSError, ValueError, TypeError):
             return True  # Unreadable admission evidence is not proof of an offline root.
     lock = root / 'state/server.lock'
     if lock.exists():
-        import fcntl
-        with lock.open('rb') as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                fcntl.flock(handle, fcntl.LOCK_UN)
-            except OSError:
-                return True
+        try:
+            with lock.open('rb') as handle:
+                file_lock_exclusive_nb(handle.fileno())
+                file_unlock(handle.fileno())  # a Windows lock goes before its handle
+        except OSError:
+            return True  # held by its server, unreadable or refused: none proves the root offline
     return False
 
 
@@ -97,10 +101,13 @@ _GUARDED = set()
 
 
 def _check_database(database):
-    from urllib.parse import unquote, urlsplit
     database = str(database)
-    path = Path(unquote(urlsplit(database).path) if database.startswith('file:') else database).resolve()
-    if any(path == root or path.is_relative_to(root) for root in _GUARDED) and 'mode=ro&immutable=1' not in database:
+    try:  # a file URI's path as the platform maps it, as SQLite opens it (Windows: file:///C:/x is C:\x)
+        path = Path(url2pathname(urlsplit(database).path) if database.startswith('file:') else database).resolve()
+    except (OSError, ValueError):
+        path = None  # a name that cannot be placed is never taken to lie outside the guard
+    inside = path is None or any(path == root or path.is_relative_to(root) for root in _GUARDED)
+    if inside and 'mode=ro&immutable=1' not in database:
         raise PermissionError('Diagnostic requires immutable read-only SQLite inputs')
 
 
@@ -135,6 +142,7 @@ def readonly_inputs(root, *, source_root=None, scratch_root=None):
     from ouroboros import settings_integrity, mcp_client, observability
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.memory import Memory
+    from ouroboros.test_environment import default_temp_parent
     from supervisor import state
 
     sqlite_connect = sqlite3.connect
@@ -196,7 +204,7 @@ def readonly_inputs(root, *, source_root=None, scratch_root=None):
     try:
         with ExitStack() as stack:
             scratch = Path(scratch_root) if scratch_root is not None else Path(stack.enter_context(
-                tempfile.TemporaryDirectory(prefix='context-fit-blobs-', dir='/tmp')))
+                tempfile.TemporaryDirectory(prefix='context-fit-blobs-', dir=default_temp_parent())))
             if any(scratch.resolve().is_relative_to(path) for path in guarded):
                 raise ValueError('Diagnostic scratch must be outside the measured root')
             write_blob = observability.write_blob
