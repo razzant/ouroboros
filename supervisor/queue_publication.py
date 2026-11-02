@@ -73,10 +73,12 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last
 # capture written. Kept: the (revision, custody) at which the saved queue was last kept.
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last capture
-# written. Census: the last census WRITTEN, never a census merely captured, so a failed write is retried by the next tick;
+# written. Captures are numbered under Q too (``capture_seq``): the number decides which of two
+# captures is newer, whatever their revisions (a tick captures without a bump). Census: the last
+# census WRITTEN, never a census merely captured, so a failed write is retried by the next tick;
 # while a write has failed, the certificate is not refreshed over the stale document.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
-                          "write_failed": False,
+                          "capture_seq": 0, "published_seq": 0, "write_failed": False,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
 _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
@@ -85,8 +87,8 @@ _PUBLISH_LOCK = threading.Lock()
 def reset() -> None:
     """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher."""
     global _PUBLISHER
-    _STATE.update(revision=0, published=0, reason="", kept=None, census=None, write_failed=False,
-                  alive_heartbeats=None, alive_written_at=0.0)
+    _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
+                  write_failed=False, alive_heartbeats=None, alive_written_at=0.0)
     _PUBLISHER = None
 
 
@@ -230,6 +232,7 @@ def _census() -> str:
 def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
     census = _census() if census is None else census
+    _STATE["capture_seq"] += 1
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
@@ -263,7 +266,7 @@ def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = Non
     from ouroboros.server_restart import _AGENT_RESTART_REPLY, agent_restart_snapshot
 
     return {
-        "revision": _STATE["revision"], "census": census,
+        "revision": _STATE["revision"], "seq": _STATE["capture_seq"], "census": census,
         "reason": reason, "rollback_readable": reason in _EXPORT_REASONS,
         "forced": reason in _FORCED_REASONS,
         "pending": pending_rows, "running": running_rows,
@@ -394,7 +397,7 @@ def _publish(capture: Dict[str, Any]) -> bool:
     encoded = {name: machine_json(document) for name, document in documents.items()}
     with _PUBLISH_LOCK:
         previous = _queue().QUEUE_PUBLICATION
-        if previous is not None and _STATE["published"] > capture["revision"] and not capture["forced"]:
+        if previous is not None and _STATE["published_seq"] > capture["seq"] and not capture["forced"]:
             return True  # a later capture of this process already published newer documents
         changed = previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
         generation = uuid.uuid4().hex if changed else previous[2]
@@ -411,6 +414,7 @@ def _publish(capture: Dict[str, Any]) -> bool:
             if changed:
                 _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generation)
             _STATE["published"] = max(_STATE["published"], capture["revision"])
+            _STATE["published_seq"] = max(_STATE["published_seq"], capture["seq"])
             _STATE["census"] = capture["census"]  # written, so the tick's next census compares against it
             _STATE["write_failed"] = False
             return True

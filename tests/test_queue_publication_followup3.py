@@ -132,3 +132,23 @@ def test_a_failed_census_publication_is_retried_and_never_recertified_meanwhile(
     assert queue_publication.publish_queue_changes() is True, "and the quiet tick that follows refreshes as before"
 
 
+# ---- N10: a newer capture always wins -------------------------------------------------------------
+
+def test_a_newer_capture_is_never_overwritten_by_an_older_one_at_the_same_revision(published):
+    root, now = published
+    queue.PENDING.append(_task("a"))
+    assert queue.persist_queue_snapshot("seed") is True
+    queue_publication.tick_publisher_started()
+    direct = {"roots": [], "incomplete": False}
+    with queue._queue_lock:
+        older = queue_publication._capture("barrier", direct)  # a barrier's capture, not yet written
+    queue.PENDING.append(_task("b"))
+    with queue._queue_lock:
+        newer = queue_publication._capture("main_loop", direct, census=queue_publication._census())  # the tick's capture
+    assert newer["revision"] == older["revision"], "the tick captured without a bump: the same revision"
+    assert queue_publication._publish(newer) is True
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["a", "b"]
+    assert queue_publication._publish(older) is True, "the older capture is subsumed, never written"
+    assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["a", "b"], "the newer facts stay on disk"
+
+
