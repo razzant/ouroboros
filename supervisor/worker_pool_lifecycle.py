@@ -86,6 +86,12 @@ def _pool():
 
 
 _WORKER_LIFECYCLE_LOCK = threading.RLock()
+
+
+class SpawnRefusedInMarkerWindow(RuntimeError):
+    """No child starts inside an assisted update's conflict-marker window: a worker spawned now would import the
+    tree's markers. The dead slot keeps its place and the reaper's refusal episode retries it each tick until the
+    window ends (``task_reaper._respawn_refused``); the degraded executor covers the lane's turns meanwhile."""
 _WORKER_SHA_LOOKUP_TIMEOUT_SEC = 2.0  # Local diagnostic I/O, like utils.get_git_info.
 
 
@@ -861,8 +867,11 @@ def retire_or_replace_worker(wid: int, slot: Any) -> str:
         fenced = project_fenced(slot)
     if not last:
         return "retired" if retire_worker(wid, slot) else ""
-    return ("replaced" if not fenced and is_worker_slot(slot)
-            and _spawn_worker_slot(wid, slot, lane=getattr(slot, "lane", LANE_PROJECT)) else "")
+    try:
+        return ("replaced" if not fenced and is_worker_slot(slot)
+                and _spawn_worker_slot(wid, slot, lane=getattr(slot, "lane", LANE_PROJECT)) else "")
+    except SpawnRefusedInMarkerWindow:
+        return ""  # the window forbids the child; the dead last member stays for the tick after it
 
 
 def request_worker_quiescence(slot: Any) -> None:
@@ -1008,8 +1017,10 @@ def reconcile_worker_capacity(residual_demand) -> None:
     for wid in range(next_id, next_id + missing):
         # Starts run without Q. The serializer excludes Stop/update/storm teardown;
         # the health owner can still fence a storm while this start is in flight.
+        from supervisor.worker_chat_lane import marker_window_closed
+
         with _queue_lock:
-            if (_pool()._WORKER_POOL_DISABLED_REASON
+            if (_pool()._WORKER_POOL_DISABLED_REASON or marker_window_closed()
                     or (_pool().repo_writer_admission_closed() and not residual_demand())):
                 break
         try:
@@ -1024,6 +1035,11 @@ def _spawn_worker_slot(wid: int, old: Any = None, *, ready_attempt: int = 1, lan
 
     ``lane`` names the slot's lane; a conversation carrier ignores the project
     pool's stop fence (its membership is not that fence's)."""
+    from supervisor.worker_chat_lane import marker_window_closed
+
+    if marker_window_closed():  # respawn, replacement and growth alike: the window forbids every child
+        raise SpawnRefusedInMarkerWindow(
+            f"worker {wid} not started: a child started now would import the tree's conflict markers")
     ctx = _pool()._get_ctx()
     in_q = ctx.Queue()
     events_cursor, spawned_at = events_log_cursor(), time.time()
