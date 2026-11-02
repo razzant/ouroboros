@@ -215,11 +215,15 @@ def take_awaiting_turn(task_id: str) -> Any:
 
 
 def live_turn_count() -> int:
-    """Under Q: the lane's live rows plus the inline executors' registered actors (the census at entry)."""
+    """Under Q: the owner's live conversation turns (the census at entry, the auto-resume gate): the lane's rows and
+    the inline executors' registered actors, as base's registered direct actors were (its turns and wakes). A
+    correspondent's Presence turn is its place's conversation, never the owner's."""
+    from ouroboros.task_carrier import execution_kind
     from supervisor.active_activity import get_direct_activity_registry
 
-    live = {tid for tid, meta in _pool().RUNNING.items() if conversation_row(meta)}
-    live.update(entry.activity_id for entry in get_direct_activity_registry().actors())
+    live = {tid for tid, meta in _pool().RUNNING.items()
+            if conversation_row(meta) and execution_kind(meta.get("task") or {}) != "presence"}
+    live.update(entry.activity_id for entry in get_direct_activity_registry().actors() if entry.kind != "presence")
     return len(live)
 
 

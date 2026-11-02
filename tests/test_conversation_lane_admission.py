@@ -369,3 +369,25 @@ def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_sa
     task_lifecycle.cancel_task_custody("turn-n7")
     assert workers.RUNNING.get("turn-n7") is resend["row"] and resend["row"]["worker_id"] == 98
     assert emitted == []  # no terminal of the old attempt for the row the resend owns
+
+
+@pytest.mark.parametrize("live, resumes", [("presence", True), ("direct", False)])
+def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane, monkeypatch, live, resumes):
+    """Review N8: the Host serves at boot before auto-resume, so a correspondent's Presence turn can be a live lane
+    row when the planned restart's resume runs. It is its place's conversation, never the owner's: only an owner
+    turn (base's registered direct actors) holds the resume."""
+    from tests.conversation_carrier_support import lane_row
+
+    started = []
+    (workers.DRIVE_ROOT / "state").mkdir(parents=True, exist_ok=True)
+    (workers.DRIVE_ROOT / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr(worker_chat_lane, "handle_chat_direct", lambda chat_id, text, *_a, **_k: started.append(text))
+    monkeypatch.setattr("ouroboros.delegate_recovery.import_legacy_restart", lambda _root: None)
+    monkeypatch.setattr("ouroboros.delegate_recovery.pending_owner_restart", lambda _root: None)
+    monkeypatch.setattr("ouroboros.installation_stop.panic_input", lambda _root: "")
+    turn = {"id": f"{live}-turn", "type": "task", "chat_id": 5 if live == "presence" else 7, "text": "hi",
+            "_is_direct_chat": True, "_execution_owner": {"kind": live}}
+    lane_row(workers, {**turn, **({"_presence_turn": True} if live == "presence" else {})}, wid=97)
+    worker_chat_lane.auto_resume_after_restart()
+    assert bool(started) is resumes and all(text.startswith("[auto-resume after restart]") for text in started)
