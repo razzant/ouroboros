@@ -216,20 +216,20 @@ class HostServiceContext:
 
         self.presence_turns = PresenceTurnExecutions()
 
-    @property
-    def presence_runner(self) -> Optional[Callable[..., Any]]:
-        """The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads it for
-        this Host's root); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An
-        injected runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did. Assigned at
-        construction or later, it reaches the carrier the same way; None restores the module's own runner."""
+    def _runner(self) -> Optional[Callable[..., Any]]:
         return self._presence_runner
 
-    @presence_runner.setter
-    def presence_runner(self, runner: Optional[Callable[..., Any]]) -> None:
+    def _bind_runner(self, runner: Optional[Callable[..., Any]]) -> None:
         from ouroboros.presence_carrier import set_presence_runner
 
         self._presence_runner = runner
         set_presence_runner(self.data_dir, runner)
+
+    # The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads it for this
+    # Host's root); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An injected
+    # runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did. Assigned at construction
+    # or later, it reaches the carrier the same way; None restores the module's own runner.
+    presence_runner = property(_runner, _bind_runner)
 
     def _ws_relay_burst_ended(self, key: str, dropped: int, duration_sec: float) -> None:
         """Report one aggregated WS relay refusal burst: a warning plus one
