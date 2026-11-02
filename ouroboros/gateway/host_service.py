@@ -202,14 +202,7 @@ class HostServiceContext:
         self.bridge_getter = bridge_getter or self._default_bridge
         self.tool_schemas_getter = tool_schemas_getter or self._default_tool_schemas
         self.ws_broadcaster_getter = ws_broadcaster_getter or self._default_ws_broadcaster
-        # The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads
-        # it); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An
-        # injected runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did.
         self.presence_runner = presence_runner
-        if presence_runner is not None:
-            from ouroboros.presence_carrier import set_presence_runner
-
-            set_presence_runner(data_dir, presence_runner)
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
@@ -222,6 +215,21 @@ class HostServiceContext:
         from ouroboros.presence_runner import PresenceTurnExecutions
 
         self.presence_turns = PresenceTurnExecutions()
+
+    @property
+    def presence_runner(self) -> Optional[Callable[..., Any]]:
+        """The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads it for
+        this Host's root); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An
+        injected runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did. Assigned at
+        construction or later, it reaches the carrier the same way; None restores the module's own runner."""
+        return self._presence_runner
+
+    @presence_runner.setter
+    def presence_runner(self, runner: Optional[Callable[..., Any]]) -> None:
+        from ouroboros.presence_carrier import set_presence_runner
+
+        self._presence_runner = runner
+        set_presence_runner(self.data_dir, runner)
 
     def _ws_relay_burst_ended(self, key: str, dropped: int, duration_sec: float) -> None:
         """Report one aggregated WS relay refusal burst: a warning plus one
