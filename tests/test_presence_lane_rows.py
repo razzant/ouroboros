@@ -256,3 +256,48 @@ def test_boot_restore_fences_an_unrecovered_owner_row_never_a_presence_turn(root
     assert (_fence_snapshot_running_rows([{"id": task["id"], "task": task}], restored_ids=set())
             == ([task["id"]] if fenced else []))
     assert (task["id"] in active_intents(root, strict=True)) is fenced
+
+
+def _hurry_door(root, task_id):
+    """The owner's HTTP Hurry door for one id: ``(status, reason_code)``."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from ouroboros.gateway.task_hurry import api_task_hurry
+
+    body = json.dumps({"request_id": "hurry-r3"}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "path": f"/api/tasks/{task_id}/hurry", "headers": [],
+                       "path_params": {"task_id": task_id},
+                       "app": SimpleNamespace(state=SimpleNamespace(drive_root=root))}, receive)
+    response = asyncio.run(api_task_hurry(request))
+    return response.status_code, json.loads(response.body).get("reason_code")
+
+
+def test_hurry_of_a_presence_turns_lane_row_refuses_typed_and_seeds_nothing(root, monkeypatch):
+    """Review R3: the lane row made the Hurry door treat a correspondent's turn as a pooled RUNNING root: it seeded
+    the control task result and the hurry mail reached that turn. A live Presence turn takes no Hurry (as Pause):
+    typed 409, nothing seeded. Without the row (the in-server author alone) the door kept the target's answer."""
+    from ouroboros.gateway.task_hurry import _admit_hurry_locked
+    from supervisor import queue as q
+
+    seeded, seen = [], {}
+    monkeypatch.setattr(q, "ensure_control_task_result", lambda task_id: seeded.append(task_id))
+
+    def scenario(author, task):
+        tid = task["id"]
+        seen["without_row"] = _admit_hurry_locked(tid)[1]
+        _admit_lane_row(task)
+        seen["with_row"] = _admit_hurry_locked(tid)[1]
+        seen["http"] = _hurry_door(root, tid)
+
+    _live_turn(root, scenario)
+    assert seen["without_row"] == "task_not_live"
+    assert seen["with_row"] == "presence_hurry_unsupported" and seen["http"] == (409, "presence_hurry_unsupported")
+    assert seeded == []
