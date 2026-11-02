@@ -15,10 +15,10 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D05 | Tool surfaces: files, code, shell, media, external | 46 | 0 |
 | D06 | Review stack | 95 | 0 |
 | D07 | Delegation, subagents & Claudexor | 104 | 0 |
-| D08 | Supervisor: queue, workers, events & runtime control | 73 | 0 |
+| D08 | Supervisor: queue, workers, events & runtime control | 75 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 113 | 0 |
+| D11 | Gateway, server & Web UI | 114 | 0 |
 | D12 | Settings & configuration | 27 | 0 |
 | D13 | Safety, guards & runtime mode | 11 | 0 |
 | D14 | Skills & extensions | 71 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 37 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 22 | 0 |
-| **total** | | **966** | **0** |
+| **total** | | **969** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -40,7 +40,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 | **D02** | ✓ | · | ✓ | · | · | · | ✓ | · | ✓ | · | · | ✓ | · | · | · | ✓ | · | ✓ | ✓ | · |
 | **D03** | ✓ | ✓ | · | ✓ | · | · | · | · | · | · | · | ✓ | · | · | ✓ | · | ✓ | ✓ | ✓ | · |
 | **D04** | · | · | · | · | ✓ | · | · | · | · | · | · | · | ✓ | · | · | · | ✓ | ✓ | ✓ | · |
-| **D05** | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · |
+| **D05** | ✓ | ✓ | · | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · |
 | **D06** | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | · | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D07** | ✓ | ✓ | · | ✓ | ✓ | ✓ | · | ✓ | · | · | · | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · |
 | **D08** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | · |
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **124**
+- lazy-only cross-domain pairs: **123**
   - D01->D10
   - D01->D11
   - D02->D05
@@ -95,7 +95,6 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D04->D20
   - D05->D03
   - D05->D06
-  - D05->D08
   - D05->D14
   - D05->D20
   - D06->D03
@@ -678,6 +677,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/owner_pause_control.py`
 - `supervisor/owner_pause_resume.py`
 - `supervisor/queue.py`
+- `supervisor/queue_publication.py`
 - `supervisor/queue_schedules.py`
 - `supervisor/queue_snapshot.py`
 - `supervisor/queue_timeouts.py`
@@ -698,6 +698,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/task_model_wait.py`
 - `supervisor/task_ownership.py`
 - `supervisor/telemetry_events.py`
+- `supervisor/tree_census.py`
 - `supervisor/work_stop_migration.py`
 - `supervisor/worker_assignment.py`
 - `supervisor/worker_chat_lane.py`
@@ -850,6 +851,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/skill_source_contracts.py`
 - `ouroboros/gateway/skill_sources.py`
 - `ouroboros/gateway/state.py`
+- `ouroboros/gateway/state_publication.py`
 - `ouroboros/gateway/storage.py`
 - `ouroboros/gateway/task_archive.py`
 - `ouroboros/gateway/task_continue.py`
