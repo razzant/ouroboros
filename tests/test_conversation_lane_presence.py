@@ -335,3 +335,40 @@ def test_the_carrier_takes_the_hosts_admitted_signal_facts_by_value():
     with pytest.raises(PresenceTurnError) as refused:
         presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission())
     assert refused.value.code == "presence_event_invalid"
+
+
+def test_a_version_2_event_finding_the_gate_busy_is_refused_before_any_lane_admission(lane, monkeypatch):
+    """Review M11: version 2 never waits in the gate. A busy gate is refused before the lane admits anything (no
+    row, no barrier, no spare claimed, no carrier spawned) with base's answer: the busy resource named, retry
+    after 1 s for the conversation and 5 s for the active-turn cap; a free gate admits the turn as usual."""
+    from ouroboros.conversation_lease import PresenceTurnGate
+
+    monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "1")
+    admission, event = _admission(), _event()
+    other_process = PresenceTurnGate(1, state_root=lane.root / "state")  # another process's view of the same files
+
+    def dispatch_v2():
+        registry = PresenceTurnExecutions()
+        turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)
+        return registry.start_or_dispatch(
+            turn_id, identity="id-v2", reserve=lambda: True, release=lambda: None,
+            dispatch=lambda execution: dispatch_presence_turn(
+                execution, drive_root=lane.root, skill_name="telegram-bot", admission=admission, event=event,
+                event_payload=_payload(event), staged_files=[], gate_wait=False))
+
+    for held_key, busy, retry_after in ((event.conversation_key, "conversation", 1), ("chat:a:other:", "capacity", 5)):
+        holder = other_process.acquire(held_key)
+        try:
+            with pytest.raises(PresenceTurnError) as refused:
+                dispatch_v2()
+        finally:
+            holder.release()
+        assert (refused.value.code, refused.value.field, refused.value.retry_after) == (
+            "presence_capacity_full", busy, retry_after)
+        assert not _lane_rows() and lane.spare.busy_task_id is None and lane.spare.in_q.empty()
+    execution, started = dispatch_v2()
+    assert started and len(_lane_rows()) == 1
+
+
+def _lane_rows():
+    return [meta for meta in workers.RUNNING.values() if meta.get("lane") == LANE_CONVERSATION]

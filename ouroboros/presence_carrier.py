@@ -111,6 +111,14 @@ def _error_from_payload(payload: Mapping[str, Any]) -> BaseException:
     return RuntimeError(f"{payload.get('type') or 'Exception'}: {payload.get('message') or ''}")
 
 
+def _capacity_full(busy: str) -> PresenceTurnError:
+    """Version 2's typed refusal of a busy gate: the busy resource named; a conversation retries after 1 s,
+    the active-turn cap after 5 s."""
+    error = PresenceTurnError("presence_capacity_full", busy, disposition="retry")
+    error.retry_after = 1 if busy == "conversation" else 5
+    return error
+
+
 def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent, skill_name: str,
                        event_payload: Mapping[str, Any], staged_files: Sequence[Any], gate_wait: bool) -> dict[str, Any]:
     """The lane's admitted seed of a Host turn: identity, address, the correspondent's words, and the
@@ -157,6 +165,13 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
     from supervisor.inline_carrier import InlineExecutorUnavailable
     from supervisor.worker_chat_lane import _degrade_if_no_carrier_can_start
 
+    if not gate_wait:
+        # Version 2 never waits in the gate, and a busy gate costs no lane admission (no row, no barrier, no
+        # spare claimed, no carrier spawned): one non-blocking pass of the carrier's own acquisition, released.
+        probe, busy = _configured_gate(Path(drive_root)).try_admit(event.conversation_key)
+        if probe is None:
+            raise _capacity_full(busy)
+        probe.release()
     task = presence_seed_task(admission=admission, event=event, skill_name=skill_name, event_payload=event_payload,
                               staged_files=staged_files, gate_wait=gate_wait)
     # The Host's data root is this turn's authority, whichever carrier runs it: a pooled worker carries the
@@ -220,12 +235,10 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
             if resources is None:
                 raise PresenceTurnError("presence_turn_cancelled", "conversation_key", turn_ref=turn_id)
             lease = PresenceTurnLease(event.conversation_key, resources, gate)
-        else:
-            lease = gate.try_acquire(event.conversation_key)
+        else:  # version 2 never waits: a slot taken since the Host's probe is the same typed refusal
+            lease, busy = gate.try_admit(event.conversation_key)
             if lease is None:
-                error_busy = PresenceTurnError("presence_capacity_full", "conversation", disposition="retry")
-                error_busy.retry_after = 1
-                raise error_busy
+                raise _capacity_full(busy)
         lease.execution = FrameExecution(turn_id, out_q)
         try:
             def factory(**kwargs):
