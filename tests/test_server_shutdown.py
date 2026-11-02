@@ -778,7 +778,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     # The tick's first rotator call (events.jsonl; the dialogue chains no longer rotate) is the tick head.
     monkeypatch.setattr(state_mod, "rotate_jsonl_log_if_needed",
                         lambda root, name, *_a, **_k: _tick_head(root) if name == "events.jsonl" else None)
-    for name in ("enqueue_task", "enforce_task_timeouts", "enqueue_evolution_task_if_needed",
+    for name in ("enqueue_task", "enforce_due_task_timeouts", "enqueue_evolution_task_if_needed",
                  "cancel_task_by_id", "queue_deep_self_review_task",
                  "sort_pending", "check_scheduled_tasks"):
         monkeypatch.setattr(queue_pkg, name, noop)

@@ -110,10 +110,20 @@ def unreadable_result(monkeypatch, task_id: str, *, root=None) -> dict:
             rows[str(task_id)] = store.StoreError(f"simulated unreadable row: {task_id}")
         return rows
 
+    real_statuses = store_hot_facts.statuses
+
+    def statuses(root, task_ids):  # a batch names the unreadable row alone, as a single read of it fails
+        answers = real_statuses(root, task_ids)
+        if switch["on"] and str(task_id) in answers and (
+                wanted_root is None or pathlib.Path(root).resolve() == wanted_root):
+            answers[str(task_id)] = store.StoreError(f"simulated unreadable row: {task_id}")
+        return answers
+
     monkeypatch.setattr(store.Txn, "body_text", body_text)
     monkeypatch.setattr(store.Txn, "row", row)
     monkeypatch.setattr(task_store, "display_documents", display_documents)
     monkeypatch.setattr(store_hot_facts, "_read_rows", hot_rows)
+    monkeypatch.setattr(store_hot_facts, "statuses", statuses)
     return switch
 
 

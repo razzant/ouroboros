@@ -669,7 +669,7 @@ def _run_supervisor(settings: dict) -> None:
         note_current_stamp(DATA_DIR)  # the stamp the bootstrap just wrote: the legacy detector's observation
 
         from supervisor.queue import (
-            enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
+            enqueue_task, enforce_due_task_timeouts, enqueue_evolution_task_if_needed,
             persist_queue_snapshot, publish_queue_changes, restore_pending_from_snapshot,
             queue_deep_self_review_task, sort_pending, tick_publisher_started,
         )
@@ -847,7 +847,7 @@ def _run_supervisor(settings: dict) -> None:
             flush_budget_projection(_event_ctx)
 
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "maintenance"), time.monotonic()
-            enforce_task_timeouts(pending_events=pending_idle_observations(get_event_q()))
+            enforce_due_task_timeouts(lambda: pending_idle_observations(get_event_q()))
             _periodic_supervisor_maintenance(  # includes the off-loop schedule duty
                 _last_custody_reap, _last_review_job_reconcile, stop_event=_watchdog_stop,
             )

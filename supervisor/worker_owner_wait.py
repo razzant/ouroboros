@@ -179,6 +179,10 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
             worker.active_capacity = False
             if not queue.publish_queue_snapshot(reason="owner_wait_parked"):  # durable before the park stands
                 raise RuntimeError("owner wait queue snapshot was not persisted")
+            if wait.get("reason") == "owner_pause":  # it may be the tree's last member; no census follows a warm park
+                from supervisor.owner_pause_control import mark_tree_changed
+
+                mark_tree_changed(str(meta["task"].get("root_task_id") or task_id))
         except Exception as exc:
             if (not park_written and isinstance(exc, StoreBusy) and exc.reason == "contention"
                     and getattr(exc, "rollback_confirmed", None) is not False):

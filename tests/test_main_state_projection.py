@@ -643,8 +643,7 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
             assert time.monotonic() < deadline and parked.is_alive(), woke
             real_sleep(0.02)
         remote["state"] = "cancelled"  # the run it sent obeyed the Pause's stop
-        monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-        assert owner_pause_control.settle_requested_owner_pauses(queue, now=100.0) == ["author"]
+        assert owner_pause_control.settle_requested_owner_pauses(queue) == ["author"]
         payload = _member_state(_member_http(tmp_path))
         [census] = [row for row in payload["active_chat_activities"] if row["activity_id"] == "author"]
         assert (census["kind"], census["phase"], census["pause_cause"], census.get("can_resume", False)) == (

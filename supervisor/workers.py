@@ -1846,8 +1846,7 @@ def _drop_cancelled_pending() -> bool:
     try:
         from supervisor.restart_retention import conserve_unreadable_pending
         from ouroboros.task_results import (
-            STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES,
-            load_task_result, write_task_result,
+            STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES, write_task_result,
         )
     except Exception:
         log.error(
@@ -1860,7 +1859,9 @@ def _drop_cancelled_pending() -> bool:
         from ouroboros.cancel_intents import (
             active_intents, claim_intent, release_claim, settle_intent,
         )
-        if not isinstance(active_intents(DRIVE_ROOT, strict=True), dict):
+        # One projection read per pass; only this pass's own settlement moves it again.
+        current_intents = active_intents(DRIVE_ROOT, strict=True)
+        if not isinstance(current_intents, dict):
             raise TypeError("cancel-intent authority returned a non-object projection")
     except Exception:
         log.error(
@@ -1880,6 +1881,13 @@ def _drop_cancelled_pending() -> bool:
     terminalization_retry_ids: List[str] = []
     hold_state_changed = False
     pending_rows = list(PENDING)
+    # One status read per pass, never a task body per row per tick (Q held). A row a
+    # store failure leaves unknown keeps every branch the unreadable authority takes below.
+    from ouroboros.store_hot_facts import statuses
+
+    stored_status = statuses(DRIVE_ROOT, [str(row.get("id") or "") for row in pending_rows
+                                          if isinstance(row, dict) and row.get("id")])
+    intents_moved = False
     for index, t in enumerate(pending_rows):
         if not assignment["safe"]:
             survivors.extend(pending_rows[index:])
@@ -1896,14 +1904,9 @@ def _drop_cancelled_pending() -> bool:
         if marker is not None and not marker_trigger.startswith("pending_cancel"):
             survivors.append(t)
             continue
-        status = ""
-        authority_error = False
-        if tid:
-            try:
-                existing = load_task_result(DRIVE_ROOT, tid, strict=True)
-                status = str((existing or {}).get("status") or "")
-            except Exception:
-                authority_error = True
+        answer = stored_status.get(tid) if tid else None
+        authority_error = isinstance(answer, Exception)
+        status = "" if authority_error else str(answer or "")
         if authority_error:
             if t.get("_project_admission_restore_hold"):
                 # Project conservation is independent of result readability;
@@ -1932,13 +1935,15 @@ def _drop_cancelled_pending() -> bool:
                 ))
                 terminalization_retry_ids.append(tid)
             continue
-        current_intents = _read_pending_cancel_intents(active_intents, assignment)
-        if current_intents is None:
-            # Keep this row and every row not yet examined.  The caller will
-            # abort the assignment pass; no ordinary pending row may cross the
-            # dispatch boundary while cancellation authority is unknown.
-            survivors.extend(pending_rows[index:])
-            break
+        if intents_moved:
+            intents_moved = False
+            current_intents = _read_pending_cancel_intents(active_intents, assignment)
+            if current_intents is None:
+                # Keep this row and every row not yet examined.  The caller will
+                # abort the assignment pass; no ordinary pending row may cross the
+                # dispatch boundary while cancellation authority is unknown.
+                survivors.extend(pending_rows[index:])
+                break
         if authority_hold:
             if not tid:
                 assignment["safe"] = False
@@ -1982,6 +1987,7 @@ def _drop_cancelled_pending() -> bool:
             )
             if abort_assignment:
                 break
+            intents_moved = True
             continue
         if status in _TRULY_TERMINAL_STATUSES and marker is None:
             dropped.append(tid)
