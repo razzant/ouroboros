@@ -583,7 +583,7 @@ def test_a_suppressed_nudge_names_no_cause(tmp_path):
     assert ctx._nanny_finalization_injected is True and not hasattr(ctx, "_completion_hold_cause")
 
 
-@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pending", "earlier_request"])
+@pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pending", "earlier_request", "pass"])
 def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, cause):
     import ouroboros.review_substrate as substrate
     import ouroboros.tools.review_change as review_change_mod
@@ -594,7 +594,7 @@ def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, caus
     _produced_answer_protocol(monkeypatch)
     sends, shown, trace = [], [], {"tool_calls": []}
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot",
-                        _seam(sends, {} if cause == "earlier_request" else {"t1": CRITICAL}))
+                        _seam(sends, {} if cause in {"earlier_request", "pass"} else {"t1": CRITICAL}))
     if cause == "pending":
         monkeypatch.setattr(review_change_mod, "run_review_change",
                             lambda ctx, **kwargs: {"state": "pending", "record_id": "rl-running"})
@@ -604,8 +604,10 @@ def test_each_result_review_hold_names_its_own_cause(tmp_path, monkeypatch, caus
         assert result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True  # refused, shown
         assert ctx._completion_hold_cause == "findings"
     if cause == "earlier_request":
-        assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, "PASS delivers"
-        assert not hasattr(ctx, "_completion_hold_cause"), "a delivery names no hold cause"
+        assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True  # its PASS, first
+        ctx._completion_hold_cause = ""  # the delivery owner reads each cause once
+        assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, "then it delivers"
+        assert ctx._completion_hold_cause == "", "a delivery names no hold cause"
         ctx._owner_directives = [*(getattr(ctx, "_owner_directives", None) or []),
                                  {"source": "owner_mailbox", "content": "Give it in kilometres.", "msg_id": "m-2"}]
     answer = "FINAL ANSWER: 3" if cause == "blocking_refusal" else "FINAL ANSWER: 2"
