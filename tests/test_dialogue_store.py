@@ -16,6 +16,7 @@ import pytest
 from ouroboros import chat_chain, dialogue_import as di, dialogue_positions as dp, dialogue_store as ds, store
 from ouroboros.utils import iter_jsonl_objects, jsonl_chain_handles, jsonl_generation_signature
 from tests._dialogue import chat_rows, lines, progress_rows, seed
+from tests._store_shared import independent_writer
 
 
 def chat(cmid="", text="hi", *, chat_id=1, direction="in", ts="2026-10-17T00:00:00+00:00", **extra):
@@ -75,7 +76,7 @@ def test_a_page_read_in_one_step_holds_the_rows_and_order_a_plain_select_returns
     ds.append(tmp_path, "chat", chat("named", "owed", dispatch_marker=1), dispatch={"process": "p1"})
     ds.append(tmp_path, "chat", {"ts": "2026-10-18T00:00:00+00:00", "direction": "in", "text": "no chat id"})
     arrival = ds.append(tmp_path, "chat", chat("", "a guest", chat_id=4242, type="place_arrival"))
-    with sqlite3.connect(ds.path(tmp_path)) as db:  # a place arrival's source pointer lands after its append
+    with independent_writer(ds.path(tmp_path)) as db:  # a place arrival's source pointer lands after its append
         db.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
                    (json.dumps({"place_context_source_ref": {"kind": "place_context", "id": "c1"}}), arrival.seq))
     with ds.transaction(tmp_path, write=False) as conn:

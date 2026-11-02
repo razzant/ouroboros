@@ -210,7 +210,9 @@ def judge(observation: dict) -> dict:
 # --- source identity -----------------------------------------------------------------------------------------------
 
 def product_files(root: Path) -> list[Path]:
-    """The runtime inputs under `root`, relative and sorted; caches generated inside them stay out."""
+    """The runtime inputs under `root`, relative; caches generated inside them stay out. They are sorted by their
+    case-sensitive components (POSIX Path order) on every platform: source_identity digests them in this order,
+    and a Windows Path would compare case-folded."""
     found = []
     for name in RUNTIME_INPUTS:
         if (root / name).is_file():
@@ -220,7 +222,7 @@ def product_files(root: Path) -> list[Path]:
             names[:] = [entry for entry in names if entry not in GENERATED]
             relative = Path(directory).relative_to(root)
             found.extend(relative / entry for entry in files if entry not in GENERATED and not entry.endswith(".pyc"))
-    return sorted(found)
+    return sorted(found, key=lambda path: path.parts)
 
 
 def _sha256(path: Path) -> str:
