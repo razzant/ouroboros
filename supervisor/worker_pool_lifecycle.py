@@ -834,7 +834,7 @@ def respawn_worker(wid: int, *, ready_attempt: int = 1) -> bool:
                 return retire_worker(wid, old)
         # The last sleeper can be stopped before its lent slot was created.
         # Fill only that vacancy, retaining normal failed-spawn recovery.
-    return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=old.lane)
+    return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))
 
 
 def retire_worker(wid: int, slot: Any) -> bool:

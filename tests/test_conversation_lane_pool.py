@@ -6,7 +6,6 @@ and readiness exhaustion capture and terminalise project slots only; the carrier
 on ``execution_owner`` are additive and old rows decode as they did.
 """
 
-import queue as stdqueue
 import threading
 import time
 
