@@ -359,22 +359,29 @@ class Core:
     def pid(self) -> int | None:
         return self.process.proc.pid if self.process.proc is not None else None
 
+    def _keeping_log(self):
+        """A start or readiness wait that fails leaves this core's log with the run's evidence; the failure goes on."""
+        from ouroboros.test_evidence import keep_startup_log
+
+        return keep_startup_log(self.root, self.process.log_path.relative_to(self.root))
+
     def start(self, *, configured: bool = True) -> None:
         """Start and prove the answering process is this checkout's; an unconfigured core has no workers."""
         from tests.candidate_checkout import verify_checkout
         from tests.test_ui_smoke_playwright import _wait_health, _wait_supervisor_ready
 
-        verify_checkout(self.checkout, self.candidate)
-        self.candidate.hold()  # pinned before the spawn; released only once the tree is proven gone
-        self.process.start()
-        _wait_health(self.url, timeout_sec=60)
-        _wait_supervisor_ready(self.url, timeout_sec=90)
-        if configured:
-            self.prove_origin()
-        else:  # the static and Python origin proofs, without the worker-pool requirement
-            with urllib.request.urlopen(self.url + "/onboarding/static/candidate-sentinel.txt", timeout=5) as r:  # noqa: S310
-                assert r.read() == self.candidate.sentinel_bytes
-            assert _fetch_json(self.url + "/api/health")["runtime_version"] == self.candidate.version_text
+        with self._keeping_log():  # every start: the first, and each restart's
+            verify_checkout(self.checkout, self.candidate)
+            self.candidate.hold()  # pinned before the spawn; released only once the tree is proven gone
+            self.process.start()
+            _wait_health(self.url, timeout_sec=60)
+            _wait_supervisor_ready(self.url, timeout_sec=90)
+            if configured:
+                self.prove_origin()
+            else:  # the static and Python origin proofs, without the worker-pool requirement
+                with urllib.request.urlopen(self.url + "/onboarding/static/candidate-sentinel.txt", timeout=5) as r:  # noqa: S310
+                    assert r.read() == self.candidate.sentinel_bytes
+                assert _fetch_json(self.url + "/api/health")["runtime_version"] == self.candidate.version_text
 
     def prove_origin(self) -> None:
         from tests.candidate_checkout import assert_served_candidate
@@ -393,11 +400,13 @@ class Core:
         self.start()
 
     def wait_ready(self, timeout: float = 90) -> dict:
+        """Ready again after the core restarted or reconfigured itself (setup, the chat's Restart)."""
         from tests.test_ui_smoke_playwright import _wait_health, _wait_supervisor_ready
 
-        _wait_health(self.url, timeout_sec=int(timeout))
-        _wait_supervisor_ready(self.url, timeout_sec=int(timeout))
-        return _fetch_json(self.url + "/api/state")
+        with self._keeping_log():
+            _wait_health(self.url, timeout_sec=int(timeout))
+            _wait_supervisor_ready(self.url, timeout_sec=int(timeout))
+            return _fetch_json(self.url + "/api/state")
 
     def boots(self) -> int:
         """How many times a server generation started listening in this core's log."""
@@ -437,7 +446,6 @@ def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, se
     of mistaking separately hosted files for the core's selected setup/sign-in pages.
     """
     from ouroboros.test_environment import isolated_environment, owned_process_temp
-    from ouroboros.test_evidence import keep_startup_log
     from tests.candidate_checkout import candidate_checkout, require_candidate_interpreter
 
     # ``root`` itself holds the isolated home and data. macOS caps a socket path at 104 bytes and the
@@ -477,8 +485,7 @@ def real_core(root: Path, *, provider: bool = True, password: str = PASSWORD, se
         require_candidate_interpreter(_python(), env, checkout)
         core = Core(root, checkout, candidate, env, port, root / "core.log", model)
         try:
-            with keep_startup_log(root, "core.log"):
-                core.start(configured=provider)
+            core.start(configured=provider)
             yield core
         finally:
             core.stop()

@@ -90,11 +90,25 @@ def network_server(tmp_path, request):
                 assert client.get('/api/widgets').status_code == 401, 'must exercise the real network gate'
                 assert client.get('/static/modules/widget_module.js').status_code == 401
                 assert client.post('/auth/login', json={'password': PASSWORD}).status_code == 200
-                # Health answers before supervisor init, which starts that manager, has an outcome.
-                deadline = time.monotonic() + 45
-                while not (state := client.get('/api/state').json())['supervisor_ready']:
-                    if state['supervisor_error'] or time.monotonic() > deadline:
-                        pytest.fail(f"supervisor not ready: {state['supervisor_error']}\n{server.log_text()[-4000:]}")
+                # Health answers before supervisor init, which starts that manager, has an outcome. Until then a
+                # state read may fail (500) or outlast the client timeout: no answer yet. A 200 is the answer.
+                deadline, last = time.monotonic() + 45, 'no answer'
+                while True:
+                    try:
+                        answer = client.get('/api/state')
+                    except httpx.TransportError as exc:
+                        answer, last = None, repr(exc)
+                    if answer is not None and answer.status_code == 200:
+                        state = answer.json()
+                        if state['supervisor_ready']:
+                            break
+                        if error := state['supervisor_error']:
+                            pytest.fail(f"supervisor not ready: {error}\n{server.log_text()[-4000:]}")
+                        last = 'starting'
+                    elif answer is not None:
+                        last = f'HTTP {answer.status_code}: {answer.text[:300]}'
+                    if time.monotonic() > deadline:
+                        pytest.fail(f"supervisor not ready: {last}\n{server.log_text()[-4000:]}")
                     time.sleep(.2)
                 assert client.get('/static/candidate-sentinel.txt').content == candidate.sentinel_bytes
                 assert health.json()['runtime_version'] == candidate.version_text

@@ -3,7 +3,8 @@
 Each counts work only as long as the code it watches keeps one idiom: a lock file is created by an
 exclusive ``os.open`` (``platform_layer``), a stored dialogue row is decoded by ``dialogue_store.decode``,
 a host name is resolved through ``socket.getaddrinfo``, a maintenance pass names refused work in its report
-(``maintenance.run``). These checks live apart from
+(``maintenance.run``), the scale root's budget fact is the budget its settings resolve to (``usage_projection``).
+These checks live apart from
 tests/test_cost_contract.py so that a change to those modules re-runs them in seconds (the commit
 gate selects a test module by its direct imports) instead of booting the contract's two installs.
 """
@@ -122,3 +123,76 @@ def test_the_driver_reads_the_work_a_maintenance_pass_reports_it_did_not_do(tmp_
         named = ["custody_trash: failed"] if pass_ == "returned_failed" else []
         assert report["status"] == "completed" and refused(report) == named, report
         assert refused(report, rest=True) == (["custody_trash: pending"] if pass_ == "left_pending" else named)
+
+
+@pytest.mark.parametrize("k", [1, 30, 100])
+def test_the_scale_root_s_budget_fact_follows_the_configured_budget_and_the_settled_spend(tmp_path, monkeypatch, k):
+    """``_budget`` (tests/_scale_root.py) hands ``usage_projection`` no limit, so the fact is the budget the root's
+    settings resolve to over the spend its ledger settled: ``spend_limit_usd(k)`` as ``build`` writes it, and the
+    lowered budget once the owner changes it (the echo it replaced kept the authored limit)."""
+    from ouroboros import config, usage_store
+    from tests._scale_root import _budget, money, spend_limit_usd
+
+    (root := tmp_path / "data").mkdir()
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setattr(config, "SETTINGS_PATH", root / "settings.json")  # as the build's interpreter names it
+
+    def configure(limit: float) -> None:
+        (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": limit}), encoding="utf-8")
+    try:
+        configure(spend_limit_usd(k))
+        for task_id in ("settled-1", "settled-2"):
+            money(root, task_id, limit=spend_limit_usd(k))
+        built = _budget(root)
+        assert built["limit_usd"] == pytest.approx(spend_limit_usd(k), abs=1e-6), built  # the projection rounds to micro-dollars
+        assert built["settled_usd"] == pytest.approx(0.8) and built["remaining_known_usd"] == pytest.approx(
+            built["limit_usd"] - built["settled_usd"]), built
+        configure(5.0)
+        assert _budget(root) == {"limit_usd": 5.0, "settled_usd": built["settled_usd"],
+                                 "remaining_known_usd": pytest.approx(5.0 - built["settled_usd"])}
+    finally:
+        usage_store.forget(root)
+
+
+def test_the_scale_root_build_runs_only_in_a_process_that_reads_the_roots_own_settings(tmp_path, monkeypatch):
+    """The budget fact is read through the process's settings, so ``main`` refuses a process whose settings are another
+    document (it would answer with ITS budget, or the product default) before it builds anything."""
+    from ouroboros import config
+    from tests import _scale_root
+
+    (root := tmp_path / "data").mkdir()
+    built = []
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setattr(_scale_root, "build", lambda path, k: built.append((path, k)) or {"k": k})
+    monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "elsewhere" / "settings.json")
+    with pytest.raises(SystemExit, match="OUROBOROS_SETTINGS_PATH must name the settings.json of the root"):
+        _scale_root.main([str(root), "1", str(tmp_path / "refused.json")])
+    assert not built and not (tmp_path / "refused.json").exists()
+    monkeypatch.setattr(config, "SETTINGS_PATH", root / "settings.json")
+    assert _scale_root.main([str(root), "1", str(tmp_path / "facts.json")]) == 0 and built == [(root, 1)]
+
+
+def test_the_steady_state_is_not_reached_by_a_pass_the_handed_in_judge_names_refused(tmp_path, monkeypatch):
+    """``steady_state`` (tests/_turn_shapes.py) judges every maintenance pass by the ``refused`` it is handed (the
+    driver's, which runs as ``__main__`` and so is not imported by name). A job that failed once and is no longer due
+    leaves the tail complete and nothing due: only the pass's own report says it did nothing, and the install must
+    not be called steady for it. The message names the whole state, so no other cause can stand in for the refusal."""
+    from ouroboros import maintenance
+    from ouroboros.chronicle_store import ChronicleStore
+    from tests._cost_driver import refused
+    from tests._store_shared import as_install
+    from tests._turn_shapes import steady_state
+
+    (root := tmp_path / "data").mkdir()
+    owed = [True]
+
+    def failing(*_args) -> dict:
+        owed[0] = False
+        return {"state": "failed", "items": 0}
+    monkeypatch.setitem(maintenance.JOBS, "custody_trash", (lambda *_args: owed[0], failing))
+    with as_install(root):
+        ChronicleStore(root).ensure_activated(wait=True)
+        with pytest.raises(RuntimeError) as breach:
+            steady_state(root, refused=refused)
+    named = str(breach.value)
+    assert "'complete': True" in named and "still due []" in named and "refused ['custody_trash: failed']" in named, named

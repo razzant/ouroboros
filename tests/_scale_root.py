@@ -47,12 +47,14 @@ store imports once) while the allowance's own last-24-hours window stays CURRENT
 and the subagent metrics cursor is ABSENT while the event chain holds every unit's suffix.
 
 Run in its own interpreter with ``OUROBOROS_DATA_DIR`` set to the root (the writers that use
-the process data root then write there): ``python -m tests._scale_root ROOT K OUT.json``. The
+the process data root then write there) and ``OUROBOROS_SETTINGS_PATH``, when set, naming the root's
+``settings.json``: ``python -m tests._scale_root ROOT K OUT.json``. The
 build names ``<home>/worktrees`` the process's worktree root, as the measured boot must too; the
 meter's execution root is the copies' own folder inside it, so resolving the configured root on a
 pass is no walk of a checkout. The root's configured budget (state and ``settings.json``) is the limit its
 money is settled under (``spend_limit_usd``), so an owner's turn has room at every size; ``facts["budget"]``
-records that limit, the settled spend and what remains, as admission reads them.
+records what admission reads back from the root: the budget its settings resolve to (no limit is handed to
+the read), the settled spend and what remains.
 """
 
 from __future__ import annotations
@@ -488,11 +490,14 @@ def spend_limit_usd(k: int) -> float:
     return GLOBAL_LIMIT_USD * max(1.0, k / LIMIT_REFERENCE_K)
 
 
-def _budget(root: pathlib.Path, limit: float) -> Dict[str, float]:
-    """The root's money as admission reads it (``usage_projection``): the limit, the settled spend, what remains."""
+def _budget(root: pathlib.Path) -> Dict[str, float]:
+    """The root's money as admission reads it (``usage_projection``): the limit, the settled spend, what remains.
+    No limit is handed to the read: it is the budget this process's settings resolve to
+    (``settings_setup_contract.resolve_total_budget_usd``), so the fact follows the configured budget instead of
+    echoing the one ``build`` authored. ``main`` holds the process to the root's own ``settings.json``."""
     from ouroboros.usage_accounting import usage_projection
 
-    projection = usage_projection(root, global_limit_usd=limit)
+    projection = usage_projection(root)
     return {key: projection[key] for key in ("limit_usd", "settled_usd", "remaining_known_usd")}
 
 
@@ -699,7 +704,7 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     facts["packs"] = step("packed", lambda: _packed(root, k))
     facts["plan_asks"] = step("plan_asks", lambda: _plan_asks(root, k))
     step("metrics_cursor", lambda: _forget_metrics_cursor(root))
-    facts["budget"] = _budget(root, limit)
+    facts["budget"] = _budget(root)
     facts["build_seconds"] = round(time.monotonic() - started, 2)
     facts["build_steps"] = steps
     return facts
@@ -709,6 +714,12 @@ def main(argv: List[str]) -> int:
     root, k, out = pathlib.Path(argv[0]), int(argv[1]), pathlib.Path(argv[2])
     if pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", "")).resolve() != root.resolve():
         raise SystemExit("OUROBOROS_DATA_DIR must name the root being built")
+    from ouroboros import config
+    from ouroboros.launch_roots import same_location
+
+    if not same_location(config.SETTINGS_PATH, root / "settings.json"):  # the budget fact is read through it
+        raise SystemExit(f"OUROBOROS_SETTINGS_PATH must name the settings.json of the root being built, "
+                         f"not {config.SETTINGS_PATH}")
     facts = build(root, k)
     out.write_text(json.dumps(facts, indent=1, sort_keys=True), encoding="utf-8")
     return 0

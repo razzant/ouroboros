@@ -546,7 +546,8 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
         NEEDLES["T:main:rows"] = [grown["main_newest"]]
         return grown
 
-    shape_steps = {"history": lambda: shapes.turn_history(root, k), "steady": lambda: shapes.steady_state(root),
+    shape_steps = {"history": lambda: shapes.turn_history(root, k),
+                   "steady": lambda: shapes.steady_state(root, refused=refused),
                    "activity": activity, "breadth": lambda: shapes.grow_breadth(root, shapes.BREADTH), "rows": rows,
                    "archive": lambda: shapes.archive_history(root, shapes.ARCHIVED)}
     plan = ["history", "steady", "census", ("T:main", 1), ("T:mainw", 1), "activity", ("T:main:foreign", 1),
