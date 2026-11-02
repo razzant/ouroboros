@@ -1220,6 +1220,9 @@ def supervised_wait(
     # Holding the run is a wait, never this task's own work; what the run does is its
     # recorded observation (``observed_run_activity``, DESIGN §9 Telegram typing).
     hold_key, hold_until, activity = "delegate:" + ",".join(run_ids), 0.0, None
+    from ouroboros.delegate_progress import HoldLease
+
+    lease = HoldLease(ctx)  # the hold's one idle-rail lease, renewed only before it would lapse
     selected_index = 0
     try:
         while True:
@@ -1244,6 +1247,7 @@ def supervised_wait(
             else:
                 if owns_transport and gateway is None:
                     gateway = _loop_gateway()
+                lease.renew(run_id)
                 raw = wait_once(ctx, run_id, _TICK_SEC, int(state.get("journal_cursor") or 0),
                                 **({"gateway": gateway} if gateway is not None else {}))
             payload, readable = _payload(raw, run_id)
@@ -1393,6 +1397,7 @@ def supervised_wait(
             if resumed:
                 model_sleep.announce_resumed(ctx)  # the held run works again, as recorded: no new start says so
     finally:
+        lease.release()
         if hold_until:
             model_sleep.end_in_slot_wait(ctx, hold_key)
         _drop_gateway(gateway)

@@ -1110,17 +1110,17 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     _started_at = parse_deadline_ts(_started_ts)
     _elapsed = lambda: None if _started_at is None else max(0, int(  # noqa: E731
         (_dt.datetime.now(tz=_dt.timezone.utc) - _started_at).total_seconds()))
-    # The idle-rail lease for THIS hold: granted before the loop, released in the
+    # The idle-rail lease for THIS window: granted before the loop, released in the
     # finally below — the supervisor's idle enforcer spares a leased task while
     # every other rail (deadline, ceiling, budget, cancel) still cuts through.
     # The grant carries a unique lease_id (F5b) and the release names the SAME
     # id, so an abandoned, executor-killed wait thread's late release can never
-    # blank a newer grant made by this task's next wait.
+    # blank a newer grant made by this task's next wait. An observation beat
+    # leases nothing: its supervising hold holds one lease (``progress.HoldLease``).
     _lease_id = uuid.uuid4().hex
-    _emit_external_wait_lease(
-        ctx, rid, _external_wait_lease_until(
-            ctx, max(window, read_window()) if observation_only else window, _started_at, _run_max_seconds),
-        lease_id=_lease_id)
+    if not observation_only:
+        _emit_external_wait_lease(ctx, rid, _external_wait_lease_until(ctx, window, _started_at, _run_max_seconds),
+                                  lease_id=_lease_id)
     try:
         if gateway is None:
             gateway = ClaudexorGateway()
@@ -1128,9 +1128,6 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             gateway.handshake(timeout_sec=progress.poll_bound(read_window()))
         step = None
         if observation_only:
-            _emit_external_wait_lease(
-                ctx, rid, _external_wait_lease_until(ctx, read_window(), _started_at, _run_max_seconds),
-                lease_id=_lease_id)
             from ouroboros import delegate_observe  # speech from the journal, attention from the engine
             step = delegate_observe.step(ctx, gateway, rid, window=window, since_seq=since_seq, read_window=read_window,
                                          elapsed_seconds=_elapsed(), max_seconds=_run_max_seconds or None)
@@ -1223,7 +1220,8 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             })
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:
-        _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
+        if not observation_only:
+            _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
         if gateway is not None and not borrowed:
             gateway.close()
 
