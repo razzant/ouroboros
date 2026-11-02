@@ -1103,7 +1103,7 @@ def test_storm_honors_saved_children_before_pool_stop(tmp_path, monkeypatch):
         # Model the normal event owner's release, after validating the real frame.
         W.RUNNING.pop(done['task_id'])
     _stop_crashed_worker_pool(jobs[-1])
-    W.kill_workers.assert_called_once_with(disable_reason='worker_crash_storm')
+    W.kill_workers.assert_called_once_with(disable_reason='worker_crash_storm', lanes=frozenset({'project'}))
     W.respawn_worker.assert_not_called()
     q.enqueue_task.assert_not_called()
 

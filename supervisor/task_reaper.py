@@ -167,12 +167,17 @@ def _stop_crashed_worker_pool(job: dict) -> None:
     from supervisor import queue as q, workers
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
 
+    from ouroboros.task_carrier import LANE_PROJECT
+    from supervisor.worker_pool_lifecycle import is_project_slot
+
     captured = dict(job["workers"])
     with _WORKER_LIFECYCLE_LOCK:
         with q._queue_lock:
+            # The storm captured the PROJECT membership; the conversation lane's slots are not its.
+            project = {wid: worker for wid, worker in workers.WORKERS.items() if is_project_slot(worker)}
             if (pathlib.Path(job["drive_root"]) != pathlib.Path(workers.DRIVE_ROOT)
-                    or set(workers.WORKERS) != set(captured)
-                    or any(workers.WORKERS[wid] is not worker for wid, worker in captured.items())):
+                    or set(project) != set(captured)
+                    or any(project[wid] is not worker for wid, worker in captured.items())):
                 return
             for worker in captured.values():
                 meta = workers.RUNNING.get(worker.busy_task_id)
@@ -180,7 +185,7 @@ def _stop_crashed_worker_pool(job: dict) -> None:
                     meta.get("_terminal_file_recovery") or not worker.proc.is_alive()
                 ):
                     raise TerminalFileRecoveryPending("captured terminal task has not settled")
-        if not workers.kill_workers(disable_reason="worker_crash_storm"):
+        if not workers.kill_workers(disable_reason="worker_crash_storm", lanes=frozenset({LANE_PROJECT})):
             raise TerminalFileRecoveryPending("crash-storm terminalization was not durable")
         workers.CRASH_TS.clear()
 

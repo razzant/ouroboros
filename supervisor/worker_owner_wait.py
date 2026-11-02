@@ -19,8 +19,8 @@ from ouroboros.owner_wait import set_owner_wait
 from ouroboros.store import acquisition_budget
 from supervisor.queue import _queue_lock
 from supervisor.worker_pool_lifecycle import (
-    _serialized_worker_lifecycle, request_worker_quiescence, retire_or_replace_worker,
-    retire_quiescent_worker, retire_worker, worker_ready,
+    _serialized_worker_lifecycle, is_project_slot, project_slots, request_worker_quiescence,
+    retire_or_replace_worker, retire_quiescent_worker, retire_worker, worker_ready,
 )
 
 log = logging.getLogger(__name__)
@@ -309,7 +309,8 @@ def _resume_claim_held(task_id: str, meta: dict, worker: Any, token: str) -> boo
 
 
 def _active_slots() -> int:
-    return sum(1 for slot in _pool().WORKERS.values() if getattr(slot, "active_capacity", True))
+    """Project slots holding active capacity: the only ones ``MAX_WORKERS`` bounds."""
+    return sum(1 for slot in project_slots() if getattr(slot, "active_capacity", True))
 
 
 def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replacement: Any,
@@ -351,7 +352,8 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
                 log.info("Owner wait resume of %s refused after its durable grant: the stack, its worker "
                          "or the replacement slot changed; the park stands", task_id)
                 return False
-            if generation is not None and replacement is None and _active_slots() >= _pool().MAX_WORKERS:
+            if (generation is not None and replacement is None and is_project_slot(worker)
+                    and _active_slots() >= _pool().MAX_WORKERS):
                 log.info("Owner wait resume of %s waits: no active slot is free; the park stands", task_id)
                 return False
             if replacement is not None:
@@ -439,7 +441,7 @@ def _resume_original_stacks(holds: dict) -> None:
     with _queue_lock:
         waiting = [(tid, meta) for tid, meta in pool.RUNNING.items()
                    if meta.get("owner_wait_resume_requested")]
-        freeing = sum(1 for w in pool.WORKERS.values()
+        freeing = sum(1 for w in project_slots()
                       if getattr(w, "active_capacity", True) and getattr(w, "retiring", False))
     for task_id, meta in waiting:
         with _queue_lock:
@@ -457,14 +459,15 @@ def _resume_original_stacks(holds: dict) -> None:
             if not _resume_memory_allowed(task_id, meta, worker):
                 continue
             holds[worker.wid] = task_id  # authorized this tick: owed its lent capacity back
-            active = [w for w in pool.WORKERS.values() if getattr(w, "active_capacity", True)]
+            active = [w for w in project_slots() if getattr(w, "active_capacity", True)]
             # A grant still on the lane counts as the slot it will take (its worker is not active yet).
             granting = sum(1 for other in pool.RUNNING.values() if other is not meta and other.get(_RESUME_CLAIM))
             exhausted = next((w for w in active
                               if getattr(w, "readiness_exhausted", False)
                               and not w.proc.is_alive()), None)
             idle = [w for w in active if w.busy_task_id is None and worker_ready(w)]
-            if len(active) + granting >= pool.MAX_WORKERS and exhausted is None:
+            # A conversation carrier's park lent no project capacity: its Resume is never gated by MAX_WORKERS.
+            if is_project_slot(worker) and len(active) + granting >= pool.MAX_WORKERS and exhausted is None:
                 for slot in idle:
                     request_worker_quiescence(slot)
                 quiet = next((slot for slot in idle if slot.quiescence_confirmed), None)

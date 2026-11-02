@@ -157,8 +157,16 @@ def ensure_workers_healthy() -> None:
 
 
 def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
-    """Capture exact task/slot ownership before handing off any dead worker."""
+    """Capture exact task/slot ownership before handing off any dead worker.
+
+    Every slot's death is recovered alike; only PROJECT deaths feed the crash-storm
+    clock and the storm's captured membership (owner decision 1A: the conversation
+    lane is outside the project pool's crash fuse, so an owner's turn is admitted
+    and dispatched while the project pool is fenced)."""
+    from supervisor.worker_pool_lifecycle import is_project_slot
+
     busy_crashes = 0
+    project_deaths = 0
     crashed_tasks = []
     jobs = []
     for wid, w in list(_pool().WORKERS.items()):
@@ -173,7 +181,9 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
         task = dict(meta.get("task") or {}) if isinstance(meta, dict) else {}
         attempt = int((meta or {}).get("attempt") or task.get("_attempt") or 1)
         exitcode = w.proc.exitcode
-        busy_crashes += int(w.busy_task_id is not None)
+        project = is_project_slot(w)
+        project_deaths += int(project)
+        busy_crashes += int(project and w.busy_task_id is not None)
         _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
             "ts": _pool().utc_now_iso(), "type": "worker_dead_detected", "worker_id": wid,
             "exitcode": exitcode, "busy_task_id": w.busy_task_id,
@@ -182,7 +192,7 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
             "attempt": (meta or {}).get("attempt"),
             "signal": -exitcode if isinstance(exitcode, int) and exitcode < 0 else None,
         })
-        if task:
+        if task and project:
             crashed_tasks.append({"task_id": w.busy_task_id, "task_type": task.get("type")})
             _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
                 "ts": _pool().utc_now_iso(), "type": "worker_crash_task_dump", "worker_id": wid,
@@ -194,17 +204,18 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
             "task_id": str(w.busy_task_id or ""), "meta": meta, "task": task,
             "attempt": attempt, "exitcode": exitcode, "drive_root": str(_pool().DRIVE_ROOT),
         })
-    disable_pool = bool(jobs) and _pool()._worker_crash_storm_detected(
-        busy_crashes=busy_crashes, dead_detections=len(jobs), crashed_tasks=crashed_tasks,
+    disable_pool = bool(project_deaths) and _pool()._worker_crash_storm_detected(
+        busy_crashes=busy_crashes, dead_detections=project_deaths, crashed_tasks=crashed_tasks,
     )
     for job in jobs:
-        job["skip_respawn"] = disable_pool
+        job["skip_respawn"] = disable_pool and is_project_slot(job["worker"])
     if disable_pool:
-        # Freeze the exact captured membership for its stop: under this latch no slot
-        # starts or is forgotten (``respawn_worker``), so only a generation change,
-        # whose own stop or start then owns the fence, can make the stop a no-op.
+        # Freeze the exact captured PROJECT membership for its stop: under this latch no
+        # project slot starts or is forgotten (``respawn_worker``), so only a generation
+        # change, whose own stop or start then owns the fence, can make the stop a no-op.
         _pool()._WORKER_POOL_DISABLED_REASON = "worker_crash_storm"
-        jobs.append({"kind": "worker_crash_storm", "workers": tuple(_pool().WORKERS.items()),
+        jobs.append({"kind": "worker_crash_storm",
+                     "workers": tuple((wid, w) for wid, w in _pool().WORKERS.items() if is_project_slot(w)),
                      "drive_root": str(_pool().DRIVE_ROOT)})
     for index, job in enumerate(jobs):
         try:
