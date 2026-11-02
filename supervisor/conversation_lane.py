@@ -118,7 +118,7 @@ def carrier_vitals() -> Dict[str, Any]:
     """The lane's carriers for the vitals (owner decision 4A: no number bounds them; the vitals show their
     count and RSS): how many, how many idle, and each one's last own report in MiB, in slot order (None
     before its first turn's heartbeat). A section of the per-minute ``supervisor_load`` row; memory only."""
-    carriers = lane_carriers()
+    carriers = lane_carriers(dict(_pool().WORKERS))  # one copy: a spawn on another thread never breaks the read
     reports = [getattr(slot, "rss", None) or {} for slot in carriers]
     return {"carriers": len(carriers), "idle": sum(1 for slot in carriers if slot.busy_task_id is None),
             "rss_mib": [report["rss_bytes"] // 1048576 if report else None for report in reports],
