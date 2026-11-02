@@ -3,9 +3,6 @@ import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 
-/** The relay and wake note lead: the author's whole text; the surface alone fits its first words. */
-export const noteLeadText = (text) => String(text ?? '').trim();
-
 /** The same account stamp on wake and delivery rows; account names remain authored. */
 export function sendsAsHtml(sender) {
     if (!sender?.label) return '';

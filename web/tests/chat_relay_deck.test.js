@@ -252,6 +252,38 @@ test('a note without the teller\'s line opens with its own words, in the meta in
     } finally { f.close(); }
 });
 
+test('a note leads with all its words, edges trimmed, collapsed, open and folded; a summary leads instead', async () => {
+    const f = fixture();
+    try {
+        // A short first paragraph, then the part that matters: the gist holds every word; fitText alone cuts it.
+        const text = '\n  Swept the stale ports.\n\nThe tail that matters: the Slack token expires on Friday.  \n';
+        const raw = f.note(text);
+        f.row('break');
+        const summarized = f.note(text, { summary: 'Ports swept; one token to renew' });
+        // A row without its text reads the bubble's own message; with neither, the line is empty, never `undefined`.
+        const bare = (message) => {
+            f.row('break');
+            const bubble = f.env.el('div', { className: 'chat-bubble assistant' },
+                ...(message === null ? [] : [f.env.el('div', { className: 'message', text: message })]));
+            const relay = { relay_id: `bare-${message}`, quotes: [] };
+            f.decks.adopt(bubble, { ts: '2026-10-21T23:50:00Z', relay }, false);
+            f.feed.append(bubble);
+            return bubble;
+        };
+        const fromMessage = bare('  As the room rendered it.  '), empty = bare(null);
+        await settle();
+        const gist = (bubble) => bubble.querySelector('.chat-relay-gist').textContent;
+        for (const step of ['collapsed', 'open', 'folded']) {
+            if (step !== 'collapsed') [raw, summarized].forEach((bubble) => f.more(bubble).click());
+            assert.equal(raw.dataset.raw, step === 'open' ? '1' : '0', step);
+            assert.equal(gist(raw), text.trim(), `${step}: every paragraph, the tail included; only the edges trimmed`);
+            assert.equal(gist(summarized), 'Ports swept; one token to renew', `${step}: the summary leads`);
+        }
+        assert.equal(gist(fromMessage), 'As the room rendered it.');
+        assert.equal(gist(empty), '');
+    } finally { f.close(); }
+});
+
 test('the sender reads by room: Main from a work\'s room, Another Main work inside Main, an unrecorded room never invented', async () => {
     const f = fixture();
     try {
