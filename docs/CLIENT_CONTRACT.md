@@ -290,7 +290,7 @@ is refused.
 `CallOpenResponse` returns `{call_id, ws_path, vision, joined?}`.
 Failure returns `{ok:false, code, error}` with its HTTP status.
 
-The separate `/ws/call/{call_id}` socket carries bounded JSON controls and
+The separate `/ws/call/{call_id}` socket carries JSON controls and
 binary PCM16 media. `GET /api/contract` publishes its header, payload limits
 and control-schema names as `call_socket` (`gateway/call_contracts.py`);
 `call_protocol.py` owns the codec. A peer first sends
@@ -298,9 +298,12 @@ and control-schema names as `call_socket` (`gateway/call_contracts.py`);
 Directions may narrow its admitted rights. `mute`, `played`, `context`,
 `participant` and `bye` are controls, never tool or owner-control authority.
 Playback acknowledgements name the item and actual played milliseconds.
+`max_control_bytes` bounds peer messages, in UTF-8.
 The server sends `state`, `activity`, `turn`, `caption` and `flush`.
-`caption.replace:true` replaces cumulative/revised text instead of appending it;
-`flush.epoch` invalidates older playback. A closed state carries its reason,
+Caption text has no byte cutoff. Append a partial caption's text to its item
+unless `replace:true` marks cumulative/revised text that replaces it; a final
+caption carries the item's whole text. `flush.epoch` invalidates older
+playback. A closed state carries its reason,
 detail and optional next action. The ordinary chat socket also publishes
 `conversation_finished` with `chat_id`, `call_id`, `task_id` and `reason`.
 

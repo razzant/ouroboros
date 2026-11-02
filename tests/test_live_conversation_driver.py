@@ -573,6 +573,22 @@ def test_final_caption_writer_failure_does_not_leave_teardown_waiting():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('speaker', ['owner', 'ouroboros'])
+def test_final_words_are_kept_when_their_display_fails(speaker):
+    async def scenario():
+        host = Host()
+        task, session = await started(host)
+        session.emit('ready', input_rate=24000, output_rate=24000)
+        await until(lambda: host.hub.states)
+        def refused(*_args, **_kwargs): raise RuntimeError('fake display failure')
+        host.hub.send_caption = refused
+        session.emit('caption', speaker=speaker, item_id='words', text='Final words.', final=True)
+        with pytest.raises(RuntimeError, match='fake display failure'):
+            await asyncio.wait_for(task, 2)
+        assert [(row['speaker'], row['text'], row['item_id']) for row in host.captions] == [(speaker, 'Final words.', 'words')]
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('source', ['host', 'provider'])
 @pytest.mark.parametrize('barrier', ['response', 'input', 'tools', 'playback', 'caption', 'native'])
 def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
