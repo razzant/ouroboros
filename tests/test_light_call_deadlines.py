@@ -8,11 +8,27 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import deadline_utils, model_concurrency, model_wait, project_naming, ui_translation
+# loop_llm_call and review_verdict_extraction load before any fixture replaces model_wait.monotonic_now, which
+# modules they import bind at import.
+from ouroboros import (
+    deadline_utils,
+    loop_llm_call,
+    model_concurrency,
+    model_wait,
+    project_naming,
+    review_verdict_extraction,
+    safety,
+    ui_translation,
+    vision_routing,
+)
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient
 from ouroboros.llm_stream import AssembledResponse
+from tests._safety_fixtures import supervisor as supervisor_fixture
 from tests._usage_store_testing import ledger_rows
+
+supervisor = supervisor_fixture
+REAL_SAFETY_CALL = safety._safety_model_call  # the shared supervisor fixture fakes it; these checks need the real one
 
 
 @pytest.fixture
@@ -233,6 +249,88 @@ def test_local_consumer_checks_preparation_deadline(call_env, monkeypatch, consu
         assert ledger_rows(call_env.root)[-1]["cost_usd"] == 0
 
 
+def light_lane(call_env, monkeypatch, lane):
+    """Route both light consumers to ``lane``: its slot identity and the send timeouts it records."""
+    from ouroboros import local_model
+    from tests.test_local_gigachat_send_deadlines import gigachat_network
+
+    if lane == "local":
+        timeouts, original = [], call_env.sdk.chat.completions.create
+
+        def local_send(**kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            response = original(**kwargs).model_dump()
+            response["usage"]["cost"] = 0
+            return AssembledResponse(response)
+
+        call_env.sdk.chat.completions.create = local_send
+        monkeypatch.setattr(local_model, "get_manager", lambda: SimpleNamespace(serving_context_evidence=lambda: {}))
+        monkeypatch.setattr(call_env.client, "_get_local_client", lambda: call_env.sdk)
+        monkeypatch.setattr(project_naming, "_light_use_local", lambda explicit: True)
+        monkeypatch.setattr(ui_translation, "_light_route", lambda: ("unseen-local", True, True))
+        return ("local-model", {"provider": "local"}), lambda: timeouts
+    seen = gigachat_network(monkeypatch, call_env, content="Useful title")
+    route = {"provider": "gigachat", "resolved_model": "GigaChat-2", "usage_model": "gigachat::GigaChat-2",
+             "access_token": "token", "base_url": "https://giga.test/api/v1"}
+    monkeypatch.setattr(call_env.client, "_resolve_remote_target", lambda model: dict(route))
+    monkeypatch.setattr(project_naming, "_light_naming_model", lambda: route["usage_model"])
+    monkeypatch.setattr(ui_translation, "_light_route", lambda: (route["usage_model"], False, True))
+    return (route["usage_model"], route), lambda: [item.timeout["read"] for item in seen]
+
+
+@pytest.mark.parametrize("consumer", ["naming", "translation"])
+@pytest.mark.parametrize("lane", ["local", "gigachat"])
+@pytest.mark.parametrize("expired", [False, True])
+def test_local_and_gigachat_sends_get_the_window_left_after_preparation(call_env, monkeypatch, consumer, lane,
+                                                                        expired):
+    """Both lanes used to fix the 10 s socket before preparation and the slot wait (#572)."""
+    _slot, timeouts = light_lane(call_env, monkeypatch, lane)
+    spend_preparation(call_env, monkeypatch, 111 if expired else 103)
+    if expired:
+        refused(call_env, consumer)
+        assert ledger_rows(call_env.root)[-1]["state"] == "released"
+    else:
+        assert invoke(call_env, consumer) == "Useful title"
+        assert ledger_rows(call_env.root)[-1]["state"] == "settled"
+    assert timeouts() == ([] if expired else [7])
+
+
+@pytest.mark.parametrize("lane", ["local", "gigachat"])
+def test_local_and_gigachat_sends_get_the_window_left_after_a_slot_wait(call_env, monkeypatch, lane):
+    (model, route), timeouts = light_lane(call_env, monkeypatch, lane)
+    with slot_held_until(call_env, monkeypatch, model, route, 103) as released:
+        assert invoke(call_env, "naming") == "Useful title"
+    assert timeouts() == [pytest.approx(110 - released[0])] and released[0] >= 103  # not the stale 10 s
+
+
+@contextlib.contextmanager
+def slot_held_until(call_env, monkeypatch, model, route, release_at):
+    """Another sender holds the lane's real slot until ``release_at`` on the controlled clock."""
+    held, released = contextlib.ExitStack(), []
+    held.enter_context(model_concurrency.model_call_slot(model, route=route))
+
+    def sleep(seconds):  # the queue's real poll
+        call_env.now[0] += seconds
+        if call_env.now[0] >= release_at and not released:
+            released.append(call_env.now[0])
+            held.close()
+
+    monkeypatch.setattr(model_concurrency, "time", SimpleNamespace(
+        time=lambda: call_env.now[0], monotonic=lambda: call_env.now[0], sleep=sleep))
+    try:
+        yield released
+    finally:
+        held.close()
+
+
+def spend_until(call_env, monkeypatch, elapsed, until):
+    """The window from 100 to ``until`` goes to preparation or to another sender's slot."""
+    if elapsed == "preparation":
+        spend_preparation(call_env, monkeypatch, until)
+        return contextlib.nullcontext([until])
+    return slot_held_until(call_env, monkeypatch, "unseen-light", call_env.route, until)
+
+
 @pytest.mark.parametrize("expired", [False, True])
 def test_managed_naming_checks_preparation_before_model_create(call_env, monkeypatch, expired):
     from ouroboros import llm_claudexor as transport
@@ -273,3 +371,161 @@ def test_relative_socket_timeout_alone_still_creates_no_operation_deadline(call_
                                         "openai-compatible::unseen-light", timeout=5)
     assert message["content"] == "Useful title" and len(call_env.sends) == 1
     assert call_env.sends[0]["timeout"] == 5
+
+
+def at(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def no_proxy_timeouts(monkeypatch, content="Useful title"):
+    """The production no-proxy client with only its network transport in memory: each request's HTTP timeout."""
+    import httpx
+
+    from ouroboros import net_transport
+
+    timeouts = []
+
+    def respond(request):
+        timeouts.append(request.extensions["timeout"])
+        return httpx.Response(200, json={
+            "id": "fixture-generation", "object": "chat.completion", "created": 1, "model": "unseen-light",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": content}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.25}})
+
+    monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *a, **k: httpx.MockTransport(respond))
+    return timeouts
+
+
+def test_place_reply_safety_check_ends_by_the_task_deadline_safety_already_uses(call_env, monkeypatch, supervisor):
+    """The reply check runs on the loop thread, outside any tool window. Safety already ends its slot wait and
+    its retry at the task deadline; the send itself used to keep the whole safety timeout (#572)."""
+    from ouroboros.config import get_safety_call_timeout_sec
+
+    monkeypatch.setattr(supervisor.module, "_safety_model_call", REAL_SAFETY_CALL)
+    monkeypatch.setattr(LLMClient, "_resolve_remote_target", lambda self, model: dict(call_env.route))
+    monkeypatch.setattr(LLMClient, "_get_remote_client", lambda self, target: call_env.sdk)
+    call_env.sdk.chat.completions.create = lambda **kwargs: call_env.sends.append(kwargs) or AssembledResponse({
+        "id": "verdict", "choices": [{"message": {"role": "assistant", "content": '{"status":"SAFE","reason":"ok"}'},
+                                      "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.01}})
+    supervisor.ctx.task_metadata["deadline_at"] = at(120)
+    spend_preparation(call_env, monkeypatch, 105)
+    reply = {"text": "Here is the answer", "destination": "room", "place_id": "place"}
+    assert supervisor.module.check_safety("place_reply", reply, ctx=supervisor.ctx) == (True, "")
+    assert get_safety_call_timeout_sec() == 60 and [send["timeout"] for send in call_env.sends] == [15]
+
+
+@pytest.mark.parametrize("elapsed", ["preparation", "slot"])
+def test_verdict_extraction_keeps_its_finalization_reserve_after_preparation_or_a_slot_wait(
+        call_env, monkeypatch, elapsed):
+    """Extraction refuses inside deadline − grace and projects its timeout from it, once, before the send."""
+    from ouroboros import config
+    from ouroboros import review_verdict_extraction as extraction
+
+    timeouts = no_proxy_timeouts(monkeypatch)
+    monkeypatch.setattr(config, "get_light_model", lambda: "openai-compatible::unseen-light")
+    with ua.usage_scope(ua.UsageScope(drive_root=call_env.root, task_id="review", root_task_id="review")), \
+            model_wait.calendar_scope(at(300)), \
+            spend_until(call_env, monkeypatch, elapsed, 110) as started:  # review custody's raw request deadline
+        extraction._extract_verdict_via_light_model("The change looks fine.", llm=call_env.client, deadline_at=at(300))
+    # Projected at 100: 300 − 120 (grace) − 100 = 80 s; about 10 s later only 70 s of that window remain.
+    assert [(timeout["read"], timeout["connect"]) for timeout in timeouts] == [(pytest.approx(180 - started[0]), 30)]
+    assert started[0] >= 110 and ledger_rows(call_env.root)[-1]["state"] == "settled"
+
+
+@pytest.mark.parametrize("elapsed", ["preparation", "slot"])
+def test_vision_caption_keeps_its_reserve_after_image_preparation_or_a_slot_wait(call_env, monkeypatch, elapsed):
+    """The caption refuses inside the loop deadline − grace and projects its timeout from it before preparing."""
+    from ouroboros import vision_routing
+
+    timeouts = no_proxy_timeouts(monkeypatch, content="A red square.")
+    monkeypatch.setattr(deadline_utils, "time", SimpleNamespace(time=lambda: call_env.now[0]))  # epoch deadline_ts
+    image = "data:image/png;base64,iVBORw0KGgo="
+    monkeypatch.setattr(vision_routing, "prepare_caption_image", lambda *a: (
+        "openai-compatible::unseen-light", image, "pixel-digest", "", ""))
+    monkeypatch.setattr(vision_routing, "prepare_messages_for_send", lambda messages, **kwargs: messages)
+    with ua.usage_scope(ua.UsageScope(drive_root=call_env.root, task_id="loop", root_task_id="loop")), \
+            spend_until(call_env, monkeypatch, elapsed, 110) as started:
+        caption, failure = vision_routing._caption_for_block(
+            {"type": "image_url", "image_url": {"url": image}}, ctx=SimpleNamespace(deadline_ts=300.0),
+            llm=call_env.client, accumulated_usage={})
+    assert (caption, failure) == ("A red square.", "")
+    # min(90, 300 − 120 − 100) = 80 s projected; about 10 s later the send has 70 s.
+    assert [(timeout["read"], timeout["connect"]) for timeout in timeouts] == [(pytest.approx(180 - started[0]), 30)]
+    assert started[0] >= 110
+
+
+def light_extraction(call_env, monkeypatch, *, until, owner=True, cancel=False):
+    """The review substrate's real verdict extraction, as a review inside a task calls it: its window is the
+    review deadline less the grace, 300 − 120 = 180, and its preparation runs to ``until``."""
+    from ouroboros import cancel_intents, config
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(call_env.root, "review", "running", root_task_id="review")  # the owner's Pause authority
+    timeouts = no_proxy_timeouts(monkeypatch, content="[]")
+    monkeypatch.setattr(config, "get_light_model", lambda: "openai-compatible::unseen-light")
+    spend_preparation(call_env, monkeypatch, until)
+    task = {"id": "review", "root_task_id": "review", "deadline_at": at(300)}
+    waiter = (model_wait.task_model_wait_scope(task=task, drive_root=call_env.root, event_queue=None,
+                                               worker_slot_held=False) if owner else contextlib.nullcontext())
+    with ua.usage_scope(ua.UsageScope(drive_root=call_env.root, task_id="review", root_task_id="review")), waiter:
+        if cancel:
+            cancel_intents.request_cancel(call_env.root, "review", source="extraction-test")
+        result = review_verdict_extraction.canonicalize_session_verdict(
+            "The change looks fine; I found nothing to fix.", conformance_passed=False,
+            llm=call_env.client, deadline_at=at(300))
+    return result, timeouts
+
+
+@pytest.mark.parametrize("owner", [True, False], ids=["wait_owner", "bare"])
+def test_verdict_extraction_whose_window_ends_in_preparation_returns_its_own_deadline_result(call_env, monkeypatch,
+                                                                                               owner):
+    """Spent while it records its candidate, the extraction sends nothing and gives the deadline_exhausted result it
+    already gives before admission; the review keeps its own unparsed text. A task's wait owner used to turn that
+    refusal into the task's deadline control, and without one its reason was lost."""
+    (_text, method, usage), timeouts = light_extraction(call_env, monkeypatch, until=181, owner=owner)
+    assert (method, usage) == ("unparsed", {"model": "openai-compatible::unseen-light",
+                                            "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"})
+    assert timeouts == [] and [row["state"] for row in ledger_rows(call_env.root)] == ["released"]
+
+
+@pytest.mark.parametrize("until,cancel,reason", [(301, False, "deadline"), (110, True, "cancelled")],
+                         ids=["task_deadline", "stop"])
+def test_verdict_extraction_keeps_its_tasks_own_controls(call_env, monkeypatch, until, cancel, reason):
+    with pytest.raises(model_wait.ModelWaitInterrupted) as interrupted:
+        light_extraction(call_env, monkeypatch, until=until, cancel=cancel)
+    assert interrupted.value.control_reason == reason
+
+
+PIXEL = ("data:image/png;base64,"
+         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=")
+
+
+@pytest.mark.parametrize("image", [True, False], ids=["captioned", "text_only"])
+def test_a_send_time_caption_refused_at_its_window_ends_mains_round_as_mains_own_send_does(call_env, monkeypatch,
+                                                                                          image):
+    """Captions are made only while Main prepares its own send, whose window is the same deadline − grace. So a
+    caption refused there costs nothing Main's own refusal does not: both rounds end in the same interruption,
+    and neither sends. Without the caption's bound that round still ended so, after a late paid caption."""
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(call_env.root, "main", "running", root_task_id="main")  # the owner's Pause authority
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
+    timeouts = no_proxy_timeouts(monkeypatch, content="A red square.")
+    monkeypatch.setattr(deadline_utils, "time", SimpleNamespace(time=lambda: call_env.now[0]))  # epoch deadline_ts
+    monkeypatch.setattr(vision_routing, "prepare_caption_image", lambda *a: (
+        "openai-compatible::unseen-light", PIXEL, "pixel-digest", "", ""))
+    spend_preparation(call_env, monkeypatch, 181)
+    content = [{"type": "text", "text": "What is on the picture?"},
+               *([{"type": "image_url", "image_url": {"url": PIXEL}}] if image else [])]
+    task = {"id": "main", "root_task_id": "main", "deadline_at": at(300)}
+    with ua.usage_scope(ua.UsageScope(drive_root=call_env.root, task_id="main", root_task_id="main")), \
+            model_wait.task_model_wait_scope(task=task, drive_root=call_env.root, event_queue=None,
+                                             worker_slot_held=False), \
+            pytest.raises(model_wait.ModelWaitInterrupted) as interrupted:
+        loop_llm_call.call_llm_with_retry(
+            call_env.client, [{"role": "user", "content": content}], "openai-compatible::unseen-light", None,
+            "medium", 1, call_env.root / "logs", "main", 1, None, {}, "task",
+            deadline_ts=300.0, transport_reserve_sec=120.0)
+    assert interrupted.value.control_reason == "deadline"
+    assert (timeouts, call_env.sends) == ([], [])

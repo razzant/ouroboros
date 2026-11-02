@@ -23,14 +23,14 @@ from ouroboros.deadline_utils import llm_transport_timeout_sec
 from ouroboros.gateways.claudexor import (ClaudexorUnavailable, engine_at_least, model_failure_evidence_supported,
                                           operation_query_supported, _READ_TIMEOUT_SEC)
 from ouroboros.gateways.claudexor_metadata import model_gateway
-from ouroboros.llm_attempt import _attempt_request, _candidate_before_dispatch, effort_request_facts
+from ouroboros.llm_attempt import _PhysicalSendNotStarted, _attempt_request, _candidate_before_dispatch, effort_request_facts
 from ouroboros.llm_capability_policy import model_catalog as model_catalog, catalog_admits_model as catalog_admits_model
 from ouroboros.send_clock import stamp_clock_note
 from ouroboros.llm_substitution import (
     AccountRotation, CapabilityRetry, SubstitutionBudget, capability_refusal_text, substitution_fact, failed_account_preference,
     take_failed_account_preference)
 from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
-from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, prepared_call_scope
+from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, dispatch_deadline_remaining_sec, prepared_call_scope
 from ouroboros.observability import persist_call
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
@@ -375,6 +375,12 @@ class _ModelInvocation:
         if not reason:
             waiter = current_model_wait()
             reason = waiter.control_reason() if waiter is not None else None
+        if not reason and starting and not self.create_attempted:
+            # The first create is this route's send, so a caller's bound holds here even with no wait owner to
+            # read it. A repeated create only rejoins its idempotent operation; a running one is never cancelled.
+            remaining = dispatch_deadline_remaining_sec()
+            if remaining is not None and remaining <= 0:
+                raise _PhysicalSendNotStarted("deadline")
         if not reason and starting:
             try:
                 if model_handed_off(self.invocation_id):

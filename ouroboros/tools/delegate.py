@@ -1392,9 +1392,9 @@ def get_tools() -> List[ToolEntry]:
                     "Unselected large inputs stay at source. Direct work without selected/observed paths cannot "
                     "claim a complete changed-file list."},
                 "max_seconds": {"type": "integer", "description":
-                    "Wall-clock cap, narrowed by your remaining deadline. Allow realistic end-to-end time "
-                    "(often 3-5+ minutes). An advancing delegate_wait cursor means progress; the run enforces "
-                    "its own cap. Do not cancel progressing work just to hurry it."},
+                    "Optional wall-clock ceiling, narrowed by the task deadline and remaining finite execution time; "
+                    "omit for no extra ceiling. Reaching it can interrupt useful work; inspect without ending the "
+                    "run via a delegate_wait checkpoint. Stop, money and custody stay separate."},
                 "continue_from": {"type": "string", "description":
                     "Continue a finished run after cap, subscription limit, crash/restart, cancel or input_required. "
                     "Prefer this when work is worth keeping. It must belong to your task line: yours, your confirmed "

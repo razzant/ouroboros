@@ -468,6 +468,19 @@ def dispatch_deadline_remaining_sec() -> float | None:
     return min(remaining) if remaining else None
 
 
+def owner_control_reason() -> str | None:
+    """What refuses a send here beyond every window a caller imposed (its calendar and execution scopes):
+    the owner's Stop, Pause and finalize request, its task's deadline and ceiling. Unreadable controls raise."""
+    from ouroboros.owner_pause import model_handed_off
+
+    calendar, logical = _CALENDAR.set(()), _LOGICAL.set(())
+    try:
+        return dispatch_control_reason(current_model_wait(), handed_off=model_handed_off())
+    finally:
+        _LOGICAL.reset(logical)
+        _CALENDAR.reset(calendar)
+
+
 class ResourceDeferral:
     """One round's resource refusal, returned to the round instead of waited in its call.
 

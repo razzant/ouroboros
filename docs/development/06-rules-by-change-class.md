@@ -183,7 +183,7 @@ Enforcement: `tests/test_owner_settings_write_seam.py` and `tests/test_settings_
 
 ### Transport and late-result custody
 
-- `LLMClient.chat` and `chat_async` accept optional `stream`, `caller_deadline_ts` and `caller_execution_deadline`; Main opts into streaming. Subtract the finalization reserve once at the caller; every physical recovery send re-checks the inherited bounds.
+- `LLMClient.chat`/`chat_async` take optional `stream`, `caller_deadline_ts`, `caller_execution_deadline`; Main streams. Callers subtract the finalization reserve once; each socket wait (not wall time) narrows to what is left, else the request is refused.
 - Stream consumption completes inside physical accounting (ARCHITECTURE §6 "Caller-owned subscription model calls"): an EOF, error or cancellation retains private wire evidence and yields no usable partial answer; only a structural parameter rejection uses wire recovery; a retry is never inferred from missing stream text or ping cadence. Local, GigaChat and Claudexor keep separate wire contracts.
 - Late reviewer reuse resolves the exact operation's complete producer receipt from the existing CAS (ARCHITECTURE §6 "Late completion and typed refusals"); paid settlement is recorded once; missing, partial or mismatched custody never buys another same-operation dispatch.
 - Unknown-outcome recovery is typed (`loop_transport.new_generation_after_unknown`): configured routes, then transport-wait observations. The old outcome and cost stay unknown; new attempts get their own identity and facts-only input; a control-link or read failure only rejoins (`same_operation_recoverable`). No scheduler, pass counter or paid probe.

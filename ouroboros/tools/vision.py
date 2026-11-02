@@ -168,7 +168,7 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
                                processing_preference: Optional[str] = None, **kwargs: Any) -> tuple[str, dict]:
     """Wait around one image call while keeping inference in a tracked child."""
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.deadline_utils import dispatch_window_remaining_sec
+    from ouroboros.deadline_utils import dispatch_window_remaining_sec, utc_now
     from ouroboros.tools.vision_process import run_vision_child
 
     subscription = not kwargs.get("use_local") and provider_for_model(kwargs.get("model", "")) == "claudexor"
@@ -183,6 +183,10 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
         operation_timeout = remaining if operation_timeout is None else min(operation_timeout, remaining)
     if operation_timeout is not None and operation_timeout <= 0:
         raise TimeoutError("VLM task execution window exhausted before child dispatch")
+    if remaining is not None:
+        # The end of that deadline window, absolute, crosses as ``vision_query``'s own bound: the child's
+        # sends re-check it after its start-up, image preparation and recording, reserve already taken (#572).
+        kwargs["caller_deadline_ts"] = utc_now().timestamp() + remaining
     child_timeout = None if operation_timeout is None else operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
     return run_vision_child(child_timeout=child_timeout, subscription=subscription,
                             model_role=model_role, processing_preference=processing_preference, **kwargs)
