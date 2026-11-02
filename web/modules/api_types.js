@@ -111,6 +111,7 @@
  * @property {string} app_version
  * @property {string=} abi_version  // gateway ABI carrier; absent on cores older than GET /api/contract
  * @property {BootDocument=} boot  // the serving generation's phases; answered while the boot runs
+ * @property {Object=} inline_executors  // turns this process ran on its own threads (degraded carrier, live call): degraded_total, live, recent
  */
 /** @typedef {Object} OpenAICompatibleModelsResponse
  * @property {string[]} models
