@@ -662,11 +662,8 @@ def _outcome_received(ctx: Any, llm_trace: Dict[str, Any], record: Dict[str, Any
 
 def _show(ctx: Any, hold: Any, text: str, record: Dict[str, Any], cause: str) -> bool:
     """Hold the delivery once to hand this outcome to its author; ``_result_review_shown`` keeps its identity."""
-    shown = getattr(ctx, "_result_review_shown", None)
-    if not isinstance(shown, set):
-        shown = set(shown or ())
-        ctx._result_review_shown = shown
-    shown.update(_outcome_keys(record))
+    shown = getattr(ctx, "_result_review_shown", None) or []
+    ctx._result_review_shown = list(dict.fromkeys([*shown, *sorted(_outcome_keys(record))]))
     ctx._completion_hold_cause = cause  # each hold names its cause to the delivery owner
     hold(text)
     return True
@@ -838,13 +835,13 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     if record is None:
         return False
     stands_for_earlier = str((record.get("subject") or {}).get("diff_sha") or "") not in {"", subject.diff_sha}
+    record_id = str(record.get("record_id") or "")
+    # What this step put before the mind is plain JSON (ids, [record, subject] pairs, refusals by subject), so a
+    # same-ID continuation carries it in its saved state (``owner_wait.continuation_state``).
     if stands_for_earlier:
-        asked = getattr(ctx, "_result_review_request_asked", None)
-        if not isinstance(asked, set):
-            asked = set()
-            ctx._result_review_request_asked = asked
-        if (str(record.get("record_id") or ""), subject.diff_sha) not in asked:
-            asked.add((str(record.get("record_id") or ""), subject.diff_sha))
+        asked = getattr(ctx, "_result_review_request_asked", None) or []
+        if [record_id, subject.diff_sha] not in asked:
+            ctx._result_review_request_asked = [*asked, [record_id, subject.diff_sha]]
             # The one question carries that review's outcome too when its author has not received it yet.
             text = _request_changed_text(ctx, record, outcome=not _outcome_received(ctx, llm_trace, record))
             return _show(ctx, hold, text, record, "earlier_request")
@@ -857,7 +854,7 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
         return False if received else _show(ctx, hold, _findings_text(record, blocking=False), record, "pass")
     if aggregate == "NOT_DISPATCHED":
         ctx._result_review_refused = {**(getattr(ctx, "_result_review_refused", None) or {}), subject.diff_sha: {
-            "ceiling": _ceiling(), "record_id": str(record.get("record_id") or "")}}
+            "ceiling": _ceiling(), "record_id": record_id}}
     blocking = required and enforcement == "blocking"
     if not received or blocking:
         return _show(ctx, hold, _findings_text(record, blocking=blocking), record, "findings")

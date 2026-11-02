@@ -158,7 +158,7 @@ def _validate_candidate_facts(row: Dict[str, Any], sequence: int) -> None:
         if context.get("profile") not in {"owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"}:
             raise UsageLedgerCorrupt(f"invalid physical_context profile in usage row seq={sequence}")
         if context.get("rendered_mode") not in {"max", "low", "nano"} or context.get("measurement_basis") not in {
-            "fresh_route_usage", "fresh_model_usage", "cold_estimate",
+            "fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate",
         }:
             raise UsageLedgerCorrupt(f"invalid physical_context mode/basis in usage row seq={sequence}")
         for key in ("target_total_tokens", "capacity_total_tokens"):

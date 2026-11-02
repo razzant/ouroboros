@@ -12,7 +12,7 @@ from typing import Literal, Optional
 class PhysicalAttemptContext:
     profile: Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
     rendered_mode: Literal["max", "low", "nano"]
-    measurement_basis: Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+    measurement_basis: Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
     route_fp: str
     round_id: str
     target_total_tokens: Optional[int]

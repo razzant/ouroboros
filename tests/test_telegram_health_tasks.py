@@ -119,3 +119,20 @@ def test_default_command_mode_is_full():
     # the command-mode default fallback is full_access (not strict)
     assert 'TELEGRAM_COMMAND_MODE") or _COMMAND_MODE_FULL' in src
     assert 'TELEGRAM_COMMAND_MODE") or _COMMAND_MODE_STRICT' not in src
+
+
+def test_a_correspondents_presence_turn_is_neither_counted_nor_listed_as_the_owners(tmp_path):
+    plugin = _load_plugin()
+    health = sys.modules["tg_ht_test.lib.telegram_health"]
+    api, data = _api_with_data(tmp_path)
+    running = [
+        {"id": "owner-turn", "type": "task", "task": {"_execution_owner": {"kind": "direct", "lane": "conversation"}}},
+        {"id": "project-work", "type": "task", "task": {"_execution_owner": {"kind": "pooled", "lane": "project"}}},
+        {"id": "presence-1", "type": "presence",
+         "task": {"_presence_turn": True, "_execution_owner": {"kind": "presence", "lane": "conversation"}}},
+    ]
+    (data / "state" / "queue_snapshot.json").write_text(json.dumps(
+        {"running_count": 3, "pending_count": 0, "running": running, "pending": []}), encoding="utf-8")
+    assert "RUNNING 2" in plugin._collect_health(api, "en")
+    txt = health._collect_tasks_text(api, "en")
+    assert "owner-tu" in txt and "project-" in txt and "presence" not in txt

@@ -188,6 +188,10 @@ def test_the_facts_line_names_window_room_and_target_excess_apart(monkeypatch):
                                    "_context_measurement_basis": "fresh_model_usage"},
                      _context_capacity_total_tokens=500_000)
     assert "predicted free ~134,464" in witness and "fresh same-model" in witness
+    # A size refusal's own density counts every candidate its passes change: an estimate, never a stated count.
+    refused = _facts(monkeypatch, **base, _context_measurement_basis="refused_input", _context_capacity_total_tokens=500_000)
+    assert ("input ~300,000 before this line (host estimate at the density of the size-refused request: its "
+            "provider-stated input over its estimate)") in refused and "input of this refused request" not in refused
 
 
 # --- #1728: a technical rebind keeps the sent view while it fits -----------------------------------

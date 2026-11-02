@@ -276,7 +276,7 @@ def context_overflow_message(text: Any) -> bool:
         return False
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low) > 0
 
-MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 ReclaimStatus = Literal[
     "applied", "no_eligible", "checkpoint_failed", "no_measurable_shrink", "binding_mismatch",
     "no_op", "fit_rejected", "source_unavailable", "authored_note_required",

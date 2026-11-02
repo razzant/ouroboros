@@ -218,6 +218,135 @@ def test_completion_conflict_preserves_sources_and_requires_reselection(turn):
     assert trace['completion_refusals'][0]['reason'].startswith('contradictory_completion_requests')
 
 
+class _WorkerDeath(BaseException):
+    """The worker process ends: nothing after this point runs, saves or acknowledges."""
+
+
+def _after_worker_death(tmp_path, monkeypatch, first, then, *, legacy=False, task_id='author-task', prepare=None):
+    """Attempt 1 answers ``first`` and its worker dies right after the batch's post-batch save. The rolling
+    state is frozen as a retry's source (``attach_recovery``) and continued as attempt 2 of ``task_id``
+    (the same task, or a new execution id) through the real loop, which answers ``then``. ``legacy`` drops
+    the conflict fact from the saved bytes, as a checkpoint written before that fact was carried."""
+    from ouroboros import working_checkpoint as wc
+    from ouroboros.task_results import write_task_result
+    from tests.test_working_checkpoint import _registry
+
+    asked = []
+
+    def attempt(number, answers, own_id, **facts):
+        registry = _registry(tmp_path, monkeypatch, own_id, number)  # a worker's start, with its fitted route
+        registry._ctx.is_direct_chat = True
+        for key, value in facts.items():
+            setattr(registry._ctx, key, value)
+        if prepare is not None:
+            prepare(registry)
+        replies = iter(answers)
+
+        def respond(*_a, **_kw):
+            asked.append(number)
+            return next(replies), 0.0
+
+        monkeypatch.setattr(loop, 'call_llm_with_retry', respond)
+        return loop.run_llm_loop([{'role': 'user', 'content': 'Please help'}], registry,
+            SimpleNamespace(default_model=lambda: 'test-model'), tmp_path / 'logs',
+            lambda text, **_kw: None, queue.Queue(), task_id=own_id, drive_root=tmp_path)
+
+    write_task_result(tmp_path, 'author-task', 'running')
+    saved = wc.save_or_log
+
+    def save_then_die(limit_ctx, boundary):
+        result = saved(limit_ctx, boundary)
+        if boundary == 'post_batch':
+            raise _WorkerDeath
+        return result
+
+    with monkeypatch.context() as dying:
+        dying.setattr(wc, 'save_or_log', save_then_die)
+        with pytest.raises(_WorkerDeath):
+            attempt(1, first, 'author-task')
+    path = wc.checkpoint_path(tmp_path, 'author-task', 1)
+    state = json.loads(path.read_bytes())
+    if legacy:
+        state['delivery'].pop('_completion_conflict', None)
+        path.write_text(json.dumps(state), encoding='utf-8')
+    task = {'id': 'author-task'}
+    assert wc.attach_recovery(tmp_path, task, source_task_id='author-task', from_attempt=1, cause='worker_crash')
+    if task_id != 'author-task':
+        write_task_result(tmp_path, task_id, 'running')
+    text, _usage, trace = attempt(2, then, task_id, working_recovery=task['_working_recovery'])
+    return text, trace, asked, state
+
+
+def _stop_then(sibling, *, answer='Stopped early.'):
+    response = finish(answer, action='stop', rationale='The child has not answered.')
+    response['tool_calls'].append({'id': 'second', 'type': 'function', 'function': sibling})
+    return response
+
+
+CONTRADICTING_FINISH = {'name': 'finish_task', 'arguments': json.dumps({'action': 'finish', 'answer': 'Finished.'})}
+FAILED_READ = {'name': 'chat_history', 'arguments': '{}'}
+
+
+def _failing_read(registry):
+    from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+
+    registry.override_handler('chat_history', lambda ctx: _publish_tool_result(ctx,
+        ToolResult(status='error', code='TOOL_ERROR', text='Read unavailable')))
+
+
+def test_a_stop_first_conflict_survives_a_same_id_recovery_of_its_post_batch_state(tmp_path, monkeypatch):
+    """Map seam 1: ``stop`` then a contradicting ``finish`` in ONE batch, the worker dying after the post-batch
+    save and before that batch's request was read. The live loop refuses the pair; the same task continued
+    from that state refuses it too, instead of publishing the first stop (the finish-only unread-result
+    check never covers a stop)."""
+    text, trace, asked, saved = _after_worker_death(
+        tmp_path, monkeypatch, [_stop_then(CONTRADICTING_FINISH)], [finish('Informed answer.')])
+    assert text == 'Informed answer.' and asked == [1, 2]
+    assert trace['completion_refusals'][-1]['reason'].startswith('contradictory_completion_requests')
+    assert 'task_completion' not in trace, 'the contradicted stop was never recorded'
+    assert saved['working']['boundary'] == 'post_batch'
+    assert saved['delivery']['_completion_request']['action'] == 'stop'
+    assert saved['delivery']['_completion_conflict'] is True, 'the conflict travels with its unread request'
+
+
+@pytest.mark.parametrize('sibling, viable', [(FAILED_READ, True), (CONTRADICTING_FINISH, False)])
+def test_a_legacy_post_batch_state_keeps_one_valid_stop_and_names_an_ambiguous_one_unknown(
+        tmp_path, monkeypatch, sibling, viable):
+    """A state saved before the conflict fact was carried proves neither its absence nor its presence.
+    The batch's own rows decide only what they can: a stop whose siblings include no failed completion request
+    is the one valid request (a failed read is no conflict) and still completes; beside a failed completion
+    request it may or may not have been contradicted, so it is held as UNKNOWN for a fresh selection, never
+    recorded as a conflict and never published on a guess."""
+    text, trace, asked, saved = _after_worker_death(
+        tmp_path, monkeypatch, [_stop_then(sibling)], [finish('Informed answer.')], legacy=True,
+        prepare=_failing_read)
+    assert '_completion_conflict' not in saved['delivery'] and saved['delivery']['_completion_request']
+    if viable:
+        assert text == 'Stopped early.' and asked == [1]
+        assert trace['task_completion']['action'] == 'stop' and not trace.get('completion_refusals')
+        return
+    assert text == 'Informed answer.' and asked == [1, 2]
+    [refusal] = trace['completion_refusals']
+    assert refusal['reason'].startswith('completion_conflict_unknown')
+    assert 'contradictory' not in refusal['reason'] and 'UNKNOWN' in refusal['reason']
+
+
+def test_a_new_execution_id_takes_the_answer_bytes_but_no_staged_request(tmp_path, monkeypatch):
+    """An idle retry continues the transcript and the retained answer (its bytes and its control episode)
+    but no request staged by the attempt it replaces: that stop is never published for the new execution,
+    which selects again over the same retained bytes."""
+    hold_first_delivery(monkeypatch)
+    draft = 'Draft answer.'
+    selector = hashlib.sha256(draft.encode()).hexdigest()
+    text, trace, asked, saved = _after_worker_death(
+        tmp_path, monkeypatch, [{'content': draft}, _stop_then(FAILED_READ, answer='Partial.')],
+        [{'content': 'Prose under armed control.'}, finish(answer_sha256=selector)], task_id='author-retry',
+        prepare=_failing_read)
+    assert saved['delivery_candidate']['full_text'] == draft and saved['delivery']['_completion_request']
+    assert text == draft and asked == [1, 1, 2, 2], 'prose is refused: the retained episode came along'
+    assert 'task_completion' not in trace and 'completion_refusals' not in trace, 'the old stop never ran here'
+
+
 def test_unavailable_held_selector_never_reconstructs_a_preview():
     text = 'Whole original response'
     selector = hashlib.sha256(text.encode()).hexdigest()

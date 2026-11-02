@@ -532,6 +532,15 @@ def held_ids(pending: Iterable[Any]) -> List[str]:
 # explicit Resume, at any age. Neither lifts an earlier Pause, Stop, budget,
 # sleep or deadline hold; a row without saved work keeps its old path.
 
+def presence_turn(task: Any) -> bool:
+    """A correspondent's Presence turn (its conversation-lane row): its place's, never the owner's saved work.
+    Nothing saves its stack (#2566) and its re-entry refuses (``presence_attempt_outcome_unknown``), so a stop
+    door neither returns, retains, holds nor fences it, as base, whose queue never held one, never did."""
+    from ouroboros.task_carrier import execution_kind
+
+    return isinstance(task, dict) and execution_kind(task) == "presence"
+
+
 def working_saved(root: Any, task_id: str, attempt: int, *, task: Optional[Dict[str, Any]] = None) -> bool:
     """Whether the attempt left a working checkpoint (a stat; validity is checked at freeze),
     or is parked on a question/review wait whose own source is this attempt's saved state."""
@@ -702,7 +711,7 @@ def retain_saved_running(running: Dict[str, Any], preserve: Iterable[str], drive
     for task_id, meta in dict(running or {}).items():
         task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
-        if (task and task_id not in preserved and not _cancel_intent_active(root, task_id)
+        if (task and task_id not in preserved and not presence_turn(task) and not _cancel_intent_active(root, task_id)
                 and working_saved(root, task_id, int(meta.get("attempt") or task.get("_attempt") or 1), task=task)):
             kept.append(str(task_id))
             lineage[str(task_id)] = {str(task.get("parent_task_id") or ""), str(task.get("root_task_id") or "")}
@@ -743,7 +752,8 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
         attempt = int(meta.get("attempt") or task.get("_attempt") or 1) if task else 0
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
-        if (task and task_id not in set(owner_wait_ids) and working_saved(root, task_id, attempt, task=task)
+        if (task and task_id not in set(owner_wait_ids) and not presence_turn(task)
+                and working_saved(root, task_id, attempt, task=task)
                 and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
                                                                     RETAIN_OWNER_PAUSE}):
             returns.add(str(task_id))
@@ -751,7 +761,8 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         task_id = str((record or {}).get("id") or "")
         attempt = int((record or {}).get("_attempt") or 1)
         root = pathlib.Path((record or {}).get("budget_drive_root") or drive_root)
-        if (task_id and task_id not in set(owner_wait_ids) and working_saved(root, task_id, attempt, task=record)
+        if (task_id and task_id not in set(owner_wait_ids) and not presence_turn(record)
+                and working_saved(root, task_id, attempt, task=record)
                 and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
                                                                     RETAIN_OWNER_PAUSE}):
             returns.add(task_id)
@@ -877,6 +888,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
             stored = load_task_result(root, task_id, strict=True) or {}
             refused[task_id] = ("no_result" if not task_id or not stored
                                 else "terminal" if stored.get("status") in _TRULY_TERMINAL_STATUSES
+                                else "presence_turn" if presence_turn(task) or presence_turn(stored)
                                 else "stopped" if _cancel_intent_active(root, task_id) else "")
             if refused[task_id]:
                 continue

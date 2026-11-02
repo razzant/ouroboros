@@ -72,6 +72,15 @@ def set_terminal_host_notice(usage: Dict[str, Any], *parts: str) -> None:
         usage.pop("terminal_host_notice", None)
 
 
+def set_terminal_plan_review_open(usage: Dict[str, Any], plan_suffix: str) -> None:
+    """Type the plan clause this exit states, and only it: an exit after a hold whose clause is gone
+    leaves no flag (absent = not open: a clean result carries no key)."""
+    if plan_suffix.strip():
+        usage["terminal_plan_review_open"] = True
+    else:
+        usage.pop("terminal_plan_review_open", None)
+
+
 def terminal_host_notice_text(result: Dict[str, Any]) -> str:
     """Host notices plus the latest stored delegated receipt, without rewriting history."""
     from ouroboros.delegate_terminal import terminal_custody_notice

@@ -299,7 +299,7 @@ def test_physical_floor_keeps_account_and_pending_correction_without_claiming_in
         window_tokens=4096, known_window=True, output_reserve=512, ratio=1.0, non_memory_tokens=0)
     assert account not in facts["floor"]["pointer_records"]
     assert account_text in short and "Final exception Ω." in short
-    assert memory_floor.minimal_view_tokens(snapshot) > 4096 - 512
+    assert memory_floor.view_tokens(short) + memory_floor.view_tokens(room) > 4096 - 512  # its last view cannot fit
     assert "### Physical floor" in room and "reduced forms" in room
     assert "2026-09-03 00:00 → 2026-09-03 00:03" in short
     assert "incorporated" not in short and "not in this account" in short

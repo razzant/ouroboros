@@ -184,7 +184,7 @@ def _capsule_metadata(message: Mapping[str, Any]) -> Tuple[bool, Optional[Dict[s
         and isinstance(checkpoint_ref, Mapping) and bool(checkpoint_ref)
         and any(dict(item) == dict(checkpoint_ref) for item in source_refs)
         and str(meta.get("measurement_basis") or "")
-        in {"fresh_route_usage", "fresh_model_usage", "cold_estimate"}
+        in {"fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"}
         and summary_contract_version == _CAPSULE_CONTRACT_VERSION
         and summary_contract_digest in {_CAPSULE_CONTRACT_DIGEST, _LEGACY_CAPSULE_CONTRACT_DIGEST}
     )

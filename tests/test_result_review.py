@@ -859,6 +859,98 @@ def test_alternating_answers_at_a_spent_blocking_ceiling_hold_with_each_refusal_
     assert "raises the review ceiling" in shown[-1] and len(sends) == 3
 
 
+# --- What the delivery step already showed survives a cold same-ID continuation (map seam 2) ------------
+
+def _floor_review(tmp_path, monkeypatch, enforcement="advisory", answers=None):
+    """The Required root of the tests above over the golden seats: ``(ctx, sends, trace, shown)``."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
+    _produced_answer_protocol(monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, answers))
+    return ctx, sends, {"tool_calls": []}, []
+
+
+@pytest.mark.parametrize("writer", ["working", "owner_wait"])
+def test_findings_shown_before_a_cold_continuation_are_not_shown_again(tmp_path, monkeypatch, writer):
+    """Advisory: findings shown, the process ends; the same task continued from either saved source delivers on
+    the mind's decision instead of holding for the same findings again."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, answers={"t1": CRITICAL})
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True, "findings first"
+    before = ctx._result_review_shown = [f"review:{'0' * 32}#FAIL", *ctx._result_review_shown]  # #2339's token form
+    ctx, trace = cold_continuation(ctx, trace, monkeypatch, writer=writer)
+    assert ctx._result_review_shown == before, "a token beside a record id, value for value and in order"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, "the mind decided"
+    [run] = [run for run in trace["review_runs"] if not run.get("superseded_by_revision")]
+    assert run["informed_finish"] is True and len(shown) == 1 and len(sends) == 3, "shown once, reviewed once"
+
+
+def test_a_changed_request_is_asked_about_once_per_subject_across_a_cold_continuation(tmp_path, monkeypatch):
+    """The ask binds (review, subject): that pair is not asked again after the process ended, while newer owner
+    words over the SAME answer form a new subject that is asked about once more."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, enforcement="blocking")
+    answer = "FINAL ANSWER: 12 miles"
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, "unreceived PASS is shown"
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is False, "the mind decided"
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Also mention the route.", "msg_id": "m-2"}]
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, "asked once"
+    ctx, trace = cold_continuation(ctx, trace, monkeypatch, writer="owner_wait")
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is False, "the same pair is not asked again"
+    ctx._owner_directives.append({"source": "owner_mailbox", "content": "And name the start town.", "msg_id": "m-3"})
+    assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, "a new subject is asked about"
+    assert "And name the start town." in shown[-1] and len(shown) == 3 and len(sends) == 3
+
+
+@pytest.mark.parametrize("enforcement", ["blocking", "advisory"])
+def test_a_shown_refusal_stands_across_a_cold_continuation(tmp_path, monkeypatch, enforcement):
+    """A shown $0 refusal outlives the process: Blocking holds on it (writing no new one) until a raised ceiling
+    lets the owed review run; Advisory delivers on the mind's informed decision."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, enforcement, answers={"t1": CRITICAL})
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True  # FAIL shown
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True  # refused, shown
+
+    root, task_id = review_ledger.ledger_root(ctx), ctx.task_id
+    written = len(review_ledger.recent_records(root, task_id, limit=50, surface="result"))
+    ctx, trace = cold_continuation(ctx, trace, monkeypatch)
+    delivered = rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append)
+    assert len(review_ledger.recent_records(root, task_id, limit=50, surface="result")) == written, "no new refusal"
+    if enforcement == "advisory":
+        assert delivered is False and len(shown) == 2, "the mind decided"
+        return
+    assert delivered is True and "raises the review ceiling" in shown[-1], "still refused: held"
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "2")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is True, "the owed PASS is shown"
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 3", trace, shown.append) is False, "the mind decided"
+    assert len(sends) == 6
+
+
+@pytest.mark.parametrize("new_id, legacy", [(True, False), (False, True)])
+def test_no_presentation_is_invented_for_a_new_execution_or_a_legacy_source(tmp_path, monkeypatch, new_id, legacy):
+    """A new execution id borrows no review state and an older source cannot say what was shown: both start with
+    nothing shown (nor a running review), so a legacy source's findings show once more, never reviewed again."""
+    from ouroboros.tools import review_result as rr
+    from tests.test_working_checkpoint import cold_continuation
+
+    ctx, sends, trace, shown = _floor_review(tmp_path, monkeypatch, answers={"t1": CRITICAL})
+    assert rr.result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is True
+    fresh, restored = cold_continuation(ctx, trace, monkeypatch, new_id=new_id, legacy=legacy)
+    assert ctx._result_review_shown and fresh._result_review_pending == ""
+    assert not (fresh._result_review_shown or fresh._result_review_request_asked or fresh._result_review_refused)
+    if legacy:
+        assert rr.result_review_at_delivery(fresh, "FINAL ANSWER: 2", restored, shown.append) is True
+        assert len(shown) == 2 and len(sends) == 3
+
+
 def test_the_host_floor_seats_the_whole_pool_and_records_that_the_host_chose(tmp_path, monkeypatch):
     from ouroboros.review_projection import ledger_record_panel
     from ouroboros.tools.review_result import result_review_at_delivery

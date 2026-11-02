@@ -116,11 +116,14 @@ class ContextFitPlan:
                             tool_schemas: Optional[List[Dict[str, Any]]], start_mode: Optional[str] = None,
                             current_messages: Optional[List[Dict[str, Any]]] = None,
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
-                            measured_input_tokens: Optional[int] = None, start_work: bool = False) -> "ContextFitPlan":
+                            measured_input_tokens: Optional[int] = None, start_work: bool = False,
+                            slack_tokens: int = 0) -> "ContextFitPlan":
         """Fit shown bytes; an actual envelope's raw estimate also prices its extra framing.
 
         The measurement belongs to this candidate, includes tools and excludes the reply.
         A requested saving alone does not establish pressure on held owner words or notes.
+        ``slack_tokens`` asks room beyond the measured or refused excess: memory and ordinary host forms may pay it,
+        a whole-or-outline section never (``memory_floor._host_steps``).
         """
         from dataclasses import replace
 
@@ -160,7 +163,8 @@ class ContextFitPlan:
             if start_work and known_window:
                 request += math.ceil((record.boundary if record else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR)
             request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
-            deficit = max(request - window_tokens if known_window and window_tokens else 0, int(refused_tokens or 0))
+            measured, units = (request - window_tokens if known_window and window_tokens else 0), max(ratio, 0.01)
+            excess, deficit = max(measured, int(refused_tokens or 0)), max(measured, int(refused_tokens or 0) + slack_tokens)
             if deficit > 0 or select_mode:
                 snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json else None
                 contents, start = _view_projections(
@@ -176,7 +180,7 @@ class ContextFitPlan:
                           for mode in memory_floor.MODES},
                     kept_sections={mode: self.projection(mode).memory_facts.get("host_sections_addressed", ())
                                    for mode in memory_floor.MODES},
-                    saving={start: math.ceil(deficit / max(ratio, 0.01))})
+                    saving={start: math.ceil(deficit / units)}, slack=math.ceil(deficit / units) - math.ceil(excess / units))
 
         def narrowed(projection: ContextFitProjection) -> bool:
             # A view whose level, budget and mode line did not move keeps its bytes (its floor note names its
@@ -669,9 +673,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       kept: Optional[Mapping[str, Any]] = None, saving: Optional[Mapping[str, int]] = None,
                       select: Optional[str] = None, kept_sections: Optional[Mapping[str, Iterable[Mapping]]] = None,
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
-                      envelope_overhead_tokens: int = 0, start_work: bool = False,
+                      envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0,
                       ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
-    """Select books once, walk memory once. Unsent book forms share the selected memory, not another budget.
+    """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
     Every automatic choice reads the ordinary view of this capture; a directly required handbook joins it last with
     its own note, so neither costs a form, mode or schema (owner 1.11.2026). At a fresh start on a known window the
@@ -696,18 +700,32 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                     *(governance[form[m]][0] if not isinstance(governance[form[m]][0], str) else ()))
                 for m in form}
     previous = tuple((kept_sections or {}).get(start or preferred, ()))
-    receipts = list(previous)
+    receipts, room_fact = list(previous), None  # room_fact: the start's Max room, named by a view lowered from Max
     held = (kept or {}).get(start or preferred) or FULL_VIEW
     story_before, room_before = (render_story(snapshot, held), render_room(snapshot, held)) if snapshot else ("", "")
+
+    def measure(selected, sent, addressed, story="", room=""):
+        return _request_tokens(_system_blocks(core, governance[form[selected]], story, room,
+            mode=selected, addressed=addressed), user_content_json,
+            supplementary_messages_json=core.supplementary_messages_json,
+            current_messages=current_messages) + tool_schema_tokens(list(sent.schemas)) + envelope_overhead_tokens
+    asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
+    original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
+        schema_names=names), section_views(sections[start or preferred], previous))
+    original_reserve = context_budget.context_mode_limits(mode, preferred, output_reserve, working_reserve_tokens=working_reserve_tokens)[1]
+    def owed(fixed, reserve):  # what a frame still owes of it once its books, host forms and reserve paid their part
+        return max(0, asked - (original_fixed - fixed) - math.floor((original_reserve - reserve) / max(ratio, 0.01)))
+    def view(selected, sent, addressed, window, boundary, **walk):  # one frame's memory beside these host forms
+        fixed = measure(selected, sent, addressed)
+        return floor.render_view_for_mode(snapshot, mode=selected, owner_mode=preferred, window_tokens=window, **walk,
+            known_window=known_window, output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed,
+            lowered_from=preferred if selected != preferred else None, max_room=room_fact, start_work=start_work,
+            tool_names=None if tool_schemas is None else sent.chosen, working_reserve_tokens=working_reserve_tokens,
+            boundary_tokens=boundary, measure_text=lambda *memory: measure(selected, sent, addressed, *memory) - fixed)
 
     def frame(selected):
         nonlocal receipts
         sent = select_tool_schemas(tool_schemas or [], context_mode=selected, schema_names=names)
-        def measure(addressed, story="", room=""):
-            return _request_tokens(_system_blocks(core, governance[form[selected]], story, room,
-                mode=selected, addressed=addressed), user_content_json,
-                supplementary_messages_json=core.supplementary_messages_json,
-                current_messages=current_messages) + tool_schema_tokens(list(sent.schemas)) + envelope_overhead_tokens
         target, reserve = context_budget.context_mode_limits(selected, preferred, output_reserve,
                                                             working_reserve_tokens=working_reserve_tokens)
         record = replace(window_record, reserve=reserve) if window_record else None
@@ -717,28 +735,23 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         host_allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=0, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
-        receipts, _ = floor._host_steps(sections[selected], receipts,
-            measure=lambda addressed: measure(addressed, story_before, room_before),
-            window=window if known_window else None, reserve=reserve, ratio=ratio,
-            saving=(saving or {}).get(start or preferred, 0), root=core.section_root, task_id=core.section_task_id,
-            allowance=host_allowances["margin" if kept is None or start_work else "physical"])
-        fixed = measure(section_views(sections[selected], receipts))
+        def shortest(forms):  # what a start sends once its own walk took each form before uncovered owner rows
+            return measure(selected, sent, forms, *view(selected, sent, forms, window, boundary, shortest=True)[:2])
+        receipts, _ = floor._host_steps(sections[selected], previous,  # every frame starts from what was shown
+            measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
+            shortest=shortest if snapshot and kept is None else None,  # a held view was sent: it keeps its steps
+            window=window if known_window else None, reserve=reserve, ratio=ratio, slack=slack,
+            saving=owed(measure(selected, sent, section_views(sections[selected], previous)), reserve) if asked else 0,
+            root=core.section_root, task_id=core.section_task_id,
+            allowance=host_allowances["margin" if kept is None or start_work else "physical"],
+            budget_mode=selected if kept is None and target and target < window else None)
+        fixed = measure(selected, sent, section_views(sections[selected], receipts))
         allowances = floor.floor_allowances(window_tokens=window if known_window else None,
             output_reserve_tokens=reserve, non_memory_tokens=fixed, target_tokens=target if kept is None else None,
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
         return sent, fixed, reserve, window, boundary, allowances
 
     sent, fixed, reserve, window, boundary, allowances = frame(mode)
-    original_fixed = (_request_tokens(_system_blocks(core, governance[form[start or preferred]],
-        mode=start or preferred, addressed=section_views(sections[start or preferred], previous)), user_content_json,
-        supplementary_messages_json=core.supplementary_messages_json, current_messages=current_messages)
-        + tool_schema_tokens(list(sent.schemas)) + envelope_overhead_tokens)
-    original_reserve = reserve
-    if kept is not None and known_window:
-        minimum = floor.minimal_view_tokens(snapshot, window_tokens=window) if snapshot else 0
-        while mode != "nano" and math.ceil((fixed + minimum) * ratio) + reserve > window:
-            mode = "low" if mode == "max" else "nano"
-            sent, fixed, reserve, window, boundary, allowances = frame(mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
@@ -753,47 +766,33 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     if room_fact and floor.max_room_lost(room_fact):
         mode = "low"
         sent, fixed, reserve, window, boundary, allowances = frame(mode)
-    # The same ordinary Nano is the last physical rescue for every Main route.
-    if (kept is None and known_window and mode == "low"
-            and math.ceil((fixed + (floor.minimal_view_tokens(snapshot, window_tokens=window) if snapshot else 0)) * ratio) + reserve > window):
-        mode = "nano"
-        sent, fixed, reserve, window, boundary, allowances = frame(mode)
-    if kept is None and known_window and math.ceil(fixed * ratio) + reserve > window:
-        minimum = floor.minimal_view_tokens(snapshot, window_tokens=window) if snapshot else 0
-        unfit = MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit",
-                                 fixed_tokens=fixed, memory_tokens=minimum, reserve_tokens=reserve,
-                                 window_tokens=window, ratio=ratio, work_room_tokens=work())
-        unfit.physical = math.ceil((fixed + minimum) * ratio) + reserve > window  # with my shortest memory view
-        raise unfit
 
-    def render():
-        saved = max(0, (saving or {}).get(start or preferred, 0) - (original_fixed - fixed)
-                    - math.floor((original_reserve - reserve) / max(ratio, 0.01)))
-        return floor.render_view_for_mode(snapshot, mode=mode, owner_mode=preferred,
-            window_tokens=window, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
-            non_memory_tokens=fixed, lowered_from=preferred if mode != preferred else None,
-            tool_names=None if tool_schemas is None else sent.chosen, max_room=room_fact,
-            kept=None if kept is None else kept.get(start or preferred), saving=saved, boundary_tokens=boundary,
-            start_work=start_work,
-            working_reserve_tokens=working_reserve_tokens,
-            measure_text=lambda story, room: _request_tokens(_system_blocks(core, governance[form[mode]], story, room,
-                mode=mode, addressed=section_views(sections[mode], receipts)), user_content_json,
-                supplementary_messages_json=core.supplementary_messages_json,
-                current_messages=current_messages) + tool_schema_tokens(list(sent.schemas)) + envelope_overhead_tokens - fixed)
-    if snapshot:
-        story, room, facts = render()
-        # Judged on the completed start view: Max keeps whole books only beside the whole story and the work room.
-        if (kept is None or start_work) and mode == "max" and allowances["margin"] is not None and (
-                story != whole_story or floor.view_tokens(story) + floor.view_tokens(room) > allowances["margin"]):
-            mode = "low"
-            sent, fixed, reserve, window, boundary, allowances = frame(mode)
-            story, room, facts = render()
-        if kept is None and known_window and math.ceil((fixed + floor.view_tokens(story) + floor.view_tokens(room)) * ratio) + reserve > window:
-            raise MinimumViewUnfit("Protected owner words and the minimum view cannot fit the usable input",
-                                   fixed_tokens=fixed, memory_tokens=floor.view_tokens(story) + floor.view_tokens(room),
-                                   reserve_tokens=reserve, window_tokens=window, ratio=ratio)
-    else:
-        story, room, facts = "", "", {}
+    def render():  # this frame's own completed memory view, its floor receipt included
+        return view(mode, sent, section_views(sections[mode], receipts), window, boundary, saving=owed(fixed, reserve),
+                    kept=None if kept is None else kept.get(start or preferred)) if snapshot else ("", "", {})
+
+    def overflows(story="", room=""):  # the known window cannot hold this frame's request beside this memory view
+        memory = floor.view_tokens(story) + floor.view_tokens(room)
+        return known_window and math.ceil((fixed + memory) * ratio) + reserve > window
+
+    # Books step down on the frame's own completed view, never on a price of one. Max keeps whole books only beside
+    # the whole story and the work room (a start's rule); the same ordinary Nano is the last physical rescue for every
+    # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered.
+    while True:
+        story, room, facts = ("", "", {}) if mode != "nano" and overflows() else render()
+        books_lost = (kept is None or start_work) and mode == "max" and allowances["margin"] is not None and (
+            story != whole_story or floor.view_tokens(story) + floor.view_tokens(room) > allowances["margin"])
+        if mode == "nano" or not (books_lost or overflows(story, room)):
+            break
+        mode = "low" if mode == "max" else "nano"
+        sent, fixed, reserve, window, boundary, allowances = frame(mode)
+    if kept is None and overflows(story, room):  # a start's refusal names its last view, never a work room's shortfall
+        core_alone = overflows()
+        raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
+                               else "Protected owner words and the minimum view cannot fit the usable input",
+                               fixed_tokens=fixed, memory_tokens=floor.view_tokens(story) + floor.view_tokens(room),
+                               reserve_tokens=reserve, window_tokens=window, ratio=ratio,
+                               work_room_tokens=work() if core_alone else 0)
     book = whole_core.required_book_tokens(mode)
     ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
     note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),

@@ -11,6 +11,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.outcomes import normalize_outcome_axes, verification_ledger_view
 from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.task_carrier import execution_kind
 from ouroboros.task_status import effective_task_result
 from ouroboros.dialogue_provenance import (
     PRESENCE_OWN_WORK_SCOPE,
@@ -221,6 +222,8 @@ def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List
         task_id = str(item.get("id") or item.get("task_id") or "")
         if binding is not None and not presence_related_work(binding, _owner_record(facts.get(task_id), task)):
             continue  # a scoped page lists no foreign running work, whatever a stale queue row claims
+        if binding is None and execution_kind(task) == "presence":
+            continue  # a correspondent's turn is its place's (live works says so), never the owner's running task
         rows.append({
             "task_id": task_id,
             "status": "running",

@@ -21,7 +21,7 @@ RESERVE = 8_192
 def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_core():
     from ouroboros.context_layout import TIER0_ALWAYS_FULL
 
-    assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "registry", "installed_skills", "drive_state",
+    assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
         "world", "subagents",
         "architecture_map", "development_map")
     assert section_floor.PROTECTED == TIER0_ALWAYS_FULL
@@ -48,8 +48,8 @@ def test_host_steps_do_not_measure_when_no_section_can_step(missing):
 @pytest.mark.parametrize("window,saving,steps", [(20_000, 0, 0), (18_000, 0, 1), (20_000, 3000, 2)])
 def test_host_steps_measure_once_then_only_after_each_new_address(monkeypatch, window, saving, steps):
     calls = []
-    sections = [HostSection(name, "whole " * 1000, "operative")
-                for name in ("runtime", "registry", "installed_skills")]
+    sections = [HostSection(name, "whole " * 1000, "operative")  # walk order: the registry outline is last
+                for name in ("runtime", "installed_skills", "registry")]
     monkeypatch.setattr(memory_floor, "retain_section",
                         lambda part, **_kw: {"section_id": part.section_id, "reader": "test-reader"})
 
@@ -215,6 +215,22 @@ def test_physical_mode_lowering_carries_host_addresses_from_the_shown_view(tmp_p
     assert core.dynamic_text not in _text(lowered, "nano")
 
 
+def test_a_shown_view_keeps_its_books_while_its_own_completed_view_fits(tmp_path):
+    """A Max view already shown, on a smaller known window (no tools): its own folded view, receipt included, needs
+    8,719 tokens with the reply reserve. Before, a generic Nano-note price of its shortest view (465 vs its real 360
+    tokens) lowered it from 8,724 to 8,814 tokens, to a Nano view that itself needed 8,960."""
+    snapshot = syn.snapshot(story=syn.pages(4, 8_000), room_facts=syn.room("1", lane1=[
+        syn.spoken(1, "human", 2_000), syn.spoken(2, "ouroboros", 2_000)]))
+    roomy = _plan(_core(tmp_path, snapshot=snapshot), 2_000_000)
+    held = {window: roomy.reproject_for_route(window_tokens=window, known_window=True, ratio=1.0,
+                                              output_reserve=RESERVE, tool_schemas=[], start_mode="max")
+            for window in (8_764, 8_700)}
+    kept = held[8_764].projection(held[8_764].initial_mode)
+    assert held[8_764].initial_mode == "max" and kept.estimated_tokens + RESERVE <= 8_764
+    assert "F5" in kept.memory_facts["floor"]["steps"]  # memory folded; the books stayed
+    assert held[8_700].initial_mode != "max"  # below its own completed view, the books step down
+
+
 def test_tool_schema_cost_and_route_density_both_count_toward_physical_pressure(tmp_path, monkeypatch):
     core = _core(tmp_path, [_service(size=3_000)])
     tokens = _plan(core, 0).max_projection.estimated_tokens
@@ -271,7 +287,7 @@ def test_host_sections_stay_whole_for_an_actor_that_could_not_read_a_pointer_bac
 
 
 
-def test_host_sections_then_index_precede_memory_and_people_step_last(tmp_path):
+def test_host_sections_then_memory_forms_then_a_physical_index_outline_and_people_last(tmp_path):
     snapshot = syn.snapshot(story=syn.pages(3, 20_000), room_facts=syn.room("1", lane1=[
         syn.spoken(1, "ouroboros", 15_000), syn.spoken(2, "human", 15_000)]))
     host = _service(size=35_000)
@@ -282,12 +298,15 @@ def test_host_sections_then_index_precede_memory_and_people_step_last(tmp_path):
     assert [r["section_id"] for r in _host_facts(plan)] == ["runtime"]
     assert plan.max_projection.memory_facts["floor"]["steps"] == {}
     assert memory_view.render_story(snapshot) in _text(plan)
-    # The index then gives way before any memory step.
+    # Memory's own shorter forms make the room first: the window holds the whole index (P1, owner 2.11.2026).
     smaller = _plan(core, 50_000)
-    assert [r["section_id"] for r in _host_facts(smaller)] == ["runtime", "knowledge_index"]
-    assert smaller.max_projection.memory_facts["floor"]["steps"] == {}
-    # At increasing physical pressure retold pages/replies go before human words.
+    assert [r["section_id"] for r in _host_facts(smaller)] == ["runtime"] and index in _text(smaller)
+    steps = smaller.max_projection.memory_facts["floor"]["steps"]
+    assert steps and "F7" not in steps
+    # Only where those forms cannot make room does the window outline the index, still before human words.
     middle = _plan(core, 20_000)
+    assert [(r["section_id"], "start_room" in r) for r in _host_facts(middle)] == [
+        ("runtime", False), ("knowledge_index", False)]
     assert "F5l" in middle.max_projection.memory_facts["floor"]["steps"]
     assert "F7" not in middle.max_projection.memory_facts["floor"]["steps"]
     smallest = middle.reproject_for_route(window_tokens=RESERVE + 1, known_window=True, ratio=1,
