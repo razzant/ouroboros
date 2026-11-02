@@ -176,13 +176,25 @@ def staged_output_address(drive_root: Any, entry: _RunCustody) -> Dict[str, str]
         return {}
 
 
+def _rootless_read(direct: Dict[str, Any]) -> Dict[str, Any]:
+    """A named ``artifact_store`` is the READER's own, which refuses an absolute address outside
+    its lineage. Rootless, dispatch selects whichever root this reader may use that physically
+    holds the same file (``tool_resolution._root_containing_absolute_path``): no new authority."""
+    args = direct.get("arguments")
+    if not (isinstance(args, dict) and args.get("root") == _STAGED_SOURCE_ROOT
+            and pathlib.Path(str(args.get("path") or "")).is_absolute()):
+        return direct
+    return {**direct, "arguments": {key: value for key, value in args.items() if key != "root"}}
+
+
 def project_output_readers(row: Dict[str, Any], publisher_task_id: str = "") -> Dict[str, Any]:
     """Prefer the receipt-bound reader, without changing retained receipt bytes.
 
     ``task_id`` on a source is its staging store, NOT its physical publisher.
     The enclosing task/hop supplies the publisher; Wrap up rows also record it
     as ``owner_task_id``. A legacy source_read is usable when neither is known.
-    Direct staging reads remain available to the owner for D7 acknowledgement.
+    Direct staging reads remain available to the owner for D7 acknowledgement
+    and open for any other actor whose read roots hold the file (``_rootless_read``).
     No source is opened and no read grant or consumption receipt is created.
     """
     projected = dict(row)
@@ -203,7 +215,7 @@ def project_output_readers(row: Dict[str, Any], publisher_task_id: str = "") -> 
             "task_id": publisher, "delegated_output_sha256": digest}}
         direct = ref.get("direct_read") or ref.get("read")
         return {**ref, "read": reader, "source_read": reader,
-                **({"direct_read": direct} if isinstance(direct, dict)
+                **({"direct_read": _rootless_read(direct)} if isinstance(direct, dict)
                    and direct.get("tool") == "read_file" else {})}
 
     for key in ("staged_output", "terminal_observation"):

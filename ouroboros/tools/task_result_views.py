@@ -312,6 +312,7 @@ def render_result_view(
     if capability_delta:
         payload["capability_delta"] = dict(capability_delta)
 
+    from ouroboros.history_retention import raw_evidence_notice
     from ouroboros.task_custody import unread_mail_notice
 
     if isinstance(data.get("cancel_origin"), dict):
@@ -323,6 +324,8 @@ def render_result_view(
         }
     if unread := unread_mail_notice(data.get("unread_mailbox")):
         payload["unread_mail_notice"] = unread
+    if gap := raw_evidence_notice(data):
+        payload["test_evidence_gap"] = gap
     if effort:
         payload["effort"] = dict(effort)
 

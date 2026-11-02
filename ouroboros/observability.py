@@ -843,6 +843,8 @@ def promote_child_task_refs(
                                  (child_result.get("child_ref_promotion") or {}).get("pending_refs", []) if isinstance(row, dict))
         if not retry_only or pending_inputs or initially_deferred:
             promote_task_attachment_refs(parent_root, child_root, task_id, rewritten, state)
+        from ouroboros.history_retention import carry_raw_evidence
+        carry_raw_evidence(parent_root, child_root, task_id, state)
         for key in _PUBLISHED_CHILD_REF_FIELDS:
             if key in {"task_contract", "attachment_manifest", "attachment_manifest_ref"}:
                 continue  # Input JSON and its file closure have one attachment-aware owner.
