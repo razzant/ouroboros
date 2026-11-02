@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.model_sleep import HOLD_NOTE, IN_SLOT_HOLD_NOTE, hold_notice, in_slot_wait, unshown_holds
-from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.outcomes import normalize_outcome_axes, verification_ledger_view
 from ouroboros.runtime_limits import IDLE_LEASE_MAX_SEC, NESTED_SETTLEMENT_MARGIN_SEC
 from ouroboros.task_results import (
     STATUS_CANCELLED,
@@ -72,7 +72,6 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
     from ouroboros.delegate_output import project_task_output_readers
 
     data = project_task_output_readers(data)
-    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
     summary: Dict[str, Any] = {
         "outcome_axes": normalize_outcome_axes(data),
     }
@@ -152,15 +151,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary["effort"] = _effort
     if isinstance(data.get("artifact_bundle"), dict):
         summary["artifact_bundle"] = data.get("artifact_bundle")
-    if ledger:
-        # An omitted-to-artifact stub carries no entries; its summary is the
-        # count authority, and for a full ledger the two always agree.
-        ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
-        summary["verification_ledger"] = {
-            "schema_version": ledger.get("schema_version"),
-            "summary": ledger_summary,
-            "entry_count": ledger_summary.get("entry_count", len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0),
-        }
+    if ledger := verification_ledger_view(data.get("verification_ledger")):
+        summary["verification_ledger"] = ledger  # dated beside the current artifact_bundle
     if receipts:
         # W2: bounded per-receipt rows for the FULL single-child handoff ONLY
         # (get_task_result/wait_task — already uncapped surfaces): which checks
