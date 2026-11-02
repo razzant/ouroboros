@@ -675,11 +675,12 @@ class EvolutionStateSnapshot(TypedDict):
 
 
 class ActiveDirectTurn(TypedDict):
-    """An active in-process direct chat or ephemeral decision turn.
+    """An active owner turn: a conversation-lane row or an inline executor's actor.
 
-    Rows of ``StateResponse.active_direct_turns``: ``DirectActivityRegistry.snapshot()``
-    always emits the seven identity/activity fields (empty string for absent values),
-    so the mirror marks them required; ``model_waits`` comes only from its live owner.
+    Rows of ``StateResponse.active_direct_turns`` (``conversation_lane.lane_turn_rows`` and
+    ``DirectActivityRegistry.snapshot()``) always emit the seven identity/activity fields
+    (empty string for absent values), so the mirror marks them required; ``model_waits``
+    comes only from its live owner.
     """
 
     activity_id: str
@@ -693,6 +694,8 @@ class ActiveDirectTurn(TypedDict):
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
+    executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker
 
 
 class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and control facts keep their own authority

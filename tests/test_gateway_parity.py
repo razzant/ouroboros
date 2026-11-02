@@ -451,11 +451,12 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     # stamp the typed fields only for registry-tracked turns (optional).
     # (__required_keys__ ignores NotRequired on some 3.10 setups, so inspect
     # the declared annotations instead.)
-    assert _notrequired_fields(ActiveDirectTurn) == {"model_waits", "task_attempt", "model_activity", "turn_phase"}, (
-        "ActiveDirectTurn keeps its required base; waits, attempt and start phase are optional live-owner facts"
+    assert _notrequired_fields(ActiveDirectTurn) == {"model_waits", "task_attempt", "model_activity", "turn_phase",
+                                                   "executor", "carrier"}, (
+        "ActiveDirectTurn keeps its required base; waits, attempt, start phase and the lane's carrier facts are optional"
     )
     assert _notrequired_fields(ActiveChatActivity) == {
-        "model_waits", "model_activity", "task_attempt", "turn_phase", "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
+        "model_waits", "model_activity", "task_attempt", "turn_phase", "executor", "carrier", "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
         "status", "outcome_axes", "reason_code", "cancel_origin", "delegated_runs_unreconciled", "root_phase_checkpoint",
         "timeout_retry_from", "original_task_id",
         "finishing_reviews", "late_work", "can_resume", "cancelable",
@@ -500,8 +501,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     turn_decl = re.search(r"@typedef \{Object\} ActiveDirectTurn\b([\s\S]*?)\*/", text)
     assert turn_decl and set(re.findall(
         r"@property \{[^}]*=\} (\w+)", turn_decl.group(1)
-    )) == {"model_waits", "task_attempt", "model_activity", "turn_phase"}, (
-        "ActiveDirectTurn browser mirror keeps wait/attempt/start-phase facts optional"
+    )) == {"model_waits", "task_attempt", "model_activity", "turn_phase", "executor", "carrier"}, (
+        "ActiveDirectTurn browser mirror keeps wait/attempt/start-phase and carrier facts optional"
     )
     typing_decl = re.search(r"@typedef \{Object\} TypingOutbound\b([\s\S]*?)\*/", text)
     assert typing_decl
