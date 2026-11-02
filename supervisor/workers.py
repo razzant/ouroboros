@@ -1233,6 +1233,64 @@ def spawn_workers(n: int = 0) -> None:
 
 
 @_serialized_worker_lifecycle
+def _partition_slots_for_stop(lanes: Optional[frozenset]) -> tuple:
+    """Under Q: the slots a stop owns (marked ``reaping``) and the RUNNING rows it spares.
+
+    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the
+    stop). A project fence spares the conversation carriers' rows and the conversation
+    rows still awaiting a carrier: popped here, restored by ``kill_workers`` at its end.
+    """
+    doomed = [w for w in WORKERS.values() if lanes is None or w.lane in lanes]
+    if lanes is None:
+        from supervisor import conversation_lane
+
+        conversation_lane.arm(None)
+    spared_ids = {w.busy_task_id for w in WORKERS.values() if w not in doomed and w.busy_task_id}
+    spared_rows = {tid: meta for tid, meta in RUNNING.items()
+                   if tid in spared_ids or (lanes is not None and LANE_CONVERSATION not in lanes
+                                            and isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION)}
+    for tid in spared_rows:
+        RUNNING.pop(tid, None)
+    for w in doomed:
+        # The timeout reaper's ownership mark: assignment, the health check
+        # and the crash detector skip the slot while it is torn down.
+        w.reaping = True
+    return doomed, spared_rows
+
+
+def _tear_down_slots(doomed: List[Worker]) -> None:
+    """Kill, join and close the doomed slots' processes (an inline executor's pseudo-slot: a cooperative stop)."""
+    for w in doomed:
+        if w.proc.pid:
+            kill_worker_tree(w.proc.pid)
+        elif w.proc.is_alive():
+            w.proc.terminate()
+    for w in doomed:
+        w.proc.join(timeout=3)
+    _kill_survivors(doomed)
+    from supervisor.worker_process import close_worker_stop_channel
+    for w in doomed:
+        close_worker_stop_channel(w.proc)
+
+
+def _confirm_dead_slots(doomed: List[Worker]) -> tuple:
+    """Under Q: the pids confirmed dead (their consumers retired) and those whose death is unconfirmed."""
+    dead_pids: set[int] = set()
+    unconfirmed_pids: list[int] = []
+    for w in doomed:
+        try:
+            if w.proc.pid and not w.proc.is_alive():
+                dead_pids.add(int(w.proc.pid))
+                from supervisor.worker_health import retire_confirmed_worker_consumers
+                retire_confirmed_worker_consumers(w, RUNNING.get(w.busy_task_id))
+            else:
+                unconfirmed_pids.append(int(w.proc.pid or 0))
+        except Exception:
+            unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
+            log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
+    return dead_pids, unconfirmed_pids
+
+
 def kill_workers(
     force: bool = True,
     *,
@@ -1276,52 +1334,13 @@ def kill_workers(
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
-        doomed = [w for w in WORKERS.values() if lanes is None or w.lane in lanes]
-        if lanes is None:
-            from supervisor import conversation_lane
-
-            conversation_lane.arm(None)  # the generation ends: no carrier grows behind its stop
-        spared_slots = [w for w in WORKERS.values() if w not in doomed]
-        spared_ids = {w.busy_task_id for w in spared_slots if w.busy_task_id}
-        # Rows the spared slots own, and conversation rows still awaiting their carrier
-        # (``worker_id`` None): out of the sweep, back in place before the lock is released.
-        spared_rows = {tid: meta for tid, meta in RUNNING.items()
-                       if tid in spared_ids or (lanes is not None and LANE_CONVERSATION not in lanes
-                                                and isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION)}
-        for tid in spared_rows:
-            RUNNING.pop(tid, None)
+        doomed, spared_rows = _partition_slots_for_stop(lanes)
         cleared_running = len(RUNNING)
-        for w in doomed:
-            # The timeout reaper's ownership mark: assignment, the health check
-            # and the crash detector skip the slot while it is torn down below.
-            w.reaping = True
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
-    for w in doomed:
-        if w.proc.pid:
-            kill_worker_tree(w.proc.pid)
-        elif w.proc.is_alive():
-            w.proc.terminate()  # an inline executor's pseudo-slot: a cooperative stop request
-    for w in doomed:
-        w.proc.join(timeout=3)
-    _kill_survivors(doomed)
-    from supervisor.worker_process import close_worker_stop_channel
-    for w in doomed:
-        close_worker_stop_channel(w.proc)
+    _tear_down_slots(doomed)
     with _queue_lock:
-        dead_pids: set[int] = set()
-        unconfirmed_pids: list[int] = []
-        for w in doomed:
-            try:
-                if w.proc.pid and not w.proc.is_alive():
-                    dead_pids.add(int(w.proc.pid))
-                    from supervisor.worker_health import retire_confirmed_worker_consumers
-                    retire_confirmed_worker_consumers(w, RUNNING.get(w.busy_task_id))
-                else:
-                    unconfirmed_pids.append(int(w.proc.pid or 0))
-            except Exception:
-                unconfirmed_pids.append(int(getattr(w.proc, "pid", 0) or 0))
-                log.debug("Cannot confirm worker %s dead", w.wid, exc_info=True)
+        dead_pids, unconfirmed_pids = _confirm_dead_slots(doomed)
         for w in doomed:
             if WORKERS.get(w.wid) is w:
                 WORKERS.pop(w.wid)

@@ -1,0 +1,177 @@
+"""A Host-admitted Presence turn's body runs in a conversation-lane carrier (A7).
+
+The Host keeps authentication, capture, dedup and its reservation; ``dispatch_presence_turn``
+admits the body as a lane RUNNING row (origin ``presence``, carrier ``conversation``); the
+carrier re-admits from durable facts, takes the gate itself, runs ``run_presence_turn`` and
+reports its settlement as ONE frame the Host resolves its waiter from; errors travel by
+value. An arrival for a carried author is accepted through one transaction under the
+author's mailbox lock against its durable intake fact.
+"""
+
+import concurrent.futures
+import pathlib
+import queue as stdqueue
+from types import SimpleNamespace
+
+import pytest
+
+from ouroboros import presence_carrier, presence_runner
+from ouroboros.presence_carrier import (
+    PRESENCE_RUN_KEY, carry_presence_turn, dispatch_presence_turn, handle_presence_turn_settled, presence_seed_task,
+)
+from ouroboros.presence_events import PresenceTurnError
+from ouroboros.presence_runner import PresenceTurnEvent, PresenceTurnExecutions, PresenceTurnResult
+from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+from supervisor import conversation_lane, workers
+from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
+from tests.test_presence_runner import _admission, _event
+from tests.worker_pool_support import affirm_ready
+
+pytestmark = pytest.mark.serial
+
+_REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane
+
+
+def _payload(event: PresenceTurnEvent) -> dict:
+    return {"source_event_id": event.source_event_id, "provider": event.provider, "account_id": event.account_id,
+            "conversation_id": event.conversation_id, "thread_id": event.thread_id,
+            "conversation_key": event.conversation_key, "actor": dict(event.actor),
+            "conversation": dict(event.conversation), "message": dict(event.message), "text": event.text}
+
+
+@pytest.fixture
+def lane(pool, monkeypatch):
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", _REAL_LANE_RECONCILE)
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", id(workers.WORKERS))
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
+    spare = workers.Worker(5, Process(5005), InputQueue(), lane=LANE_CONVERSATION)
+    affirm_ready(spare)
+    workers.WORKERS[5] = spare
+    pool.spare = spare
+    return pool
+
+
+def test_the_host_dispatches_the_body_as_a_presence_lane_row(lane):
+    admission, event = _admission(), _event()
+    registry = PresenceTurnExecutions()
+    turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)  # the Host's id
+    execution, started = registry.start_or_dispatch(
+        turn_id, identity="id-1", reserve=lambda: True, release=lambda: None,
+        dispatch=lambda execution: dispatch_presence_turn(
+            execution, drive_root=lane.root, skill_name="telegram-bot", admission=admission, event=event,
+            event_payload=_payload(event), staged_files=[], gate_wait=True))
+    assert started and execution is registry.find(turn_id)
+    rows = {tid: meta for tid, meta in workers.RUNNING.items() if meta.get("lane") == LANE_CONVERSATION}
+    assert len(rows) == 1
+    tid, meta = next(iter(rows.items()))
+    task = meta["task"]
+    assert task["_presence_turn"] and task["_execution_owner"]["kind"] == "presence"
+    assert task["_execution_owner"]["lane"] == LANE_CONVERSATION and task["_execution_owner"]["executor"] == EXECUTOR_WORKER
+    assert task["metadata"]["presence_request_waits"] is True
+    dispatched = lane.spare.in_q.get_nowait()
+    assert dispatched["id"] == tid and dispatched[PRESENCE_RUN_KEY]["skill_name"] == "telegram-bot"
+    assert dispatched[PRESENCE_RUN_KEY]["event"]["source_event_id"] == event.source_event_id
+    assert not workers.PENDING
+    # The settlement frame resolves the waiter and releases the row and the slot.
+    handle_presence_turn_settled({"turn_id": tid, "physical_id": tid, "error": None,
+                                  "result": presence_carrier._result_payload(
+                                      PresenceTurnResult(outcome="message", text="Hi", task_id=tid))},
+                                 SimpleNamespace(RUNNING=workers.RUNNING, WORKERS=workers.WORKERS))
+    assert execution.result.result(timeout=1).text == "Hi"
+    assert tid not in workers.RUNNING and lane.spare.busy_task_id is None and registry.find(tid) is None
+
+
+def test_the_carrier_runs_the_turn_under_the_gate_and_settles_by_frame(tmp_path, monkeypatch):
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    admission, event = _admission(), _event()
+    from ouroboros import presence_admission
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **kw: admission)
+    seen = {}
+
+    class Agent:
+        def __init__(self, **kwargs):
+            self.owner_wait_callback = None
+
+        def handle_task(self, task):
+            seen.update(task)
+            from ouroboros.task_results import write_task_result
+            write_task_result(pathlib.Path(data), task["id"], "completed", metadata=task["metadata"], result="Hi")
+            return [{"type": "presence_result", "outcome": "message", "text": "Hi", "work_ref": ""}]
+
+    monkeypatch.setattr("ouroboros.agent.make_agent", lambda **kwargs: Agent(**kwargs))
+    task = presence_seed_task(admission=admission, event=event, skill_name="telegram-bot",
+                              event_payload=_payload(event), staged_files=[], gate_wait=True)
+    task["_execution_owner"] = {"kind": "presence", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
+    out_q = stdqueue.Queue()
+    carry_presence_turn(task, out_q, repo, data, owner_wait_callback="pooled-wait")
+    frames = []
+    while not out_q.empty():
+        frames.append(out_q.get_nowait())
+    settled = [f for f in frames if f["type"] == "presence_turn_settled"]
+    assert len(settled) == 1 and settled[0]["error"] is None and settled[0]["result"]["text"] == "Hi"
+    assert seen["_execution_owner"]["lane"] == LANE_CONVERSATION  # the carrier facts rode the presence record
+    assert seen["metadata"]["presence_request_waits"] is True  # the Host request waits: the post-task rule's fact
+    # The gate was taken and released by the carrier: a second turn in the conversation is admissible.
+    gate = presence_runner._configured_gate(data)
+    lease, busy = gate.try_admit(event.conversation_key)
+    assert lease is not None and busy == ""
+    lease.release()
+
+
+def test_a_refusal_travels_by_value_to_the_waiter(lane):
+    registry = PresenceTurnExecutions()
+    execution, _started = registry.start_or_dispatch("presence-2", identity="id-2", reserve=lambda: True,
+                                                      release=lambda: None, dispatch=lambda execution: None)
+    error = PresenceTurnError("presence_capacity_full", "conversation", disposition="retry")
+    error.retry_after = 1
+    handle_presence_turn_settled({"turn_id": "presence-2", "physical_id": "presence-2", "result": None,
+                                  "error": presence_carrier._error_payload(error)},
+                                 SimpleNamespace(RUNNING=workers.RUNNING, WORKERS=workers.WORKERS))
+    with pytest.raises(PresenceTurnError) as raised:
+        execution.result.result(timeout=1)
+    assert raised.value.code == "presence_capacity_full" and raised.value.retry_after == 1
+    assert registry.find("presence-2") is None
+
+
+def test_a_dispatch_that_raises_settles_the_waiter_and_reraises(lane):
+    registry = PresenceTurnExecutions()
+
+    def boom(execution):
+        raise RuntimeError("no lane")
+
+    with pytest.raises(RuntimeError):
+        registry.start_or_dispatch("presence-3", identity="", reserve=lambda: True, release=lambda: None, dispatch=boom)
+    assert registry.find("presence-3") is None
+
+
+def test_a_remote_author_accepts_mail_only_while_its_durable_intake_is_open(tmp_path):
+    from ouroboros.conversation_lease import (
+        accept_author_mail, author_intake_accepting, bind_author_intake, close_author_intake, open_author_intake,
+    )
+
+    root = tmp_path
+    (root / "memory" / "owner_mailbox").mkdir(parents=True)
+    appended = []
+
+    def append(admit=None):
+        if admit is not None and not admit():
+            return False
+        appended.append(1)
+        return True
+
+    assert accept_author_mail(root, "author-1", "key-1", append) is False  # no fact: nobody reads
+    open_author_intake(root, "author-1", "key-1")
+    assert author_intake_accepting(root, "author-1", "key-1") and not author_intake_accepting(root, "author-1", "other")
+    assert accept_author_mail(root, "author-1", "key-1", append) is True and appended == [1]
+    assert accept_author_mail(root, "author-1", "other-key", append) is False
+    close_author_intake(root, "author-1")
+    assert accept_author_mail(root, "author-1", "key-1", append) is False and appended == [1]
+    # The agent's end of the turn closes the fact.
+    released = []
+    agent = SimpleNamespace(_release_turn=lambda: released.append(True))
+    bind_author_intake(agent, root, "author-2", "key-2")
+    assert author_intake_accepting(root, "author-2", "key-2")
+    agent._release_turn()
+    assert released == [True] and not author_intake_accepting(root, "author-2", "key-2")

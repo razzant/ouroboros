@@ -771,6 +771,9 @@ def kill_workers_for_update(
             if worker.proc.is_alive() and worker.proc.pid:
                 kill_worker_tree(worker.proc.pid)
                 worker.proc.join(timeout=3)
+            elif worker.proc.is_alive():  # an inline executor's thread: cooperative, at its next control boundary
+                worker.proc.terminate()
+                worker.proc.join(timeout=3)
             if worker.proc.is_alive():
                 survivors.append(f"worker:{worker.proc.pid or worker.wid}")
             else:

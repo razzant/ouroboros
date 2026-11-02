@@ -143,13 +143,30 @@ def answer_source_context(block: dict) -> str:
             "No external reply or action has been sent by this delivery.")
 
 
-def flush_owner_events(root, events: list) -> None:
+def flush_owner_events(root, events: list, sink=None) -> None:
     """Return private deferred frames to the attached supervisor bus, in order.
 
     Never create a child-local bus or invoke handlers with invented queue state.
     On an uncertain enqueue the unchanged event retains its durable retry identity.
+    ``sink(rows)`` receives the frames instead when this process carries the turn for
+    another (a conversation-lane carrier has no server bus of its own).
     """
     from ouroboros.owner_quiz import quiz_states
+
+    if sink is not None:
+        picked = []
+        for event in list(events):
+            kind = event.get("type")
+            task_id = str(event.get("task_id") or "")
+            block = event.get("progress_meta") or {}
+            if kind in {"send_quiz", "send_quiz_state"}:
+                block = quiz_states(root, task_id).get(str(event.get("quiz_id") or "")) or {}
+            if kind in {"send_message", "send_quiz", "send_quiz_state"} and private_main_contact(block, task_id):
+                picked.append(dict(event))
+                events.remove(event)
+        if picked:
+            sink(picked)
+        return
     from supervisor.workers import get_event_q
 
     for event in list(events):

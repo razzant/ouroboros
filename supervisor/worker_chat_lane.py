@@ -564,6 +564,9 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
                 admission_basis=basis,
             )
             task["_project_admission"] = basis
+            if broadcast is not None:  # the row (snapshot, pooled park, restore) learns the basis by frame
+                broadcast({"type": "direct_turn_bound", "task_id": str(task["id"]), "task_attempt": int(task.get("_attempt") or 1),
+                           "facts": {"_project_admission": basis, "project_id": pid}})
         except Exception as exc:
             _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
     if not task.get("text"):
@@ -587,6 +590,69 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     return task
 
 
+def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseException, event_queue: Any,
+                                    pool_drive_root: Any, *, quiet: bool = False) -> None:
+    """A conversation turn's exception is that turn's own terminal, recorded in its carrier before the
+    exception unwinds (owner decision 1A): the stored result — typed for a before-start Stop or an
+    exhausted budget (the closed class's words, the control's reason), the exception terminal otherwise —
+    and the owner's keyed final as a ``send_message`` frame (``task_terminal_status``; a host operation's
+    ``origin_message_ref``), as the old lane's ``_report_direct_chat_error`` wrote them. A saved exact pause of this attempt owns
+    the id (``death_returns_to_pause``) and unreadable pause evidence is recovery's to judge: neither is
+    concluded over. ``quiet`` (a wake) records the terminal and sends no final. Never raises."""
+    from ouroboros.budget_pause import budget_pause_row, death_returns_to_pause
+
+    task_id = str(task.get("id") or "")
+    try:
+        pause = budget_pause_row(task.get("budget_drive_root") or pool_drive_root, task_id)
+        if death_returns_to_pause(pause, int(task.get("_attempt") or 1)):
+            return
+    except Exception:
+        log.warning("Pause evidence of turn %s is unreadable; recovery decides its exception", task_id, exc_info=True)
+        return
+    before_start = bool(getattr(exc, "before_task_start", False))
+    control = str(getattr(exc, "control_reason", "") or "")
+    stopped = before_start and control in {"cancelled", "finalize_requested"}
+    exhausted = before_start and control == "budget_exhausted"
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    correlation = _host_operation_failure(metadata).get("progress_meta", {})
+    origin = {"origin_message_ref": correlation["origin_message_ref"]} if "origin_message_ref" in correlation else {}
+    try:
+        if stopped or exhausted:
+            from ouroboros.outcomes import infra_failed_axes
+            from ouroboros.subagents import effort_result_fields
+            from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, _TRULY_TERMINAL_STATUSES, write_task_result
+
+            text = ("⏹ The owner stopped this chat turn before it started; no work was done." if stopped else
+                    "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
+            write_task_result(
+                agent.env.drive_root, task_id, STATUS_CANCELLED if stopped else STATUS_FAILED,
+                _field_projector=lambda current, incoming: (None if current.get("status") in _TRULY_TERMINAL_STATUSES
+                                                            else incoming),
+                _terminal_observed=True, result=text, reason_code=control,
+                outcome_axes=infra_failed_axes(control, lifecycle="cancelled" if stopped else "failed",
+                                               review_trigger="before_task_start"),
+                **origin, **effort_result_fields(task))
+        else:
+            from ouroboros.agent import _task_exception_terminal
+
+            text = f"⚠️ Error during processing: {type(exc).__name__}: {exc}"
+            _task_exception_terminal(agent.env, task, exc, agent.env.drive_path("logs"), keep_terminal=True)
+    except Exception:
+        log.warning("Terminal of turn %s was not recorded", task_id, exc_info=True)
+        return
+    if quiet:  # a wake's failure is the clock's and the supervisor's to report, never a chat final
+        return
+    progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed", **origin}
+    if metadata.get("initiator"):
+        progress_meta["initiator"] = str(metadata["initiator"])
+    try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
+        event_queue.put({"type": "send_message", "task_id": task_id, "chat_id": int(task.get("chat_id") or 0),
+                         "text": text, "progress_meta": progress_meta, "role": "system",
+                         "system_type": "task_not_started" if stopped or exhausted else "task_error"})
+    except Exception:
+        log.debug("keyed final of turn %s failed", task_id, exc_info=True)
+
+
 def refusal_terminal(agent: Any, task: Dict[str, Any], refusal: ConversationRefusal, event_queue: Any) -> list:
     """The carrier's refusal as the turn's own terminal: the owner's words as a host notice, no model work."""
     from ouroboros.agent_task_pipeline import emit_task_results
@@ -608,7 +674,7 @@ class CarrierTurn:
     thread's store meter."""
 
     def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any) -> None:
-        from supervisor.active_activity import TurnExecution
+        from supervisor.active_activity import TurnExecution, get_direct_activity_registry
         from supervisor.conversation_lane import PREPARE_KEY
 
         facts = task.get(PREPARE_KEY) if isinstance(task.get(PREPARE_KEY), dict) else {}
@@ -617,6 +683,9 @@ class CarrierTurn:
         self.attempt = int(task.get("_attempt") or 1)
         self.execution = TurnExecution(int(task.get("chat_id") or 0), str(facts.get("client_message_id") or ""),
                                        task_id=self.task_id, owner_turn=bool(facts.get("reply_expected")))
+        entry = get_direct_activity_registry().get(self.task_id)  # an inline executor: this process's own entry
+        if entry is not None and entry.execution is not None:
+            self.execution = entry.execution  # one execution per turn; the liveness read sees the body's phases
         self.execution.accepted_at = str((task.get("origin_message_ref") or {}).get("ts") or "")
         self.execution.census = dict(facts.get("census") or {})
         admitted_at = float(facts.get("admitted_at") or 0.0)
@@ -631,7 +700,7 @@ class CarrierTurn:
         self.quiet = bool(facts.get("quiet"))
         self.initiator = str(metadata.get("initiator") or "")
         self._namer = None
-        if not task.get("project_id") and not wake_cause(metadata):
+        if not task.get("project_id") and not wake_cause(metadata) and not task.get("_presence_turn"):
             from ouroboros.project_naming import spawn_turn_namer
 
             self._namer = lambda: spawn_turn_namer(  # noqa: E731

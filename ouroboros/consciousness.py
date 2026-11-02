@@ -332,10 +332,10 @@ class BackgroundConsciousness:
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
             "interval": self._interval(), "appointment_at": self._appointment_at,
         }
-        bound_over = None
+        bound_over, stopped_before_binding = None, False
 
         def bind_input(task):
-            nonlocal bound_over
+            nonlocal bound_over, stopped_before_binding
             if not is_own_clock_wake(task.get("metadata")):
                 return
             # Bind before the dispatch: even an immediate completion has an owner.
@@ -346,9 +346,7 @@ class BackgroundConsciousness:
                                   "initiator": metadata["initiator"], "finished": False}
                 self._set_state(OWN_WAKE_STATE_KEY, self._own_wake)
                 self._last_wake_task_id, self._last_wake_outcome, self._last_error = str(task["id"]), "running", ""
-                stopped = self._stopped
-            if stopped:  # Stop can arrive during admission, before the clock knows this id.
-                self._stop_live_wake(str(task["id"]))
+                stopped_before_binding = self._stopped  # a Stop that found no wake to address yet
             task["_wake_prepare"] = dict(preparation)
 
         # The lane checks its gates under its own lock order (Q -> gate); only this tick starts own wakes.
@@ -366,7 +364,7 @@ class BackgroundConsciousness:
         if not receipt.get("admitted"):
             why = str(receipt.get("reason") or "refused")
             self._last_wake_outcome = f"rejected:{why}"
-            # A wake the lane could not admit already left an error in the chat: back off
+            # A wake the lane could not admit (its admission raised; the lane logged it) backs off
             # like a failed wake. A closed door is retried quietly — the repo-writer gate at
             # the floor, the owner's budget at the interval.
             if why == "admission_failed":
@@ -375,6 +373,13 @@ class BackgroundConsciousness:
             self._set_next_wake(now + (self.floor if transient else min(self.ceiling, self._interval() * self._backoff)))
             self._record("consciousness_wake_rejected", reason=why, wake_reason=reason)
             return f"rejected:{why}"
+        if stopped_before_binding:
+            # That Stop found nothing to address; the admitted row exists now. The durable intent is
+            # enough: the ordinary sweep routes it to whichever carrier owns the id (a later Stop
+            # addressed the live id itself).
+            from supervisor.consciousness_carriers import stop_pooled_wake
+
+            stop_pooled_wake(str(self._last_wake_task_id))
         # The accepted observation boundary is the carrier's to bind (its first step); it reaches
         # this clock with the wake's terminal (``_settle_wake``), so the next wake starts after it.
         # A wake that dies before its terminal replays the same window (at-least-once, never a silent skip).

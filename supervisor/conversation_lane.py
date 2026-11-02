@@ -135,7 +135,8 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     now = time.time()
     task_id = str(task["id"])
     task.setdefault("root_task_id", task_id)
-    task["_execution_owner"] = {**execution_owner_record(pool.DRIVE_ROOT, task, "direct"),
+    origin = "presence" if task.get("_presence_turn") else "direct"
+    task["_execution_owner"] = {**execution_owner_record(pool.DRIVE_ROOT, task, origin),
                                 "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}
     task[PREPARE_KEY] = {
         "admitted_at": now, "quiet": bool(quiet), "reply_expected": bool(reply_expected),
@@ -323,6 +324,32 @@ def handle_direct_turn_phase(evt: Dict[str, Any], ctx: Any) -> None:
         current = str(meta.get("turn_phase") or TURN_PHASES[0])
         if TURN_PHASES.index(phase) >= TURN_PHASES.index(current):  # facts only move forward
             meta["turn_phase"] = phase
+
+
+BOUND_FACTS = ("_project_admission", "project_id")  # the carrier's first-step facts a row rebuilds from
+
+
+def handle_direct_turn_bound(evt: Dict[str, Any], ctx: Any) -> None:
+    """The carrier bound its turn (the Project basis of a room turn): the RUNNING row's task learns the
+    facts everything rebuilt from the row needs — the snapshot's running rows, the pooled park, restore."""
+    from supervisor.queue_snapshot import persist_queue_snapshot
+
+    task_id, facts = str(evt.get("task_id") or ""), evt.get("facts")
+    if not task_id or not isinstance(facts, dict):
+        return
+    with _queue_lock:
+        meta = ctx.RUNNING.get(task_id)
+        if not isinstance(meta, dict) or not isinstance(meta.get("task"), dict):
+            return
+        try:
+            if int(evt.get("task_attempt") or 1) != int(meta.get("attempt") or 1):
+                return
+        except (TypeError, ValueError):
+            return
+        for key in BOUND_FACTS:
+            if key in facts and facts[key] is not None:
+                meta["task"][key] = facts[key]
+        persist_queue_snapshot(reason="conversation_turn_bound")
 
 
 def handle_task_named(evt: Dict[str, Any], ctx: Any) -> None:

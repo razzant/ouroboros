@@ -27,6 +27,7 @@ vitals; in normal operation the degraded count is 0.
 from __future__ import annotations
 
 import logging
+import pathlib
 import threading
 import time
 from collections import deque
@@ -64,11 +65,12 @@ class InlineCarrier:
     pid = None
     daemon = True
 
-    def __init__(self, target: Callable[[], None], name: str) -> None:
+    def __init__(self, target: Callable[[], None], name: str, on_stop: Optional[Callable[[], None]] = None) -> None:
         self._thread = threading.Thread(target=target, name=name, daemon=True)
         self._started = False
         self.exitcode: Optional[int] = None
         self.stop_requested = False
+        self._on_stop = on_stop
 
     def start(self) -> None:
         self._started = True
@@ -84,7 +86,13 @@ class InlineCarrier:
                 self.exitcode = 0
 
     def terminate(self) -> None:
-        self.stop_requested = True
+        """Cooperative: arm the turn's finalize control once; the body ends at its next control boundary."""
+        first, self.stop_requested = not self.stop_requested, True
+        if first and self._on_stop is not None and self.is_alive():
+            try:
+                self._on_stop()
+            except Exception:
+                log.debug("inline executor stop request failed", exc_info=True)
 
     kill = terminate
 
@@ -190,7 +198,7 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
                 if pool.WORKERS.get(wid) is slot:
                     pool.WORKERS.pop(wid)
 
-    slot.proc = InlineCarrier(body, name=f"{executor}-{task_id}")
+    slot.proc = InlineCarrier(body, name=f"{executor}-{task_id}", on_stop=lambda: arm_inline_stop(task_id))
     slot.process_birth = f"inline:{task_id}"
     slot.ready_identity = None
     pool.WORKERS[wid] = slot
@@ -203,15 +211,34 @@ def start_inline_turn(meta: Dict[str, Any], *, executor: str, reason: str, agent
     return slot
 
 
+def arm_inline_stop(task_id: str) -> None:
+    """Write the finalize control of a live inline turn once, quietly (a pool teardown or a managed
+    update stopping the executor's thread); the body reads it at its next control boundary."""
+    from supervisor import queue as q
+    from supervisor import workers
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
+    from supervisor.task_reaper import request_finalization_grace
+
+    turn = workers.direct_chat_turn(task_id)
+    if turn is None or turn.get("stop_control_msg_id"):
+        return
+    workers.arm_direct_chat_turn(task_id, lambda live: request_finalization_grace(
+        pathlib.Path(q.DRIVE_ROOT), task_id, REASON_OWNER_STOPPED_DIRECT_TURN,
+        chat_id=int(live.get("chat_id") or 0), stamp=int(time.time()), toast_text="", quiet=True))
+
+
 def refused_carrier_reason() -> str:
     """The physical fact that forbids a fresh carrier right now, or "" (never "busy").
 
-    A marker window (``worker_chat_lane.marker_window_closed``), a lane carrier parked
-    after exhausting its readiness attempts, or a spawn the lane could not make.
+    No started pool generation (``conversation_lane.armed``: a Host serving without a pool),
+    a marker window (``worker_chat_lane.marker_window_closed``), a lane carrier parked after
+    exhausting its readiness attempts, or a spawn the lane could not make.
     """
-    from supervisor.conversation_lane import lane_carriers, spawn_refusal
+    from supervisor.conversation_lane import armed, lane_carriers, spawn_refusal
     from supervisor.worker_chat_lane import marker_window_closed
 
+    if not armed():
+        return "pool_not_started"  # no pool generation keeps a carrier for the lane: a Host without a pool
     if marker_window_closed():
         return "repo_writer_gate_closed"
     if any(getattr(slot, "readiness_exhausted", False) for slot in lane_carriers()):
@@ -269,11 +296,18 @@ def run_inline_turn(
                                   hold_carrier=True)
                 admitted = {"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat",
                             "task_metadata": task_metadata, "realtime_turn": realtime_turn, "agent": None}
-                start_inline_turn(
-                    meta, executor=executor, reason="live_call" if realtime_turn is not None else "degraded",
-                    realtime_turn=realtime_turn,
-                    on_failure=lambda runner, error: _inline_failure({**admitted, "agent": runner}, error),
-                )
+                try:
+                    start_inline_turn(
+                        meta, executor=executor, reason="live_call" if realtime_turn is not None else "degraded",
+                        realtime_turn=realtime_turn,
+                        on_failure=lambda runner, error: _inline_failure({**admitted, "agent": runner}, error),
+                    )
+                except Exception:
+                    # The body never started here and no carrier may take a process-local turn:
+                    # the row leaves with the refusal (reported below), never awaiting a carrier.
+                    _pool().RUNNING.pop(str(task.get("id") or ""), None)
+                    queue.persist_queue_snapshot(reason="conversation_turn_inline_refused")
+                    raise
         if deferred:
             _defer_chat_for_restart(task, chat_id, task_metadata)
             return None
@@ -424,5 +458,5 @@ def stop_direct_chat_turn(task_id: str, turn: Dict[str, Any], *, deliver: bool =
 
 
 __all__ = ["DIRECT_TURN_STOP_ENDED", "DIRECT_TURN_STOP_GONE", "DIRECT_TURN_STOP_LIVE", "EXECUTOR_INLINE_CALL",
-           "EXECUTOR_INLINE_DEGRADED", "InlineCarrier", "inline_vitals", "refused_carrier_reason",
+           "EXECUTOR_INLINE_DEGRADED", "InlineCarrier", "arm_inline_stop", "inline_vitals", "refused_carrier_reason",
            "run_inline_turn", "start_inline_turn", "stop_direct_chat_turn"]

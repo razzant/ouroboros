@@ -305,7 +305,8 @@ from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional pu
 )
 from supervisor.worker_owner_wait import handle_owner_wait  # noqa: E402
 from supervisor.worker_pool_lifecycle import handle_worker_quiescent  # noqa: E402
-from supervisor.conversation_lane import handle_direct_turn_phase, handle_task_named  # noqa: E402
+from supervisor.conversation_lane import handle_direct_turn_bound, handle_direct_turn_phase, handle_task_named  # noqa: E402
+from ouroboros.presence_carrier import handle_presence_turn_initial, handle_presence_turn_settled  # noqa: E402
 
 from supervisor.events_mind_controls import handle_mind_task_control
 
@@ -316,7 +317,10 @@ EVENT_HANDLERS = {
     "worker_quiescent": handle_worker_quiescent,
     # A conversation carrier's frames: its start phases for the census, its coined title.
     "direct_turn_phase": handle_direct_turn_phase,
+    "direct_turn_bound": handle_direct_turn_bound,
     "task_named": handle_task_named,
+    "presence_turn_initial": handle_presence_turn_initial,
+    "presence_turn_settled": handle_presence_turn_settled,
     **_CEH,
     **_MWH,
     **_CDE,
