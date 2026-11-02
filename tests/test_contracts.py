@@ -780,46 +780,35 @@ def _find_async_fn(tree: ast.AST, name: str) -> ast.AsyncFunctionDef | None:
 
 
 def test_state_response_matches_server_payload():
-    """StateResponse declared keys must cover every ``/api/state`` success payload.
+    """StateResponse declared keys must equal the ``/api/state`` success payload's keys.
 
-    The error path returns ``{"error": str}`` with HTTP 500 — that shape is
-    intentionally outside the frozen contract, so the test whitelists
-    ``{"error"}`` only for dicts that contain it (error branch).
+    The payload is the state publication's produced fields (``state_publication.produced_fields``),
+    the per-request process facts (``state._live_fields``) and the request's bindings pair
+    (``task_bindings``/``task_bindings_unchanged``, joined by ``state_publication.response_body``).
+    The error path returns ``{"error": str}`` with HTTP 500 — outside the frozen contract.
+    ``StateResponse`` is total=True, so a missing declared key fails as loudly as a leaked one.
     """
     from ouroboros.gateway.contracts import StateResponse
 
-    tree = ast.parse((REPO_ROOT / "ouroboros" / "gateway" / "state.py").read_text(encoding="utf-8"))
-    api_state_fn = _find_async_fn(tree, "api_state")
-    assert api_state_fn is not None
+    def returned_keys(path, name):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
+        literals = [node.value for node in ast.walk(function)
+                    if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)]
+        assert len(literals) == 1, f"{name} must return one dict literal"
+        keys, unknown = _dict_literal_keys(literals[0])
+        assert not unknown, f"{name} uses non-constant keys: {unknown}"
+        return keys
 
+    gateway = REPO_ROOT / "ouroboros" / "gateway"
+    produced = returned_keys(gateway / "state_publication.py", "produced_fields")
+    live = returned_keys(gateway / "state.py", "_live_fields")
+    bindings = {"task_bindings", "task_bindings_unchanged"}
+    assert not produced & live and not (produced | live) & bindings, "a key would be written twice"
     declared = set(StateResponse.__annotations__.keys())
-    response_dicts = _api_route_response_dicts(api_state_fn)
-    assert response_dicts, "api_state exposes no JSONResponse dict literal"
-
-    happy_path_checked = False
-    for literal in response_dicts:
-        keys, unknown = _dict_literal_keys(literal)
-        assert not unknown, (
-            f"api_state response uses non-constant keys: {unknown}"
-        )
-        # The error path has exactly one key ``error``; whitelist it explicitly
-        # rather than blanket-excluding ``error`` from the happy-path contract.
-        if keys == {"error"}:
-            continue
-        leaked = keys - declared
-        assert not leaked, (
-            f"/api/state happy-path emits keys not declared in StateResponse: {leaked}"
-        )
-        # Enforce required-key presence too. ``StateResponse`` is total=True,
-        # so every declared key is required; a missing one means the runtime
-        # silently dropped a declared field and the frozen contract should fail
-        # loudly.
-        missing = declared - keys
-        assert not missing, (
-            f"/api/state happy-path is missing declared StateResponse keys: {missing}"
-        )
-        happy_path_checked = True
-    assert happy_path_checked, "api_state exposes no happy-path response dict"
+    keys = produced | live | bindings
+    assert not keys - declared, f"/api/state happy-path emits keys not declared in StateResponse: {keys - declared}"
+    assert not declared - keys, f"/api/state happy-path is missing declared StateResponse keys: {declared - keys}"
 
 
 def test_health_response_matches_server_payload():

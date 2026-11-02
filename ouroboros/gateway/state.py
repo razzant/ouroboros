@@ -10,7 +10,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from ouroboros import get_version
 from ouroboros.settings_scales import effort_range
@@ -107,21 +107,27 @@ def _evolution_state_public(evolution_state: Dict[str, Any]) -> Dict[str, Any]:
     return {**evolution_state, "campaign": {**campaign, "history": history}}
 
 
-def _boot_document(request: Request) -> Dict[str, Any]:
-    """The ``boot`` object: this process's phases and steps (``server_liveness.BOOT``), the
-    supervisor latches the server attached to the app, the store's named-job rows."""
+def _live_boot(request: Request, jobs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The ``boot`` object without a store read: this process's phases and steps (``server_liveness.BOOT``), the
+    supervisor latches the server attached to the app, and the store's named-job rows as the state publication
+    last read them (``state_publication.published_jobs``; ``{}`` before its first production)."""
+    from ouroboros.gateway.state_publication import published_jobs
     from ouroboros.server_liveness import boot_document
 
-    return boot_document(request_drive_root(request), getattr(request.app, "state", None))
+    app_state = getattr(request.app, "state", None)
+    boot = boot_document(None, app_state, jobs=False)
+    boot["jobs"] = dict(jobs) if jobs is not None else published_jobs(app_state)
+    return boot
 
 
 async def api_health(request: Request) -> JSONResponse:
-    """Answers 200 as soon as the socket serves, during boot too; ``boot`` carries the phase."""
+    """Answers 200 as soon as the socket serves, during boot too; ``boot`` carries the phase. Liveness only: no
+    executor hop and no store read, so a busy interpreter answers it as soon as the loop runs."""
     from ouroboros.gateway.schema import GATEWAY_ABI_VERSION
 
     runtime_version = get_version()
     app_version = os.environ.get("OUROBOROS_APP_VERSION", "").strip() or runtime_version
-    boot = await asyncio.to_thread(_boot_document, request)  # one indexed store read, off the loop
+    boot = _live_boot(request)
     return JSONResponse({
         "status": "ok",
         # legacy field for backward compatibility
@@ -161,13 +167,13 @@ async def api_consciousness(request: Request) -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(describe), headers={"Cache-Control": "no-store"})
 
 
-def _state_snapshot(request: Request) -> Dict[str, Any]:
-    """Collect every heavy synchronous input for the ``/api/state`` payload.
+def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[str, Any]:
+    """Collect every heavy synchronous input for the ``/api/state`` payload: the publication's production.
 
-    Runs inside ``asyncio.to_thread`` (pattern shared with gateway/history.py)
-    so state.json reads, the usage-ledger projection, the evolution snapshot,
-    and the projects/bindings reads cannot block the event loop for every
-    concurrent request.
+    Runs inside the state publication's one executor job (``state_publication.Publisher.refresh``), after
+    the revision probe, so state.json reads, the usage-ledger projection, the evolution snapshot and the
+    projects/bindings reads never run per request or on the event loop. ``direct`` is the probe's
+    ``(direct turns, complete)``, so the census starts from the rows the revision stamped.
     """
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
@@ -178,24 +184,19 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     from ouroboros.usage_accounting import usage_projection, usage_writer_snapshot
     from supervisor.queue import get_evolution_status_snapshot
     from supervisor.state import TOTAL_BUDGET_LIMIT, control_value, load_state
-    from supervisor.workers import PENDING, RUNNING, WORKERS
+    from supervisor.workers import PENDING, RUNNING
 
     st = load_state()
     bg_known, bg_value = control_value(st, "bg_consciousness_enabled")
     bg_enabled = bool(bg_value) if bg_known else None  # unknown is never shown as off (#1307)
-    alive = 0
-    total_w = 0
-    try:
-        alive = sum(1 for w in WORKERS.values() if w.proc.is_alive())
-        total_w = len(WORKERS)
-    except Exception:
-        pass
     # ``0`` is the documented unbounded budget, not a request to invent the
     # historical $10 default.  Server startup initializes the supervisor
     # value from settings; keeping zero here makes that state explicit.
     limit = max(0.0, float(TOTAL_BUDGET_LIMIT or 0.0))
     drive_root = request_drive_root(request)
-    boot = _boot_document(request)
+    from ouroboros.server_liveness import job_facts
+
+    jobs = job_facts(drive_root)  # one indexed read that never waits: the published ``boot.jobs``
     accounting_available = True
     try:
         # The writer's slim snapshot (totals, marker, OpenRouter bucket): this response
@@ -256,7 +257,11 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     revision = bindings_revision(drive_root)  # stamped BEFORE the read: the map is never older than it
     task_bindings = _task_bindings_safe(request, availability=activity_availability)
     bindings_complete = activity_availability["complete"]
-    direct_turns = _direct_turns_snapshot_safe(availability=activity_availability)
+    if direct is None:
+        direct_turns = _direct_turns_snapshot_safe(availability=activity_availability)
+    else:
+        direct_turns = list(direct[0])
+        activity_availability["complete"] = activity_availability["complete"] and direct[1] is True
     decision_owners, work_facts = [], {}
     activities = _chat_activities_snapshot_safe(
         drive_root, task_bindings, direct_turns=direct_turns, availability=activity_availability,
@@ -291,9 +296,10 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
         "st": st,
         # Resolved here so the checkout file reads stay on the snapshot thread.
         "runtime_identity": _runtime_repo_identity(st),
-        "workers_alive": alive,
-        "boot": boot,
-        "workers_total": total_w,
+        "jobs": jobs,
+        # Other data roots the census read (a task's ledger root): the next revision probe stamps them too.
+        "roots": sorted({str(facts["budget_drive_root"]) for facts in work_facts.values()
+                         if isinstance(facts, dict) and facts.get("budget_drive_root")}),
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
         "limit": limit,
@@ -885,141 +891,69 @@ def current_work_in_room(drive_root: Any, task_bindings: Any, matches: Callable[
     return [task_id for task_id in in_room if not _answer_stored(_task_activity_facts(drive_root, task_id).get("late_phase"))]
 
 
-async def api_state(request: Request) -> JSONResponse:
-    """``StateResponse``, never stored: an open page compares its ``sha`` to spot a new build."""
+def _worker_counts() -> tuple:
+    """(alive, total) of the worker pool, read from this process's table (no I/O)."""
     try:
-        from ouroboros.config import (
-            get_context_mode,
-            get_runtime_mode,
-            get_safety_mode,
-            get_skills_repo_path,
-        )
+        from supervisor.workers import WORKERS
 
-        snap = await asyncio.to_thread(_state_snapshot, request)
-        st = snap["st"]
+        workers = list(WORKERS.values())
+        return sum(1 for worker in workers if worker.proc.is_alive()), len(workers)
+    except Exception:
+        return 0, 0
+
+
+def _live_fields(request: Request, jobs: Dict[str, Any]) -> Dict[str, Any]:
+    """The process facts of ``StateResponse``, read per request without I/O: never part of the publication."""
+    from ouroboros.config import get_context_mode, get_runtime_mode, get_safety_mode, get_skills_repo_path
+
+    supervisor_ready = _state_attr(request, "supervisor_ready_event")
+    get_supervisor_error = _state_attr(request, "get_supervisor_error")
+    app_start = float(_state_attr(request, "app_start", time.time()) or time.time())
+    alive, total = _worker_counts()
+    return {
+        "uptime": int(time.time() - app_start),
+        "workers_alive": alive,
+        "workers_total": total,
+        "supervisor_ready": bool(supervisor_ready.is_set()) if supervisor_ready else False,
+        "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
+        "boot": _live_boot(request, jobs),  # the boot phases the header paints (Starting… → chat ready → Online)
+        "runtime_mode": get_runtime_mode(),
+        "context_mode": get_context_mode(),
+        # Frozen one-window compatibility field. Persistent auto-Low is retired.
+        "context_mode_auto_low": False,
+        "effort_range": effort_range(),  # the owner's range, the tolerant read
+        "safety_mode": get_safety_mode(),
+        "skills_repo_configured": bool(get_skills_repo_path()),
+        "served_ui": _served_ui_state(request),
+    }
+
+
+def _production(request: Request, direct: Optional[tuple]) -> Dict[str, Any]:
+    """One production of the publication: the snapshot, its produced fields, the bindings map apart."""
+    from ouroboros.gateway.state_publication import produced_fields
+
+    snap = _state_snapshot(request, direct=direct)
+    return {"fields": produced_fields(snap), "task_bindings": snap["task_bindings"],
+            "task_bindings_revision": snap["task_bindings_revision"], "roots": snap["roots"], "jobs": snap["jobs"]}
+
+
+async def api_state(request: Request) -> Response:
+    """``StateResponse``, never stored: an open page compares its ``sha`` to spot a new build.
+
+    Served from the data root's display publication (``state_publication``): one production per revision,
+    shared by every concurrent reader and encoded once; the process facts and the bindings map the client
+    may already hold (``bindings_since``) are added per request."""
+    from ouroboros.gateway.state_publication import AGE_HEADER, GENERATION_HEADER, publisher, response_body
+
+    try:
+        publication = await publisher(getattr(request.app, "state", None), request_drive_root(request)).current(
+            lambda direct: _production(request, direct))
         since = str(request.query_params.get("bindings_since") or "")  # the revision of a map the client holds
-        unchanged = bool(since) and since == snap["task_bindings_revision"]  # a failed read's "" never is
-        runtime_branch, runtime_sha = snap["runtime_identity"]
-        limit = snap["limit"]
-        accounting = snap["accounting"]
-        breakdown = snap["breakdown"]
-        accounting_available = snap["accounting_available"]
-        spent = snap["spent"]
-        evolution_state = snap["evolution_state"]
-        from supervisor.state import STATE_READ_KEY, control_value
-
-        # A read that is not current never renders its controls as known (#1307).
-        state_read = st.get(STATE_READ_KEY) if isinstance(st.get(STATE_READ_KEY), dict) else {}
-        evolution_known, evolution_enabled = control_value(st, "evolution_mode_enabled")
-        bg_known, bg_requested = control_value(st, "bg_consciousness_enabled")
-        bg_requested = bool(bg_requested) if bg_known else None
-        bg_state = snap.get("bg_state") or {}
-        supervisor_ready = _state_attr(request, "supervisor_ready_event")
-        get_supervisor_error = _state_attr(request, "get_supervisor_error")
-        app_start = float(_state_attr(request, "app_start", time.time()) or time.time())
-        response = JSONResponse({
-            "uptime": int(time.time() - app_start),
-            "workers_alive": snap["workers_alive"],
-            "workers_total": snap["workers_total"],
-            "pending_count": snap["pending_count"],
-            "running_count": snap["running_count"],
-            "spent_usd": round(spent, 4) if spent is not None else None,
-            "budget_limit": limit,
-            "budget_pct": (
-                round((spent / limit * 100) if limit > 0 else 0, 1)
-                if spent is not None else None
-            ),
-            # W2-F3: state values when the supervisor stamped them, else the
-            # actual runtime checkout (source-mode installs never stamp state).
-            # The retired bare "ouroboros" default was dead code — load_state
-            # always seeds the key (None), so the default never fired — and a
-            # guessed branch is not identity.
-            "branch": runtime_branch,
-            "sha": (runtime_sha or "")[:8],
-            "evolution_enabled": bool(evolution_enabled) if evolution_known else None,
-            "bg_consciousness_enabled": bg_requested,
-            "state_quality": {"quality": str(state_read.get("quality") or "current"),
-                              "source": str(state_read.get("source") or "primary"),
-                              "unconfirmed": list(state_read.get("unconfirmed") or [])},
-            "evolution_cycle": int(st.get("evolution_cycle") or 0),
-            "evolution_state": evolution_state,
-            "bg_consciousness_state": bg_state,
-            "spent_calls": (
-                int(breakdown.get("physical_calls") or 0) if accounting_available else None
-            ),
-            "supervisor_ready": bool(supervisor_ready.is_set()) if supervisor_ready else False,
-            "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
-            "boot": snap["boot"],  # the boot phases the header paints (Starting… → chat ready → Online)
-            "runtime_mode": get_runtime_mode(),
-            "context_mode": get_context_mode(),
-            "subagents_mode": snap["subagents_mode"],
-            "subagents_availability": snap["subagents_availability"],
-            # Frozen one-window compatibility field. Persistent auto-Low is retired.
-            "context_mode_auto_low": False,
-            "effort_range": effort_range(),  # the owner's range, the tolerant read
-            "safety_mode": get_safety_mode(),
-            "skills_repo_configured": bool(get_skills_repo_path()),
-            "github_token_configured": snap["github_token_configured"],
-            "accounting": {
-                "available": accounting_available,
-                "authority": "physical_attempt_ledger",
-                "settled_usd": (
-                    float(accounting.get("settled_usd") or 0.0) if accounting_available else None
-                ),
-                "confirmed_usd": (
-                    float(accounting.get("confirmed_usd") or 0.0) if accounting_available else None
-                ),
-                "estimated_usd": (
-                    float(accounting.get("estimated_usd") or 0.0) if accounting_available else None
-                ),
-                "reserved_usd": (
-                    float(accounting.get("reserved_usd") or 0.0) if accounting_available else None
-                ),
-                "unresolved_upper_bound_usd": (
-                    float(accounting.get("unresolved_upper_bound_usd") or 0.0)
-                    if accounting_available else None
-                ),
-                "accounted_usd": (
-                    float(accounting.get("accounted_usd") or 0.0) if accounting_available else None
-                ),
-                "unknown_unmetered": (
-                    int(accounting.get("unknown_unmetered") or 0) if accounting_available else None
-                ),
-                "cost_final": bool(accounting.get("cost_final")) if accounting_available else False,
-                "integrity_degraded": (
-                    bool(accounting.get("integrity_degraded")) if accounting_available else True
-                ),
-                "attempt_counts": dict(accounting.get("attempt_counts") or {}),
-                "limit_usd": limit,
-                "remaining_known_usd": (
-                    float(accounting.get("remaining_known_usd") or 0.0)
-                    if accounting_available and limit > 0
-                    else None
-                ),
-                **({"error_code": "ledger_unavailable"} if not accounting_available else {}),
-            },
-            "projects": snap["projects"],
-            "project_chat_ids": snap["project_chat_ids"],
-            "main_visible_revision": snap.get("main_visible_revision"),
-            "task_bindings": None if unchanged else snap["task_bindings"],
-            "task_bindings_revision": snap["task_bindings_revision"],
-            "task_bindings_unchanged": unchanged,
-            "active_direct_turns": snap.get("active_direct_turns") or [],
-            "active_chat_activities": snap.get("active_chat_activities") or [],
-            "active_chat_activities_complete": snap.get("active_chat_activities_complete") is True,
-            "current_questions": snap.get("current_questions") or [],
-            "current_questions_complete": snap.get("current_questions_complete") is True,
-            "current_questions_gaps": snap.get("current_questions_gaps") or [],
-            "main_attention": snap.get("main_attention") or [],
-            "main_attention_complete": snap.get("main_attention_complete") is True,
-            "main_attention_gaps": snap.get("main_attention_gaps") or [],
-            "works": snap.get("works") or [],
-            "rooms": snap.get("rooms") or {},
-            "work_summary": snap.get("work_summary") or {},
-            "works_complete": snap.get("works_complete") is True,
-            "works_gaps": snap.get("works_gaps") or [],
-            "served_ui": _served_ui_state(request),
-        })
+        unchanged = bool(since) and since == publication.bindings_revision  # a failed read's "" never is
+        body = response_body(publication, _live_fields(request, publication.jobs), bindings_unchanged=unchanged)
+        response = Response(body, media_type="application/json", headers={
+            GENERATION_HEADER: str(publication.generation),
+            AGE_HEADER: f"{max(0.0, time.time() - publication.published_at):.3f}"})
     except Exception as exc:
         response = json_exception(exc)
     response.headers["Cache-Control"] = "no-store"
