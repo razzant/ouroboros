@@ -48,7 +48,7 @@ def test_accounts_have_no_floor_rung_even_when_the_minimum_cannot_fit():
     text = mv.render_story(snap, level)
     assert account['text'] in text
     assert text.index('### My account across rooms') < text.index('### My older pages')
-    assert mf.minimal_view_tokens(snap) >= len(account['text']) // 4
+    assert mf.view_tokens(text) >= len(account['text']) // 4
 
 
 def test_pointer_has_one_id_and_label_does_not_cut_a_long_first_sentence():

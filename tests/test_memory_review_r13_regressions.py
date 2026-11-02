@@ -6,6 +6,7 @@ import pytest
 
 from ouroboros import memory_floor as mf, memory_view as mv
 from tests import _memory_view_synthetic as syn
+from tests.test_memory_view_floor import frame, tokens
 
 
 @pytest.mark.parametrize('shape', ['row', 'page'])
@@ -14,8 +15,8 @@ def test_optional_aggregate_cannot_increase_minimum(shape, monkeypatch):
                         story=syn.pages(1, 8000) if shape == 'page' else ())
     with monkeypatch.context() as prior:
         prior.setattr(mf, 'LADDER', tuple(s for s in mf.LADDER if s not in {'F7a', 'F5a'}))
-        without = mf.minimal_view_tokens(snap, window_tokens=92000)
-    with_optional = mf.minimal_view_tokens(snap, window_tokens=92000)
+        without = tokens(snap, mf.fit_memory_view(snap, frame(0, 0)))  # the floor's own walk with no room left
+    with_optional = tokens(snap, mf.fit_memory_view(snap, frame(0, 0)))
     assert with_optional <= without, (shape, without, with_optional)
 
 

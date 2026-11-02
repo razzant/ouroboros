@@ -323,6 +323,8 @@ class PhysicalAttemptCapture:
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
     effort: Optional[Dict[str, Any]] = None
+    # The submitted fit-estimator count of these bytes (measurement only): 0 unknown, or an exact local count outranks it.
+    prompt_tokens_bounded_estimate: int = 0
 
 
 @contextlib.contextmanager
@@ -1400,6 +1402,8 @@ def _record_attempt_capture(
         submitted_processing_mode=request.submitted_processing_mode,
         processing_basis=copy.deepcopy(request.processing_basis),
         effort=copy.deepcopy(request.effort),
+        prompt_tokens_bounded_estimate=0 if request.prompt_tokens_exact is not None else max(
+            0, int(request.prompt_tokens_bounded_estimate or 0)),
     )
     _LAST_PHYSICAL_ATTEMPT.set(capture)
     _PHYSICAL_DRIVE_ROOT.set((reservation.attempt_id, reservation.drive_root))
