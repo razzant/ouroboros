@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from ouroboros.force_remove import force_rmtree
 from ouroboros.marketplace.adapter import AdapterResult, adapt_openclaw_skill
 from ouroboros.marketplace.clawhub import (
     ClawHubArchive,
@@ -157,7 +158,15 @@ def snapshot_payload_state(
     *,
     include_state_provenance: bool = False,
 ) -> PayloadRollbackSnapshot:
-    """Copy current live payload/state so a failed install/update can restore it."""
+    """Copy current live payload/state so a failed install/update can restore it.
+
+    Links are copied as links, never through them: an environment's interpreter link may dangle
+    after the app moved, and a link target is not payload, so it is not frozen either (an
+    absolute link into the live tree reads it from this copy and from ``.previous``). The
+    dependency owner re-points a restored environment (``isolated_deps``). A failed copy is
+    removed before the error propagates, so an incomplete copy never becomes a rollback source.
+    Native Windows is unverified: a link there needs the symlink privilege (else the copy
+    fails), and CPython copies a junction as a directory."""
 
     drive_root = pathlib.Path(drive_root)
     target_dir = pathlib.Path(target_dir)
@@ -167,7 +176,13 @@ def snapshot_payload_state(
         rollback_root = target_dir.parent / ".rollback"
         rollback_root.mkdir(parents=True, exist_ok=True)
         backup_dir = rollback_root / f"{target_dir.name}.{uuid.uuid4().hex}"
-        shutil.copytree(target_dir, backup_dir)
+        try:
+            shutil.copytree(target_dir, backup_dir, symlinks=True)
+        except BaseException:
+            force_rmtree(backup_dir)
+            if backup_dir.exists():
+                log.error("Incomplete rollback copy of %s remains at %s", skill_name, backup_dir)
+            raise
     return PayloadRollbackSnapshot(
         drive_root=drive_root,
         skill_name=skill_name,

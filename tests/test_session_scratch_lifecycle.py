@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from ouroboros import headless, owner_keep, task_custody, test_environment
+from tests._shared import retire_synthetic_retention
 from tests.test_session_service_directories import GRANTED, _Catalog, _prepare, _synthetic_temp_parent  # noqa: F401
 from tests.test_storage_free import OLD, _drives, _fake_sizer, _guard, _join, _owner, _preview
 
@@ -137,14 +138,15 @@ def test_a_scratch_its_producer_retained_is_never_destroyed(world):
     _drives(data, [("held", "direct", "completed", OLD)])
     scratch = _scratch(world, "held")
     (scratch / "only-here.txt").write_text("unique input\n", encoding="utf-8")
-    test_environment.retain_tree(scratch, "the producer could not prove its process ended")
+    reason = "the producer could not prove its process ended"
+    test_environment.retain_tree(scratch, reason)
     assert task_custody.settle_child_drive(data, "held", data / "task_drives" / "held",
                                            live=lambda _t: False)["status"] == "removed"
-    for _ in range(2):
-        assert task_custody.remove_custody_trash(data)["stuck"]
-        assert (scratch / "only-here.txt").read_text(encoding="utf-8") == "unique input\n"
-    (scratch / test_environment.RETENTION_MARKER).unlink()  # the producer resolves its own retention
-    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
+    # The custodied drive goes at once (#2586); the retained scratch stays, owned by no one from then on.
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": [str(scratch)]}
+    assert task_custody.remove_custody_trash(data) == {"removed": 0, "stuck": {}, "retained": []}
+    assert (scratch / "only-here.txt").read_text(encoding="utf-8") == "unique input\n"
+    assert retire_synthetic_retention(scratch, reason)
 
 
 @pytest.mark.parametrize("access", ACCESSES)

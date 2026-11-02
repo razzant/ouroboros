@@ -284,7 +284,7 @@ def _standin_source_ref(call_id: Any, text: str, digest: str) -> Dict[str, Any]:
 def project_tool_result_batch(
     results: List[Dict[str, Any]], messages: List[Dict[str, Any]], tool_schemas: list,
     *, drive_root: pathlib.Path, task_id: str, fit_candidate: FitCandidate,
-    policy: str = "accepted_prefix",
+    policy: str = "accepted_prefix", as_message: Optional[Callable[[Mapping[str, Any], str], Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Retain full results before constructing a fitting multi-result view.
 
@@ -299,17 +299,18 @@ def project_tool_result_batch(
     row, ``result_partial``, ``result_source_ref``, ``result_source_status`` and
     ``result_source_view``; plus a receipt whose ``status`` is ``complete``,
     ``projected``, ``minimum_view_unfit`` or (the measured policy only)
-    ``capacity_unknown``.
+    ``capacity_unknown``. ``as_message`` renders the message the caller will actually append (a
+    host notice rather than a tool response), so the measured candidate is that request itself.
     """
     rows = [{**row, **({"result_meta": dict(row["result_meta"])} if isinstance(row.get("result_meta"), dict) else {})}
             for row in results]
     full = [str(row["result"]) for row in rows]
+    render = as_message or (lambda row, text: {"role": "tool", "tool_call_id": row["tool_call_id"], "content": text})
 
     def measure(contents: Sequence[str]) -> Dict[str, Any]:
         # A fresh list over the live message dicts: the callback measures and
         # must not mutate (``measure_main_fit`` only serializes its inputs).
-        candidate = [*messages, *({"role": "tool", "tool_call_id": row["tool_call_id"], "content": text}
-                                  for row, text in zip(rows, contents))]
+        candidate = [*messages, *(render(row, text) for row, text in zip(rows, contents))]
         return dict(fit_candidate(candidate, list(tool_schemas or [])))
 
     if policy == "measured_frame":

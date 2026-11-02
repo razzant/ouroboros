@@ -129,7 +129,9 @@ def test_unknown_outcome_tries_the_configured_route_first_with_a_new_identity(da
     assert old != new
     assert ua.usage_projection(data_root)["unresolved_upper_bound_usd"] == 1.0
     notices = _notices(llm.sent[-1][1])
-    assert len(notices) == 1 and old in notices[0] and "fb/one" in notices[0]
+    assert len(notices) == 1 and old in notices[0]
+    assert "the host is trying a configured alternative." in notices[0] and "fb/one" not in notices[0], \
+        "a try, naming no route the send might not use"
     assert usage["transport_recovery"]["previous_attempt"]["physical_attempt_id"] == old
     assert _events(tmp_path, "network_wait") == []
 
