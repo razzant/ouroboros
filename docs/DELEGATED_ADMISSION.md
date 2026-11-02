@@ -97,7 +97,8 @@ name that scratch instead of the default parent (`workspace_preflight.session_se
 A `full` Agent start, whose rights already reach such a folder, gets the same owned scratch with nothing
 sent: a private copy's (keyed by its snapshot), an in-place run's (`in-place-<invocation>`) and a reviewer seat's.
 Every naming declares it disposable before use (`delegate_start_instructions.DISPOSABLE_SCRATCH`): never
-captured, retired with the starting task's drive, nothing reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
+captured, released once the starting task is over (`workspace_preflight.release_finished_scratch`), nothing
+reinstalled for a later session. That is a purpose and an owner, not a promise of byte-for-byte reproduction.
 The native profile's existing temporary-directory permissions are unchanged. Directory grants do
 not grant IPC or process inspection: a blocked check stays unverified, with its command and
 diagnostics retained. After inspecting the candidate, the integrating mind may run it through
