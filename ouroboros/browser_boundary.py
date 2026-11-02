@@ -25,17 +25,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Awaitable, Callable
-
-from starlette.routing import compile_path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
 Scope = dict[str, Any]
-Receive = Callable[[], Awaitable[dict[str, Any]]]
 
 CROSS_ORIGIN_CODE = "cross_origin_request"
-JSON_CONTENT_TYPE_CODE = "json_content_type_required"
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
 _ORIGIN = re.compile(r"(https?)://([^/?#@\s]+)")
 _PASSIVE_EXACT = frozenset({"/", "/onboarding", "/auth/login", "/api/widget-bridge.js"})
@@ -44,8 +40,6 @@ _PASSIVE_PREFIXES = ("/static/", "/onboarding/static/", "/auth/", "/api/widget-a
 # ui/{revision}/{path:path}. A shorter shape such as ui/action is a registered dynamic route, not a
 # file, so it must stay behind the boundary; only these two reach a passive file handler.
 _EXTENSION_FILES = re.compile(r"/api/extensions/[^/]+/(?:module/|ui/[^/]+/)")
-_BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_JSON_MEDIA = re.compile(r"application/(?:[\w.+-]+\+)?json")
 _refused_seen: set[tuple[str, str, str]] = set()
 
 
@@ -115,51 +109,3 @@ def browser_request_refused(scope: Scope) -> bool:
         log.warning("browser_boundary refused %s %s origin=%s sec-fetch-site=%s",
                     scope.get("method") or "WEBSOCKET", key[2], key[0] or "-", key[1] or "-")
     return True
-
-
-def _non_json_routes() -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """``(method, path)`` of each endpoint whose published request body is not JSON (``endpoint_index``:
-    uploads, forms, extension routes' ``any``); ``ANY`` stands for every method."""
-    from ouroboros.gateway.endpoint_index import AUTH_ENDPOINTS, HTTP_SHAPES
-
-    routes = {tuple(token.split(" ", 1)) for token, shape in {**HTTP_SHAPES, **AUTH_ENDPOINTS}.items()
-              if set(shape.request.split("|")) & {"multipart", "form", "any", "text", "file"}}
-    return tuple((method, compile_path(path)[0]) for method, path in sorted(routes))
-
-
-_NON_JSON: tuple[tuple[str, re.Pattern[str]], ...] | None = None
-
-
-def _json_contract(scope: Scope) -> bool:
-    """A host API body route: an ``/api`` method and path whose published body is JSON."""
-    global _NON_JSON
-    path, method = scope.get("path") or "/", scope.get("method")
-    if method not in _BODY_METHODS or not path.startswith("/api/"):
-        return False
-    if _NON_JSON is None:
-        _NON_JSON = _non_json_routes()
-    return not any(declared in {method, "ANY"} and pattern.match(path) for declared, pattern in _NON_JSON)
-
-
-async def json_body_refused(scope: Scope, receive: Receive) -> tuple[bool, Receive]:
-    """Whether a JSON contract got a non-empty body without a JSON Content-Type, and the ``receive`` to pass on.
-
-    An empty body needs no type (body-less POSTs, a proxy's empty chunked stream). An unknown
-    length is decided by the first body chunk, which is replayed to the handler unchanged."""
-    content_type = (_header(scope, b"content-type") or "").split(";", 1)[0].strip().lower()
-    if not _json_contract(scope) or _JSON_MEDIA.fullmatch(content_type):
-        return False, receive
-    length = _header(scope, b"content-length")
-    if length is not None:
-        return length.strip() not in {"", "0"}, receive
-    held: list[dict[str, Any]] = []
-    while True:
-        message = await receive()
-        held.append(message)
-        if message.get("type") != "http.request" or message.get("body") or not message.get("more_body"):
-            break
-
-    async def replay() -> dict[str, Any]:
-        return held.pop(0) if held else await receive()
-
-    return bool(held[-1].get("body")) and held[-1].get("type") == "http.request", replay
