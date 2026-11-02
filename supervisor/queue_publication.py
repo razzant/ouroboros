@@ -275,9 +275,16 @@ def _pool_counts() -> Dict[str, Any]:
     RUNNING but NOT assignable, so the context queue digest never falsely advertises a free slot."""
     try:
         from supervisor import workers as _workers_mod
-        from supervisor.worker_pool_lifecycle import worker_ready
+        from supervisor.worker_pool_lifecycle import is_project_slot, worker_ready
 
-        _ws = list(_workers_mod.WORKERS.values())
+        def idle(slot: Any) -> bool:
+            return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
+                    and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", ""))
+
+        # Project slots alone: they are what MAX_WORKERS bounds and the queue assigns to. The
+        # conversation lane's carriers are outside that count (owner decision 4A) and reported apart (W9).
+        _ws = [w for w in _workers_mod.WORKERS.values() if is_project_slot(w)]
+        lane = [w for w in _workers_mod.WORKERS.values() if not is_project_slot(w)]
         active = sum(1 for w in _ws if getattr(w, "active_capacity", True))
         disabled = _workers_mod._worker_pool_execution_state()["disabled_reason"]
         return {
@@ -285,14 +292,13 @@ def _pool_counts() -> Dict[str, Any]:
             "worker_total": len(_ws), "active_worker_count": active, "parked_worker_count": len(_ws) - active,
             # Absence is counted above, not an explicit disablement.
             "worker_pool_disabled_reason": "" if disabled == "no_workers" else disabled,
-            "assignable_idle_workers": sum(
-                1 for _w in _ws
-                if (getattr(_w, "busy_task_id", None) is None and worker_ready(_w)
-                    and getattr(_w, "active_capacity", True) and not getattr(_w, "resume_hold", ""))),
+            "assignable_idle_workers": sum(1 for _w in _ws if idle(_w)),
+            "lane_carrier_total": len(lane), "lane_carrier_idle": sum(1 for _w in lane if idle(_w)),
         }
     except Exception:
         return {"reaping_count": 0, "worker_total": 0, "active_worker_count": 0, "parked_worker_count": 0,
-                "worker_pool_disabled_reason": "unknown", "assignable_idle_workers": 0}
+                "worker_pool_disabled_reason": "unknown", "assignable_idle_workers": 0,
+                "lane_carrier_total": 0, "lane_carrier_idle": 0}
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

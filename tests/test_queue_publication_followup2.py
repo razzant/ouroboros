@@ -184,3 +184,24 @@ def test_the_census_watches_exactly_the_row_facts_the_capture_publishes():
     assert "last_progress_at" not in queue_publication._row_facts(meta), "ordinary progress rotates nothing"
 
 
+# ---- W9: project slots counted, lane carriers apart -----------------------------------------------
+
+def test_pool_counts_count_project_slots_and_report_lane_carriers_apart(monkeypatch):
+    from supervisor import workers
+    from supervisor.worker_pool_lifecycle import LANE_CONVERSATION, LANE_PROJECT
+
+    def slot(wid, lane, busy=None):
+        return types.SimpleNamespace(wid=wid, lane=lane, busy_task_id=busy, active_capacity=True, resume_hold="",
+                                     reaping=False, readiness_exhausted=False, process_birth="b",
+                                     ready_identity=(100 + wid, "b"), proc=types.SimpleNamespace(pid=100 + wid, is_alive=lambda: True))
+
+    monkeypatch.setattr(workers, "WORKERS", {0: slot(0, LANE_CONVERSATION), 1: slot(1, LANE_PROJECT), 2: slot(2, LANE_PROJECT, busy="t")})
+    monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
+    from supervisor import worker_pool_lifecycle
+    monkeypatch.setattr(worker_pool_lifecycle, "_slot_pid", lambda s: s.proc.pid)
+    counts = queue_publication._pool_counts()
+    assert counts["worker_total"] == 2 and counts["assignable_idle_workers"] == 1, "the lane's spare is not a project slot"
+    assert counts["active_worker_count"] == 2 and counts["parked_worker_count"] == 0
+    assert counts["lane_carrier_total"] == 1 and counts["lane_carrier_idle"] == 1
+
+
