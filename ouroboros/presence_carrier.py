@@ -135,6 +135,7 @@ def presence_seed_task(*, admission: PresenceAdmission, event: PresenceTurnEvent
             "skill_name": str(skill_name), "binding_id": admission.binding_id, "event": payload,
             "identity": dict(event.identity) if isinstance(event.identity, Mapping) else None,
             "staged_files": [str(path) for path in staged_files],
+            "vouched_facts": list(event.facts or ()),  # the Host admitted these facts (its declared signals too)
             "delivery_reporting_version": int(event.delivery_reporting_version or 0),
             "continuation_version": int(event.continuation_version or 0),
             "allowance": dict(admission.allowance) if isinstance(admission.allowance, Mapping) else None,
@@ -201,7 +202,8 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
             admission = replace(admission, allowance=dict(facts["allowance"]))
         event = presence_turn_event(facts.get("event"), admission,
                                     reporting_version=int(facts.get("delivery_reporting_version") or 0),
-                                    continuing=int(facts.get("continuation_version") or 0))
+                                    continuing=int(facts.get("continuation_version") or 0),
+                                    vouched_facts=facts.get("vouched_facts") or ())
         if facts.get("identity") is not None:
             event = replace(event, identity=dict(facts["identity"]))
         gate = _configured_gate(root)

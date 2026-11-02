@@ -310,3 +310,28 @@ def test_a_presence_turn_whose_carrier_ended_unreported_settles_at_its_published
     events._handle_task_done({"task_id": "pres-answered", "status": "completed", "task_type": "presence",
                               "chat_id": 5}, ctx)
     assert answered.result.result(timeout=1).text == "hello" and released.count("pres-answered") == 1
+
+
+def test_the_carrier_takes_the_hosts_admitted_signal_facts_by_value():
+    """Review K2: the Host admits ``WAKE_FACTS`` plus the authenticated connector's declared signals (its live
+    publication, in the server). The seed carries the facts the Host admitted, and the carrier's re-admission
+    honours them by value, never its own process's registry; a fact nobody vouched for is still refused."""
+    from dataclasses import replace
+
+    from ouroboros.presence_events import presence_turn_event
+
+    event = replace(_event(), facts=("mention", "signal.words"))
+    payload = {"source_event_id": event.source_event_id, "provider": event.provider, "account_id": event.account_id,
+               "conversation_id": event.conversation_id, "thread_id": event.thread_id,
+               "conversation_key": event.conversation_key, "actor": dict(event.actor),
+               "conversation": dict(event.conversation), "message": dict(event.message), "text": event.text,
+               "facts": list(event.facts)}
+    seed = presence_seed_task(admission=_admission(), event=event, skill_name="telegram-bot", event_payload=payload,
+                              staged_files=[], gate_wait=False)
+    vouched = seed[PRESENCE_RUN_KEY]["vouched_facts"]
+    assert vouched == ["mention", "signal.words"]
+    readmitted = presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission(), vouched_facts=vouched)
+    assert readmitted.facts == ("mention", "signal.words")
+    with pytest.raises(PresenceTurnError) as refused:
+        presence_turn_event(seed[PRESENCE_RUN_KEY]["event"], _admission())
+    assert refused.value.code == "presence_event_invalid"
