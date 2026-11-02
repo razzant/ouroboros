@@ -101,3 +101,69 @@ def test_pause_of_a_presence_turns_lane_row_refuses_at_every_door_and_changes_no
     assert seen["owner"] == seen["mind"] == {"ok": False, "error": "presence_pause_unsupported"}
     assert seen["http"] == (409, "presence_pause_unsupported")
     assert not seen["fence"] and seen["latch"] is False and seen["unchanged"] is True
+
+
+# The server's census while a carried turn's author starts in its carrier (another process): the server holds the
+# turn's lane row, the author's witness names no room yet (a non-local preparing author reads as an empty row).
+_CENSUS_BESIDE_A_STARTING_CARRIED_AUTHOR = r'''
+import json, sys
+from pathlib import Path
+import pytest
+root, tid = Path(sys.argv[1]), sys.argv[2]
+from tests._budget_pause_exact_helpers import _install_queue
+_install_queue(root, pytest.MonkeyPatch())
+import ouroboros.config
+ouroboros.config.DATA_DIR = root
+from supervisor import message_bus, workers
+from tests.conversation_carrier_support import lane_row
+from tests.test_presence_project_activity import _Bridge, _state
+message_bus._BRIDGE = _Bridge()
+lane_row(workers, {"id": tid, "type": "presence", "source": "presence", "chat_id": 5, "text": "hi",
+                   "_is_direct_chat": True, "_presence_turn": True, "_execution_owner": {"kind": "presence"}}, wid=97)
+census, works, complete = _state(root)
+print(json.dumps({"complete": complete, "kinds": [row.get("kind") for row in census if row.get("activity_id") == tid]}))
+'''
+
+
+def test_a_starting_carried_presence_turn_leaves_the_census_whole(root):
+    """Review N12: the server's census lists a carried turn from its lane row while its author starts in its carrier;
+    the author's room-less witness there is that same known turn, never an unknown row (the Restart dialog's)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from tests.test_presence_project_activity import REPO, _starting_turn
+
+    seen = {}
+
+    def starting(tid):
+        env = {**os.environ, "OUROBOROS_DATA_DIR": str(root), "PYTHONDONTWRITEBYTECODE": "1"}
+        child = subprocess.run([sys.executable, "-c", _CENSUS_BESIDE_A_STARTING_CARRIED_AUTHOR, str(root), tid],
+                               cwd=str(REPO), env=env, text=True, capture_output=True, timeout=90)
+        assert child.returncode == 0, child.stdout + child.stderr
+        seen.update(json.loads(child.stdout.strip().splitlines()[-1]))
+
+    _starting_turn(root, starting)
+    assert seen == {"complete": True, "kinds": ["presence"]}
+
+
+def test_an_inline_executors_turn_is_listed_once_as_its_live_actor(root):
+    """Census minor (a): an inline executor's turn is both a registered actor and a lane row; the census lists it
+    once, as the actor (its own phase and model wait), never a second lane-shaped row beside it."""
+    from ouroboros.gateway.state import _direct_turns_snapshot_safe
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
+    from supervisor import workers
+    from supervisor.active_activity import get_direct_activity_registry
+    from tests.conversation_carrier_support import lane_row
+
+    registry = get_direct_activity_registry()
+    registry.clear()
+    try:
+        registry.register("inline-turn", 1, kind="direct_chat", phase="working")
+        lane_row(workers, {"id": "inline-turn", "type": "task", "chat_id": 1, "text": "hi", "_is_direct_chat": True},
+                 executor=EXECUTOR_INLINE_DEGRADED, pid=None)
+        rows = [row for row in _direct_turns_snapshot_safe() if row.get("activity_id") == "inline-turn"]
+        assert rows == [row for row in registry.snapshot() if row.get("activity_id") == "inline-turn"]
+    finally:
+        registry.clear()
