@@ -189,10 +189,9 @@ never call it; no notification state survives reload.
 
 The room gate refuses hidden, A2A and unknown chats. Each task ending has one key;
 a direct ending is an ordinary reply. Frame lineage excludes child banners.
-Activation resolves exact Project identity through `GET /api/projects?chat_id=…`,
-independent of the capped sidebar. Missing, inactive or unreadable destinations show
-unavailable without navigating. Established Main notices, including Telegram, open Main.
-A later click supersedes an unfinished lookup; hydration stays silent.
+Activation follows ARCHITECTURE §3 (exact registry identity, never the capped sidebar;
+an unresolved destination shows unavailable, keeping the view; Main notices open
+Main); a later click supersedes an unfinished lookup; hydration stays silent.
 
 Classification and gating are pure over a frame and stored preferences, testable
 without DOM or socket. Preferences stay client-local, outside `s-`, settings-dirty
