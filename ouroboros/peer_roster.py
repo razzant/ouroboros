@@ -45,6 +45,7 @@ from ouroboros.control_actor import pause_author
 from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
 from ouroboros.focus import compact_focus, focus_fingerprint
 from ouroboros.task_status import SETTLED_STATUSES, _load_queue_snapshot, queue_snapshot_observation
+from ouroboros.task_carrier import execution_kind
 from ouroboros.queue_observation import load_queue_document
 
 log = logging.getLogger(__name__)
@@ -372,10 +373,10 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
         "project_id": str(task.get("project_id") or ""),
         "status": status,
         "drive_root": str(task.get("child_drive_root") or task.get("drive_root") or ""),
-        # A live direct conversation: the retired fragment's rows, and the conversation lane's RUNNING
-        # rows (an owner turn carried by the pool is still the owner's conversation, never a task). A
-        # Presence turn is a place's conversation, not the owner's, wherever it runs (``inline_presence``).
-        "direct_chat": bool(direct or (task.get("_is_direct_chat") and not _presence_task(task))),
+        # A live direct conversation: the retired fragment's rows, and an attempt whose recorded owner is
+        # the owner's turn (``execution_kind``), wherever it runs. A Presence turn is a place's conversation,
+        # and a turn handed to the project pool (``continue_in_background``) is pooled work: neither is.
+        "direct_chat": bool(direct or (execution_kind(task) == "direct" and not _presence_task(task))),
     }
     queue_row = queue_row if isinstance(queue_row, dict) else {}
     # Focus is durably written before the supervisor projection event.  Read
