@@ -26,10 +26,37 @@ def detached_fields(task: dict, pause: dict) -> dict:
 
 
 def pool_available() -> dict:
-    """Called only by an in-process head, against its actual supervisor pool."""
-    from supervisor.workers import worker_pool_admission_state
+    """The project pool's admission as the server, its only owner, sees it.
 
-    return worker_pool_admission_state()
+    In the server (an inline executor) that is the live pool table. A conversation carrier owns no pool
+    table (its own ``supervisor.workers`` is empty), so it reads the server's published facts: the queue
+    document's pool members and disablement, and the durable update marker (the server's in-memory writer
+    gate is not visible from here; its transaction marker is). An unreadable document is no availability.
+    """
+    from ouroboros.utils import in_worker_process
+
+    if not in_worker_process():
+        from supervisor.workers import worker_pool_admission_state
+
+        return worker_pool_admission_state()
+    from ouroboros.config import DATA_DIR
+    from ouroboros.queue_observation import load_queue_document
+
+    document = load_queue_document(DATA_DIR)
+    started = int(document.get("worker_total") or 0) + int(document.get("lane_carrier_total") or 0) > 0
+    disabled = ("queue_document_unreadable" if "_snapshot_invalid" in document or "_snapshot_missing" in document
+                else str(document.get("worker_pool_disabled_reason") or ""))
+    try:
+        from supervisor.update_merge import active_update_tx
+
+        tx = active_update_tx()
+        update = f"managed_update_tx:{tx.get('phase') or 'unknown'}" if tx else ""
+    except Exception:
+        update = "managed_update_tx:unreadable"
+    reason = disabled or update or ("" if started else "no_workers")
+    return {"available": not reason, "reason_code": "" if not reason else "worker_pool_unavailable",
+            "disabled_reason": reason, "worker_count": int(document.get("worker_total") or 0),
+            "source": "published"}
 
 
 def owner_question_pending(ctx: Any) -> bool:
