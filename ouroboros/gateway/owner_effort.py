@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.composer_cognition import main_cognition, request_project_id, update_project_cognition
-from ouroboros.gateway._helpers import request_drive_root
+from ouroboros.gateway._helpers import request_drive_root, request_json_or
 from ouroboros.gateway.owner_settings import (
     _owner_audit,
     _owner_update_settings,
@@ -42,9 +42,9 @@ def effort_range_refusal(body: Any) -> str:
 @owner_write_guard
 async def api_owner_effort_range(request: Request) -> JSONResponse:
     """Persist the owner's effort range; every participant started afterwards reads it."""
-    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+    from ouroboros.gateway.settings import _run_settings_writer
 
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside), like every settings writer.
     return await _run_settings_writer(_api_owner_effort_range_sync, request, body)
 
@@ -85,9 +85,9 @@ def _api_owner_effort_range_sync(request: Request, body: Any) -> JSONResponse:
 
 @owner_write_guard
 async def api_owner_subagents_mode(request: Request) -> JSONResponse:
-    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+    from ouroboros.gateway.settings import _run_settings_writer
 
-    return await _run_settings_writer(_api_owner_subagents_mode_sync, request, await _json_body_or_empty(request))
+    return await _run_settings_writer(_api_owner_subagents_mode_sync, request, await request_json_or(request, {}))
 
 
 def _api_owner_subagents_mode_sync(request: Request, body: Any) -> JSONResponse:

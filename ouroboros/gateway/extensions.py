@@ -644,7 +644,7 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     sentinel = object()
@@ -736,7 +736,7 @@ async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     payload = await _run_owner_skill_action(request, skill_name, "attest", body)
@@ -785,7 +785,7 @@ async def api_skill_grants(request: Request) -> JSONResponse:
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     if "enable_after_grant" in body and not isinstance(body["enable_after_grant"], bool):
@@ -820,7 +820,7 @@ async def api_skill_delete(request: Request) -> JSONResponse:
     skill_name = _sanitize_skill_name(str(request.path_params.get("skill") or "").strip())
     if not skill_name or skill_name == "_unnamed":
         return json_error("missing skill name", 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
     payload = await _run_owner_skill_action(request, skill_name, "delete", body)

@@ -31,7 +31,11 @@ from ouroboros.llm_capability_policy import (
 )
 from ouroboros.reasoning_artifacts import transcript_has_sealed_reasoning
 from ouroboros.llm_routing import _resolve_or_provider
-from ouroboros.provider_models import normalize_deepseek_reasoning_effort, normalize_zai_reasoning_effort
+from ouroboros.provider_models import (
+    normalize_deepseek_reasoning_effort,
+    normalize_minimax_reasoning_effort,
+    normalize_zai_reasoning_effort,
+)
 from ouroboros.request_wire_recovery import (
     current_wire_candidate,
     finalize_wire_response,
@@ -198,15 +202,26 @@ class _OpenAICompatibleLaneMixin:
                     # its caller-declared affinity instead.
                     kwargs["prompt_cache_key"] = cache_identity
             requested_effort = normalize_reasoning_effort(reasoning_effort)
-            if provider not in {"deepseek", "zai"}:
+            if provider not in {"deepseek", "minimax", "zai"}:
                 # Every Chat Completions route carries the owner's effort in the
-                # standard field: direct OpenAI, MiniMax, Cloud.ru and any
+                # standard field: direct OpenAI, Cloud.ru and any
                 # OpenAI-compatible server alike. No provider or model list
                 # decides it — unknown is not no — so a route that refuses the
                 # field or a value is adapted by request-wire recovery on that
                 # exact route's own rejection, requested and sent kept apart.
-                # DeepSeek and Z.ai keep their measured projections below.
+                # DeepSeek, MiniMax and Z.ai keep their sourced projections below.
                 kwargs["reasoning_effort"] = requested_effort
+            elif provider == "minimax":
+                # Exact Flash only; omitting none would serve max. Reuse the
+                # requested/applied disclosure, including clearing a stale note.
+                applied = normalize_minimax_reasoning_effort(resolved_model, requested_effort)
+                kwargs["reasoning_effort"] = applied
+                _EFFORT_CLAMP_CVAR.set(None)
+                if applied != requested_effort:
+                    _EFFORT_CLAMP_CVAR.set({
+                        "requested": requested_effort, "applied": applied,
+                        "reason": "provider_wire_mapping", "model": resolved_model,
+                    })
             elif provider == "deepseek":
                 # Same carriage, projected onto DeepSeek's wire dialect
                 # (low/high/max; thinking is switched off by a toggle, not an
@@ -597,7 +612,7 @@ class _OpenAICompatibleLaneMixin:
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )
-        # Merge the tier note staged at build (DeepSeek/Z.ai projections); normal
+        # Merge the tier note staged at build (DeepSeek/MiniMax/Z.ai projections); normal
         # dispatch adaptation is disclosed through usage.request_wire.
         _clamp_note = self._pop_effort_clamp_disclosure()
         if _clamp_note:

@@ -314,8 +314,9 @@ def get_supervisor_liveness_deadline_sec(settings: Optional[dict] = None) -> int
 
 
 def get_post_task_evolution_budget_usd() -> float:
-    """Optional per-window USD budget for post-task evolution (0 = use the
-    existing EVOLUTION_BUDGET_RESERVE / TOTAL_BUDGET gating only)."""
+    """Start floor of a post-task promotion: below this remaining global budget (USD) a pending
+    request is dropped instead of starting its campaign. 0 (default) adds no floor beyond the
+    ordinary TOTAL_BUDGET admission; it is no per-cycle or per-window budget and caps no cycle."""
     return _clamped_number_setting("OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", low=0.0)
 
 

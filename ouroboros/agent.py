@@ -805,6 +805,7 @@ class OuroborosAgent:
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
             task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
+        self._capture_mutation_baseline(task, task_metadata)  # before the rebind records the candidate in it
         body_candidate.restore(ctx)  # a retry, Resume or new worker authors the candidate this lineage owns
         # Existing ToolContext stays the loop's carrier; these process-local
         # references are not serialized state or a new routing authority.
@@ -851,7 +852,6 @@ class OuroborosAgent:
                 self._current_task_metadata = dict(task_metadata)
             route_choice.bind_task_route(ctx, task_metadata, presence=bool(task.get("_presence_turn")))
         startup_wake = subagent_bootstrap.bootstrap_before_context(ctx, task, dispatch)
-        self._capture_mutation_baseline(task, task_metadata)
         self._emit_typing_start()
         canonical_drive = pathlib.Path(task.get("budget_drive_root") or self.env.budget_drive_root or self.env.drive_root)
         review_env = self.env if canonical_drive.resolve(strict=False) == self.env.drive_root.resolve(strict=False) else replace(self.env, drive_root=canonical_drive)

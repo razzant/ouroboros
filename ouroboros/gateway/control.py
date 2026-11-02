@@ -1427,7 +1427,7 @@ async def _apply_replace_recovery(
 
 async def api_update_apply(request: Request) -> JSONResponse:
     """Apply an exact managed plan; replacement is an explicit recovery only."""
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("JSON body must be an object.", 400)
     # Executable gateway ABI (ABI-3, Q7=A): UpdateApplyRequest declares

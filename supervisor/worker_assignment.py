@@ -651,7 +651,6 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     from ouroboros.project_placement import refresh_pending_placement
     from ouroboros.config import get_max_active_subagents_per_root
     from supervisor.events_budget import budget_resume_dispatch_allowed
-    from supervisor.state import EVOLUTION_BUDGET_RESERVE
     from supervisor.task_lifecycle import root_cancellation_fenced
     from supervisor.consciousness_carriers import autonomous_work_enabled
 
@@ -690,8 +689,6 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
             # One member explicitly selected against THIS fence is admitted; the latch stays up for the rest (Q9).
             and not budget_fence_selected(candidate, queue.BUDGET_ROOT_FENCES.get(root_task_id))):
         return True
-    if str(candidate.get("type") or "") == "evolution" and remaining < EVOLUTION_BUDGET_RESERVE:
-        return True
     if not refresh_pending_placement(_pool().DRIVE_ROOT, candidate):
         return True
     cold = cold_holders if cold_holders is not None else cold_project_holders(_pool().PENDING)
@@ -712,7 +709,6 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
     Selection never claims dispatch, consumes a grant, or creates RUNNING custody.
     """
     from ouroboros.project_lease import cold_project_holders, running_project_ids
-    from supervisor.state import EVOLUTION_BUDGET_RESERVE
 
     leased = running_project_ids(running)
     while True:
@@ -761,12 +757,7 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
             chosen_idx = i
             break
         if chosen_idx is None:
-            # Project-leased rows wait; evolution rows below the reserve are cleaned.
-            # At zero the pause block already parked or settled each row: keep it.
-            if 0 < remaining < EVOLUTION_BUDGET_RESERVE:
-                dropped_ids = _pool()._drop_assignable_evolution_tasks(unresolved_invalid_id_set)
-                if dropped_ids:
-                    queue.persist_queue_snapshot(reason="evolution_dropped_budget")
+            # Ineligible rows wait in custody; at zero the pause block parked or settled each.
             return None, False
         task = _pool().PENDING[chosen_idx]
         depth_error = _pool()._normalize_pending_task_depth(task)
@@ -806,7 +797,7 @@ def _reconcile_fenced_lane() -> None:
 
 def assign_tasks() -> None:
     from supervisor import queue
-    from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
+    from supervisor.state import budget_remaining
     from supervisor.worker_owner_wait import maintain_owner_wait_capacity
 
     from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity, worker_ready
@@ -848,10 +839,7 @@ def assign_tasks() -> None:
         if _pool()._WORKER_POOL_DISABLED_REASON:
             return
         try:  # every loop tick: ride the snapshot; a refusal re-reads exactly, reserve_attempt is the gate
-            evolution_queued = any(str(row.get("type") or "") == "evolution" for row in _pool().PENDING)
-            remaining = budget_remaining(  # this tick refuses at zero AND, for evolution, at its reserve
-                st, strict=True, allow_stale=True,
-                refuse_below=EVOLUTION_BUDGET_RESERVE if evolution_queued else 0.0)
+            remaining = budget_remaining(st, strict=True, allow_stale=True)  # this tick refuses at zero
         except Exception:
             log.error("Task assignment blocked: monetary authority unavailable")
             return

@@ -122,7 +122,7 @@ ouroboros/ — agent core and shared runtime (§6)
   extension_companion.py, extension_reconcile_queue.py — host-supervised companion processes for transport skills; durable worker→server reconcile markers (§12; §13)
   event_bus.py — typed in-process event bus for skill subscriptions
   event_usage.py, event_token_totals.py — event token counters, offline totals (§11.4)
-  evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoint ledger; canonical objective fingerprint for repeat gating
+  evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoint ledger; canonical objective fingerprint for repeat counts
   improvement_backlog.py — the authored backlog note's complete current text for the evolution chooser and context; no host writer (§6 Post-task work)
   loop.py — the LLM tool loop, finalization nudges and the FINAL ANSWER candidate (§6 Task lifecycle)
   late_review_marks.py — a review settled after its author could receive it (a plan reply, a left wave), kept in its room's view until the mind releases it (§6 Review stack)
@@ -476,7 +476,7 @@ ouroboros/ — agent core and shared runtime (§6)
     history_paging.py, history_chronology.py — a room's own pages over the dialogue store, frozen room-bound cursors, gaps, the import frontier, a Project's `latest_arrival`; no stored history copy (§3 History reads)
     cost_breakdown.py — Ledger-derived dashboard buckets and root-task detail over the same physical-attempt authority
     projects.py — GET/POST /api/projects, /from-task, /update, /delete
-    _helpers.py — Shared request-root/coercion/JSON error envelope and `run_sync_to_completion`, the settled worker wait for request-owned blocking work
+    _helpers.py — Shared request-root/coercion, the JSON body (`request_json_or`) and error envelope, `run_sync_to_completion`, the settled worker wait for request-owned blocking work
   tools/ — Auto-discovered tool plugins
     registry.py — Tool registry SSOT: loads tool modules, exposes schemas, executes safely; owns the shell-guard/process-tool membership sets
     core.py — File/data tools (read_file, list_files, write_file, edit_text), delivery tools (send_photo, send_video, send_file, send_links, show_card), search_code, escalate, forward_to_worker

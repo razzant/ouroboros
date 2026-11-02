@@ -539,7 +539,9 @@ def _attach_host_mutation_projection(
     if task_id and task_id == root_task_id:
         try:
             if attribution_task_id(evidence_root, (task_id,)) == task_id:
-                record_terminal_mutation_candidates(evidence_root, task_id)
+                from ouroboros.body_candidate import find  # the root's own copy reads as the commit consumer reads it
+                copy = find(task_id) or {}
+                record_terminal_mutation_candidates(evidence_root, task_id, candidate_roots=[copy.get("path") or ""])
         except Exception:
             snapshot_failed = True
             log.debug("terminal mutation snapshot failed for %s", task_id, exc_info=True)
