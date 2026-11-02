@@ -294,7 +294,7 @@ def test_server_navigation_and_chat_static_contracts():
 
     assert "def _describe_bg_consciousness_state(requested_enabled: bool | None) -> dict:" in server_source
     assert '"evolution_state": evolution_state,' in state_source
-    assert '"bg_consciousness_state": bg_state,' in state_source
+    assert '"bg_consciousness_state": snap.get("bg_state") or {},' in _read("ouroboros/gateway/state_publication.py")
     assert 'request.query_params.get("force")' in control_source
     assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));" in app_source
     assert "evo-consciousness-detail" in evo_source

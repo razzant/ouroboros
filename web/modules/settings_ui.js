@@ -194,8 +194,8 @@ export function renderSettingsPage() {
                             </div>
                             <div class="form-field ui-field">
                                 <label for="s-websearch-model">Model</label>
-                                <input id="s-websearch-model" placeholder="Auto: source defaults" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
-                                <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices. Empty uses source defaults.</div>
+                                <input id="s-websearch-model" placeholder="Recommended for each source" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
+                                <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices. Empty follows the model Ouroboros recommends for each source.</div>
                             </div>
                         </div>
                         <div class="ui-field-help" id="s-websearch-preview" role="status"></div>

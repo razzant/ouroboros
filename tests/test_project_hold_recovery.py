@@ -208,7 +208,7 @@ def test_snapshot_clear_failure_retains_hold_then_revalidates(host, tmp_path, mo
     resume_after_app_stop(host, "held")
     hold = copy.deepcopy(host.pending[0]["_project_admission_restore_hold"])
     with monkeypatch.context() as patch:
-        patch.setattr(queue, "persist_queue_snapshot", lambda **_k: False)
+        patch.setattr(queue, "publish_queue_snapshot", lambda **_k: False)
         workers.assign_tasks()
     assert not sent and host.pending[0]["_project_admission_restore_hold"] == hold
     workers.assign_tasks()
@@ -408,11 +408,11 @@ def test_unchanged_hold_does_not_rewrite_snapshot_but_changed_reason_does(host, 
     sent = worker(host, monkeypatch)
     workers.assign_tasks()  # First failure projects its current cause.
     writes = []
-    persist = queue.persist_queue_snapshot
+    persist = queue.publish_queue_snapshot
     def observed(**kwargs):
         writes.append(kwargs)
         return persist(**kwargs)
-    monkeypatch.setattr(queue, "persist_queue_snapshot", observed)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", observed)
     workers.assign_tasks()
     workers.assign_tasks()
     assert not writes and not sent

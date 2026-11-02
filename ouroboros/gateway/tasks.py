@@ -296,7 +296,7 @@ def _enqueue_api_task_durably(
             admitted.update(_admission_never_admitted=True, _admission_owner_token=admission_token)
             return admitted
         try:
-            if queue.persist_queue_snapshot(reason="api_task_create") is not True:
+            if queue.publish_queue_snapshot(reason="api_task_create") is not True:  # durable before 202
                 raise RuntimeError("Queue snapshot persistence was not confirmed")
             write_task_result(drive_root, task_id, STATUS_SCHEDULED, **result_fields)
             stored = load_task_result(drive_root, task_id, strict=True) or {}

@@ -42,7 +42,7 @@ from devtools.benchmarks.common.run_roots import (
     safe_join_under,
 )
 from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
-from ouroboros.config import EFFORT_SCALE, SETTINGS_DEFAULTS
+from ouroboros.config import EFFORT_SCALE
 
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
@@ -179,10 +179,14 @@ def _effective_helper_models(
     credentials), so it is never forwarded or declared as a used model and is
     carried by `triad_rows_not_executable_in_container` instead. A malformed
     host roster is a typed refusal (ValueError), never a declared-but-never-run
-    default. Returns ordered (model_id, role) pairs, deduped by model id.
+    default. The web search model is the value the adapter forwards (operator env first, else the
+    host settings file); a blank one is planned as the recommended models of the container's own
+    Source (`_planned_blank_search_models`). Returns ordered (model_id, role) pairs, deduped by model id.
     """
-    websearch_default = str(SETTINGS_DEFAULTS["OUROBOROS_WEBSEARCH_MODEL"])
-    websearch = os.environ.get("OUROBOROS_WEBSEARCH_MODEL", websearch_default) or websearch_default
+    websearch = os.environ.get("OUROBOROS_WEBSEARCH_MODEL")
+    if websearch is None and settings:
+        websearch = settings.get("OUROBOROS_WEBSEARCH_MODEL")
+    websearch = str(websearch or "").strip()
     ordered: list[tuple[str, str]] = [(measured_model, "agent")]
     for row in _container_review_pool(measured_model, settings):
         ordered.append((row.target_id.strip(), "commit_review_triad"))
@@ -191,8 +195,8 @@ def _effective_helper_models(
     # Only declare a web_search model if web tools are actually available this run. With
     # disable_agent_web (the default), the agent's web tools are blocked, so declaring a
     # web_search role would misrepresent the submission.
-    if websearch.strip() and not disable_agent_web:
-        ordered.append((websearch.strip(), "web_search"))
+    if not disable_agent_web:
+        ordered.extend((model_id, "web_search") for model_id in ([websearch] if websearch else _planned_blank_search_models()))
     deduped: dict[str, str] = {}
     for model_id, role in ordered:
         if model_id in deduped:
@@ -201,6 +205,19 @@ def _effective_helper_models(
         else:
             deduped[model_id] = role
     return list(deduped.items())
+
+
+def _planned_blank_search_models() -> list[str]:
+    """The models a blank web search Model plans inside the container, as `org/model` ids: the
+    recommended legs `search_routes` resolves for the container's Source, which the adapter does not
+    forward (Auto). Planned, not observed: which leg answers depends on the container's keys, and this
+    reads no host route, credential or Source."""
+    from ouroboros.search_routes import resolve_web_search_route
+
+    route = resolve_web_search_route(settings={"OUROBOROS_WEBSEARCH_BACKEND": "auto", "OUROBOROS_WEBSEARCH_MODEL": ""})
+    legs = route["legs"] + route["unavailable"]
+    return list(dict.fromkeys(leg["model"] if leg["source"] == "openrouter" else f"{leg['source']}/{leg['model']}"
+                              for leg in legs if leg["model"]))
 
 
 def _host_settings(settings_path: pathlib.Path) -> dict[str, Any]:

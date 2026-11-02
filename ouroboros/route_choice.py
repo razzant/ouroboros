@@ -4,11 +4,11 @@ Two facts the loop lacked (R1 §6.0): whether a task's route follows its role or
 choice, and that a role's binding is a reference, not a value frozen when the turn opened. This
 leaf answers both; it holds no model call and no checkpoint store of its own.
 
-Live view. ``ROUTE_SETTING_KEYS`` (the role model slots, their local flags, accounts, windows,
-processing preferences, the OpenRouter routing preset and every provider credential key) are read
-from the settings document as it is NOW, never from the task's entry snapshot: a saved Main reaches
-work that follows Main on its next call, and a cleared or disabled key stops every task's next
-send. The read has ``skill_settings()`` semantics (the full effective loader over
+Live view. ``ROUTE_SETTING_KEYS`` (the role model slots, the web search Source its Model belongs to,
+their local flags, accounts, windows, processing preferences, the OpenRouter routing preset and every
+provider credential key) are read from the settings document as it is NOW, never from the task's entry
+snapshot: a saved Main reaches work that follows Main on its next call, and a cleared or disabled key
+stops every task's next send. The read has ``skill_settings()`` semantics (the full effective loader over
 ``skill_environ()``: an operator's own variable still stands in for a key the document leaves
 unset; this process tree's own mirrored values never do, so a key the owner cleared cannot come
 back from a reused worker's environment), memoised behind the document's stat and the operator
@@ -51,7 +51,7 @@ ROUTE_CREDENTIAL_SETTING_KEYS: frozenset = frozenset(provider_models.ROUTE_CREDE
 ROUTE_SETTING_KEYS: frozenset = frozenset({
     *MODEL_ROLE_SETTINGS.values(), *(key for key in SETTINGS_DEFAULTS if key.startswith("USE_LOCAL_")),
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_PREFERENCE_KEY,
-    "OUROBOROS_OR_PROVIDER", *ROUTE_CREDENTIAL_SETTING_KEYS,
+    "OUROBOROS_OR_PROVIDER", "OUROBOROS_WEBSEARCH_BACKEND", *ROUTE_CREDENTIAL_SETTING_KEYS,
 })
 _EXPORTED_ROUTE_KEYS = frozenset(settings_env_keys()) & ROUTE_SETTING_KEYS
 # The operator variables a read lets stand in, and the projection records that tell them from our echo.

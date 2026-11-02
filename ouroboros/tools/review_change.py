@@ -1237,7 +1237,8 @@ def _handle_review_change(ctx: ToolContext, review_reference: Any = None, *,
             return argument_refusal(ctx, "TOOL_ARG_ERROR (review_change)", [str(exc)],
                                     effect="No reviewer was dispatched.")
     record = load_record(ledger_root(ctx), str(payload.get("record_id") or "")) if payload.get("record_id") else None
-    return publish_delivery(ctx, text, record) if record else text
+    # The receipt covers the rows this text rendered; a seat that settled since is not in it.
+    return publish_delivery(ctx, text, record, rendered_rows=payload.get("rows") or []) if record else text
 
 
 def _review_change_tool_timeout_sec() -> Optional[float]:

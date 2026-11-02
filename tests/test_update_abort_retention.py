@@ -67,6 +67,9 @@ def _system(tmp_path, monkeypatch):
     # would build its manager on it (no ``Process``) and every task_done publish would fail.
     monkeypatch.setattr(workers, "_CTX", None)
     monkeypatch.setattr(workers, "threading", SimpleNamespace(Thread=_InlineThread))
+    # A demand-grown project slot's readiness watcher is the lifecycle module's thread; inline too,
+    # so the slot the first assignment pass grows is ready for the second.
+    monkeypatch.setattr(worker_pool_lifecycle, "threading", SimpleNamespace(Thread=_InlineThread))
     processes, launches = {}, []
 
     def process(wid, commands):
@@ -76,7 +79,8 @@ def _system(tmp_path, monkeypatch):
 
     def spawn(_ctx, wid, commands, _events, _repo, root):
         proc = process(wid, commands)
-        launches.append(commands)
+        if wid != 0:  # slot 0 is the conversation lane's spare (spawn_workers): not a project launch
+            launches.append(commands)
         append_jsonl(root / "logs" / "events.jsonl", {
             "type": "worker_ready", "worker_id": wid, "pid": proc.pid,
             "process_birth": f"birth-{proc.pid}", "git_sha": "test-sha"})
@@ -92,6 +96,20 @@ def _system(tmp_path, monkeypatch):
     for module in (workers, worker_pool_lifecycle):
         monkeypatch.setattr(module, "kill_worker_tree", lambda pid, **_kw: processes[pid].terminate())
     monkeypatch.setattr(worker_process, "spawn_worker_process", spawn)
+    # The pool boots with the conversation lane's spare only; project workers grow on demand
+    # (``reconcile_worker_capacity`` at the end of an assignment pass, sized by the residual
+    # demand). These tests call ``assign_tasks`` as the tick's dispatch: two passes, the first
+    # grows the project slot a pending row asks for, the second dispatches to it once ready.
+    assign = workers.assign_tasks
+
+    def assign_after_capacity():
+        grown = len(launches)
+        result = assign()
+        if len(launches) > grown:  # the pass grew a project slot for a pending row: dispatch to it once ready
+            result = assign()
+        return result
+
+    monkeypatch.setattr(workers, "assign_tasks", assign_after_capacity)
 
     def saved(task_id="saved"):
         admitted = queue.enqueue_task(_queued(task_id, root_task_id=task_id))
@@ -165,7 +183,7 @@ def test_gateway_abort_returns_saved_work_and_assigns_once(tmp_path, monkeypatch
     handoff = dict(task["_working_recovery"])
     system.control._respawn_workers_after_failed_update()
     assert _assert_returned(system, tmp_path)["_working_recovery"] == handoff
-    assert len(system.launches) == 1
+    assert not system.launches  # the respawn gives the lane's spare; the project worker grows at assignment
     system.workers.assign_tasks()
     [commands] = system.launches
     sent = commands.get_nowait()
@@ -188,7 +206,7 @@ def test_assisted_abort_doors_return_saved_work(tmp_path, monkeypatch, door):
     assert system.workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True)
     system.workers.assign_tasks()
     assert system.workers.RUNNING["saved"]["retained_for_boot"] is True
-    assert not system.workers.PENDING and system.launches[0].empty()
+    assert not system.workers.PENDING and all(commands.empty() for commands in system.launches)
     if door == "watchdog":
         result = update_merge.abort_orphaned_assisted_tx("resolver", metadata)
         assert result["rolled_back"], result
@@ -316,7 +334,8 @@ def test_failed_snapshot_never_opens_writers_and_retry_buys_one_successor(tmp_pa
     monkeypatch.setattr(system.queue, "atomic_write_text", original_write)
     system.control._respawn_workers_after_failed_update()
     task = _assert_returned(system, tmp_path)
-    assert task["_attempt"] == 2 and len(system.launches) == 1
+    assert task["_attempt"] == 2 and not system.launches  # one successor; its project worker grows at assignment
+    assert any(worker.lane == "conversation" for worker in system.workers.WORKERS.values())  # the pool restarted
 
 
 @pytest.mark.parametrize("replacement", ["different_attempt", "different_object", "foreign_id"])

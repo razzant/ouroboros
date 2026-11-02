@@ -59,11 +59,14 @@ def presence_event_origin(payload: Any) -> dict[str, str]:
 
 
 def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
-                        reporting_version: int = 0, continuing: int = 0) -> PresenceTurnEvent:
+                        reporting_version: int = 0, continuing: int = 0, vouched_facts: Any = ()) -> PresenceTurnEvent:
     """Validate a call's source event against its admitted place, as ``/presence/turn`` does.
 
     The transport's claimed conversation_key never chooses the host history
     or concurrency key; that key comes from the checked origin facts.
+    ``vouched_facts``: the declared connector signals the Host already admitted for this event from the
+    authenticated connector's live publication (``places.declared_wake_signals``); a carrier re-admitting the
+    Host's event takes them by value, never from its own process's registry.
     """
     from ouroboros.places import WAKE_FACTS
     from ouroboros.presence_bindings import conversation_key
@@ -72,8 +75,8 @@ def presence_turn_event(payload: Any, admission: PresenceAdmission, *,
                 "conversation_key", "actor", "conversation", "message", "text"}
     if not isinstance(payload, dict) or set(payload) - {"facts"} != expected:
         raise PresenceTurnError("presence_event_invalid", "event")
-    facts = payload.get("facts")
-    if "facts" in payload and (not isinstance(facts, list) or any(fact not in WAKE_FACTS for fact in facts)):
+    facts, allowed = payload.get("facts"), set(WAKE_FACTS) | set(vouched_facts or ())
+    if "facts" in payload and (not isinstance(facts, list) or any(fact not in allowed for fact in facts)):
         raise PresenceTurnError("presence_event_invalid", "event.facts")
     provider, account_id, conversation_id, thread_id = (
         str(payload.get(key) or "").strip()

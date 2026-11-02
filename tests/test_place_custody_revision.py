@@ -820,3 +820,87 @@ def test_a_reentry_note_carries_a_reaction_as_context_and_never_as_coverage(tmp_
     metadata = {"presence_continuation_version": 2,
                 "presence": {"event": {"source_event_id": "chat:a:5", "message": {"message_id": "5", "source_order": 5}}}}
     assert reply_anchor(author, metadata)["source_event_id"] == "chat:a:6"
+
+
+def test_a_carried_version_2_author_answers_early_from_its_carrier(v2, monkeypatch):
+    """Review K4: the early answer comes from the turn's own intake opening in whichever process carries it.
+    Here the v2 event is admitted to a READY conversation-lane carrier (executor ``worker``), never the degraded
+    executor a TestClient Host otherwise uses; this test is that carrier: it runs the real worker body, which
+    re-admits the turn and runs the production agent, and hands its frames to the server's handlers. The Host
+    answers ``continuing`` while the author's first model call is still in flight."""
+    from ouroboros.presence_carrier import handle_presence_turn_initial, handle_presence_turn_settled
+    from supervisor import conversation_lane, workers
+    from supervisor.worker_process import run_worker_task
+    from tests.conversation_carrier_support import isolate_lane_pool
+
+    h = v2
+    slot, = isolate_lane_pool(monkeypatch, h.root, spares=1)
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", id(workers.WORKERS))  # a started pool generation
+    monkeypatch.setattr(conversation_lane, "replenish_after_claim", lambda: None)  # this test is the only carrier
+
+    class ServerBus:
+        """The server's consumer of the carrier's frames (the Host's waiter is settled from them)."""
+
+        def put(self, item, *_a, **_k):
+            kind = item.get("type") if isinstance(item, dict) else None
+            if kind == "presence_turn_initial":
+                handle_presence_turn_initial(item, workers)
+            elif kind == "presence_turn_settled":
+                handle_presence_turn_settled(item, workers)
+
+    stop, carried = threading.Event(), []
+
+    def carrier():
+        while not stop.is_set():
+            if not slot.in_q:
+                time.sleep(0.01)
+                continue
+            task = slot.in_q.pop(0)
+            carried.append(task)
+            run_worker_task(SimpleNamespace(owner_wait_callback=None, _event_queue=None), task, wid=slot.wid,
+                            out_q=ServerBus(), repo_dir=str(h.root), drive_root=str(h.root))
+
+    thread = threading.Thread(target=carrier, name="test-carrier", daemon=True)
+    thread.start()
+    release = threading.Event()
+    h.script = [held(release, finish_call("Carried answer."))]
+    try:
+        request, box = post_later(h, 1)
+        try:
+            request.join(BARRIER)
+            assert "response" in box and not release.is_set(), "no early answer while the carried author was working"
+            assert box["response"].status_code == 200 and box["response"].json()["status"] == "continuing"
+            assert carried and carried[0]["_execution_owner"]["executor"] == "worker"  # a carrier, not degraded
+        finally:
+            release.set()
+            request.join(BARRIER)
+        assert settled(h, turn_ref(h, 1))["text"] == "Carried answer."
+        wait_until(lambda: not h.host.presence_turns.live(), "the carried author's settlement")
+    finally:
+        stop.set()
+        thread.join(BARRIER)
+
+
+def test_the_authors_durable_intake_closes_with_its_final_drain_before_the_turn_returns(v2):
+    """Review M10: a Host in another process reads only the author's durable intake fact. It closes with the
+    loop's own admission, before the final drain reads, so between the final closure and the turn's return a
+    remote arrival is refused (it becomes its own turn), never acknowledged to an author that will not read it."""
+    from ouroboros.conversation_lease import author_intake_accepting
+    from ouroboros.presence_bindings import conversation_key
+
+    h, go = v2, threading.Event()
+    h.script = [held(go, finish_call("Answer."))]
+    h.terminal.clear()
+    thread, _box = post_later(h, 1)
+    ref, key = turn_ref(h, 1), conversation_key("chat", "a", "r", "")
+    try:
+        wait_until(lambda: len(h.calls) == 1, "the author's first model call")
+        assert author_intake_accepting(h.root, ref, key)  # its loop reads mail: a remote Host may offer it
+        go.set()
+        assert h.closed.wait(BARRIER)  # the final closure passed; the turn has not returned yet
+        assert not author_intake_accepting(h.root, ref, key)
+    finally:
+        go.set()
+        h.terminal.set()
+        thread.join(BARRIER)
+    assert settled(h, ref)["text"] == "Answer."

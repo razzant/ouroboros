@@ -56,7 +56,9 @@ class PresenceTurnLease:
     A lease minted by a gate can also be LENT at a qualified review wait (#1536): the
     conversation and active slot return to the gate while the same author stays live, and
     ``reacquire`` takes both again, in admission order, before any model or tool step.
-    ``execution`` is the Host turn whose initial envelope that author may publish.
+    ``execution`` is the Host turn whose initial envelope that author may publish; ``review_wait`` the
+    carrier's pooled owner wait its qualified review/private-question park lends the slot through (never the
+    agent's generic owner-wait capability: a Presence author gets no sleep, detach, Pause or budget pause).
     """
 
     def __init__(self, conversation_key: str, resources: ExitStack,
@@ -67,6 +69,7 @@ class PresenceTurnLease:
         self._gate = gate
         self._ended = False
         self.execution: Any = None
+        self.review_wait: Any = None
         self.task_id = ""
         self.intake_agent: Any = None
         self._live_fd: int | None = None
@@ -406,25 +409,133 @@ def presence_author_agent(drive_root, author: str):
     return lease.intake_agent if lease is not None and not lease._ended else None
 
 
-def accept_author_mail(drive_root, author: str, conversation_key: str, append: Callable[[], bool]) -> bool:
-    """Accept under the author's own intake/close lock, never a census-to-append race.
+def _intake_path(drive_root: Any, task_id: str) -> Path:
+    from ouroboros.task_results import validate_task_id
 
-    A remote author has no local admission endpoint: leave the arrival to ordinary
-    conversation admission instead of pretending a mailbox append is acceptance.
+    return Path(drive_root) / "memory" / "owner_mailbox" / f"{validate_task_id(task_id)}.intake.json"
+
+
+def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str = "") -> bool:
+    """The author's durable intake fact: True while its loop reads this conversation's mail.
+
+    Read under ``task_custody.task_mail_lock`` by the acceptance transaction below.
+    """
+    try:
+        row = json.loads(_intake_path(drive_root, task_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not row.get("accepting") or (conversation_key and row.get("conversation_key") != conversation_key):
+        return False
+    # The fact is the writer's: a carrier that died before its release left it standing, and a dead
+    # author reads no mail (an arrival appended to it would be swallowed). Its process must be alive.
+    return _writer_alive(row.get("pid"))
+
+
+def _writer_alive(pid: Any) -> bool:
+    from ouroboros.platform_layer import pid_is_alive  # never os.kill(pid, 0): CTRL_C_EVENT on Windows
+
+    try:
+        return pid_is_alive(int(pid))
+    except (TypeError, ValueError):
+        return False
+
+
+def _write_intake(drive_root: Any, task_id: str, row: dict) -> None:
+    atomic_write_json(_intake_path(drive_root, task_id), row)
+
+
+def open_author_intake(drive_root: Any, task_id: str, conversation_key: str) -> bool:
+    """The author's loop reads this conversation's mail from here on (under the mail lock).
+
+    False when the lock could not be taken: nothing is opened, so no arrival is accepted that the lock
+    could not order (the author still reads its own mailbox; a remote Host refuses, and the arrival
+    becomes its own turn)."""
+    from ouroboros.task_custody import task_mail_lock
+
+    with task_mail_lock(drive_root, task_id) as locked:
+        if not locked:
+            return False
+        _write_intake(drive_root, task_id, {"accepting": True, "conversation_key": conversation_key, "pid": os.getpid()})
+        return True
+
+
+def close_author_intake(drive_root: Any, task_id: str) -> bool:
+    """The author's loop stopped reading: an arrival offered from now on is refused (under the mail lock).
+
+    The fact is removed even when the lock could not be taken (it must never outlive its reader); False
+    then discloses that an arrival racing the close may have landed unread."""
+    from ouroboros.task_custody import task_mail_lock
+
+    with task_mail_lock(drive_root, task_id) as locked:
+        try:
+            _intake_path(drive_root, task_id).unlink()
+        except OSError:
+            pass
+        if not locked:
+            log.warning("author intake of %s closed without its mail lock; a racing arrival may be unread", task_id)
+        return bool(locked)
+
+
+def follow_loop_admission(ctx: Any, accepting: bool) -> None:
+    """A carried Presence author's durable intake follows its loop's own admission (the final drain).
+
+    A Host in another process reads only this fact, so it moves with the loop under the mail lock:
+    closed BEFORE the final drain reads (an arrival either lands first and is drained, or is refused
+    and becomes its own turn), reopened when the loop reads mail again (an owner follow-up, a reopened
+    final). Only the writer's own process moves its fact; a turn with no intake row has none to follow."""
+    metadata = getattr(ctx, "task_metadata", None)
+    root, task_id = getattr(ctx, "drive_root", None), str(getattr(ctx, "task_id", "") or "")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("presence"), dict) or root is None or not task_id:
+        return
+    from ouroboros.task_custody import task_mail_lock
+
+    try:
+        path = _intake_path(root, task_id)
+        if not path.exists():
+            return
+        with task_mail_lock(root, task_id) as locked:
+            row = json.loads(path.read_text(encoding="utf-8"))
+            if row.get("pid") != os.getpid() or bool(row.get("accepting")) is bool(accepting):
+                return
+            if not locked:
+                if accepting:
+                    return  # never reopened unordered: the loop's own mailbox stays its only intake
+                log.warning("author intake of %s closed without its mail lock; a racing arrival may be unread",
+                            task_id)
+            _write_intake(root, task_id, {**row, "accepting": bool(accepting)})
+    except (OSError, ValueError):
+        log.debug("author intake of %s did not follow its loop's admission", task_id, exc_info=True)
+
+
+def accept_author_mail(drive_root, author: str, conversation_key: str, append: Callable[..., bool]) -> bool:
+    """Accept an arrival for a live author while it still reads, never a census-to-append race.
+
+    A LOCAL author (an inline executor's actor in this process) is asked under its own
+    intake/close lock as before. A REMOTE author (a conversation-lane carrier) is asked
+    through one transaction under its mailbox lock (``task_custody.task_mail_lock``): the
+    durable intake fact (``open_author_intake`` / ``close_author_intake``, written under the
+    same lock) and the append are one step, so no row lands after the author stopped
+    reading. ``append(admit=...)`` performs the write; it receives the check to run inside
+    its own locked append (``owner_mailbox.write_task_message(admit=...)``).
     """
     root = str(Path(drive_root).resolve())
     with _AUTHORS_LOCK:
         lease = _AUTHORS.get((root, author))
     agent = lease.intake_agent if lease is not None else None
     lock = getattr(agent, "_owner_message_admission_lock", None)
-    if lock is None:
+    if lock is not None:
+        with lock, lease._lock:
+            if (lease._ended or lease._resources is None or lease.conversation_key != conversation_key
+                    or not getattr(agent, "_accepting_owner_messages", False) or not getattr(agent, "_busy", False)
+                    or getattr(agent, "_current_task_id", None) != author):
+                return False
+            return append()
+    if not author_intake_accepting(drive_root, author, conversation_key):
         return False
-    with lock, lease._lock:
-        if (lease._ended or lease._resources is None or lease.conversation_key != conversation_key
-                or not getattr(agent, "_accepting_owner_messages", False) or not getattr(agent, "_busy", False)
-                or getattr(agent, "_current_task_id", None) != author):
-            return False
-        return append()
+    try:
+        return bool(append(admit=lambda: author_intake_accepting(drive_root, author, conversation_key)))
+    except TypeError:
+        return False  # an append that takes no admission check cannot be made one transaction
 
 
 def live_presence_roots(drive_root: Any) -> dict:

@@ -497,19 +497,19 @@ def test_host_retry_of_a_live_turn_joins_it_instead_of_refusing(tmp_path):
         assert release.wait(60)
 
     agents.append(_answering_agent(calls, "Real answer", tmp_path, during=hold))
-    real_start_or_join = ctx.presence_turns.start_or_join
+    real_start_or_dispatch = ctx.presence_turns.start_or_dispatch  # the Host dispatches to the lane carrier (1A)
 
     async def scenario():
         second_joined = asyncio.Event()
 
         def recording(turn_id, **kwargs):
-            outcome = real_start_or_join(turn_id, **kwargs)
+            outcome = real_start_or_dispatch(turn_id, **kwargs)
             joins.append(outcome[1])
             if len(joins) == 2:
                 second_joined.set()
             return outcome
 
-        ctx.presence_turns.start_or_join = recording
+        ctx.presence_turns.start_or_dispatch = recording
 
         async def json_body():
             return _host_body(binding_id)
@@ -538,7 +538,7 @@ def test_host_turn_that_never_started_runs_on_its_retry(tmp_path, monkeypatch):
     start = threading.Thread.start
 
     def refuse_turn_threads(thread):
-        if thread.name.startswith("presence-turn-"):
+        if thread.name.startswith("inline_degraded-"):  # the degraded executor's carrier thread (2A)
             raise RuntimeError("can't start new thread")
         return start(thread)
 

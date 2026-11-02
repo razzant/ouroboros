@@ -21,6 +21,7 @@ from tests.test_direct_project_turn_recovery import (
     _resume_and_revalidate,
     _run_until_saved,
 )
+from supervisor.worker_chat_lane import admit_owner_turn as _OWNER_DOOR
 from tests.test_placement_pinned_resources import _assert_defaults, _started
 from tests.test_swarm_host_admission import host as host
 
@@ -29,23 +30,35 @@ PROOF = "resource-proof.txt"
 
 
 def _admit(host, folder=""):
+    """The owner's turn through the real door: admitted to the lane (its RUNNING row, the ready spare's
+    queue), then the carrier's first step — run here by the real worker body — binds the room and lays
+    the contract onto the seed: the task the worker's own context builder then reads."""
     from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.projects_registry import create_project
+    from ouroboros.task_carrier import LANE_CONVERSATION
     from supervisor import worker_chat_lane, workers
     from tests._cancel_intents_shared import _CaptureQueue
+    from tests.conversation_carrier_support import carry, install_lane_spare
 
     project = create_project(host.root, PID, name="Room 2547", working_dir=str(folder))
     text = "Continue this room work"
     origin = build_owner_message_ref(chat_id=project["chat_id"], client_message_id="resource-2547",
                                     ts="2026-11-01T00:00:00Z", text=text)
     workers.open_repo_writer_admission()
-    actor = SimpleNamespace(handle_task=lambda task: [], _event_queue=_CaptureQueue())
-    admitted = worker_chat_lane._admit_chat_task(actor, project["chat_id"], text, task_metadata={
+    # The swarm host forbids the owner door to its routing probes; this IS the owner's turn.
+    host.monkeypatch.setattr(worker_chat_lane, "admit_owner_turn", _OWNER_DOOR)
+    spare = install_lane_spare(workers, 90)
+    worker_chat_lane.handle_chat_direct(project["chat_id"], text, task_metadata={
         "project_id": PID, "client_message_id": "resource-2547", "origin_message_ref": origin,
         "origin_message_text": text})
-    assert admitted is not None
+    [tid] = [task_id for task_id, meta in workers.RUNNING.items() if meta.get("lane") == LANE_CONVERSATION]
+    assert spare.busy_task_id == tid
     workers.REPO_DIR.mkdir(exist_ok=True)
-    return project, admitted
+    prepared = {}
+    carry(workers, spare, SimpleNamespace(handle_task=lambda task: prepared.update(task=task) or [], _event_queue=None),
+          out_q=_CaptureQueue())
+    assert prepared["task"]["_project_admission"]["project_id"] == PID, "the carrier bound the room"
+    return project, SimpleNamespace(task=prepared["task"], task_id=tid, spare=spare, workers=workers)
 
 
 def _write(host, task, monkeypatch, content):
@@ -96,8 +109,8 @@ def _resumed(host, task_id):
 def test_resumed_work_keeps_its_folderless_resource_after_a_sibling_assigns_the_first_folder(
         host, tmp_path, monkeypatch):
     project, admitted = _admit(host)
-    _agent, _ctx, before = _write(host, admitted["task"], monkeypatch, "before stop")
-    assert before == host.root / "task_drives" / admitted["task"]["id"]
+    _agent, _ctx, before = _write(host, admitted.task, monkeypatch, "before stop")
+    assert before == host.root / "task_drives" / admitted.task["id"]
     task = _stop_and_restore(host, admitted, monkeypatch)
     folder = _sibling_assigns_the_first_folder(host, tmp_path, project)
 
@@ -113,7 +126,7 @@ def test_resumed_work_keeps_its_room_folder(host, tmp_path, monkeypatch):
     room = tmp_path / "room-folder"
     room.mkdir()
     _project, admitted = _admit(host, room)
-    _agent, _ctx, before = _write(host, admitted["task"], monkeypatch, "before stop")
+    _agent, _ctx, before = _write(host, admitted.task, monkeypatch, "before stop")
     assert before == room
     task = _stop_and_restore(host, admitted, monkeypatch)
 

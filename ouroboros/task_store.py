@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 from ouroboros import store, store_task_cards
@@ -253,6 +254,42 @@ def list_documents(root: Any, *, statuses: Optional[Iterable[str]] = None) -> Li
     with open_store(root, write=False) as txn:
         fetched = _fetch(txn) if wanted is None else _fetch(txn, f"t.status IN ({','.join('?' * len(wanted))})", wanted)
     return _decode(fetched)
+
+
+# (root, ``owes``) -> task id -> (stamp, document ``owes`` selected, or None for one it declined): this process's
+# memory of what a recurring pass read last, kept for the selected rows only.
+_SEEN: Dict[Tuple[str, Callable[[Dict[str, Any]], bool]], Dict[str, Tuple[tuple, Optional[Dict[str, Any]]]]] = {}
+_SEEN_LOCK = threading.Lock()
+
+
+def owing_documents(root: Any, statuses: Iterable[str], owes: Callable[[Dict[str, Any]], bool]) -> List[Dict[str, Any]]:
+    """The documents among STATUSES (``list_documents``' selection) that ``owes`` selects, in task-id order, each a
+    caller's own copy. A recurring pass asks with the same ``owes``: a row whose stamp (``write_seq``, ``updated_at``:
+    every write moves it) stands since this process last read it is not read again, so an unchanged selection costs
+    one indexed read of the stamps. ``owes`` is a pure function of the document; what only time or another process
+    can change is the caller's to judge on each row it gets. A read that fails keeps nothing."""
+    import copy
+
+    wanted = sorted({str(status) for status in statuses})
+    if not wanted:
+        return []
+    key = (str(root), owes)
+    with _SEEN_LOCK:
+        seen = dict(_SEEN.get(key) or {})
+    with open_store(root, write=False) as txn:
+        stamps = {record["task_id"]: (record["write_seq"], record["updated_at"]) for record in txn.conn.execute(
+            f"SELECT task_id, write_seq, updated_at FROM tasks WHERE unlikely(status IN ({','.join('?' * len(wanted))}))",
+            wanted)}
+        moved = sorted(task_id for task_id, stamp in stamps.items() if task_id not in seen or seen[task_id][0] != stamp)
+        fetched = _fetch(txn, "t.task_id IN (SELECT value FROM json_each(?))", (json.dumps(moved),)) if moved else []
+    kept = {task_id: seen[task_id] for task_id in stamps if task_id in seen and task_id not in moved}
+    kept.update((task_id, (stamps[task_id], None)) for task_id in moved)  # a row without a body owes no document
+    for task_id, document in _documents(fetched):
+        if task_id in stamps:
+            kept[task_id] = (stamps[task_id], document if owes(document) else None)
+    with _SEEN_LOCK:
+        _SEEN[key] = kept
+    return [copy.deepcopy(kept[task_id][1]) for task_id in sorted(kept) if kept[task_id][1] is not None]
 
 
 def filtered_list_candidates(root: Any, statuses: Iterable[str], limit: Optional[int]) -> List[Dict[str, Any]]:

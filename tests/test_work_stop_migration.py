@@ -6,7 +6,7 @@ import json
 import pytest
 
 from ouroboros.work_stop import SELECTION_KEY, continuation_refusal, current_stop
-from supervisor.work_stop_migration import FORMAT_KEY, normalize_snapshot
+from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION, normalize_snapshot
 from tests._budget_pause_exact_helpers import _install_queue, _parked
 
 
@@ -119,7 +119,7 @@ def test_format_stamp_survives_absent_stops_and_empty_snapshot(tmp_path, monkeyp
     path = tmp_path / "state" / "queue_snapshot.json"
     path.write_text(json.dumps(_snapshot()))
     assert queue.restore_pending_from_snapshot() == 0
-    assert json.loads(path.read_text())[FORMAT_KEY] == 1
+    assert json.loads(path.read_text())[FORMAT_KEY] == FORMAT_VERSION
     assert not workers.PENDING
     from supervisor import work_stop_migration
     monkeypatch.setattr(work_stop_migration, "normalize_snapshot", lambda *_a: pytest.fail("format already converted"))
@@ -153,7 +153,7 @@ def test_real_restore_normalizes_before_retention_and_repairs_missing_locator(tm
     _idle_worker(workers, sent)
     workers.assign_tasks()
     assert sent == []
-    assert json.loads(path.read_text())[FORMAT_KEY] == 1
+    assert json.loads(path.read_text())[FORMAT_KEY] == FORMAT_VERSION
 
 
 def test_a_restored_locator_keeps_the_project_basis_its_result_carries(tmp_path, monkeypatch):

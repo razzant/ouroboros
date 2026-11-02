@@ -74,7 +74,7 @@ def _stop_boot(monkeypatch, *, returning=False):
     workers.WORKERS[0] = SimpleNamespace(wid=0, proc=process, busy_task_id=next(iter(workers.RUNNING), None),
                                          reaping=False)
     monkeypatch.setattr(workers, "kill_worker_tree", process.kill)
-    monkeypatch.setattr(workers, "_kill_survivors", lambda: None)
+    monkeypatch.setattr(workers, "_kill_survivors", lambda *_slots: None)
     assert workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                                 stop_source="server_shutdown", retain_saved_work=True)
     workers.PENDING[:] = []

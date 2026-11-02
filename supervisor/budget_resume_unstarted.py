@@ -63,7 +63,7 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
         if members:
             # No root grant exists to bind: only the owner selects these members.
             hold_root_resume_descendants(q, root_id, fence, {"grant_id": "", "generation": 0}, actor_id=task_id)
-        if not q.persist_queue_snapshot(reason="owner_pause_root_resumed"):
+        if not q.publish_queue_snapshot(reason="owner_pause_root_resumed"):  # durable while launch authority is closed
             rollback()
             return {"ok": False, "error": "snapshot_not_persisted"}
         try:
@@ -72,7 +72,7 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
                             resume_actor=control_actor())
         except Exception as exc:
             rollback()
-            q.persist_queue_snapshot(reason="owner_pause_root_resume_held")
+            q.publish_queue_snapshot(reason="owner_pause_root_resume_held")
             return {"ok": False, "error": "owner_pause_fence_unwritable", "detail": str(exc)[:200]}
     q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
                    {"ts": utc_now_iso(), "type": "owner_pause_resumed", "task_id": task_id,

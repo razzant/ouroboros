@@ -191,7 +191,7 @@ def test_a_committed_mark_finishes_and_puts_once_in_the_same_generation(world, m
     _, root, pending = world
     registered, task = admitted(world)
     failures = []
-    real_rows, real_persist = schedules._write_scheduled_tasks, queue.persist_queue_snapshot
+    real_rows, real_persist = schedules._write_scheduled_tasks, queue.publish_queue_snapshot
 
     def rows(data, *args, **kwargs):
         if step == "row_write" and not failures and any(
@@ -217,7 +217,7 @@ def test_a_committed_mark_finishes_and_puts_once_in_the_same_generation(world, m
         return real_started(root_, candidate)
 
     monkeypatch.setattr(schedules, "_write_scheduled_tasks", rows)
-    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", persist)
     monkeypatch.setattr(obligations, "drive_started", started)
     workers.assign_tasks()
     assert failures == [step] and sent == [] and pending == [task]
@@ -239,8 +239,8 @@ def test_a_committed_mark_never_replays_after_a_crash(world, monkeypatch):
     """The witness is process memory: a crash leaves only the durable possible, held on restore."""
     _, root, pending = world
     _, task = admitted(world)
-    real_persist = queue.persist_queue_snapshot
-    monkeypatch.setattr(queue, "persist_queue_snapshot",
+    real_persist = queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot",
                         lambda **kw: False if kw.get("reason") == "worker_launch_claimed" else real_persist(**kw))
     assert claim(task, []) is False
     stale = snapshot_row(root, task["id"])
@@ -270,8 +270,8 @@ def test_project_rows_keep_their_project_custody_after_a_stale_commit(tmp_path, 
     queue_module.check_scheduled_tasks()
     [task] = pending
     assert task.get("project_id") == "proj"
-    real_persist = queue_module.persist_queue_snapshot
-    monkeypatch.setattr(queue_module, "persist_queue_snapshot",
+    real_persist = queue_module.publish_queue_snapshot
+    monkeypatch.setattr(queue_module, "publish_queue_snapshot",
                         lambda **kw: False if kw.get("reason") == "worker_launch_claimed" else real_persist(**kw))
     assert claim(task, []) is False
     stale = snapshot_row(root, task["id"])
@@ -279,7 +279,7 @@ def test_project_rows_keep_their_project_custody_after_a_stale_commit(tmp_path, 
     [restored] = restore([stale])
     assert restored["_project_admission_restore_hold"]
     pending[:] = [restored]
-    monkeypatch.setattr(queue_module, "persist_queue_snapshot", real_persist)
+    monkeypatch.setattr(queue_module, "publish_queue_snapshot", real_persist)
     revalidate_project_holds()
     assert pending[0].get("_project_admission_restore_hold"), "a committed Project mark keeps its custody"
 
@@ -479,7 +479,7 @@ def unsent_launch(world, monkeypatch):
     world, workers, sent = _assignment_world(world, monkeypatch)
     _, root, pending = world
     _, task = admitted(world)
-    real_persist, failed = queue.persist_queue_snapshot, []
+    real_persist, failed = queue.publish_queue_snapshot, []
 
     def persist(**kwargs):
         if kwargs.get("reason") == "worker_launch_claimed" and not failed:
@@ -487,7 +487,7 @@ def unsent_launch(world, monkeypatch):
             return False
         return real_persist(**kwargs)
 
-    monkeypatch.setattr(queue, "persist_queue_snapshot", persist)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", persist)
     workers.assign_tasks()
     assert failed and sent == [] and pending == [task] and task["admitted_dispatch"] == "possible"
     assert worker_assignment._unsent(task) is not None
@@ -529,8 +529,8 @@ def test_the_witness_carries_its_pre_commit_deadline_claim(world, monkeypatch):
     _, root, pending = world
     _, task = admitted(world)
     claim_ = {"task_id": task["id"], "claim": {"marker": "pre-commit"}}
-    real_persist = queue.persist_queue_snapshot
-    monkeypatch.setattr(queue, "persist_queue_snapshot",
+    real_persist = queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot",
                         lambda **kw: False if kw.get("reason") == "worker_launch_claimed" else real_persist(**kw))
     with queue._queue_lock:
         assert worker_assignment._commit_launch(queue, task, claim_) is None

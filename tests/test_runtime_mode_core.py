@@ -273,32 +273,14 @@ def test_onboarding_bootstrap_exposes_runtime_mode():
 
 
 def test_api_state_declares_phase2_keys():
-    tree = ast.parse((REPO / "ouroboros" / "gateway" / "state.py").read_text(encoding="utf-8"))
-    api_state_fn = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "api_state":
-            api_state_fn = node
-            break
-    assert api_state_fn is not None
-
-    for node in ast.walk(api_state_fn):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not (isinstance(func, ast.Name) and func.id == "JSONResponse"):
-            continue
-        if not node.args or not isinstance(node.args[0], ast.Dict):
-            continue
-        keys = {
-            k.value for k in node.args[0].keys
-            if isinstance(k, ast.Constant) and isinstance(k.value, str)
-        }
-        if keys == {"error"}:
-            continue
-        assert "runtime_mode" in keys
-        assert "skills_repo_configured" in keys
-        return
-    raise AssertionError("api_state exposes no happy-path JSONResponse literal")
+    """``/api/state`` reads its process facts per request from ``state_publication.live_fields``."""
+    tree = ast.parse((REPO / "ouroboros" / "gateway" / "state_publication.py").read_text(encoding="utf-8"))
+    live = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "live_fields")
+    returned = [node.value for node in ast.walk(live) if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)]
+    assert returned, "live_fields returns no dict literal"
+    keys = {k.value for k in returned[0].keys if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    assert "runtime_mode" in keys
+    assert "skills_repo_configured" in keys
 
 
 def test_state_response_typeddict_declares_phase2_keys():

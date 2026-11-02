@@ -40,7 +40,7 @@ import json
 import logging
 import pathlib
 import re
-from collections import Counter
+from collections import Counter, OrderedDict
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -381,7 +381,7 @@ def _fixes(store: ChronicleStore, record: Mapping[str, Any], fixes: Mapping[str,
 
 
 def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mapping[str, memory_inventory.LegacyUnit],
-                 room_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                 room_id: Optional[str] = None, terminal: Optional[Callable[..., Any]] = None) -> List[Dict[str, Any]]:
     """Every acting page and part not folded into a part (``room_id``'s alone, when named), and every account my
     selection shows, all rooms; the records a shown account tells in its place are marked ``told_by``.
 
@@ -389,12 +389,13 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
     and then the pages no part or account holds yet, in publication order (sequence). A newly sealed page so
     joins the end and preserves the prefix on routes with prefix caching. With one cache marker for the whole
     block B, a new page misses that block (``context_fit._system_blocks``). A fold rewrites the story from its
-    first changed retelling, as before."""
+    first changed retelling, as before. ``terminal`` groups the writers' later terminal rows (``capture_story``'s
+    records what it read)."""
     fixes = fix_map(store)
     records = [record for record in store.room_records(room_id, kinds=("page", "part"))
                if not record.get("folded_into")]
     from ouroboros.memory_sealing import capture_terminal_rows, terminal_links
-    terminal_cache = capture_terminal_rows(store.data_root, records)
+    terminal_cache = terminal(records) if terminal else capture_terminal_rows(store.data_root, records)
     keyed = [((entry.pop("first"), entry["sequence"]), entry) for entry in account_entries(
         store, label, units, fixes, lambda period: _period(period.span, period.note()))]
     for record in records:
@@ -415,15 +416,79 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
             for key, entry in ordered]
 
 
+class _StorySources:
+    """What one story capture read beside the chronicle and its legacy units: the room labels it named, its page
+    writers' later terminal rows and, while the old memory is not all folded, the helper route."""
+
+    def __init__(self, root: pathlib.Path, label: Callable[..., str]) -> None:
+        # ``route``: None until asked, then its answer in a 1-tuple (an answer may itself be None)
+        self.root, self._label, self.labels, self.starts, self.rows, self.route = root, label, {}, {}, {}, None
+
+    def label(self, room: Any) -> str:
+        self.labels[room] = self._label(room)
+        return self.labels[room]
+
+    def terminal(self, records: List[Dict[str, Any]]) -> Dict[Any, Any]:
+        from ouroboros.memory_sealing import terminal_starts, writer_terminal_rows
+
+        self.starts = terminal_starts(records)
+        self.rows = writer_terminal_rows(self.root, self.starts)
+        return self.rows
+
+    def helper_route(self) -> str:
+        from ouroboros.model_slots import get_light_model
+
+        self.route = (get_light_model(),)
+        return self.route[0]
+
+    def unchanged(self, label: Callable[..., str]) -> bool:
+        """Whether each source, asked again (of the caller's labeler), answers as it did."""
+        from ouroboros.memory_sealing import writer_terminal_rows
+        from ouroboros.model_slots import get_light_model
+
+        return (all(label(room) == text for room, text in self.labels.items())
+                and writer_terminal_rows(self.root, self.starts) == self.rows
+                and (self.route is None or self.route == (get_light_model(),)))
+
+
+# The last story of each chronicle index with what it read: (journal size, legacy units, sources, story); a few
+# chronicles at most, a memory bound (a process reads one data root; a test process many).
+_STORIES: "OrderedDict[str, Tuple[int, List[memory_inventory.LegacyUnit], _StorySources, Tuple[Any, ...]]]" = OrderedDict()
+_STORIES_KEPT = 4
+
+
 def capture_story(store: ChronicleStore, root: pathlib.Path, label: Callable[..., str],
                    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
     """``(story entries, story status, helper refusals)``; folded or not is ``memory_inventory``'s verdict.
 
     Every unfolded retold record keeps its current words, whatever its block: whole in the story until the
     floor turns its room into one line (F3) or a selected account tells it in its place (``told_by``).
+
+    The story is a function of its sources alone (this module's docstring): a capture of the stored chronicle at
+    the journal size of the last one, with equal legacy units, and whose room labels, page writers' later terminal
+    rows and helper route answer as they did, is that capture byte for byte, so it is reused in this process; any
+    other answer captures the story whole. A proposal's capture reads an unsaved selection: it neither reuses nor
+    keeps one. Its entries are shared, and no reader mutates them (as a parsed view's).
     """
+    with capture(root, tail="terminal"):  # one state for the identity and every read; inside a capture, that one
+        size, units = store.stored_state(), memory_inventory.legacy_units(store, root)
+        held = _STORIES.get(str(store.index_path)) if size is not None else None
+        if held is None or held[:2] != (size, units) or not held[2].unchanged(label):
+            sources = _StorySources(root, label)
+            held = (size, units, sources, _capture_story(store, sources, units))
+            if size is not None:
+                _STORIES.pop(str(store.index_path), None)  # the newest last
+                _STORIES[str(store.index_path)] = held
+                if len(_STORIES) > _STORIES_KEPT:
+                    _STORIES.popitem(last=False)
+    story, status, refusals = held[3]
+    return list(story), dict(status), list(refusals)
+
+
+def _capture_story(store: ChronicleStore, sources: _StorySources, units: List[memory_inventory.LegacyUnit],
+                   ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
+    label = sources.label
     pointers = {pointer["node_id"]: pointer for pointer in memory_inventory.legacy_pointers(store)}
-    units = memory_inventory.legacy_units(store, root)
     open_rooms = {unit.room_id for unit in units if not unit.folded}
     words = {record["id"]: str(record.get("current_text") or "") for room in sorted(open_rooms)
              for record in store.room_records(room, kinds=("legacy",))}
@@ -448,7 +513,7 @@ def capture_story(store: ChronicleStore, root: pathlib.Path, label: Callable[...
             read = _mapping(_mapping(_mapping(unit.refusal.get("response_ref")).get("read")).get("arguments"))
             refusals.append({"id": unit.record_id, "label": entry["label"], "period": entry["period"],
                              "kind": str(unit.refusal.get("kind") or "refused"), "path": str(read.get("path") or "")})
-    pages = _story_pages(store, label, {unit.record_id: unit for unit in units})
+    pages = _story_pages(store, label, {unit.record_id: unit for unit in units}, terminal=sources.terminal)
     told = told_map([entry for entry in pages if entry["kind"] == "account"])  # a retold record an account tells
     story = [{**entry, "told_by": told[entry["id"]]} if entry["id"] in told else entry for entry in story]
     progress = memory_inventory.legacy_progress(units)
@@ -460,9 +525,7 @@ def capture_story(store: ChronicleStore, root: pathlib.Path, label: Callable[...
               "accounts": len(accounts),  # in the common view: whole there, not told by a later account
               "accounts_shown": sum(1 for entry in pages if entry["kind"] == "account" and not entry.get("told_by"))}
     if status["folded"] < status["total"]:
-        from ouroboros.model_slots import get_light_model
-
-        status["helper_route"] = get_light_model()
+        status["helper_route"] = sources.helper_route()
     return story + pages, status, refusals
 
 

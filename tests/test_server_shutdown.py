@@ -778,7 +778,7 @@ def _supervisor_harness(monkeypatch, tmp_path, steps):
     # The tick's first rotator call (events.jsonl; the dialogue chains no longer rotate) is the tick head.
     monkeypatch.setattr(state_mod, "rotate_jsonl_log_if_needed",
                         lambda root, name, *_a, **_k: _tick_head(root) if name == "events.jsonl" else None)
-    for name in ("enqueue_task", "enforce_task_timeouts", "enqueue_evolution_task_if_needed",
+    for name in ("enqueue_task", "enforce_due_task_timeouts", "enqueue_evolution_task_if_needed",
                  "cancel_task_by_id", "queue_deep_self_review_task",
                  "sort_pending", "check_scheduled_tasks"):
         monkeypatch.setattr(queue_pkg, name, noop)
@@ -893,12 +893,13 @@ def test_healthy_tick_between_crashes_resets_the_count(monkeypatch, tmp_path):
 def test_a_kept_saved_queue_is_not_a_failed_tick(monkeypatch, tmp_path, published):
     """A process that has not taken the saved queue into custody (its restore could not read it) keeps
     that snapshot at every tick's publication (None): durable as it is, so the loop runs on. Only a
-    failed publication (False) is a crash."""
+    failed publication (False) is a crash. The tick's publisher is ``publish_queue_changes``
+    (``queue_publication``); the mark every transition leaves is not the tick's outcome."""
     import server
     import supervisor.queue as queue_pkg
 
     rec = _supervisor_harness(monkeypatch, tmp_path, ["ok", "ok", "ok", "stop"])
-    monkeypatch.setattr(queue_pkg, "persist_queue_snapshot", lambda **_k: published)
+    monkeypatch.setattr(queue_pkg, "publish_queue_changes", lambda: published)
     _run(rec, server)
     if published is None:
         assert rec.alerts == [] and server._supervisor_error is None and rec.stop.waits == []

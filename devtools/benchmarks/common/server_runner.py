@@ -95,7 +95,9 @@ _ISO_SETTINGS_ALLOW_PREFIX = ("OUROBOROS_MODEL", "OUROBOROS_EFFORT", "LOCAL_MODE
 _ISO_SETTINGS_ALLOW_EXACT = frozenset({
     # The roster carries the delegation actor AND the review pool (its marked rows).
     "OUROBOROS_SUBAGENTS",
-    "OUROBOROS_WEBSEARCH_MODEL",
+    # The web search Source and Model are one choice: a ddgs pin's stale Model must not become
+    # paid Auto search, nor an Anthropic pin's legacy bare id change meaning. Overrides still win.
+    "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_WEBSEARCH_BACKEND",
     # Review policy knobs (non-secret): must propagate so settings.json's result-review
     # config is honored by isolated benchmark servers (else it silently
     # falls back to the "auto" default and the end-of-task review never runs).

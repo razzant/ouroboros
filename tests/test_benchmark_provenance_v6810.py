@@ -52,6 +52,9 @@ _LIVE = {
     "OUROBOROS_MODEL_HEAVY": "claude-opus-4.8",
     "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
     "OUROBOROS_MODEL_FALLBACKS": "openai/gpt-5.5",
+    # Saved like every slot: an OpenRouter catalog id, so the search is pinned there too. A blank
+    # search Model plans its recommended legs instead (tests/test_search_routes.py).
+    "OUROBOROS_WEBSEARCH_MODEL": "openai/gpt-5.5",
     "OUROBOROS_REVIEW_MODELS": "anthropic/claude-fable-5,openai/gpt-5.6-sol",
     "OPENROUTER_API_KEY": "or-value",
     "OPENAI_API_KEY": "oa-value",
@@ -111,6 +114,7 @@ def test_legacy_claude_sdk_settings_are_inert_state():
     manifests replay; it is a documented no-op)."""
     live = {
         "OUROBOROS_MODEL": "openrouter/model",
+        "OUROBOROS_WEBSEARCH_MODEL": "openrouter/model",  # pinned with Main: only the retired slots are in question
         "CLAUDE_CODE_MODEL": "claude-explicit",
         "CLAUDE_AGENT_SDK_MODEL": "opus",
         "OPENROUTER_API_KEY": "or-value",
@@ -216,9 +220,9 @@ def test_a_settings_mapping_with_no_slots_fails_OPEN_and_discloses_it(monkeypatc
     plan = provider_credential_plan({"OUROBOROS_MODEL": "", "CLAUDE_CODE_MODEL": ""})
     assert plan["fail_open"] is False and plan["planned_keys"]
 
-    # Degenerate case: nothing resolvable at all.
+    # Degenerate case: nothing resolvable at all (a ddgs web search needs no credential).
     monkeypatch.setattr(pm, "declared_model_settings", lambda _settings: {})
-    degenerate = provider_credential_plan({})
+    degenerate = provider_credential_plan({"OUROBOROS_WEBSEARCH_BACKEND": "ddgs"})
     assert degenerate["fail_open"] is True
     assert degenerate["planned_keys"] == sorted(pm.ALL_PROVIDER_CREDENTIAL_KEYS)
 
@@ -278,6 +282,7 @@ def test_initial_manifest_uses_disabled_claude_projection(tmp_path, monkeypatch)
     settings_path.write_text(
         json.dumps({
             "OUROBOROS_MODEL": "openrouter/model",
+            "OUROBOROS_WEBSEARCH_MODEL": "openrouter/model",  # pinned with Main: only the retired slots are in question
             "CLAUDE_CODE_MODEL": "",
             "CLAUDE_AGENT_SDK_MODEL": "",
             "OPENROUTER_API_KEY": "",
