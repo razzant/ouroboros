@@ -66,7 +66,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # The lane's doors admit only (owner decision 1A): the actor and the event bus are the
     # carrier's (``inline_carrier`` reads them for the two inline executors), not this leaf's.
     "supervisor/worker_chat_lane.py": ("supervisor/workers.py", "_pool", frozenset({
-        "DRIVE_ROOT", "REPO_DIR", "_repo_writer_gate_lock", "chat_turn_liveness",
+        "DRIVE_ROOT", "REPO_DIR", "_repo_writer_gate_lock",
         "_origin_from_mapping", "_repo_writer_turn_allowed",
         "_report_binding_failure", "load_state",
         "repo_writer_admission_closed", "send_with_budget",
