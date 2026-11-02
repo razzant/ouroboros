@@ -7,7 +7,10 @@ writers: the backlog is one authored note."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
+import pytest
 
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +65,43 @@ def test_primitive_fail_open_on_unparseable(monkeypatch):
     from ouroboros.semantic_dedup import find_semantic_duplicate_id
 
     assert find_semantic_duplicate_id("n", [{"id": "obl-1", "text": "o"}], subject="s", call_type="t", drive_root=None) is None
+
+
+@pytest.mark.parametrize("observed", [False, True])
+@pytest.mark.parametrize("chosen", ["omitted", "", None, "claudexor::codex=explicit-model"])
+def test_the_default_light_call_reaches_the_engine_with_the_light_role(tmp_path, monkeypatch, observed, chosen):
+    """#2575: the default model IS the Light slot, so its role-owned account goes with it;
+    an explicit model keeps its unlabelled (Auto) semantics. Real client, fake engine."""
+    from ouroboros import llm_claudexor as transport, pricing, usage_accounting as ua
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
+    from ouroboros.semantic_dedup import find_semantic_duplicate_id
+    from tests.test_llm_claudexor import MODEL, Gateway, result
+
+    root = tmp_path / "data"
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", MODEL)
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "main-account", "light": "light-account"}))
+    monkeypatch.setattr(transport.config, "CLAUDEXOR_MODEL_POLL_INTERVAL_SEC", 0.001)
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_: pytest.fail("Claudexor must not fetch API pricing"))
+    verdict = result()
+    verdict["message"] = {"role": "assistant",
+                          "content": '{"duplicate_id":"obl-1","confidence":"high","reason":"same"}'}
+    gateway = Gateway([verdict])
+    monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **_kw: gateway)
+
+    with ua.usage_scope(ua.UsageScope(drive_root=root, task_id="dedup-owner", root_task_id="dedup-owner")):
+        got = find_semantic_duplicate_id(
+            "new bug", [{"id": "obl-1", "text": "old bug"}], subject="s", call_type="obligation_dedup",
+            drive_root=root if observed else None, **({} if chosen == "omitted" else {"model": chosen}))
+
+    assert got == "obl-1" and len(gateway.uploads) == 1
+    sent = gateway.uploads[0][0]
+    explicit = bool(chosen and chosen != "omitted")
+    assert sent["account"] == ({"mode": "auto"} if explicit else {"mode": "pin", "profileId": "light-account"})
+    assert sent["model"] == ("explicit-model" if explicit else "exact-model")
+    assert bool(list((root / "observability" / "calls" / "semantic_dedup").glob("*_request.json"))) is observed
 
 
 # --------------------------------------------------------------------------- #

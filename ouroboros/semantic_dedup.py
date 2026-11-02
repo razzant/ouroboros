@@ -76,7 +76,8 @@ def find_semantic_duplicate_id(
 ) -> Optional[str]:
     """Return the id of the existing candidate that ``new_item`` is a high-confidence
     semantic duplicate of, or None. ``candidates`` is a list of ``{"id", "text"}``
-    dicts (already filtered/ranked/capped by the caller). Never raises."""
+    dicts (already filtered/ranked/capped by the caller). Never raises. Without a
+    ``model`` (omitted, empty or None) this is a Light-role call; an explicit model is unlabelled."""
     new_text = _bounded_compare_text(new_item)
     if not new_text:
         return None
@@ -102,7 +103,8 @@ def find_semantic_duplicate_id(
         from ouroboros.llm import LLMClient
 
         client = LLMClient()
-        use_model = model or get_light_model()
+        # One binding: the Light model always travels with its role-owned account and options.
+        use_model, model_role = (model, "") if model else (get_light_model(), "light")
         messages = [{"role": "user", "content": prompt}]
         if drive_root is not None:
             from ouroboros.llm_observability import chat_observed
@@ -112,7 +114,7 @@ def find_semantic_duplicate_id(
                 drive_root=pathlib.Path(drive_root),
                 task_id="semantic_dedup",
                 call_type=call_type,
-                model_role="light" if model is None else "",
+                model_role=model_role,
                 messages=messages,
                 model=use_model,
                 reasoning_effort=reasoning_effort,
@@ -121,7 +123,7 @@ def find_semantic_duplicate_id(
         else:
             resp, usage = client.chat(
                 messages=messages, model=use_model, reasoning_effort=reasoning_effort, max_tokens=512,
-                model_role="light" if model is None else "",
+                model_role=model_role,
             )
         if usage:
             try:
