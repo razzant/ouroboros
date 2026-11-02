@@ -80,11 +80,17 @@ this turn's host facts, at the harness's starting directory; quoted ones are his
 Each ordinary continuation's prompt restates its access and binding (else its directory). The binding, the `workspace_write`
 access line and the unproven-boundary sentence state one write rule, because
 verification needs writes no copy may hold: disposable process state (test
-scratch, package-manager temporaries) goes outside every Git working tree, the
+scratch, package-manager temporaries, build or dependency output that only serves
+checks) goes outside every Git working tree, the
 binding naming safe_test's default parent through the launcher's own predicate,
 so its ancestor guard stays intact (only a body copy's facts name safe_test itself);
+output a tool must keep in the project tree stays only in new files Git ignores: generated
+build/dependency output is not automatically excluded from the result-commit capture, Git
+ignore rules keep new untracked files out, and tracking overrides them;
 durable package downloads go only to the shared download cache the environment facts
-name; evidence goes under the copy's `.review-evidence/`. Where the route's catalog row
+name; evidence (reports, logs, sources, repro scripts, intended binaries of any size) goes
+under the copy's `.review-evidence/`, whose retention applies no cache, binary, size or
+ignore filter. Where the route's catalog row
 negotiates `accessControl.auxiliaryWritableRoots` (never a guess from a harness name or
 write mechanism) and the start is an Agent `workspace_write` one, the host makes the run's
 exact short scratch under `test_environment.default_temp_parent()` (`/tmp/obs-<random>` on
