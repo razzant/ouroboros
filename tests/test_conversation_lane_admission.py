@@ -299,3 +299,24 @@ def test_a_failed_admission_barrier_keeps_the_turn_unstarted_until_its_row_lands
     monkeypatch.setattr(queue, "publish_queue_snapshot", real)
     conversation_lane.dispatch_awaiting_turns()
     assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == meta["task"]["id"]
+
+
+def test_a_dead_carriers_retry_whose_barrier_failed_waits_unstarted_for_its_row(lane, monkeypatch):
+    """Astra M1's law on the crash path: ``readmit_after_crash`` (crash recovery's lane re-admission, under Q)
+    keeps a retry whose barrier failed awaiting with no carrier and the READY spare free; the lane's next pass
+    publishes once, then hands it out (the crash path itself: tests/test_worker_crash_retry.py)."""
+    from supervisor import queue
+
+    task = {"id": "turn-r", "type": "task", "chat_id": 1, "text": "hello", "_is_direct_chat": True, "_attempt": 2,
+            "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER},
+            "_conversation_prepare": {"admitted_at": time.time(), "quiet": False, "reply_expected": True,
+                                      "client_message_id": "cm-r", "census": {}}}
+    real = queue.publish_queue_snapshot
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda reason="": False)
+    with queue._queue_lock:
+        meta = conversation_lane.readmit_after_crash(task, {"client_message_id": "cm-r", "reply_expected": True})
+    assert meta["attempt"] == 2 and meta["worker_id"] is None and meta.get("_unpublished") is True
+    assert lane.spare.busy_task_id is None and lane.spare.in_q.empty()
+    monkeypatch.setattr(queue, "publish_queue_snapshot", real)
+    conversation_lane.dispatch_awaiting_turns()
+    assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == "turn-r"

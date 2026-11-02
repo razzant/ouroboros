@@ -274,6 +274,7 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
     fuse (FINAL_PLAN §1). The row awaits a carrier again with the turn's own lane facts, published before
     any carrier can hold it; a ready idle carrier takes it now, the disclosed degraded executor on a physical
     fact, otherwise the lane's reconcile hands it the next carrier (the dead slot's replacement among them).
+    A failed barrier keeps the retry visibly unstarted, held from every carrier, as an admission's (``admit_turn``).
     """
     from supervisor import queue
 
@@ -282,7 +283,10 @@ def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str
     meta = _awaiting_row(task, attempt=int(task.get("_attempt") or 1), client_message_id=prior.get("client_message_id"),
                          reply_expected=prior.get("reply_expected"), fresh_identity=prior.get("fresh_identity"))
     _pool().RUNNING[str(task["id"])] = meta
-    queue.publish_queue_snapshot(reason="conversation_turn_retried")
+    if queue.publish_queue_snapshot(reason="conversation_turn_retried") is False:
+        meta["_unpublished"] = True
+        log.warning("Conversation turn %s retried but its row is not on disk yet: no carrier holds it", task["id"])
+        return meta
     dispatch_awaiting_turns()
     return meta
 
