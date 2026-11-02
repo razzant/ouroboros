@@ -75,8 +75,10 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last capture
 # written. Captures are numbered under Q too (``capture_seq``): the number decides which of two
 # captures is newer, whatever their revisions (a tick captures without a bump). Census: the last
-# census WRITTEN, never a census merely captured, so a failed write is retried by the next tick;
-# while a write has failed, the certificate is not refreshed over the stale document.
+# census WRITTEN, never a census merely captured. A failed write leaves the bundle on disk unknown
+# (torn or old) with its certificate revoked: from then on the publisher owes a fresh capture and a
+# complete rewrite of every document under a new generation, whatever the bytes say against the last
+# cache, and ``write_failed`` clears only when that write lands; no certificate is written meanwhile.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "capture_seq": 0, "published_seq": 0, "write_failed": False,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
@@ -183,9 +185,11 @@ def publish_queue_changes() -> Optional[bool]:
     with _queue()._queue_lock:
         # The census: what the rows publish without a transition (worker reports mutate RUNNING in place
         # with no mark). One small identity per tick, so a changed fact is published and an unchanged
-        # live set still captures, serializes and writes nothing.
+        # live set still captures, serializes and writes nothing. A failed write is itself a reason to
+        # publish: the bundle on disk is unknown until a complete rewrite lands (R2).
         census = _census()
-        moved = _STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
+        moved = (_STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
+                 or _STATE["write_failed"])
         capture = _capture(_STATE["reason"] or "main_loop", direct, census=census) if moved else None
     if not moved:
         return _refresh_alive()
@@ -405,7 +409,10 @@ def _publish(capture: Dict[str, Any]) -> bool:
         previous = _queue().QUEUE_PUBLICATION
         if previous is not None and _STATE["published_seq"] > capture["seq"] and not capture["forced"]:
             return True  # a later capture of this process already published newer documents
-        changed = previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
+        # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
+        # so every document is rewritten under a new generation and certified (R2/R3-A).
+        changed = (previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
+                   or _STATE["write_failed"])
         generation = uuid.uuid4().hex if changed else previous[2]
         state = _queue().QUEUE_SNAPSHOT_PATH.parent
         try:
