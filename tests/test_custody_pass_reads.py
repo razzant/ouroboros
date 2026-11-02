@@ -168,3 +168,14 @@ def test_a_receipt_sqlite_cannot_read_breaks_no_pass_and_never_rests(tmp_path):
     assert _body_reads(tmp_path, lambda: delegate_terminal.refresh_recently_settled_terminals(
         tmp_path, live_task_ids=set())) > 0
     assert "owner" not in delegate_terminal._RESTS.get(str(tmp_path), {})
+
+
+def test_the_snapshot_gc_reads_no_document_for_an_owner_with_no_record(tmp_path):
+    """``body_candidate._recorded_terminal`` (the snapshot, copy and checkout retirers' owner check): a missing
+    record is not terminal, known from the typed row; a recorded terminal still reads as terminal."""
+    from ouroboros import body_candidate
+
+    write_task_result(tmp_path, "finished", "completed", result="done")
+    assert _body_reads(tmp_path, lambda: body_candidate._recorded_terminal("never-recorded", tmp_path)) == 0
+    assert body_candidate._recorded_terminal("never-recorded", tmp_path) is False
+    assert body_candidate._recorded_terminal("finished", tmp_path) is True
