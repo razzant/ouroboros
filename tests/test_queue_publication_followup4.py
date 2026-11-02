@@ -212,3 +212,37 @@ def test_an_inflight_quiet_refresh_cannot_recertify_after_a_failed_barrier(publi
     assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"] == {"kind": "review", "state": "waiting"}
 
 
+# ---- R5: the Pause latch's barrier outside Q keeps its typed refusal ------------------------------
+
+def test_a_raising_pause_barrier_answers_the_typed_refusal_and_runs_outside_q(tmp_path, monkeypatch):
+    from supervisor import owner_pause_control as pause
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests.test_owner_pause import _live_tree
+
+    q, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _live_tree(tmp_path, workers)
+    calls = []
+    real_barrier, real_wake = q.publish_queue_snapshot, pause._wake_members
+
+    def barrier(*a, **kw):
+        calls.append(("barrier", q._queue_lock._is_owned()))
+        return real_barrier(*a, **kw)
+
+    def wake(*a, **kw):
+        calls.append(("wake", q._queue_lock._is_owned()))
+        return real_wake(*a, **kw)
+
+    monkeypatch.setattr(q, "publish_queue_snapshot", barrier)
+    monkeypatch.setattr(pause, "_wake_members", wake)
+    answer = pause.request_owner_pause("root-1", request_id="order")
+    assert answer["ok"] and answer["snapshot_persisted"]
+    assert calls[0] == ("barrier", False) and calls[1] == ("wake", False), "published outside Q, before the wake"
+
+    def raising(*_a, **_kw):
+        raise OSError("fixture: the encoder failed")
+
+    monkeypatch.setattr(q, "publish_queue_snapshot", raising)
+    answer = pause.request_owner_pause("root-1", request_id="raise")
+    assert answer == {"ok": False, "error": "pause_record_unwritable", "detail": "fixture: the encoder failed"}
+
+
