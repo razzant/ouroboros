@@ -229,19 +229,19 @@ def test_restore_partial_keeps_checkout_effect_and_target_receipt(invoke, tmp_pa
     binding = SimpleNamespace(root="active_workspace", base_path=tmp_path, repository_path=None)
     monkeypatch.setattr(git, "_vcs_binding", lambda *a, **k: binding)
     monkeypatch.setattr(git, "binding_targets_system_repo", lambda *a: False)
-    monkeypatch.setattr("ouroboros.tools.review_helpers.list_changed_paths_from_git_status", lambda *a, **k: ["changed.txt"])
+    monkeypatch.setattr(git_vcs_ops, "_scope_changes", lambda *a, **k: [(" M", "changed.txt"), ("??", "loose.txt")])
     calls = []
 
     def command(args, **kwargs):
         calls.append(args)
         if args[1] == "clean":
             raise RuntimeError("cleanup failed")
-        assert args[1] == "checkout"
+        assert args[1] in {"rev-parse", "checkout"}
         return ""
 
     monkeypatch.setattr(git, "run_cmd", command)
     result = invoke(git_vcs_ops._restore_to_head, confirm=True, paths=paths, root="active_workspace")
-    assert result.code == "TOOL_ERROR" and len(calls) == 2
+    assert result.code == "TOOL_ERROR" and [args[1] for args in calls] == ["rev-parse", "checkout", "clean"]
     assert "RESTORE_PARTIAL" in result.text and "VCS target: root=active_workspace" in result.text
     assert "operation_outcome" not in result.meta
 

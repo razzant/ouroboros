@@ -124,7 +124,48 @@ def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=()
     return attempt
 
 
+def collected_open_peer(ctx, commit_message, goal, scope, review_rebuttal, paths):
+    """The open frozen attempt this call collects exactly, known before any effect: the index already
+    holds its subject under this intent (``commit_gate.exact_open_peer``) and staging changes nothing
+    (each path to stage, the retained ones when omitted, equals its working file; the release sync
+    writes nothing). Only that collection keeps a retained composition; a distinct intent, or newer
+    bytes under the same intent, is a new subject under the ordinary selection rules."""
+    from ouroboros.commit_admission import _version_sync_due
+    from ouroboros.tools import git as git_mod
+    from ouroboros.tools.commit_gate import exact_open_peer
+    from ouroboros.tools.git_vcs_ops import _scope_changes
+    from ouroboros.tools.release_sync import sync_release_metadata
+
+    if not getattr(ctx, "_review_open_peers", None):
+        return None
+    repo = pathlib.Path(ctx.repo_dir)
+    try:
+        fingerprint = git_mod._fingerprint_staged_diff(repo).get("fingerprint", "")
+        peer = exact_open_peer(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
+                               fingerprint=fingerprint) if fingerprint else None
+        if peer is None:
+            return None
+        targets = ([git_mod.safe_relpath(path) for path in paths if str(path).strip()] if paths is not None
+                   else sorted(git_mod._staged_index(repo)))
+        moved = bool(targets) and any(state[1] != " " for state, _path in _scope_changes(
+            repo, [f":(literal){name}" for name in targets]))
+        synced = _version_sync_due(repo, targets) and bool(sync_release_metadata(str(repo), write=False))
+    except Exception:
+        return None
+    return None if moved or synced else peer
+
+
 def bind_commit_collection(ctx, fingerprint, retry_key):
+    # A pre-lock peer only permits its exact final subject; restaging cannot lend that permission to a new wave.
+    peer = getattr(ctx, "_review_collected_peer", None)
+    selection = getattr(ctx, "_commit_attribution", None) or {}
+    unnamed = sorted(set(selection.get("uncertain") or []) - set(selection.get("explicit_uncertain") or []))
+    if peer is not None and retry_key != peer.review_retry_key and unnamed:
+        return {"status": "blocked", "block_reason": "review_binding", "message": (
+            "⚠️ REVIEW_SELECTION_CHANGED_BLOCKED: the prepared index no longer matches the retained review, "
+            f"and this call did not explicitly select its uncertain paths: {', '.join(unnamed)}. "
+            "No new review was dispatched or commit created. The prepared index and files remain; inspect "
+            "the changed composition and name the paths you intend to review.")}, retry_key
     source = getattr(ctx, "_collect_commit_source", None)
     if source is None:
         return None, retry_key

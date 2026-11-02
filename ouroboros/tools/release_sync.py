@@ -592,9 +592,17 @@ def check_worktree_version_sync(repo_dir) -> str:
     return ""
 
 
-def sync_release_metadata(repo_dir: str) -> List[str]:
-    """Sync VERSION into generated and author-facing release carriers."""
+def sync_release_metadata(repo_dir: str, *, write: bool = True) -> List[str]:
+    """Sync VERSION into generated and author-facing release carriers.
+
+    ``write=False`` changes nothing and names the carriers this sync would rewrite now.
+    """
     root = Path(repo_dir)
+
+    def put(path: Path, text: str) -> None:
+        if write:
+            path.write_text(text, encoding="utf-8")
+
     version_file = root / "VERSION"
     if not version_file.exists():
         return []
@@ -619,7 +627,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             flags=re.MULTILINE,
         )
         if new_text != text:
-            pyproject.write_text(new_text, encoding="utf-8")
+            put(pyproject, new_text)
             changed.append("pyproject.toml")
 
     uv_lock = root / "uv.lock"
@@ -631,7 +639,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             count=1,
         )
         if replacements == 1 and new_text != text:
-            uv_lock.write_text(new_text, encoding="utf-8")
+            put(uv_lock, new_text)
             changed.append("uv.lock")
 
     web_package = root / "web" / "package.json"
@@ -644,7 +652,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             flags=re.MULTILINE,
         )
         if new_text != text:
-            web_package.write_text(new_text, encoding="utf-8")
+            put(web_package, new_text)
             changed.append("web/package.json")
 
     web_lock = root / "web" / "package-lock.json"
@@ -656,7 +664,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             text,
         )
         if new_text != text:
-            web_lock.write_text(new_text, encoding="utf-8")
+            put(web_lock, new_text)
             changed.append("web/package-lock.json")
 
     api_types = root / "web" / "modules" / "api_types.js"
@@ -668,7 +676,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             text,
         )
         if new_text != text:
-            api_types.write_text(new_text, encoding="utf-8")
+            put(api_types, new_text)
             changed.append("web/modules/api_types.js")
 
     readme = root / "README.md"
@@ -682,7 +690,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         )
         new_text = _sync_readme_download_urls(new_text, version)
         if new_text != text:
-            readme.write_text(new_text, encoding="utf-8")
+            put(readme, new_text)
             changed.append("README.md")
 
     for relative in (
@@ -695,7 +703,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         text = install_page.read_text(encoding="utf-8")
         new_text = _sync_html_download_urls(text, version)
         if new_text != text:
-            install_page.write_text(new_text, encoding="utf-8")
+            put(install_page, new_text)
             changed.append(relative.as_posix())
 
     arch = root / "docs" / "ARCHITECTURE.md"
@@ -706,7 +714,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             text,
         )
         if new_text != text:
-            arch.write_text(new_text, encoding="utf-8")
+            put(arch, new_text)
             changed.append("docs/ARCHITECTURE.md")
 
     return changed

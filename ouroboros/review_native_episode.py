@@ -685,23 +685,18 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         return self._verdict_result()
 
     def _inspection_registry(self, root: str, drive_root: Any) -> tuple[Any, List[Dict[str, Any]]]:
-        """A fresh instance-local registry pinned to ``root``, read-only.
-
-        Reuses the existing capability machinery wholesale instead of a new
-        allowlist mechanism: the ``local_readonly_subagent`` constraint gives
-        the read-only operation/root matrix, ``disabled_tools`` trims its
-        broader name allowlist down to the inspection six, and the resource
-        contract keeps extension/MCP discovery off. ``registry._ctx`` is
-        per-instance, so the worker's own registry/context is never touched.
-        ``drive_root`` is the data plane the inspection tools may read: an
-        empty scratch directory by default, or the surface's opt-in
-        ``policy["native_data_root"]`` (a stored paged source or skill index
-        resolves there; deep self-review exposes the runtime root while its
-        memory whitelist arrives inline) — the read-only constraint applies to
-        it exactly as to the repository.
+        """``inspection_registry`` pinned to ``root``, read-only, over ``drive_root`` (scratch, or the
+        surface's ``policy["native_data_root"]``: a stored paged source or skill index resolves there;
+        deep self-review exposes the runtime root while its memory whitelist arrives inline). A body
+        candidate the request froze beside its subject (``policy["native_candidate_root"]``: a plan whose
+        task keeps its own folder, ``plan_ask.planning_roots``) becomes the context's workspace edge, the
+        one a candidate author's child records (``tool_access_reads.inherited_read_roots``): its absolute
+        paths READ as ``active_workspace``; subject, governance, writes and path class are unchanged.
         """
         registry, self._inspection_ctx, schemas = inspection_registry(
             root, drive_root, str(self.assignment.request.task_id or "review"))
+        if candidate := str((self.assignment.request.policy or {}).get("native_candidate_root") or ""):
+            self._inspection_ctx.task_metadata["parent_workspace"] = {"root": candidate, "mode": "", "source": "system_repo"}
         return registry, schemas
 
     def _reprepare_model_call(self, values: dict, *, messages: list) -> dict:

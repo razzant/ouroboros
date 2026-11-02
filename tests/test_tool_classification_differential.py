@@ -358,6 +358,10 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # A readable diff with escaped Git output is still successful; the original Git failure, if any, keeps its own code.
+    "OUTPUT_NOT_UTF8": (False, "ok"),
+    # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
+    "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED": (True, "blocked"),
     # tools/tool_discovery.py `enable_tools`: a load none of which fits the route's schema ceiling;
     # the retired pair never saw it. A physical resource refusal: nothing loaded, every tool stays callable.
     "TOOL_SCHEMA_LIMIT": (True, "resource_constraint_blocked"),
