@@ -7,7 +7,7 @@
 // the key it uses: nothing here picks, orders or rotates keys.
 import { apiClient } from './api_client.js';
 import { adoptConnectionLabels } from './connection_labels.js';
-import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, parseModelSource } from './route_editor_primitives.js';
+import { API_PROVIDER_ORDER, apiConnections, apiProviderLabel, compatibleEndpoint, parseModelSource } from './route_editor_primitives.js';
 import { setButtonBusy } from './settings_controls.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
 import { PROVIDER_CARDS, connectionRowHtml } from './settings_provider_cards.js';
@@ -76,14 +76,22 @@ export function connectionUsage(settings = {}, slots = []) {
     return used;
 }
 
-/** A row's status word and meta line: what is true of this key now (docs/DESIGN.md §6). */
-export function connectionRowFacts({ draft = false, enabled = true, configured = false, source = '', usedBy = [] } = {}) {
+/** A row's status word and meta line: what is true of this key now (docs/DESIGN.md §6). `legacyAddress`:
+ * the built-in compatible row is served by the legacy OPENAI_BASE_URL pair, which only Settings edits. */
+export function connectionRowFacts({ draft = false, enabled = true, configured = false, source = '', usedBy = [], legacyAddress = '' } = {}) {
     if (draft) return { tone: 'neutral', label: 'Not saved', meta: '' };
     const users = usedBy.join(', ');
     if (!enabled) return { tone: 'neutral', label: 'Disabled', meta: `${users ? `Named by ${users}` : 'Not used by any role'} · nothing is sent through it` };
     const use = users ? `used by ${users}` : 'not used by any role';
-    if (!configured) return { tone: 'neutral', label: 'No key', meta: `${use[0].toUpperCase()}${use.slice(1)}` };
-    return { tone: 'ok', label: 'Ready', meta: `${source === 'environment' ? 'Provided by environment' : 'Enabled'} · ${use}` };
+    const legacy = legacyAddress ? `Legacy OpenAI Base URL ${legacyAddress} with the OpenAI API key · change the address in Settings → Accounts` : '';
+    if (!configured) return { tone: 'neutral', label: 'No key', meta: legacy ? `${legacy} · ${use}` : `${use[0].toUpperCase()}${use.slice(1)}` };
+    return { tone: 'ok', label: 'Ready', meta: `${source === 'environment' ? 'Provided by environment' : legacy || 'Enabled'} · ${use}` };
+}
+
+/** The legacy address a document's built-in compatible connection reads, or '' while it has its own. */
+function legacyAddressOf(settings) {
+    const endpoint = compatibleEndpoint(settings);
+    return endpoint.legacy ? endpoint.baseUrl : '';
 }
 
 /** A compatible endpoint's learned refusal of prompt-cache hints, when the server reports one; else ''. */
@@ -143,8 +151,31 @@ export function providerTestResultIsCurrent({
     return sentGeneration === currentGeneration && sentFingerprint === currentFingerprint;
 }
 
-/** The Accounts API-key rows of one Settings page: load, draft edits, collect, validate, Test. */
-export function createConnectionsEditor({ root, onChange = () => {}, test = (body) => apiClient.providerTest(body) } = {}) {
+/**
+ * A built-in key's Test request from its changed fields. The built-in compatible key reaches one of two
+ * pairs (`compatibleEndpoint` over the page's flat draft `flat`): the request names it in `api_key_setting`,
+ * and the legacy pair, edited outside the row, travels as the page holds it (a kept key stays masked), so
+ * the probe is the pair a save would run.
+ */
+export function builtinTestRequest(kind, overrides, flat = {}) {
+    if (kind !== 'openai-compatible') return { provider_id: kind, overrides };
+    const pair = compatibleEndpoint(flat);
+    return { provider_id: kind, api_key_setting: pair.apiKeySetting,
+        overrides: pair.legacy ? { ...overrides, OPENAI_BASE_URL: pair.baseUrl, OPENAI_API_KEY: pair.apiKey } : overrides };
+}
+
+/**
+ * Whether the built-in compatible key's draft reaches another pair (`compatibleEndpoint`, the pair its Test sends)
+ * than the settings whose facts its row shows: another address, another key as the page holds it (a kept key stays
+ * masked) or the other pair. While it does, those facts are not about what the row would send.
+ */
+export function reachesAnotherPair(facts = {}, draft = {}) {
+    return JSON.stringify(compatibleEndpoint(draft)) !== JSON.stringify(compatibleEndpoint(facts));
+}
+
+/** The Accounts API-key rows of one Settings page: load, draft edits, collect, validate, Test.
+ * `pageDraft`: flat values the page edits outside these rows and outside `refresh` (Settings' legacy address). */
+export function createConnectionsEditor({ root, onChange = () => {}, test = (body) => apiClient.providerTest(body), pageDraft = () => ({}) } = {}) {
     const cards = new Map(PROVIDER_CARDS.filter((card) => root.querySelector(`[data-connection-rows="${card.kind}"]`))
         .map((card) => [card.kind, card]));
     const kinds = API_PROVIDER_ORDER.filter((kind) => cards.has(kind));
@@ -153,6 +184,9 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     let entries = [];
     let listed = [];            // the document's own `_meta.connections` entries (facts the picker does not read)
     let usage = new Map();
+    let slots = [];
+    let pageSettings = {};      // the page's flat settings as last loaded or refreshed
+    let legacyAddress = '';     // the built-in compatible row's legacy OPENAI_BASE_URL, when that pair serves it
     let builtinOff = new Set();
     let originals = new Map();  // uid → the loaded row: fields this page does not show travel unchanged
     let foreign = [];           // loaded rows of a kind this page has no card for, kept as they are
@@ -161,6 +195,7 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     const touched = new Set();  // cards the owner opened or closed: a reload never overrides that
     const generations = new Map();
     const inFlight = new Set();
+    const asked = new WeakMap();  // row → the request its Test status answers (or awaits)
     let rowBaselines = new WeakMap();
 
     const cardNode = (kind) => root.querySelector(`[data-provider-card="${cards.get(kind)?.id}"]`);
@@ -222,8 +257,12 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         const id = builtin ? kind : `${kind}@${row.dataset.name}`;
         const entry = draft ? null : entries.find((item) => item.id === id);
         const enabled = builtin ? !builtinOff.has(kind) : row.dataset.enabled !== '0';
-        const facts = connectionRowFacts({ draft: draft || rowFingerprint(row) !== rowBaselines.get(row), enabled, configured: Boolean(entry?.configured),
-            source: entry?.source, usedBy: usage.get(id) || [] });
+        const legacy = builtin && kind === 'openai-compatible' ? legacyAddress : '';
+        // The built-in compatible row's pair is also edited beside it (Settings' legacy address, the OpenAI key a
+        // legacy pair travels with): the facts loaded or refreshed stand only while the draft still reaches their pair.
+        const moved = builtin && kind === 'openai-compatible' && reachesAnotherPair(pageSettings, flatDraft());
+        const facts = connectionRowFacts({ draft: draft || moved || rowFingerprint(row) !== rowBaselines.get(row), enabled,
+            configured: Boolean(entry?.configured), source: entry?.source, usedBy: usage.get(id) || [], legacyAddress: legacy });
         const status = row.querySelector('[data-connection-status]');
         Object.assign(status, { textContent: facts.label, hidden: false });
         status.dataset.tone = facts.tone;
@@ -238,8 +277,9 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
             title: enabled ? 'Keep the key; nothing is sent through it until you enable it again'
                 : 'Let the roles that name this key send through it again' });
         const remove = row.querySelector('[data-connection-remove]');
-        // The built-in key's Remove clears its stored credential; a key the environment provides is turned off instead.
-        remove.hidden = builtin && !(entry?.configured && entry.source !== 'environment');
+        // The built-in key's Remove clears its stored credential; a key the environment provides is turned off
+        // instead, and a legacy pair keeps nothing in this row to clear.
+        remove.hidden = builtin && !(entry?.configured && entry.source !== 'environment' && !legacy);
         remove.title = builtin ? 'Clear this key when you save' : draft ? 'Discard this key' : 'Forget this key when you save';
         const note = cacheHintsNote(listed.find((item) => item?.id === id));
         Object.assign(row.querySelector('[data-connection-cache]'), { textContent: note, hidden: !note });
@@ -262,14 +302,18 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
     function expire(row) {
         const key = rowKey(row);
         generations.set(key, (generations.get(key) || 0) + 1);
+        asked.delete(row);
         setInlineStatus(row.querySelector('[data-connection-test-status]'), '', 'muted');
     }
 
     function load(settings = {}, { modelSlots = [] } = {}) {
+        slots = modelSlots;
+        pageSettings = settings;
         entries = apiConnections(settings);
         listed = Array.isArray(settings?._meta?.connections) ? settings._meta.connections : [];
         adoptConnectionLabels(settings?._meta?.connections);
         usage = connectionUsage(settings, modelSlots);
+        legacyAddress = legacyAddressOf(settings);
         const rows = connectionRows(settings?.[CONNECTIONS_KEY]);
         builtinOff = new Set([
             ...rows.filter((row) => row.name === 'default' && row.enabled === false).map((row) => row.kind),
@@ -344,30 +388,52 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         onChange();
     }
 
+    // The page's flat draft: the settings last loaded or refreshed under the built-in rows' current fields,
+    // so a pair edited partly outside its row (the OpenAI key of a legacy compatible pair) reads as typed.
+    function flatDraft() {
+        const values = { ...pageSettings, ...pageDraft() };
+        root.querySelectorAll('[data-connection-row][data-builtin="1"]').forEach((row) => {
+            for (const field of cards.get(row.dataset.kind).fields) {
+                const input = fieldInput(row, field);
+                if (input) values[field.settingKey] = input.value;
+            }
+        });
+        return values;
+    }
+
     // One short model request against the row's draft; only owner-edited fields travel, because a saved
     // secret arrives MASKED: an untouched field tests the saved value server-side, an emptied one the draft.
-    async function testRow(row) {
+    function testRequest(row) {
         const card = cards.get(row.dataset.kind);
         const builtin = row.dataset.builtin === '1';
+        const overrides = {};
+        for (const field of card.fields) {
+            const input = fieldInput(row, field);
+            const value = (input?.value || '').trim();
+            if (value !== (input?.dataset.appliedValue ?? '').trim()) overrides[builtin ? field.settingKey : field.rowField] = value;
+        }
+        return builtin ? builtinTestRequest(card.kind, overrides, flatDraft())
+            : { provider_id: card.kind, connection: names(card.kind).get(row), overrides };
+    }
+
+    // A Test status answers one request: an edit outside the row that changes it clears it too.
+    function settle() {
+        root.querySelectorAll('[data-connection-row]').forEach((row) => {
+            if (asked.has(row) && asked.get(row) !== JSON.stringify(testRequest(row))) expire(row);
+        });
+    }
+
+    async function testRow(row) {
         const key = rowKey(row);
         if (inFlight.has(key)) return;
         const status = row.querySelector('[data-connection-test-status]');
         const button = row.querySelector('[data-connection-test]');
-        const request = () => {
-            const overrides = {};
-            for (const field of card.fields) {
-                const input = fieldInput(row, field);
-                const value = (input?.value || '').trim();
-                if (value !== (input?.dataset.appliedValue ?? '').trim()) overrides[builtin ? field.settingKey : field.rowField] = value;
-            }
-            return builtin ? { provider_id: card.kind, overrides }
-                : { provider_id: card.kind, connection: names(card.kind).get(row), overrides };
-        };
-        const sent = request();
+        const sent = testRequest(row);
         const sentGeneration = generations.get(key) || 0;
         const current = () => row.isConnected && providerTestResultIsCurrent({ sentGeneration,
             currentGeneration: generations.get(key) || 0,
-            sentFingerprint: JSON.stringify(sent), currentFingerprint: JSON.stringify(request()) });
+            sentFingerprint: JSON.stringify(sent), currentFingerprint: JSON.stringify(testRequest(row)) });
+        asked.set(row, JSON.stringify(sent));
         inFlight.add(key);
         setButtonBusy(button, true);
         setInlineStatus(status, 'Testing…', 'muted');
@@ -400,13 +466,15 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
         else if (target.closest('[data-connection-remove]')) removeRow(row);
     }
 
-    // A displayed verdict is only good for the draft it tested: any edit of the row clears it.
+    // A displayed verdict is only good for the draft it tested: any edit of the row clears it,
+    // and so does an edit beside the rows that changes what it asked (Settings' legacy address).
+    // Every row repaints: an edit beside a row, or in another one, can move the pair it describes.
     function onInput(event) {
         const row = event.target instanceof Element ? event.target.closest('[data-connection-row]') : null;
-        if (!row) return;
-        expire(row);
-        paintRow(row);
-        onChange();
+        if (row) expire(row);
+        paintAll();
+        settle();
+        if (row) onChange();
     }
 
     panel?.addEventListener('click', onClick);
@@ -414,6 +482,16 @@ export function createConnectionsEditor({ root, onChange = () => {}, test = (bod
 
     return {
         load,
+        /** Re-read a draft's facts (which keys it holds, who names them) without remounting: an edit outside
+         * the rows, such as the OpenAI key a legacy pair travels with, repaints them; drafts and baselines stay. */
+        refresh(settings = {}) {
+            pageSettings = settings;
+            entries = apiConnections(settings);
+            usage = connectionUsage(settings, slots);
+            legacyAddress = legacyAddressOf(settings);
+            paintAll();
+            settle();
+        },
         /** The setting travels only when the rows differ from the loaded ones. */
         collect() {
             const rows = collectRows();

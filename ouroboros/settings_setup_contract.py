@@ -26,7 +26,7 @@ from ouroboros.model_slots import (
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY,
     PROCESSING_PREFERENCE_KEY, normalize_model_role_options, normalize_processing_preference,
 )
-from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
 from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
 from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections
 
@@ -361,7 +361,8 @@ def derive_provider_profile(settings: dict) -> str:
     flags = {field["settingKey"]: bool(_string(settings.get(field["settingKey"]))) for field in _PROVIDER_FIELDS}
     if flags["OPENROUTER_API_KEY"]:
         return "openrouter"
-    if flags["OPENAI_COMPATIBLE_BASE_URL"]:
+    # The legacy OPENAI_BASE_URL pair counts too: its OPENAI_API_KEY then belongs to that endpoint.
+    if compatible_endpoint_configured(lambda key: _string(settings.get(key))):
         return "openai-compatible"
     direct = [
         ("OPENAI_API_KEY", "openai"),
@@ -463,6 +464,9 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop") -> dic
         budget_state[field["stateKey"]] = float(field["default"] if error or value is None else value)
     state = {
         "connections": mask_connections(list(connection_rows(settings.get("OUROBOROS_CONNECTIONS")))),
+        # Read-only here: an older install's endpoint, paired with OPENAI_API_KEY while the dedicated
+        # address is empty (``compatible_endpoint``). No provider field: completion keeps it as saved.
+        "legacyCompatibleBaseUrl": _string(settings.get("OPENAI_BASE_URL")),
         "providerProfile": profile,
         "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT")) or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
         "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),

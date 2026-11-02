@@ -33,7 +33,7 @@ function inertElement() {
     const listeners = new Map();
     const target = {
         innerHTML: '', textContent: '', value: '', hidden: false, disabled: false, checked: false,
-        dataset: {}, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        dataset: {}, style: { setProperty() {} }, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
         children: [], childNodes: [], attributes: [], firstElementChild: null,
         addEventListener(type, fn) { listeners.set(type, fn); },
         removeEventListener() {},
@@ -132,6 +132,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
     install('setInterval', win.setInterval);
     install('clearTimeout', win.clearTimeout);
     install('clearInterval', win.clearInterval);
+    install('ResizeObserver', class { observe() {} disconnect() {} });
     try {
         // A ReferenceError here is the exact failure that shipped in 6.113.3–6.114.0.
         await import(`../modules/onboarding_wizard.js?${query}`);
