@@ -189,7 +189,7 @@ def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch,
     assert receipt["ok"] is False and receipt["observed_effect"] is True and receipt["steps_done"] == done, receipt
     assert receipt["error"], "the failure's own diagnostics stay in the receipt"
 
-    assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is True  # PASS
     assert len(sends) == 3, "the host reviewed the partial run under Required"
     subject = subject_text(ctx)
     assert f"- effect declared by {effect['tool']}: {effect['receipt']}" in subject
@@ -266,7 +266,7 @@ def test_a_host_note_never_hides_a_receipt_and_stays_beside_it(tmp_path, monkeyp
     for effect in effects:
         assert WARNING not in effect["receipt"] and json.loads(effect["receipt"])["observed_effect"] is True
         assert effect["host_notes"] == [WARNING]
-    assert rr.result_review_at_delivery(ctx, "Saved it.", trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, "Saved it.", trace_of(ctx), lambda _text: None) is True  # its PASS
     subject = subject_text(ctx)
     assert subject.count(json.dumps([WARNING], ensure_ascii=False)) == 2, "each receipt keeps its host note"
 
@@ -362,14 +362,14 @@ def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tm
     desktop = mac(ctx, tmp_path, monkeypatch)
     desktop.call("click", x=1, y=2, raw=True)
     answer = "Clicked Save."
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # its PASS, first
     first = subject_text(ctx)
     assert len(sends) == 3
     assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
     assert len(sends) == 3 and subject_text(ctx) == first, "the same receipt is the same subject: reused at $0"
 
     desktop.call("key", keys="cmd+s")
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
     assert len(sends) == 6, "a new receipt is new material: a new review"
     clicked, saved = (effect["receipt"] for effect in rr.produced_material(ctx)["effects"])
     second = subject_text(ctx)

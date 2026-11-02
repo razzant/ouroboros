@@ -216,6 +216,10 @@ def test_canonical_cas_wake_is_identical_across_installs_and_review_modes(tmp_pa
     restored = _ctx(tmp_path)
     restored._left_review_wait = state
     assert not waiting.ready_helpers(restored, waiting.select_helpers(restored))
+    # A cursor an earlier build saved holds each outcome's full identity: it counts as delivered too.
+    state["seen_outcomes"] = [f"review:{row['wave_id']}:{row['operation_id']}:{row['slot_id']}:{row['outcome']['outcome_id']}"
+                              for row in ready]
+    assert not waiting.ready_helpers(restored, waiting.select_helpers(restored))
 
 
 def test_time_wake_is_peeked_then_consumed_only_with_the_delivery_cursor(tmp_path):

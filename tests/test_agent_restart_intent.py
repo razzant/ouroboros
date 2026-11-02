@@ -266,7 +266,7 @@ def test_late_or_unconfirmed_intake_promises_no_execution(runtime, monkeypatch, 
     if fault == "closed":
         runtime.queue.name_queue_returns(runtime.queue.PENDING, "planned_restart")
     else:
-        monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     result = runtime.queue.enqueue_task({"id": "late", "type": "task", "text": "late", "chat_id": 0})
     assert result.get("_admission_blocked") == ("restart_intake_closed" if fault == "closed" else "restart_admission_unconfirmed")
     worker_chat_lane.handle_chat_direct(7, "late Main")
@@ -360,17 +360,19 @@ def test_refused_restart_releases_intent_without_reopening_other_doors(runtime, 
 
 
 def test_main_preparation_is_not_permission_to_begin_after_intent(runtime, monkeypatch):
-    from supervisor import worker_chat_lane as chat
+    """The lane's admission and the Restart intake are one transaction (owner decision 1A): a Main turn
+    arriving once the intent is accepted is saved on the durable queue, never admitted to a carrier."""
+    from supervisor import message_bus, worker_chat_lane as chat
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
 
-    calls, notices = [], []
-    agent = SimpleNamespace(handle_task=lambda task: calls.append(task))
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: agent)
+    notices = []
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: notices.append((a, k)))
-    admitted = chat._admit_chat_task(agent, 7, "prepared Main")
-    assert admitted is not None and not calls
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    spare = install_lane_spare(runtime.workers)
     accept(runtime)
-    assert chat._execute_chat_task(admitted) is False
-    assert not calls and admitted["registry"].get(admitted["task"]["id"]) is None
+    chat.handle_chat_direct(7, "prepared Main")
+    assert not lane_rows(runtime.workers) and spare.in_q == []
     assert any(row["text"] == "prepared Main" for row in runtime.queue.PENDING)
     assert "task_terminal_status" not in notices[-1][1].get("progress_meta", {})
 
@@ -411,11 +413,18 @@ def test_no_agent_intent_leaves_other_doors_with_their_existing_policies(runtime
     runtime.queue.RETURNS_NAMED["door"] = "managed_update"
     admitted = enqueue(runtime, "existing-update-policy")
     assert admitted in runtime.queue.PENDING
-    actor = SimpleNamespace()
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: actor)
-    turn = chat._admit_chat_task(actor, 7, "ordinary conversation during update")
-    assert turn is not None, "Update's own conversation gate remains the admission authority"
-    turn["registry"].unregister(turn["task"]["id"])
+    from supervisor import message_bus
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
+
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    spare = install_lane_spare(runtime.workers)
+    chat.handle_chat_direct(7, "ordinary conversation during update")
+    [row] = lane_rows(runtime.workers).values()
+    assert row["task"]["text"] == "ordinary conversation during update", \
+        "Update's own conversation gate remains the admission authority"
+    assert row["worker_id"] == spare.wid
+    runtime.workers.RUNNING.pop(row["task"]["id"])
 
 
 @pytest.mark.parametrize("fault", ["none", "closed", "save_failed"])
@@ -433,7 +442,7 @@ def test_task_http_consumer_reports_only_durable_admission(runtime, monkeypatch,
     if fault == "closed":
         runtime.queue.name_queue_returns(runtime.queue.PENDING, "planned_restart")
     elif fault == "save_failed":
-        monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     with TestClient(_app(runtime.root, runtime.root / "repo")) as client:
         result = client.post("/api/tasks", json={"description": "HTTP request B", "source": "web", "chat_id": 1})
     assert result.status_code == (200 if fault == "none" else 409), result.text
@@ -454,13 +463,13 @@ def test_unpublished_ack_and_another_attempt_never_claim_success(runtime, monkey
     monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0)
     assert control_runtime._request_restart(runtime.ctx, "same").startswith("RESTART_UNCONFIRMED:")
     event = runtime.events.get_nowait()
-    publish = runtime.queue.persist_queue_snapshot
-    monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", lambda **k: False)
+    publish = runtime.queue.publish_queue_snapshot
+    monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", lambda **k: False)
     runtime.server._handle_restart_in_supervisor(event, runtime.host)
     assert runtime.restart.agent_restart_pending()
     assert control_runtime._request_restart(runtime.ctx, "same").startswith("RESTART_UNCONFIRMED:")
     assert runtime.events.empty()
-    monkeypatch.setattr(runtime.queue, "persist_queue_snapshot", publish)
+    monkeypatch.setattr(runtime.queue, "publish_queue_snapshot", publish)
     publish(reason="later_host_publication")
     assert control_runtime._request_restart(runtime.ctx, "same").startswith("Restart requested.")
     runtime.server._handle_restart_in_supervisor({**event, "phase": "ready", "task_attempt": 2}, runtime.host)
@@ -670,14 +679,16 @@ def test_update_lock_open_failure_releases_only_restart_before_effects(runtime, 
     runtime.workers.assign_tasks()
     assert [row["id"] for row in delivered] == [queued["id"]]
     assert queued not in runtime.queue.PENDING
-    model_calls = []
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: model_calls.append(True) or SimpleNamespace())
-    turn = worker_chat_lane._admit_chat_task(None, 7, "Main after failed Restart")
-    try:
-        assert turn is not None and model_calls == [True]
-    finally:
-        if turn is not None:
-            turn["registry"].unregister(turn["task"]["id"])
+    from supervisor import message_bus
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
+
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    spare = install_lane_spare(runtime.workers)
+    worker_chat_lane.handle_chat_direct(7, "Main after failed Restart")
+    [row] = [meta for meta in lane_rows(runtime.workers).values() if meta["task"]["text"] == "Main after failed Restart"]
+    assert row["worker_id"] == spare.wid  # the released intent admits Main to the lane again
+    runtime.workers.RUNNING.pop(row["task"]["id"])
 
 
 @pytest.mark.parametrize("phase", ["checkout", "teardown"])

@@ -135,10 +135,14 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
     lag): RUNNING can mean only paid post-work remains, and a terminal result cannot drain a
     new owner or peer message, so it is never suggested as steerable. The running roots'
     owner-Pause fences are read in one statement per store and handed to each reader check.
+    A carried Presence turn's lane row is its place's conversation, never a steerable root (#2604):
+    a moved local author is addressed as ``_moved_presence_readers`` says, and an author in
+    another process has no endpoint here (``steer_task``'s ``presence_author_elsewhere``).
     """
     try:
         from ouroboros.room_reader import is_reading
         from ouroboros.store_hot_facts import snapshot as hot_facts
+        from ouroboros.task_carrier import execution_kind
         from ouroboros.task_status import SETTLED_STATUSES
         from ouroboros.task_store import task_drive_status
 
@@ -148,7 +152,8 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
                   *((row.get("id"), row, "pending", row.get("queued_at"))
                     for row in list(getattr(ctx, "PENDING", []) or []) if isinstance(row, dict))]
         roots = [(str(tid or "").strip(), task, status, started) for tid, task, status, started in queued
-                 if str(tid or "").strip() and isinstance(task, dict) and task.get("delegation_role") != "subagent"]
+                 if str(tid or "").strip() and isinstance(task, dict) and task.get("delegation_role") != "subagent"
+                 and execution_kind(task) != "presence"]
         canonical = pathlib.Path(ctx.DRIVE_ROOT) if roots else None  # no root, no store read
         stored = task_drive_status(canonical, [root[0] for root in roots])
         drives = [pathlib.Path(str(task.get("child_drive_root") or task.get("drive_root") or "").strip()

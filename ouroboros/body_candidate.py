@@ -235,12 +235,13 @@ def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> 
 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
-    """Positive lifecycle evidence only: an unreadable or missing record is not terminal."""
+    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row)."""
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
-
-        record = load_effective_task_result(_wt._data_dir(results_root), task_id, materialize_artifacts=False) or {}
-        return record.get("status") in FINAL_STATUSES
+        from ouroboros.task_store import exists
+        root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
+        record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
+        return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
         log.debug("candidate owner status unavailable for %s", task_id, exc_info=True)
         return False

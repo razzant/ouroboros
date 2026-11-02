@@ -11,7 +11,8 @@ from tests.test_live_review_r9_relay import actor
 pytestmark = pytest.mark.serial
 
 
-def test_restart_defers_live_intent_without_constructing_an_actor(runtime, direct_call, monkeypatch):
+def test_restart_defers_live_intent_without_constructing_an_actor(direct_call, runtime, monkeypatch):
+    # ``direct_call`` first: ``runtime`` then installs the queue tables the restart's census reads.
     from ouroboros.realtime_turn import recovery_refusal
     from supervisor import worker_chat_lane
 

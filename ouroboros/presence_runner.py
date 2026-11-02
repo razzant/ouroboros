@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
-import contextvars
 import functools
 import hashlib
 import json
@@ -21,6 +18,9 @@ from ouroboros.presence_admission import PresenceAdmission
 from ouroboros.presence_events import PresenceTurnError, PresenceTurnEvent, presence_turn_event as presence_turn_event
 from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.conversation_lease import PresenceTurnGate, PresenceTurnLease
+from ouroboros.presence_executions import (  # noqa: F401 -- the Host's registry, re-exported for its importers
+    PROACTIVE_TURNS, PresenceTurnExecution, PresenceTurnExecutions, PresenceTurnNotStarted, _find_execution,
+)
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_COMPLETED,
@@ -1096,12 +1096,20 @@ def run_presence_turn(
     gate: PresenceTurnGate | None = None,
     admitted: PresenceTurnLease | None = None,
     live_turn: Any = None,
+    carrier_owner: Mapping[str, Any] | None = None,
+    event_sink: Callable[[list], None] | None = None,
+    request_waits: bool | None = None,
 ) -> PresenceTurnResult:
     """Run one bounded turn; adapters retain durable provider custody.
 
     ``admitted`` is a lease the caller already took for this conversation (``PresenceTurnGate.admit``):
     the turn runs under it instead of waiting on ``gate``, and the caller keeps releasing it.
     Either lease may be lent at a qualified review wait (``presence_continuation``).
+    ``carrier_owner`` is the lane admission's execution-owner record (its carrier facts ride the
+    row's own ``execution_owner``); ``event_sink`` receives the private owner-contact frames the
+    runner returns to the bus when this process has no bus of its own (a carrier);
+    ``request_waits`` states whether a Host request waits on this turn's result (the admission
+    fact the post-task rule reads, ``agent_task_pipeline.presence_request_waits``).
     """
 
     task_id = _task_id(admission, event)
@@ -1183,6 +1191,8 @@ def run_presence_turn(
             retained_manifest=next((resolve_attachment_manifest(drive_root, task_id, r) for r in prior_rows
                                     if r.get("direction") == "in"), None),
         )
+        if request_waits is not None:
+            task["metadata"]["presence_request_waits"] = bool(request_waits)
         if live_turn is not None:
             from ouroboros.live_conversation import LiveConversationTurn
             if not isinstance(live_turn, LiveConversationTurn) or live_turn.spec.presence_binding_id != admission.binding_id:
@@ -1234,6 +1244,8 @@ def run_presence_turn(
 
         bind_review_wait(agent, lease=lease, event=event, task_id=task_id, identity=identity,
                          drive_root=Path(drive_root))
+        if carrier_owner:
+            task["_execution_owner"] = dict(carrier_owner)  # the lane's carrier facts ride the presence record
         # Read back RUNNING before execution: absence could authorize a duplicate after a crash.
         from ouroboros.task_results import write_task_result
         from ouroboros.task_status import execution_owner_record
@@ -1259,14 +1271,33 @@ def run_presence_turn(
             raise PresenceTurnError("presence_start_unwritable", "source_event_id", turn_ref=task_id) from exc
         try:
             from supervisor.worker_chat_lane import name_wake_on_admission
-            name_wake_on_admission(drive_root, task)
+            name_wake_on_admission(drive_root, task, broadcast=(
+                (lambda msg: event_queue.put(dict(msg))) if event_queue is not None else None))
             lease.intake_agent = agent
-            events = agent.handle_task(task)
+            # The author's intake is a durable fact beside its mailbox (``conversation_lease``):
+            # a Host in another process offers an arrival to this author only while it reads.
+            # Closed after the body returns (its wait scope already closed), never inside the
+            # agent's release: a store write there sat between the final's publication and the
+            # wait's close, where a consumer reads "no author left".
+            from ouroboros.conversation_lease import close_author_intake, open_author_intake
+            intake_open = False
+            try:
+                intake_open = open_author_intake(Path(drive_root), task_id, event.conversation_key)
+            except Exception:
+                log.debug("author intake fact not written for %s", task_id, exc_info=True)
+            try:
+                events = agent.handle_task(task)
+            finally:
+                if intake_open:
+                    try:
+                        close_author_intake(Path(drive_root), task_id)
+                    except Exception:
+                        log.debug("author intake fact not closed for %s", task_id, exc_info=True)
             # Unlike a pooled worker, this runner has no end-of-task event drain.
             # Private owner contact still uses the existing durable delivery owners
             # when there was no live queue (or its enqueue acknowledgement failed).
             from ouroboros.presence_owner_contact import flush_owner_events
-            flush_owner_events(Path(drive_root), events)
+            flush_owner_events(Path(drive_root), events, sink=event_sink)
         except BaseException:  # its executor ended without a terminal: record that end, never a re-run
             _notify_unresolved_turn(Path(drive_root), task_id)
             raise
@@ -1326,222 +1357,6 @@ def run_presence_turn(
         return execute()
     finally:
         lease.release()
-
-
-class PresenceTurnNotStarted(RuntimeError):
-    """Nothing ran: admission was interrupted or no thread could start; retry the same event."""
-
-
-class PresenceTurnExecution:
-    """One live host turn: the results every waiter shares and the admission that starts it.
-
-    ``initial`` is the first envelope (a continuing author's, or the terminal itself) and
-    ``result`` the author's terminal (#1536). The reserved capacity returns exactly once,
-    at whichever comes first; the turn stays live until its terminal.
-    """
-
-    __slots__ = ("turn_id", "identity", "result", "initial", "admission", "_capacity", "_returned", "_lock")
-
-    def __init__(self, turn_id: str, identity: str = "") -> None:
-        self.turn_id = turn_id
-        self.identity = identity
-        self.result: concurrent.futures.Future = concurrent.futures.Future()
-        self.initial: concurrent.futures.Future = concurrent.futures.Future()
-        # RUNNING from birth: a cancelled waiter's wrapper calls Future.cancel(), which a running
-        # future refuses, so no HTTP waiter can cancel the result other waiters share.
-        self.result.set_running_or_notify_cancel()
-        self.initial.set_running_or_notify_cancel()
-        self.admission: asyncio.Task | None = None
-        self._capacity: Callable[[], None] | None = None
-        self._returned = False
-        self._lock = threading.Lock()
-
-    def return_capacity(self, fallback: Callable[[], None] | None = None) -> None:
-        with self._lock:
-            if self._returned:
-                return
-            self._returned, release = True, self._capacity or fallback
-        if release is not None:
-            try:
-                release()
-            except Exception:
-                log.warning("presence turn %s could not return its capacity", self.turn_id, exc_info=True)
-
-    def publish_initial(self, value: Any, *, return_capacity: bool = True) -> bool:
-        """The durable initial envelope of a continuing author: its waiters answer, its capacity returns.
-
-        An author that answered early (``return_capacity=False``: it still runs and holds its
-        lease) returns the capacity at its first real park, whose envelope is then already out.
-        """
-        with self._lock:
-            published = not self.initial.done()
-            if published:
-                self.initial.set_result(value)
-        if return_capacity:
-            self.return_capacity()
-        return published
-
-
-class PresenceTurnExecutions:
-    """The Host's live presence turns by durable turn id: start one, or join the one already running.
-
-    A turn queues on the gate as a coroutine (no thread), then runs on its own daemon thread
-    with the admitting request's context variables (settings, usage and wait scopes), as
-    ``asyncio.to_thread`` carried them. Both versions return ``reserve``d capacity at a qualified
-    park or terminal settlement; version 0's HTTP waiter stays open until terminal. Cancelling or
-    disconnecting a waiter leaves the turn and any held capacity in place; retries join it.
-    A process exit leaves the turn host-lost for retry; the daemon thread never extends a drain.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._live: dict[str, PresenceTurnExecution] = {}
-
-    def live(self) -> list[str]:
-        with self._lock:
-            return list(self._live)
-
-    def start_or_join(
-        self,
-        turn_id: str,
-        *,
-        identity: str = "",
-        reserve: Callable[[], bool],
-        release: Callable[[], None],
-        admit: Callable[[], Any],
-        run: Callable[[PresenceTurnLease], Any],
-    ) -> tuple[PresenceTurnExecution | None, bool]:
-        """``(execution, started)``; ``(None, False)`` when ``reserve`` refuses a new turn.
-
-        A live turn is joined before capacity is consulted: a retry never needs a new slot.
-        Call from the event loop; ``admit`` is a coroutine function returning the lease.
-        """
-        with self._lock:
-            live = self._live.get(turn_id)
-            if live is not None:
-                if identity and live.identity and identity != live.identity:
-                    raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=turn_id)
-                return live, False
-            if not reserve():
-                return None, False
-            execution = self._live[turn_id] = PresenceTurnExecution(turn_id, identity)
-            execution._capacity = release
-        admission = self._admit_and_start(execution, admit, run, release)
-        try:
-            execution.admission = asyncio.get_running_loop().create_task(admission)
-        except BaseException:
-            admission.close()
-            self._settle(execution, release, error=PresenceTurnNotStarted("presence turn admission did not start"))
-            raise
-        execution.admission.add_done_callback(lambda task: self._admission_ended(execution, release, task))
-        return execution, True
-
-    def start_thread(self, turn_id: str, *, identity: str, admit: Callable[[], PresenceTurnLease],
-                     run: Callable[[PresenceTurnLease], Any],
-                     context: contextvars.Context) -> tuple[PresenceTurnExecution, bool]:
-        """The proactive form of ``start_or_join``: admission waits on the turn's own thread."""
-        with self._lock:
-            live = self._live.get(turn_id)
-            if live is not None:
-                if identity and live.identity and identity != live.identity:
-                    raise PresenceTurnError("presence_event_identity_conflict", "source_event_id", turn_ref=turn_id)
-                return live, False
-            execution = self._live[turn_id] = PresenceTurnExecution(turn_id, identity)
-
-        def body() -> None:
-            try:
-                lease = admit()
-            except BaseException as exc:
-                self._settle(execution, lambda: None, error=exc)
-                return
-            self._execute(execution, run, lease, lambda: None)
-
-        try:
-            threading.Thread(target=context.run, args=(body,), name=f"presence-turn-{turn_id}", daemon=True).start()
-        except BaseException as exc:
-            error = PresenceTurnNotStarted("presence turn thread could not start")
-            error.__cause__ = exc
-            self._settle(execution, lambda: None, error=error)
-            raise error from exc
-        return execution, True
-
-    def _admission_ended(self, execution: PresenceTurnExecution, release: Callable[[], None],
-                         task: asyncio.Task) -> None:
-        # Cancellation lands only before the thread starts — in ``admit`` or before the first step,
-        # where the coroutine's own handlers never run (e.g. a loop shutting down).
-        if task.cancelled() and not execution.result.done():
-            self._settle(execution, release, error=PresenceTurnNotStarted("presence turn admission was interrupted"))
-
-    async def _admit_and_start(self, execution: PresenceTurnExecution, admit: Callable[[], Any],
-                               run: Callable[[PresenceTurnLease], Any], release: Callable[[], None]) -> None:
-        try:
-            lease = await admit()
-        except asyncio.CancelledError:
-            raise  # settled by _admission_ended
-        except BaseException as exc:
-            self._settle(execution, release, error=exc)
-            if not isinstance(exc, Exception):
-                raise
-            return
-        try:
-            thread = threading.Thread(
-                target=contextvars.copy_context().run, args=(self._execute, execution, run, lease, release),
-                name=f"presence-turn-{execution.turn_id}", daemon=True,
-            )
-            thread.start()
-        except BaseException as exc:  # e.g. "can't start new thread": nothing ran, so nothing stays held
-            self._release_lease(execution, lease)
-            error = PresenceTurnNotStarted("presence turn thread could not start")
-            error.__cause__ = exc
-            self._settle(execution, release, error=error)
-            if not isinstance(exc, Exception):
-                raise
-
-    def _execute(self, execution: PresenceTurnExecution, run: Callable[[PresenceTurnLease], Any],
-                 lease: PresenceTurnLease, release: Callable[[], None]) -> None:
-        outcome: Any = None
-        error: BaseException | None = None
-        lease.execution = execution  # the author may publish its initial envelope through its lease
-        try:
-            outcome = run(lease)
-        except BaseException as exc:  # relayed unchanged to every waiter
-            error = exc
-        self._release_lease(execution, lease)
-        self._settle(execution, release, result=outcome, error=error)
-
-    @staticmethod
-    def _release_lease(execution: PresenceTurnExecution, lease: PresenceTurnLease) -> None:
-        try:
-            lease.release()
-        except Exception:  # every release callback still ran; settlement must not be lost with it
-            log.warning("presence turn %s could not release its gate lease", execution.turn_id, exc_info=True)
-
-    def _settle(self, execution: PresenceTurnExecution, release: Callable[[], None], *,
-                result: Any = None, error: BaseException | None = None) -> None:
-        # Capacity first, then the id retires, then every waiter sees the outcome. The live set is
-        # custody the Host reads the moment a waiter observes the terminal, and this usually runs on
-        # the turn's own thread while the waiter wakes on the loop: an id published after its outcome
-        # could outlive a response already on the wire. A retry that takes the lock before this joins
-        # the running turn; one that lands after retirement rechecks durable authority — a turn that
-        # reached the model left its RUNNING/terminal row, so it replays or refuses; only a turn that
-        # failed before the start barrier may have no row, and it never generated anything to repeat.
-        # A continuing author returned its capacity with its initial envelope; that is never repeated.
-        execution.return_capacity(release)
-        with self._lock:
-            if self._live.get(execution.turn_id) is execution:
-                del self._live[execution.turn_id]
-        for future in (execution.initial, execution.result):
-            with execution._lock:
-                if future.done():
-                    continue
-                if error is None:
-                    future.set_result(result)
-                else:
-                    future.set_exception(error)
-
-
-# Initiated turns run under this process's own execution registry (the Host keeps its own).
-PROACTIVE_TURNS = PresenceTurnExecutions()
 
 
 __all__ = [

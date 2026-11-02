@@ -202,7 +202,7 @@ class HostServiceContext:
         self.bridge_getter = bridge_getter or self._default_bridge
         self.tool_schemas_getter = tool_schemas_getter or self._default_tool_schemas
         self.ws_broadcaster_getter = ws_broadcaster_getter or self._default_ws_broadcaster
-        self.presence_runner = presence_runner or self._default_presence_runner
+        self.presence_runner = presence_runner
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
@@ -215,6 +215,21 @@ class HostServiceContext:
         from ouroboros.presence_runner import PresenceTurnExecutions
 
         self.presence_turns = PresenceTurnExecutions()
+
+    def _runner(self) -> Optional[Callable[..., Any]]:
+        return self._presence_runner
+
+    def _bind_runner(self, runner: Optional[Callable[..., Any]]) -> None:
+        from ouroboros.presence_carrier import set_presence_runner
+
+        self._presence_runner = runner
+        set_presence_runner(self.data_dir, runner)
+
+    # The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads it for this
+    # Host's root); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An injected
+    # runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did. Assigned at construction
+    # or later, it reaches the carrier the same way; None restores the module's own runner.
+    presence_runner = property(_runner, _bind_runner)
 
     def _ws_relay_burst_ended(self, key: str, dropped: int, duration_sec: float) -> None:
         """Report one aggregated WS relay refusal burst: a warning plus one
@@ -259,17 +274,6 @@ class HostServiceContext:
         from ouroboros.gateway.ws import broadcast_ws_sync
 
         return broadcast_ws_sync
-
-    def _default_presence_runner(self, **kwargs: Any) -> Any:
-        from ouroboros.presence_runner import run_presence_turn
-        from supervisor.workers import REPO_DIR, get_event_q
-
-        return run_presence_turn(
-            repo_dir=pathlib.Path(REPO_DIR),
-            drive_root=self.data_dir,
-            event_queue=get_event_q(),
-            **kwargs,
-        )
 
     async def admit_presence_gate(self, conversation_key: str, *, wait: bool = True) -> Any:
         """Coroutine admission into the configured presence gate; the lease the turn runs under."""
@@ -1011,7 +1015,8 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     source (chat, id, time, text), then that work's effective retry-aware status. Discovery is
     addressed by the message: the live queue, the tasks whose typed origin names it
     (``task_store.origin_documents``, rows an older writer left underived included), the live
-    direct registry and the dialogue rows indexed under that origin; no room history or routing
+    direct registry (a carried turn's lane row answers as that actor did) and the dialogue rows
+    indexed under that origin, a turn's own record told apart by its origin; no room history or routing
     annotation is read. A managed root (a promoted or detached task) answers before the direct turn
     that handed it off; children and retry successors fold into their root, unless a record its
     retry-aware read went through cannot be read (``task_record_unreadable``). Otherwise ``pending``,
@@ -1024,10 +1029,11 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     """
     from ouroboros import dialogue_store
     from ouroboros.project_dialogue import entry_matches_source_ref, owner_message_ref_is_valid
-    from ouroboros.task_carrier import inline_execution
+    from ouroboros.task_carrier import conversation_origin
     from ouroboros.task_status import SETTLED_STATUSES, load_effective_task_result
     from ouroboros.task_store import origin_documents
     from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.conversation_lane import conversation_row
     from supervisor import queue as task_queue
 
     inbound = accepted.row
@@ -1051,15 +1057,19 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     def root(record: dict) -> bool:
         return not str(record.get("parent_task_id") or "").strip() and record.get("delegation_role") != "subagent"
 
-    # Live queue payloads cover tasks no worker has persisted yet: the current source.
+    # Live queue payloads cover tasks no worker has persisted yet: the current source. A conversation-lane row
+    # is the turn itself, live as the registry's actor was, never the managed root it may have promoted.
     queued: Dict[str, Dict[str, Any]] = {}
+    turns: Dict[str, Dict[str, Any]] = {}
     cancel_owner_matches = (task_queue.DRIVE_ROOT is not None
                             and pathlib.Path(task_queue.DRIVE_ROOT).resolve() == ctx.data_dir.resolve())
     if cancel_owner_matches:
         with task_queue._queue_lock:
-            for task in [*task_queue.PENDING, *(meta.get("task") or {} for meta in task_queue.RUNNING.values())]:
+            rows = [*((task, False) for task in task_queue.PENDING),
+                    *((meta.get("task") or {}, conversation_row(meta)) for meta in task_queue.RUNNING.values())]
+            for task, lane in rows:
                 if str(task.get("id") or "") and owns(task) and root(task):
-                    queued[str(task["id"])] = dict(task)
+                    (turns if lane else queued)[str(task["id"])] = dict(task)
     documents, unreadable = origin_documents(ctx.data_dir, key)
     owners = {tid: doc for tid, doc in documents.items() if owns(doc) and root(doc)}
     for tid, doc in list(owners.items()):
@@ -1069,7 +1079,7 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
     successors = {str(doc.get(link) or "") for doc in owners.values() for link in ("superseded_by", "retry_task_id")}
     heads = sorted((tid for tid in owners if tid not in successors and tid not in queued),
                    key=lambda tid: (str(owners[tid].get("ts") or ""), tid), reverse=True)
-    direct = [tid for tid in heads if inline_execution(owners[tid])]  # a turn's own record, by its attempt owner
+    direct = [tid for tid in heads if conversation_origin(owners[tid])]  # a turn's own record, whatever carried it
     managed = [*queued, *(tid for tid in heads if tid not in direct)]
     if managed:
         target = managed[0]
@@ -1083,6 +1093,13 @@ def _operation_state(ctx: HostServiceContext, accepted: Any) -> Dict[str, Any]:
             state["reason"] = "task_record_unreadable"
             return state
         return _task_view(state, target, stored, cancel_owner_matches)
+    for tid, task in turns.items():  # live as the registry's actor was until its own record settles; then its
+        kind = "presence" if task.get("_presence_turn") else "direct_chat"  # final or record answers, below
+        if str((load_effective_task_result(ctx.data_dir, tid, materialize_artifacts=False) or {}).get("status")
+               or "") not in SETTLED_STATUSES:
+            state.update(status="running", phase=kind, task_id=tid, cancel_supported=kind == "direct_chat")
+            return state
+        direct += [] if tid in direct else [tid]
     registry = get_direct_activity_registry()
     for entry in registry.snapshot(chat_id):
         activity = registry.get(str(entry.get("activity_id") or ""))

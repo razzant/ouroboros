@@ -710,6 +710,16 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     return facts
 
 
+def force_store_journal() -> None:
+    """``COST_STORE_JOURNAL``: the journal mode every store of this measurement takes, whatever this machine's SQLite and
+    filesystem would choose: the stand holds its counts on WAL and on PERSIST (Windows CI is PERSIST)."""
+    mode = os.environ.get("COST_STORE_JOURNAL", "")
+    if mode:
+        from ouroboros import store
+
+        store._journal_mode = lambda *_args: mode
+
+
 def main(argv: List[str]) -> int:
     root, k, out = pathlib.Path(argv[0]), int(argv[1]), pathlib.Path(argv[2])
     if pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", "")).resolve() != root.resolve():
@@ -720,6 +730,7 @@ def main(argv: List[str]) -> int:
     if not same_location(config.SETTINGS_PATH, root / "settings.json"):  # the budget fact is read through it
         raise SystemExit(f"OUROBOROS_SETTINGS_PATH must name the settings.json of the root being built, "
                          f"not {config.SETTINGS_PATH}")
+    force_store_journal()
     facts = build(root, k)
     out.write_text(json.dumps(facts, indent=1, sort_keys=True), encoding="utf-8")
     return 0

@@ -132,7 +132,7 @@ from ouroboros.usage_accounting import (
     last_physical_attempt_capture,  # noqa: F401
     usage_scope,  # noqa: F401 -- historical public import surface
     )
-from ouroboros.utils import in_worker_process, sanitize_tool_result_for_log  # noqa: F401
+from ouroboros.utils import sanitize_tool_result_for_log, transport_no_proxy  # noqa: F401
 from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
@@ -233,9 +233,9 @@ class LLMClient(
                     messages, tools, max_tokens, tool_choice, **local_kwargs,
                 )
             else:
-                # Central worker policy: remote calls from worker processes avoid
-                # system proxy lookup without every caller remembering a flag.
-                no_proxy = no_proxy or in_worker_process()
+                # The spawner's transport policy (``utils.transport_no_proxy``): a forked child
+                # avoids OS proxy lookup; a spawned carrier keeps the server's policy.
+                no_proxy = no_proxy or transport_no_proxy()
                 target = {**self._resolve_remote_target(model), "processing_preference": processing_preference}
                 if temperature is None and target.get("provider") != "claudexor":
                     temperature = default_temperature
@@ -293,7 +293,7 @@ class LLMClient(
         from ouroboros.llm_claudexor import turn_state_for_route
 
         messages = self._normalize_system_message_placement(messages)
-        no_proxy = no_proxy or in_worker_process()
+        no_proxy = no_proxy or transport_no_proxy()
         if use_local:
             turn_state_for_route(model_turn_state, "local")
             from ouroboros.usage_accounting import adopt_physical_attempt_capture, last_physical_attempt_capture

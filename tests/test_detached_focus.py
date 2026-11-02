@@ -1,7 +1,9 @@
 """A direct root keeps its own focus after handing the same work to the pool (#2494).
 
 ``is_direct_chat`` stays the historical origin and ``_execution_owner`` names the current carrier.
-The seam runs the real arm, checkpoint, park, wake, assignment and worker materialization, then the
+The live direct root here is an inline executor's turn (a registered actor of this process, its RUNNING
+lane row on a pseudo-slot); its exact pause is parked by the pooled path (the supervisor's
+``budget_pause`` handler over the row), then woken, assigned and materialized on a worker, then the
 real tool dispatch; only the model and the worker process are absent.
 """
 
@@ -14,14 +16,16 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import budget_pause as bp
-from ouroboros.task_carrier import execution_kind
+from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED, execution_kind
 from ouroboros.task_results import load_task_result, write_task_result
 from tests.test_project_hold_recovery import worker
 from tests.test_swarm_host_admission import host as host
+from tests.conversation_carrier_support import lane_row, park_lane_pause
 
 pytestmark = pytest.mark.serial
 
 TASK_ID = "head"
+INLINE_WID = 97  # the inline executor's pseudo-slot
 RECENT = {"reader": "recent_tasks"}
 
 
@@ -69,7 +73,7 @@ def direct(host, monkeypatch):
     """A live direct root on the real chat-lane carrier, past its pre-effect checkpoint."""
     from ouroboros import model_detach, working_checkpoint
     from ouroboros.owner_wait import direct_owner_wait
-    from supervisor import active_activity, queue
+    from supervisor import active_activity, queue, workers
 
     sent = worker(host, monkeypatch)
     monkeypatch.setattr(host.ctx.bridge, "push_log", lambda _event: None, raising=False)
@@ -81,6 +85,8 @@ def direct(host, monkeypatch):
     actor.owner_wait_callback = direct_owner_wait
     task = {"id": TASK_ID, "type": "task", "root_task_id": TASK_ID, "chat_id": 1, "text": "work",
             "_is_direct_chat": True, "_attempt": 1, "tool_profile": "operator_control"}
+    # An inline executor's turn: its RUNNING lane row on a pseudo-slot (no pid), its actor registered.
+    lane_row(workers, task, wid=INLINE_WID, executor=EXECUTOR_INLINE_DEGRADED, pid=None)
     ctx = _materialize(actor, task)
     registry.register(TASK_ID, 1, actor=actor)
     # What the loop binds around a model turn; the fields it carries while no model call is made.
@@ -106,7 +112,6 @@ def _handed_to_pool(direct):
     from ouroboros import working_checkpoint
     from ouroboros.tools.control_mind import _continue_in_background
     from supervisor import queue, workers
-    from supervisor.direct_pause import park_direct_pause
     from supervisor.sleep_wake import wake_ready_sleepers
 
     armed = json.loads(_continue_in_background(direct.ctx, "continue the same work"))
@@ -114,8 +119,13 @@ def _handed_to_pool(direct):
     assert working_checkpoint.save_round(direct.limit, "post_batch")
     with pytest.raises(bp.BudgetPauseRequested) as stopped:
         bp.enter_cold_sleep(direct.limit)
-    assert park_direct_pause(direct.task, bp.pause_event(direct.task, stopped.value.pause))
+    # The body returns its pause event; the supervisor parks the row (RUNNING -> PENDING), and the
+    # inline executor's actor and pseudo-slot leave as its body ends.
+    park_lane_pause(bp.pause_event(direct.task, stopped.value.pause))
+    assert TASK_ID not in workers.RUNNING and [row["id"] for row in workers.PENDING] == [TASK_ID]
     direct.registry.unregister(TASK_ID)
+    workers.WORKERS.pop(INLINE_WID, None)
+    bp.end_dispatch_fence(TASK_ID)
     assert any(outcome.get("ok") for outcome in wake_ready_sleepers(queue))
     workers.assign_tasks()
     [handed] = direct.sent

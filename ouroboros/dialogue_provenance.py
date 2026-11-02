@@ -142,9 +142,9 @@ def presence_sender_origin(ctx: Any) -> dict[str, str]:
 def presence_queue_task(drive_root: Any, task_id: str) -> dict[str, Any] | None:
     """The persisted queue row of one pending/running task, if the snapshot lists it."""
 
-    from ouroboros.utils import read_json_dict
+    from ouroboros.queue_observation import load_queue_document
 
-    snapshot = read_json_dict(Path(drive_root) / "state" / "queue_snapshot.json") or {}
+    snapshot = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
     for key in ("pending", "running"):
         for item in snapshot.get(key) or []:
             task = item.get("task") if isinstance(item, Mapping) else None

@@ -630,14 +630,18 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     if needs_decision_lane:
         task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
 
-    def _run_direct() -> None:
-        ctx.handle_chat_direct(
-            chat_id,
-            text or image_caption,
-            image_data,
-            task_constraint=task_constraint,
-            task_metadata=task_metadata,
-            **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
-        )
-
-    threading.Thread(target=_run_direct, daemon=True).start()
+    if realtime_turn is not None:
+        # A live call keeps a thread of this process (``executor=inline_call``): its host port is process-local.
+        threading.Thread(target=ctx.handle_chat_direct, args=(chat_id, text or image_caption, image_data),
+                         kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata,
+                                 "realtime_turn": realtime_turn}, daemon=True).start()
+        return
+    # The conversation lane's admission: the RUNNING row and the start receipt here, the
+    # turn's body in a carrier process (owner decision 1A). No thread per owner turn.
+    ctx.handle_chat_direct(
+        chat_id,
+        text or image_caption,
+        image_data,
+        task_constraint=task_constraint,
+        task_metadata=task_metadata,
+    )

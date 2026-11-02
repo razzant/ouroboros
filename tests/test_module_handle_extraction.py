@@ -63,10 +63,12 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "DRIVE_ROOT", "PENDING", "RUNNING", "SCHEDULED_TASKS_FILE", "_queue_lock",
         "load_state", "persist_queue_snapshot",  # admission enqueues in schedule_occurrence
     })),
+    # The lane's doors admit only (owner decision 1A): the actor and the event bus are the
+    # carrier's (``inline_carrier`` reads them for the two inline executors), not this leaf's.
     "supervisor/worker_chat_lane.py": ("supervisor/workers.py", "_pool", frozenset({
-        "DRIVE_ROOT", "REPO_DIR", "_repo_writer_gate_lock", "chat_turn_liveness",
-        "_get_chat_agent", "_origin_from_mapping", "_repo_writer_turn_allowed",
-        "_report_binding_failure", "get_event_q", "load_state",
+        "DRIVE_ROOT", "REPO_DIR", "_repo_writer_gate_lock",
+        "_origin_from_mapping", "_repo_writer_turn_allowed",
+        "_report_binding_failure", "load_state",
         "repo_writer_admission_closed", "send_with_budget",
     })),
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({
@@ -95,17 +97,22 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # tree did not bear it out, so the three invariants below were not running on
     # them. Sets are the tool-derived exact read sets on these bytes.
     "supervisor/queue_snapshot.py": ("supervisor/queue.py", "_queue", frozenset({
-        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "INITIALIZED", "PENDING", "PRIOR_DIRECT_ROOTS",
+        "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "PENDING", "PRIOR_DIRECT_ROOTS",
         "QUEUE_PUBLICATION", "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
-        "append_jsonl", "atomic_write_text", "enqueue_task", "parse_iso_to_ts",
+        "append_jsonl", "enqueue_task", "parse_iso_to_ts",
         "persist_queue_snapshot", "restore_invalid_depth_admission", "sort_pending",
+    })),
+    # L5 (server-saturation sprint): publication left the restore leaf for its own owner; the
+    # capture reads the live maps and the publication record through the same handle.
+    "supervisor/queue_publication.py": ("supervisor/queue.py", "_queue", frozenset({
+        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "INITIALIZED", "PENDING", "QUEUE_PUBLICATION",
+        "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock", "atomic_write_text", "persist_queue_snapshot",
     })),
     "supervisor/queue_timeouts.py": ("supervisor/queue.py", "_queue", frozenset({
         "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "FINALIZATION_GRACE_SEC", "HEARTBEAT_STALE_SEC", "PENDING",
         "RUNNING", "_enforce_task_timeouts_locked", "_expire_pending_deadlines_locked",
-        "_ensure_reaper_started", "_has_pending_descendant",
-        "_is_descendant_of", "_queue_lock", "_reap_queue",
-        "_request_finalization_grace", "_subtree_progressing", "_task_deadline_ts",
+        "_ensure_reaper_started", "_queue_lock", "_reap_queue",
+        "_request_finalization_grace", "_task_deadline_ts",
         "_task_drive_for_task", "coerce_chat_identity",
         "get_task_abs_ceiling_sec", "get_task_idle_timeout_sec", "load_state",
         "persist_queue_snapshot",

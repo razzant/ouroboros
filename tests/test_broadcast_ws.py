@@ -15,16 +15,15 @@ def test_broadcast_partial_failure_uses_module_data_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("OUROBOROS_DATA_DIR", raising=False)
     monkeypatch.setattr(ws, "DATA_DIR", tmp_path)
 
-    with ws._ws_lock:
-        original_clients = list(ws._ws_clients)
-        ws._ws_clients.clear()
-        ws._ws_clients.append(_DeadWebSocket())
-    try:
-        asyncio.run(ws.broadcast_ws({"type": "unit_test"}))
-    finally:
-        with ws._ws_lock:
-            ws._ws_clients.clear()
-            ws._ws_clients.extend(original_clients)
+    monkeypatch.setattr(ws, "_ws_clients", [])
+
+    async def run():
+        connection = ws._register(_DeadWebSocket())
+        await ws.broadcast_ws({"type": "unit_test"})
+        await connection.writer  # the writer retires its connection on the failed send
+
+    asyncio.run(run())  # closing the loop joins the default executor that wrote the row
+    assert ws._ws_clients == []
 
     events_path = tmp_path / "logs" / "events.jsonl"
     rows = [
@@ -124,10 +123,15 @@ def test_a_loop_closing_after_the_running_check_still_closes_the_coroutine(monke
 
     from ouroboros.gateway import ws
 
+    from types import SimpleNamespace
+
     loop = asyncio.new_event_loop()
     loop.close()
     monkeypatch.setattr(loop, "is_running", lambda: True)  # running at the check, closed by the schedule
     monkeypatch.setattr(ws, "_event_loop", loop)
+    monkeypatch.setattr(ws, "_ws_clients", [SimpleNamespace()])  # an open socket: the frame needs the loop
+    monkeypatch.setattr(ws, "_pending", ws.collections.deque())
+    monkeypatch.setattr(ws, "_flush_scheduled", False)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         assert ws.broadcast_ws_sync({"type": "unit_test_closing_loop"}) is False

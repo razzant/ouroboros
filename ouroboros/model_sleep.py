@@ -601,10 +601,7 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     from ouroboros.model_detach import is_detach
 
     chosen = chosen if chosen is not None else (getattr(ctx, "_model_sleep", None) or {})
-    detach = is_detach(chosen)
-    allow_transfer = allow_transfer and not detach
-    if detach:
-        transferred = ()
+    detach = is_detach(chosen)  # a detach transfers its exact bound runs to the body like any cold sleep
     blockers: List[Dict[str, str]] = []
     try:
         observed = observe_task_runs(custody.custody_root(ctx), str(ctx.task_id), reason="cold_sleep_check",

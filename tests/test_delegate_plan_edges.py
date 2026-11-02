@@ -181,7 +181,7 @@ def test_plan_workspace_is_retained_without_capture_or_apply_duty(plan_setup, mo
     assert capture_terminal_patch_for_drive(p.root, writable, gateway=p.engine) is not None
     assert custody.candidate_apply_possible(writable)
     assert not custody.candidate_apply_possible(replace(writable, mode="plan", execution_mode="plan"))
-    monkeypatch.setattr(current, "runs", lambda *a, **kw: {prior.run_id: prior})
+    monkeypatch.setattr(current, "held_runs", lambda *a, **kw: {prior.run_id: prior})
     assert prior.snapshot_id not in custody.open_snapshot_ids(p.root)
     prior.mode = "agent"
     assert prior.snapshot_id in custody.open_snapshot_ids(p.root)

@@ -745,6 +745,50 @@ def observe_wake(drive_root: Any, *, boundary: Any, since: float, now: float, re
         boundary=None if source_unreadable else state_to_accept or None)
 
 
+def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
+    """The wake's first step in its carrier: observe the window, render the message, bind the source.
+
+    The clock admitted the wake with the facts only its process holds (``_wake_prepare``:
+    the accepted boundary, the bootstrap, the allowance window, the live roots, the
+    schedule); everything that reads history runs here, in the carrier (owner decision 1A,
+    L7). The complete observation becomes the task's text, its exact source is stored under
+    the wake, and the boundary it accepts rides the task metadata to the clock
+    (``consciousness._settle_wake``). A failure here leaves the admitted text as the only input.
+    """
+    facts = task.pop("_wake_prepare", None)
+    if not isinstance(facts, dict):
+        return
+    from ouroboros.consciousness_view import cause_views, place_views, root_views
+
+    root = pathlib.Path(drive_root)
+    now = float(facts.get("now") or 0.0)
+    reason = str(facts.get("reason") or "heartbeat")
+    window = facts.get("window") if isinstance(facts.get("window"), dict) else {}
+    observation = observe_wake(root, boundary=facts.get("boundary"), since=float(facts.get("since") or 0.0),
+                               now=now, reason=reason)
+    try:
+        places = place_views(root, window)
+    except Exception:
+        places = None
+    context = {"spend_by_cause": cause_views(window.get("spend_by_cause"), places),
+               "counted_roots": root_views(list(facts.get("counted_roots") or []), places), "places": places}
+    previous = previous_wake_text(root, str(facts.get("last_wake_task_id") or ""), now=now)
+
+    def render(events: str) -> str:
+        return render_wake_message(
+            facts.get("repo_dir"), drive_root=root, reason=reason, last_wake_at=float(facts.get("last_wake_at") or 0.0),
+            now=now, level=facts.get("level"), disabled_tools=list(facts.get("disabled_tools") or []),
+            spent_usd=window.get("settled_usd"), spent_is_floor=int(window.get("unknown_unmetered") or 0) > 0,
+            daily_usd=window.get("limit_usd") or 0.0, running=len(context["counted_roots"]),
+            max_tasks=int(facts.get("max_tasks") or 0), interval=int(facts.get("interval") or 0), events=events,
+            previous_wake=previous, appointment_at=float(facts.get("appointment_at") or 0.0), **context)
+
+    task["text"] = render(observation.full_text())
+    accepted = bind_wake_observation(root, task, observation, render)
+    if accepted is not None:
+        task.setdefault("metadata", {}).setdefault(WAKE_OBSERVATION_KEY, {})["accepted_boundary"] = accepted
+
+
 def bind_wake_observation(drive_root: Any, task: Dict[str, Any], observation: WakeObservation,
                           render: Any) -> Optional[Dict[str, Any]]:
     """Store the whole observation under the registered wake and name its projection.

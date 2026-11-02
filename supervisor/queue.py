@@ -76,7 +76,7 @@ SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 # OWNER_PID names that process: a child forked after ``init`` inherits INITIALIZED, not the pid.
 INITIALIZED = False
 OWNER_PID: Optional[int] = None
-QUEUE_PUBLICATION = None  # Structural documents and their successfully published generation.
+QUEUE_PUBLICATION = None  # (path, encoded documents, generation) of the last successful publication.
 
 
 def owns_live_queue(drive_root: Any) -> bool:
@@ -95,7 +95,10 @@ def owns_live_queue(drive_root: Any) -> bool:
 
 def init(drive_root: pathlib.Path) -> None:
     global DRIVE_ROOT, FINALIZATION_GRACE_SEC, INITIALIZED, OWNER_PID, QUEUE_SNAPSHOT_PATH, QUEUE_PUBLICATION
+    from supervisor.queue_publication import reset as reset_publication
+
     QUEUE_PUBLICATION = None
+    reset_publication()  # nothing marked or published by this generation, no tick publisher yet
     DRIVE_ROOT = drive_root
     INITIALIZED, OWNER_PID = True, os.getpid()
     QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
@@ -513,11 +516,11 @@ def enqueue_task(
         if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
             ADMISSION_RESERVATIONS.pop(task_id, None)
         if not restoring_snapshot and (durable or agent_restart_pending()):
-            if persist_queue_snapshot(reason="agent_restart_admission") is not True:
+            if publish_queue_snapshot(reason="agent_restart_admission") is not True:  # durable before the reply
                 # No accepted reply and no dispatch. A partial disk publication
                 # is outside the named return set and boots held for Resume.
                 PENDING[:] = [row for row in PENDING if row is not t]
-                persist_queue_snapshot(reason="agent_restart_admission_unconfirmed")
+                publish_queue_snapshot(reason="agent_restart_admission_unconfirmed")
                 return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
     return t
 
@@ -952,8 +955,13 @@ from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional publi
     _kept_service_pids,
     _retained_daemon_pids,
     parse_iso_to_ts,
-    persist_queue_snapshot,
     restore_pending_from_snapshot,
+)
+from supervisor.queue_publication import (  # noqa: E402, F401 -- intentional public re-exports
+    persist_queue_snapshot,
+    publish_queue_changes,
+    publish_queue_snapshot,
+    tick_publisher_started,
 )
 from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports
     _enforce_task_timeouts_locked,
@@ -963,5 +971,6 @@ from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional publi
     _subtree_progressing,
     _task_deadline_ts,
     _task_drive_for_task,
+    enforce_due_task_timeouts,
     enforce_task_timeouts,
 )

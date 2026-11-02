@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ouroboros.task_carrier import inline_execution
+from ouroboros.task_carrier import conversation_origin, inline_execution
 
 from ouroboros.config import runtime_setting
 
@@ -625,7 +625,7 @@ class OuroborosAgent:
         attributed candidate set to consume."""
         if (
             str(task.get("id") or "").strip()
-            and not inline_execution(task)
+            and not conversation_origin(task)  # a queued root, never an owner's or correspondent's turn
             and str(task_metadata.get("delegation_role") or "").lower() != "subagent"
         ):
             try:
@@ -1087,7 +1087,7 @@ class OuroborosAgent:
                 if isinstance(task.get("metadata"), dict)
                 else {}
             )
-            self._accepting_owner_messages = inline_execution(task)
+            self._accepting_owner_messages = conversation_origin(task)  # the turn's own intake, in whichever process
 
     def _release_turn(self) -> None:
         """The turn's end (its body's, or a preparation that ended before the body): nothing reads it as live."""
@@ -1216,7 +1216,7 @@ class OuroborosAgent:
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
             else:
                 with self._owner_message_admission_lock:
-                    if opened := inline_execution(task):
+                    if opened := conversation_origin(task):
                         self._accepting_owner_messages = True
                 if opened and callable(getattr(self, "intake_opened_callback", None)):
                     # Only this prepared loop reads what intake accepts: a version-2 Presence author answers
@@ -1298,7 +1298,7 @@ class OuroborosAgent:
             physical_calls = _physical_calls_after_budget_rail(
                 task.get("budget_drive_root") or self.env.drive_root, task_id)
             # Direct chats cannot honestly advertise the queued-task resume contract.
-            replay_safe = physical_calls == 0 and not inline_execution(task)
+            replay_safe = physical_calls == 0 and not conversation_origin(task)
             resource_limit = {
                 "status": "paused_before_dispatch" if replay_safe else "resource_limited",
                 "scope": str(getattr(exc, "limit_scope", "global") or "global"),
@@ -1308,10 +1308,10 @@ class OuroborosAgent:
                 "auto_resume": False,
                 "resume_policy": _budget_resume_policy(
                     replay_safe=replay_safe,
-                    direct_chat=inline_execution(task),
+                    direct_chat=conversation_origin(task),
                 ),
             }
-            if resource_limit["scope"] == "root" and not replay_safe and not inline_execution(task):
+            if resource_limit["scope"] == "root" and not replay_safe and not conversation_origin(task):
                 # One root admission latch is enough. Existing siblings finish
                 # any sent request and meet the same ledger rail before another.
                 self._pending_events.append({
@@ -1339,7 +1339,7 @@ class OuroborosAgent:
                     "ts": utc_now_iso(),
                 })
                 return list(self._pending_events)
-            message_fn = _budget_exhausted_message if inline_execution(task) else _queued_budget_exhausted_message
+            message_fn = _budget_exhausted_message if conversation_origin(task) else _queued_budget_exhausted_message
             text = message_fn()
             usage = {
                 "execution_status": "failed",

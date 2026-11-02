@@ -886,10 +886,10 @@ def task_requires_workspace_capture(task: Dict[str, Any]) -> bool:
     The actual execution owner wins over historical direct/Presence origin.
     Source verification, cancellation and split-result adoption precede this test.
     """
-    from ouroboros.task_carrier import inline_execution
+    from ouroboros.task_carrier import conversation_origin
 
     return (_workspace_root_from_task(task) is not None
-            and not task_is_readonly_subagent(task) and not inline_execution(task))
+            and not task_is_readonly_subagent(task) and not conversation_origin(task))
 
 
 def _build_deliverable_manifest(

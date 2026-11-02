@@ -10,7 +10,6 @@ never reports work as scheduled on the strength of having emitted an event.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import queue
@@ -158,14 +157,20 @@ def _promotion_pool_disabled_from_snapshot(ctx: ToolContext) -> str:
     already says the executor pool was deliberately disabled.
     """
     try:
+        from ouroboros.queue_observation import load_queue_document
+
         root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-        snapshot = json.loads(
-            (root / "state" / "queue_snapshot.json").read_text(encoding="utf-8")
-        )
+        snapshot = load_queue_document(root)
+        if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+            return ""
         reason = str(snapshot.get("worker_pool_disabled_reason") or "")
         if reason not in {"", "unknown"}:
             return reason
-        if int(snapshot.get("worker_total") or 0) <= 0:
+        # Availability as ``model_detach.pool_available`` reads it: any started process answers. The
+        # project pool idles at zero slots after boot and after every quiet period (the lane's spare is
+        # the one resident), and a promote is what makes it grow; only an empty table is absence.
+        started = int(snapshot.get("worker_total") or 0) + int(snapshot.get("lane_carrier_total") or 0)
+        if started <= 0:
             return "no_workers"
         return ""
     except Exception:

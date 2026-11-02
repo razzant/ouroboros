@@ -132,7 +132,7 @@ def test_orphan_exclusion_filters_before_effective_materialization(roots, monkey
     for tid in ["live", "dead"]:
         write_task_result(root, tid, "running", result="original")
     read = []
-    def effective(root, tid, materialize_artifacts=True, *, _boot=False):
+    def effective(root, tid, materialize_artifacts=True, *, _boot=False, reads=None):
         tid = tid["task_id"]
         read.append((tid, materialize_artifacts))
         return {"task_id": tid, "status": "failed", "result": "proven orphan"}
@@ -561,7 +561,7 @@ def test_orphan_reconcile_closes_the_open_quiz_and_its_paired_wait(roots, monkey
     monkeypatch.setattr(
         "ouroboros.task_status.effective_task_result",
         # The reconciler reuses the addressed row for its status-only decision.
-        lambda _root, row, materialize_artifacts=True, _boot=False: {"task_id": row["task_id"], "status": "failed", "result": "proven orphan"},
+        lambda _root, row, materialize_artifacts=True, _boot=False, reads=None: {"task_id": row["task_id"], "status": "failed", "result": "proven orphan"},
     )
 
     assert reconcile_orphaned_running_tasks(root) == 2

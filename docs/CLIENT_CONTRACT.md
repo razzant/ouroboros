@@ -223,6 +223,8 @@ On a failed or unknown save, retain the form and read the attempt back as above;
 - **Checkout:** `sha`, the first 8 characters of the commit on disk (the running core's start commit is `running_sha` in `GET /api/update/status`); `branch`, `null` for a detached HEAD or unknown branch.
 - **`served_ui`.**
 
+Two informative response headers describe the body, never its shape: `X-Ouroboros-State-Generation` (the server process's publication it came from) and `X-Ouroboros-State-Age` (seconds since that publication was produced). A fact that changes by clock passage alone refreshes when the next change moves the publication. Clients may ignore both.
+
 A quiz-bound activity may carry `owner_wait.quiz_id`, the exact question its wait
 names, in Main as in a Project; absence supplies no question identity. To open it,
 match the exact task and quiz in `owner_quiz` of `GET /api/tasks/{activity_id}`.

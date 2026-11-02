@@ -56,15 +56,17 @@ def stop_pooled_wake(task_id: str) -> None:
 
 
 def pooled_terminal_ok(result: dict):
-    """A pooled attempt's recorded end as the clock reads it; None while nothing settled it
-    (``interrupted`` stays with its restore owner, an inline carrier with its own callback).
+    """A carried wake's recorded end as the clock reads it; None while nothing settled it (``interrupted``
+    stays with its restore owner, a legacy in-process row that predates the carrier facts with the stack that
+    ran it). Every lane carrier reports a wake's end only through this terminal, a worker and the disclosed
+    degraded executor alike (one execution model): none calls the clock back.
     An early ``completed`` keeps its sticky lifecycle beside the fault's ``infra_failed`` axis."""
     from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes
-    from ouroboros.task_carrier import execution_kind
+    from ouroboros.task_carrier import carrier_executor, inline_execution
     from ouroboros.task_status import SETTLED_STATUSES
 
     status = result.get("status")
-    if status not in SETTLED_STATUSES or execution_kind(result) != "pooled":
+    if status not in SETTLED_STATUSES or (inline_execution(result) and not carrier_executor(result)):
         return None
     return status == "completed" and normalize_outcome_axes(result)["execution"]["status"] != EXECUTION_INFRA_FAILED
 

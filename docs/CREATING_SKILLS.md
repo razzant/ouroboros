@@ -1341,6 +1341,11 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   its FIFO, retry it unchanged after `retry_after` seconds (1 for `conversation`, 5 for
   `capacity`; back off as you see fit), and serve other conversations meanwhile. Versions 0 and 1
   keep waiting in the gate.
+- **Interrupted turn.** A turn whose carrier ended before it answered (a Stop's kill, a crash, a
+  pool stop) answers HTTP 503 `{ok: false, error, code: "presence_turn_interrupted", disposition:
+  "retry"}`; one that could not start at all answers 503 `presence_turn_not_started`, also
+  `retry`. Resend the same event unchanged: the Host answers it from the turn's durable record (a
+  replay, or the retained refusal), never by regenerating an ended attempt.
 - **Polls.** A version-2 turn's poll echoes `continuation_version: 2`; turns admitted at other
   versions keep `1`. Its terminal adds `reply_anchor: {source_event_id, message}`, where `message`
   is the exact captured `event.message` of the last input the selected answer covers. Covered

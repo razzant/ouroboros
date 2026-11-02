@@ -319,6 +319,8 @@ def park_saved_pause(task: Dict[str, Any], attempt: int, result_root: Any, *,
     parked.pop("_budget_pause_resume", None)
     parked.pop("_owner_wait_resume", None)
     parked["_budget_pause"] = exact_pause_marker(pause, default_root=str(task.get("root_task_id") or task_id))
+    from ouroboros.model_detach import detached_fields
+    parked.update(detached_fields(parked, pause))  # a detach a lane carrier saved rides the durable pause row
     if retention == RETAIN_SLEEP:
         hold_after_stop(parked, result_root, sleep_hold_reason)
     if held_reason:
@@ -685,7 +687,7 @@ def recover_aborted_update(drive_root: Any, running: Dict[str, Any], pending: Li
                                             pid=getattr(batch["rows"][task_id]["proc"], "pid", None),
                                             paused_roots=queue.BUDGET_ROOT_FENCES)
     # None: the saved queue this process never took into custody stays on disk as it is (durable).
-    if queue.persist_queue_snapshot(reason="update_abort_handoff") is False:
+    if queue.publish_queue_snapshot(reason="update_abort_handoff") is False:
         return False
     _update_returns = {}
     return True
@@ -888,6 +890,9 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
             fold_consumed_resume(row, root)  # a consumption whose notification died with the process
             fold_running_clock(task, row)  # confirmed waits newer than the saved source (#939)
             stamp_execution_handoff(task, row)
+            from ouroboros.budget_pause import budget_pause_row
+            from ouroboros.model_detach import detached_fields
+            task.update(detached_fields(task, budget_pause_row(root, task_id) or {}))  # the durable detach, if any
             if auto:
                 retain_consumed_selection(task, stored.get("budget_pause") or {})
         except Exception:

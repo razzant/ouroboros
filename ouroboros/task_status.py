@@ -37,6 +37,7 @@ from ouroboros.post_task_checkpoint import (
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
+from ouroboros.task_reads import TaskReads
 from ouroboros.task_store import select_lineage
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
@@ -52,7 +53,7 @@ from ouroboros.task_results import (
     load_task_result,
     validate_task_id,
 )
-from ouroboros.queue_observation import load_queue_document, queue_stamp
+from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, load_queue_document, queue_stamp
 from ouroboros.utils import iter_jsonl_objects
 
 log = logging.getLogger(__name__)
@@ -215,13 +216,13 @@ def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     return load_queue_document(drive_root)
 
 
-# GR7-1a freshness bound for the live-ownership twin. The supervisor persists
-# queue.alive on every main-loop pass (nominally 0.5s apart), so a stamp
-# this old means the writer is gone or badly wedged — the twin can no longer
-# trust it to prove a DEAD worker. Sized well above 2× the nominal tick to
-# absorb ordinary loop hitches (task_done processing, git ops) without turning
-# every cancel into a fail-open pass.
-_SNAPSHOT_OWNERSHIP_FRESH_SEC = 10.0
+# GR7-1a freshness bound for the live-ownership twin. The supervisor refreshes
+# queue.alive inside this bound (``queue_publication.QUEUE_ALIVE_REFRESH_SEC``), so a
+# stamp this old means the writer is gone or badly wedged — the twin can no longer
+# trust it to prove a DEAD worker. Sized well above the refresh cadence to absorb
+# ordinary loop hitches (task_done processing, git ops) without turning every
+# cancel into a fail-open pass. One bound for publisher and readers.
+_SNAPSHOT_OWNERSHIP_FRESH_SEC = QUEUE_ALIVE_FRESH_SEC
 
 
 def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) -> Dict[str, Any]:
@@ -275,6 +276,20 @@ def execution_owner_record(drive_root: Any, task: Dict[str, Any], kind: str) -> 
         from ouroboros.review_operation import controller_identity
 
         record["controller"] = controller_identity()
+    # The carrier facts beside the origin (``task_carrier``): a pooled attempt is a
+    # project-lane worker's; a conversation-lane admission stamped its lane and
+    # executor on the task before this record is (re)bound, and they travel with
+    # the kind. A legacy record names neither (additive; old rows decode).
+    from ouroboros.task_carrier import EXECUTOR_WORKER, EXECUTORS, LANE_CONVERSATION, LANE_PROJECT
+
+    prior = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if kind == "pooled":
+        record.update(lane=LANE_PROJECT, executor=EXECUTOR_WORKER)
+    else:
+        if prior.get("lane") in {LANE_PROJECT, LANE_CONVERSATION}:
+            record["lane"] = prior["lane"]
+        if prior.get("executor") in EXECUTORS:
+            record["executor"] = prior["executor"]
     return record
 
 
@@ -327,7 +342,11 @@ def task_execution_observation(
     snapshot = queue_snapshot if queue_snapshot is not None else _load_queue_snapshot(root)
     queue_seen = queue_snapshot_observation(snapshot)
     queued, _task = _queue_task_status(snapshot, tid)
-    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED}:
+    # The queue never owns a Presence turn: its body runs in a conversation-lane carrier (or the
+    # disclosed degraded executor), whose liveness is observed locally (below) or proven by its
+    # controller, never by a snapshot row a dead carrier left published. A pooled or direct row keeps
+    # the queue-ownership reading (restore relies on it to dedup a live direct root's running row).
+    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED} and kind != "presence":
         return {**observation, **queue_seen, "kind": "pooled", "state": "active",
                 "reason": "queue_ownership", "status": queued}
     try:
@@ -754,6 +773,13 @@ def load_effective_task_result(
     )
 
 
+class _SweepReads(TaskReads):
+    """One sweep's queue document, intents and events tail, read once; WHOLE documents (a heal persists them)."""
+
+    def load(self, root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+        return load_task_result(root, task_id)
+
+
 def reconcile_orphaned_running_tasks(
     drive_root: Any, *, exclude_task_ids: frozenset[str] = frozenset(),
     expired_quizzes: Optional[List[Any]] = None,
@@ -777,12 +803,14 @@ def reconcile_orphaned_running_tasks(
     ``updated_at`` at decision time, and, given ``write_guard`` (the supervisor's
     queue-ownership fence, queue -> row lock order), by live queue ownership; the
     monotonic guard in ``write_task_result`` protects a newer terminal/cancel write.
-    Idempotent; safe at boot and on a periodic tick.
+    Idempotent; safe at boot and on a periodic tick. Candidates are read in one batch, the sweep's other
+    facts once (``_SweepReads``); rows a caller's guard refuses anyway (``queue_owned_task_ids``) are excluded unread.
 
     ``expired_quizzes`` collects ``(task_id, quiz_id)`` for every question this
     sweep expired, so the supervisor-side caller can send the same live frame the
     task-done seam sends. This module stays free of a supervisor import.
     """
+    from ouroboros.cancel_intents import has_active_intent
     from ouroboros.task_custody import attempt_basis
     from ouroboros.task_results import write_task_result
     from ouroboros.obligations import result_rows
@@ -794,9 +822,17 @@ def reconcile_orphaned_running_tasks(
                    if row.get("status") in {STATUS_RUNNING, STATUS_INTERRUPTED}]
     except Exception:
         return 0
+    reads = _SweepReads(root)
     for row in running:
         task_id = str(row.get("task_id") or row.get("id") or "")
         if not task_id or task_id in exclude_task_ids:
+            continue
+        try:
+            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot, reads=reads)
+        except Exception:
+            continue
+        eff_status = str(effective.get("status") or "").strip().lower()
+        if eff_status not in SETTLED_STATUSES:
             continue
         # An ACTIVE cancel intent means cancellation custody already owns this
         # row and will settle it with its own outcome and text; at boot that
@@ -804,20 +840,12 @@ def reconcile_orphaned_running_tasks(
         # would win the race and publish infra_failed for a task the owner was
         # told is being cancelled. An UNREADABLE intent store is the same
         # refusal: this sweep never settles over an unknown cancel authority.
+        # Asked of the rows this sweep would settle, right before the write.
         try:
-            from ouroboros.cancel_intents import has_active_intent
-
             if has_active_intent(root, task_id, strict=True):
                 continue
         except Exception:
             log.debug("Orphan reconcile skipped %s: cancel authority unreadable", task_id, exc_info=True)
-            continue
-        try:
-            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot)
-        except Exception:
-            continue
-        eff_status = str(effective.get("status") or "").strip().lower()
-        if eff_status not in SETTLED_STATUSES:
             continue
         persist_fields = {
             key: effective[key]
@@ -1090,7 +1118,13 @@ def effective_task_result(
         queue_snapshot = (reads.queue_snapshot(drive_root) if reads is not None
                           else _load_queue_snapshot(pathlib.Path(drive_root)))
         queue_status, queue_task = _queue_task_status(queue_snapshot, task_id)
-        if queue_status and queue_status != "unknown":
+        # The queue never owns a Presence turn (its body runs in a conversation-lane carrier or the
+        # disclosed degraded executor, admitted to a RUNNING snapshot row): a stale lane row a dead
+        # carrier left behind must not read as live ownership and mask the turn's own end fact. Its
+        # liveness is the carrier/controller's, decided below exactly as the Host work view decides it.
+        _meta = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
+        presence_turn = isinstance(_meta.get("presence"), dict)
+        if queue_status and queue_status != "unknown" and not presence_turn:
             merged["status"] = _merge_queue_status(parent_status, queue_status, queue_task)
             from ouroboros.project_admission import project_hold_fact
             from ouroboros.work_stop import task_current_stop

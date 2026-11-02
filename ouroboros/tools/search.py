@@ -28,7 +28,7 @@ from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
 
-from ouroboros.search_routes import SEARCH_MODELS, resolve_web_search_route
+from ouroboros.search_routes import SEARCH_MODELS, named_connection_routes, resolve_web_search_route
 
 DEFAULT_SEARCH_MODEL = SEARCH_MODELS["openai"]
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
@@ -223,24 +223,37 @@ def _anthropic_model(model: str) -> str:
 
 
 def _available_web_search_backends() -> list[str]:
-    return [leg["backend"] for leg in resolve_web_search_route()["legs"]]
+    """Backends a call could reach: the configured selection's eligible legs, else the Source's recommended
+    ones (a call naming its own model meets them), else a named connection's, which only a call naming it uses."""
+    legs = (resolve_web_search_route()["legs"] or resolve_web_search_route(model="")["legs"]
+            or [leg for named in named_connection_routes() for leg in named["legs"]])
+    return [leg["backend"] for leg in legs]
 
 
 def _web_search_unavailability() -> tuple[str, str]:
-    """``(reason, detail)`` for a route with no eligible leg, from the route's own causes.
+    """``(reason, detail)`` when no call can run, from the routes' own causes: the configured one's,
+    then each configured named connection's (``kind@name``), whose key may be there without its SDK.
 
     Only a route whose every unavailable leg lacks a key is ``missing_credential``;
-    a key whose SDK is not installed keeps ``package_missing``."""
+    a key whose SDK is not installed keeps ``package_missing``. An unsupported saved
+    selection is named beside what also stops the Source's recommended legs."""
+    from ouroboros.provider_models import connection_id
+
     route = resolve_web_search_route()
-    if route.get("error"):
-        return "unsupported_selection", route["error"]
-    unavailable = route["unavailable"]
-    if not unavailable:
-        return "missing_credential", "web_search_backend"
-    reasons = dict.fromkeys("missing_credential" if leg["unavailable_reason"] == "no_credentials"
-                            else leg["unavailable_reason"] for leg in unavailable)
-    return "+".join(reasons), "web_search_backend: " + ", ".join(
-        f"{leg['source']} {leg['unavailable_reason']}" for leg in unavailable)
+    selection_error = route.get("error", "")
+    if selection_error:
+        route = resolve_web_search_route(model="")
+        if route.get("error"):
+            return "unsupported_selection", selection_error
+    unavailable = route["unavailable"] + [leg for named in named_connection_routes() for leg in named["unavailable"]]
+    reasons = list(dict.fromkeys("missing_credential" if leg["unavailable_reason"] == "no_credentials"
+                                 else leg["unavailable_reason"] for leg in unavailable)) or ["missing_credential"]
+    causes = ", ".join(f"{connection_id(leg['source'], leg.get('connection', ''))} {leg['unavailable_reason']}"
+                       for leg in unavailable)
+    detail = f"web_search_backend: {causes}" if causes else "web_search_backend"
+    if selection_error:
+        return "+".join(["unsupported_selection", *reasons]), f"{selection_error}; {detail}"
+    return "+".join(reasons), detail
 
 
 def _web_search_backend_pin() -> str:
@@ -825,11 +838,16 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
                 reasoning_effort: str = "") -> str:
     from ouroboros.model_slots import resolve_processing_preference
 
-    route = resolve_web_search_route(model=model or None)
+    # A model this call names is mandatory (per_call); an empty one is an ordinary omission.
+    call_model = str(model or "").strip()
+    route = resolve_web_search_route(model=call_model or None, per_call=bool(call_model))
     tried = []
     preference = resolve_processing_preference("websearch")
-    result = {"error": route.get("error") or f"web_search unavailable: source {route['source']} has no configured search backend that succeeded. Configure a search API key or install optional ddgs.",
-              "backend": route["source"]}
+    unavailable = (f"web_search unavailable: no configured built-in route can send {call_model}, the model this call "
+                   "named (route.unavailable says why); omit model to use the configured Source and Model."
+                   if call_model else f"web_search unavailable: source {route['source']} has no configured search backend "
+                   "that succeeded. Configure a search API key or install optional ddgs.")
+    result = {"error": route.get("error") or unavailable, "backend": route["source"]}
     # Auto tries eligible routes; a pinned source always reaches its own backend,
     # which reports its own missing credential or accounting refusal.
     for leg in route["legs"] + ([] if route["source"] == "auto" else route["unavailable"]):
@@ -883,8 +901,12 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
     elif "error" in result and tried:
         # The exception text stays in the result and Logs, never in the owner's row.
         _search_progress(ctx, f"⚠️ Web search failed ({last}); no source answered; details in Logs")
+    # An omitted call never tries a named connection; with nothing else eligible, say which one a call may name.
+    named = ([f"{leg['source']}@{leg['connection']}" for connection in named_connection_routes()
+              for leg in connection["legs"]] if "error" in result and not call_model and not route["legs"] else [])
     text = json.dumps({**result, "route": route, "legs_tried": tried,
-                       "backend_errors": [leg["error"] for leg in tried if "error" in leg]}, ensure_ascii=False, indent=2)
+                       "backend_errors": [leg["error"] for leg in tried if "error" in leg],
+                       **({"named_connections": named} if named else {})}, ensure_ascii=False, indent=2)
     if "error" in result:
         from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
@@ -908,15 +930,16 @@ def get_tools() -> List[ToolEntry]:
             "name": "web_search",
             "description": (
                 (
-                'Search with the configured Source and Model. Returns a summary lead with sources; open them with '
-                'browse_page to verify load-bearing facts. Auto uses eligible built-in routes; a named source is '
-                'strict. A model override keeps that source selection; an empty model uses saved/provider defaults. '
+                'Search with the configured Source and Model (a blank Model is the recommended one). Returns a summary '
+                'lead with sources; open them with browse_page to verify load-bearing facts. Auto uses eligible built-in '
+                'routes; a named source is strict. A model you pass is mandatory: only it is sent (under Auto an id without '
+                'source:: may also go through another provider of that model), and if it cannot run the call fails and says why. '
                 'Split compound questions into focused searches. Skills, MCP and browser tools remain separate choices.'
             )
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},
-                "model": {"type": "string", "description": "Search model override; native id or routed source::model. Must agree with a pinned Source."},
+                "model": {"type": "string", "description": "This call's model: native id or routed source[@connection]::model; must agree with a pinned Source (ddgs takes none). Omit for the configured one."},
                 "search_context_size": {"type": "string", "enum": ["low", "medium", "high"],
                                         "description": f"How much context to fetch (default: {DEFAULT_SEARCH_CONTEXT_SIZE})"},
                 "reasoning_effort": {"type": "string", "enum": ["low", "medium", "high"],

@@ -32,7 +32,7 @@ import pathlib
 import sqlite3
 import time
 import uuid
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from ouroboros._usage_money import (
     LiteralFloat, billing_group_key, decimal_of, durable_literals, exact_money, exceeds_limit, monetary_scope_key,
@@ -389,8 +389,13 @@ class Txn:
         and abandoned settlements that keep their late-receipt right."""
         return decode_attempts(self.open_attempt_rows(root_task_id=root_task_id))
 
-    def open_attempt_rows(self, *, root_task_id: Optional[str] = None) -> Captured:
-        """``open_attempts``' rows captured (``attempt_rows``), for ``decode_attempts`` after the read closed."""
+    def open_attempt_rows(self, *, root_task_id: Optional[str] = None,
+                          root_task_ids: Optional[Iterable[str]] = None) -> Captured:
+        """``open_attempts``' rows captured (``attempt_rows``), for ``decode_attempts`` after the read closed;
+        ``root_task_ids`` names several roots in the one step."""
+        if root_task_ids is not None:
+            return self.attempt_rows(f"{_OPEN_PREDICATE} AND root_task_id IN (SELECT value FROM json_each(?))",
+                                     (_json(sorted(map(str, root_task_ids))),))
         if root_task_id is None:
             return self.attempt_rows(_OPEN_PREDICATE)
         return self.attempt_rows(f"{_OPEN_PREDICATE} AND root_task_id=?", (str(root_task_id),))
