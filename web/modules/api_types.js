@@ -435,6 +435,9 @@
  *   keeps failure_details as an object, and names current sources[] by
  *   {role, part, status, sha256, size, chars}. Pending/displaced sources remain
  *   historical in the record; existing exact selections remain readable.
+ *   panels[].wave_failures (absent when none) is a wave Ouroboros itself stopped:
+ *   [{block_reason, reported_cause (masked, bounded), source}], source naming the
+ *   panel's failure note by {seat_id: "panel", role, part, status, sha256, size, chars}.
  *   v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored
  *   dialogue-status reduction), panels[].single_reviewer_no_diversity (boolean label),
  *   and actors[].dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement"|"").

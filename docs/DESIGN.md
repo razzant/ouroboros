@@ -1468,8 +1468,11 @@ reviews create child tasks or prove execution.
   tray. A reviewer is two lines: model (else the requested one, `requested · not
   reported`), counted or adviser, outcome; then its critical finding (or that it
   is only in the full answer), else a note, else the engine's own cause, with
-  Read. A narrow card (its own width) puts the state under the subject and wraps
-  reviewer lines to two.
+  Read. A review Ouroboros itself could not complete (owner 01.11, #2516 taken:
+  the review reaches the parent with its cause) says so in one line before its
+  reviewers, with Read of its saved note, secrets masked; a reviewer it never
+  sent, or whose outcome it lost, then adds no cause line. A narrow card (its own
+  width) puts the state under the subject and wraps reviewer lines to two.
 - Rows speak one table's words (`review_record_card.js`): `passed`, `rejected`,
   `no verdict`, `not sent`, `verdict not recorded`; a reviewer `passed it` (with
   notes), `rejected it`, `inconclusive`, `outcome unknown`, `awaiting`, `not
@@ -1498,13 +1501,14 @@ reviews create child tasks or prove execution.
   Document reading. An unavailable original is named so; normalized saved
   skill/applied detail is labelled so, read through its task's review door.
 - One Record facts per row lists the record (label, value): identities, verdict
-  tokens, pool, strictness, reason, not-reached causes, costs (measured, zero,
-  subscription or unknown; wave totals over priced seats), failure codes,
-  requested and observed models apart; PASS may have findings. It scrolls in its
-  own box; the row's foot says the panel line. One unreadable record is a local
-  `could not be read` row beside readable neighbours (Logs print it too); older
-  records have a paged Read (`may be` when a rotated index cannot say); an older
-  count alone makes no row or door. A preflight stays one informational seat.
+  tokens, pool, strictness, reason, not-reached causes, a stopped wave's code
+  and words, costs (measured, zero, subscription or unknown; wave totals over
+  priced seats), failure codes, requested and observed models apart; PASS may
+  have findings. It scrolls in its own box; the row's foot says the panel line.
+  One unreadable record is a local `could not be read` row beside readable
+  neighbours (Logs print it too); older records have a paged Read (`may be` when
+  a rotated index cannot say); an older count alone makes no row or door. A
+  preflight stays one informational seat.
 - Start progress labels the frozen model/route/profile as requested; settlement
   reports that same slot's observed execution or says it was not reported. An API
   model sent in a request is not an independently observed provider label, and
