@@ -94,10 +94,16 @@ class Participant:
 # ------------------------------------------------------------------ roots and body
 
 def planning_roots(ctx: Any) -> tuple[pathlib.Path, pathlib.Path]:
-    """``(system_root, active_root)``; a ValueError is the caller's typed refusal."""
+    """``(system_root, active_root)``; a ValueError is the caller's typed refusal. ``review_repo_dirs_for``
+    with the task's own folder first: a task's explicit workspace or its room's selected folder (as
+    ``active_repo_dir_for`` resolves it) stays the subject when ``prepare_self_change`` binds a separate
+    candidate: relative paths, attachments and retrieving seats keep reading it, an unavailable one is
+    refused, never replaced, and the candidate's checkout is not required; native seats READ the candidate
+    beside it at the address ``prepare_ask`` freezes in the request (``policy["native_candidate_root"]``,
+    #2431). Without such a folder a bound candidate is the subject."""
     from ouroboros.review_substrate import review_repo_dirs_for
 
-    return review_repo_dirs_for(ctx)
+    return review_repo_dirs_for(ctx, task_folder_first=True)
 
 
 def state_location(ctx: Any) -> tuple[pathlib.Path, str]:
@@ -110,8 +116,10 @@ def state_location(ctx: Any) -> tuple[pathlib.Path, str]:
 
 def plan_is_body(ctx: Any, affected_paths: List[str], *, system_root: pathlib.Path, active_root: pathlib.Path) -> tuple[bool, str]:
     """Body plan = the declared paths change the installed body (``resolve_constitutional``),
-    or a recognized body copy at the active root (``review_body_fact``), or own-body research
-    the task declared (``context_requires_self_body_docs`` with a recognized body source)."""
+    or a recognized body copy (``review_body_fact``) — the active root or a bound candidate,
+    whichever spelling, relative or absolute, reaches it — or own-body research the task
+    declared (``context_requires_self_body_docs`` with a recognized body source)."""
+    from ouroboros import body_candidate
     from ouroboros.review_body_fact import BODY_TRUE, body_fact
     from ouroboros.tools import plan_spec
 
@@ -121,12 +129,17 @@ def plan_is_body(ctx: Any, affected_paths: List[str], *, system_root: pathlib.Pa
         payload_roots=payload_roots)
     if constitutional:
         return True, note
-    if affected_paths and pathlib.Path(active_root) != pathlib.Path(system_root):
+    copies = [pathlib.Path(active_root)]
+    if body_candidate.is_bound(ctx):
+        copies.append(pathlib.Path(body_candidate.descriptor(ctx)["path"]).resolve(strict=False))
+    for root in dict.fromkeys(copies):
+        if not affected_paths or root == pathlib.Path(system_root):
+            continue
         under_root, _ = plan_spec.resolve_constitutional(
-            active_root=active_root, system_repo_root=active_root, affected_paths=affected_paths, evidence=(),
+            active_root=active_root, system_repo_root=root, affected_paths=affected_paths, evidence=(),
             payload_roots=payload_roots)
-        if under_root and body_fact(active_root, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
-            return True, f"body: the declared paths change a recognized copy of Ouroboros's own body ({active_root})"
+        if under_root and body_fact(root, system_repo=system_root, data_dir=ctx.drive_root).body == BODY_TRUE:
+            return True, f"body: the declared paths change a recognized copy of Ouroboros's own body ({root})"
     if not affected_paths:
         from ouroboros.context_input_selection import _explicit_self_body_docs_flag
         from ouroboros.context_layout import task_design_source
@@ -362,6 +375,7 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
     participant's delivery, fit and lane health, the budget admission (``legacy``: the imported v2 state).
     ``revision=None`` is a reading of the request before any plan: no paths are declared, so its body
     fact is the task's own declaration (``plan_is_body`` with no paths)."""
+    from ouroboros import body_candidate
     from ouroboros.config import get_review_enforcement
     from ouroboros.owner_words import objective_author_text
     from ouroboros.tools.plan_dialogue import attach_own_dialogue, dialogue_slot_inputs, render_dialogue, session_input_limits
@@ -433,6 +447,9 @@ def prepare_ask(ctx: Any, *, record: Mapping[str, Any], revision: Optional[Mappi
         for key in ("slot_messages", "slot_session_tasks", "slot_prompt_chars", "dialogue_delivery", "continuation_restarted"):
             merged[key].update(one.get(key) or {})
         merged["request_policy"] = one.get("request_policy") or merged["request_policy"]
+    bound = pathlib.Path(body_candidate.descriptor(ctx)["path"]).resolve(strict=False) if body_candidate.is_bound(ctx) else None
+    if bound is not None and bound != pathlib.Path(active_root):  # native seats read it from the request, not the live binding
+        merged["request_policy"]["native_candidate_root"] = str(bound)
     for sid in merged["continuation_restarted"]:
         continued.pop(sid, None)
     fanout = plan_fanout_inputs(slots, prompt_chars=max([len(system_prompt) + len(c) for c in contents.values()] or [0]),
@@ -570,6 +587,7 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
             "host_added": bool(participant.host_added), "dispatched": sid in base_facts and base_facts[sid]["status"] == "pending",
             "continued": bool(prepared.continued.get(sid)), "slot": frozen_seat(participant.slot),
             "delivery_ref": delivery_refs.get(sid), **base_facts[sid],
+            **(_room_delivery(prepared.delivery.get("dialogue_delivery", {}).get(sid)) if base_facts[sid]["status"] == "pending" else {}),
         })
     record = plan_record.append_ask(state_root, task_id, {
         "ask_id": prepared.ask_id, "ts": utc_now_iso(), "revision": number, "message": prepared.message,
@@ -628,6 +646,13 @@ def dispatch_ask(ctx: Any, prepared: PreparedAsk, *, revision: Optional[Mapping[
 
 
 # ------------------------------------------------------------------ settlement
+
+def _room_delivery(facts: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The room this seat's delivery carries inline, counted at the barrier before any send and never revised. Whether it
+    went is the seat's own dispatch outcome, which its readers join to it; what file reads cover is a fact apart."""
+    keys = ("conversation_rows", "conversation_inline_rows", "other_rows")
+    return {"room_delivery": {key: int(facts.get(key) or 0) for key in keys}} if facts and facts.get("snapshot_lines") else {}
+
 
 def _dialogue_carrier(manifest: Mapping[str, Any]) -> Dict[str, Any]:
     """The ask row's carrier of the own-room snapshot every participant saw: the exact source

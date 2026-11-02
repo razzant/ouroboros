@@ -26,11 +26,17 @@ def image_positions(messages):
             if isinstance(block, dict) and block.get('type') in {'image_url', 'image'}]
 
 
-def evict_stale_image_blocks(messages, *, incoming=0, owner_mode='max', readable_only=False, reader_available=True):
-    """Nano chosen by the owner batches >4 to 2; Max/Low keep their >10 to 5 floor."""
+def image_floor(owner_mode='max'):
+    """(keep, high water): Nano chosen by the owner batches >4 to 2; Max/Low keep their >10 to 5 floor."""
     from ouroboros.context_budget import (MAX_LIVE_IMAGE_BLOCKS, LIVE_IMAGE_BLOCKS_HIGH_WATER,
                                           NANO_LIVE_IMAGE_BLOCKS, NANO_LIVE_IMAGE_BLOCKS_HIGH_WATER)
-    keep, high = (NANO_LIVE_IMAGE_BLOCKS, NANO_LIVE_IMAGE_BLOCKS_HIGH_WATER) if owner_mode == 'nano' else (MAX_LIVE_IMAGE_BLOCKS, LIVE_IMAGE_BLOCKS_HIGH_WATER)
+    return ((NANO_LIVE_IMAGE_BLOCKS, NANO_LIVE_IMAGE_BLOCKS_HIGH_WATER) if owner_mode == 'nano'
+            else (MAX_LIVE_IMAGE_BLOCKS, LIVE_IMAGE_BLOCKS_HIGH_WATER))
+
+
+def evict_stale_image_blocks(messages, *, incoming=0, owner_mode='max', readable_only=False, reader_available=True):
+    """Replace the oldest images by placeholders down to ``image_floor`` once past its high water."""
+    keep, high = image_floor(owner_mode)
     positions = image_positions(messages)
     total = len(positions) + max(0, int(incoming))
     if total <= high:

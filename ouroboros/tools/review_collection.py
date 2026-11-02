@@ -20,7 +20,7 @@ def reference_for(record, attempt=None):
 def resolve_reference(ctx, reference, *, commit=False):
     """Identity lookup only. It grants neither a new dispatch nor a landing."""
     from ouroboros.review_ledger import ledger_root, load_record
-    from ouroboros.review_state import load_state, make_repo_key
+    from ouroboros.review_state import _attempt_review_roster_rows, load_state, make_repo_key
     from ouroboros.tools.review_change_custody import review_state_root
 
     if not isinstance(reference, dict):
@@ -32,7 +32,11 @@ def resolve_reference(ctx, reference, *, commit=False):
     root = pathlib.Path(ctx.drive_root) if commit else review_state_root(ctx)
     attempt = next((row for row in reversed(load_state(root).attempts)
                     if row.review_record_id == record_id and row.task_id == str(ctx.task_id)), None)
-    if attempt is None or not attempt.paid or (attempt.raw_stripped and record.get("state") != "settled"):
+    # A wave reserves its roster before any seat sends and is paid only at its first send (#2410): the
+    # reserved operations are the custody this reference collects, whether or not one was sent yet.
+    reserved = attempt is not None and any(row.get("operation_id") for row in _attempt_review_roster_rows(attempt))
+    if not (attempt is not None and (attempt.paid or reserved)) or (
+            attempt.raw_stripped and record.get("state") != "settled"):
         raise ValueError("the original paid attempt or its recorded roster is unavailable")
     if (attempt.tool_name == "commit_reviewed") != commit:
         raise ValueError("collect this reference with its original review tool")
@@ -120,7 +124,48 @@ def prepare_commit_collection(ctx, reference, *, commit_message="", mutations=()
     return attempt
 
 
+def collected_open_peer(ctx, commit_message, goal, scope, review_rebuttal, paths):
+    """The open frozen attempt this call collects exactly, known before any effect: the index already
+    holds its subject under this intent (``commit_gate.exact_open_peer``) and staging changes nothing
+    (each path to stage, the retained ones when omitted, equals its working file; the release sync
+    writes nothing). Only that collection keeps a retained composition; a distinct intent, or newer
+    bytes under the same intent, is a new subject under the ordinary selection rules."""
+    from ouroboros.commit_admission import _version_sync_due
+    from ouroboros.tools import git as git_mod
+    from ouroboros.tools.commit_gate import exact_open_peer
+    from ouroboros.tools.git_vcs_ops import _scope_changes
+    from ouroboros.tools.release_sync import sync_release_metadata
+
+    if not getattr(ctx, "_review_open_peers", None):
+        return None
+    repo = pathlib.Path(ctx.repo_dir)
+    try:
+        fingerprint = git_mod._fingerprint_staged_diff(repo).get("fingerprint", "")
+        peer = exact_open_peer(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
+                               fingerprint=fingerprint) if fingerprint else None
+        if peer is None:
+            return None
+        targets = ([git_mod.safe_relpath(path) for path in paths if str(path).strip()] if paths is not None
+                   else sorted(git_mod._staged_index(repo)))
+        moved = bool(targets) and any(state[1] != " " for state, _path in _scope_changes(
+            repo, [f":(literal){name}" for name in targets]))
+        synced = _version_sync_due(repo, targets) and bool(sync_release_metadata(str(repo), write=False))
+    except Exception:
+        return None
+    return None if moved or synced else peer
+
+
 def bind_commit_collection(ctx, fingerprint, retry_key):
+    # A pre-lock peer only permits its exact final subject; restaging cannot lend that permission to a new wave.
+    peer = getattr(ctx, "_review_collected_peer", None)
+    selection = getattr(ctx, "_commit_attribution", None) or {}
+    unnamed = sorted(set(selection.get("uncertain") or []) - set(selection.get("explicit_uncertain") or []))
+    if peer is not None and retry_key != peer.review_retry_key and unnamed:
+        return {"status": "blocked", "block_reason": "review_binding", "message": (
+            "⚠️ REVIEW_SELECTION_CHANGED_BLOCKED: the prepared index no longer matches the retained review, "
+            f"and this call did not explicitly select its uncertain paths: {', '.join(unnamed)}. "
+            "No new review was dispatched or commit created. The prepared index and files remain; inspect "
+            "the changed composition and name the paths you intend to review.")}, retry_key
     source = getattr(ctx, "_collect_commit_source", None)
     if source is None:
         return None, retry_key

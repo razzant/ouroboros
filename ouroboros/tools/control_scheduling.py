@@ -682,6 +682,8 @@ def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
                 # child verify receipts would "support" claims the child never owned.
                 "acceptance_claims": child_claims,
                 "success_criteria": [],
+                # A direct handbook answer, true or false, is the parent's own: no child inherits it.
+                "context_requires_development": None,
                 **input_source_fields,
             } if isinstance(parent_contract, dict) else {
                 "delegation_budget": delegation_budget,

@@ -46,6 +46,9 @@ def _legacy_payload(state):
     data = asdict(state)
     # The retired advisory lane's debts are stored after the live ones, in the same list.
     data["commit_readiness_debts"] += data.pop("archived_advisory_debts")
+    # Displaced stale markers are stored only when present: one scope keeps the legacy shape.
+    if not data["earlier_stale_markers"]:
+        del data["earlier_stale_markers"]
     data["state_version"] = data["schema_version"] = store._STATE_SCHEMA_VERSION
     data["next_obligation_seq"] = int(state.next_obligation_seq or 1)
     data["next_commit_readiness_debt_seq"] = int(state.next_commit_readiness_debt_seq or 1)

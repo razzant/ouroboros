@@ -329,9 +329,9 @@ class ToolRegistry:
         "health", "imagegen", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "preflight_review",
         "project_journal", "presence",
         "recent_tasks",
-        "query_code", "query_data", "review", "review_change", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree", "tool_discovery",
-        "vcs_read", "verify", "vision",
+        "query_code", "query_data", "review", "review_change", "search", "secret_hitl", "services", "shell", "skill_exec",
+        "skill_publish", "skill_preflight", "skill_source_tools", "subagent_integration", "task_retention", "task_tree",
+        "tool_discovery", "vcs_read", "verify", "vision",
     ]
 
     def _load_modules(self) -> _ToolCatalog:

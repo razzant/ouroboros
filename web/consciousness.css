@@ -64,7 +64,8 @@ textarea.ui-control.consciousness-owner-words {
 /* It leads the bar's end group, so a status word that grows or shrinks never moves it (DESIGN bible 6). */
 :is(.chat-page-header, .project-panel-bar) > .cx-chip { margin-inline-start: auto; }
 :is(.chat-page-header, .project-panel-bar) > .cx-chip:not([hidden]) + :is(.app-page-actions, .app-page-trailing) { margin-inline-start: 0; }
-/* Before a Project's name is cut the chip shows its brain and mark alone (room_work.js fitWord); its name says it all. */
+/* On a phone, while a Project's one-line name is still cut, the chip shows its brain and mark alone (room_work.js
+   fitWord); its name says it all. A desk keeps the chip's word and the name ends in an ellipsis. */
 .project-panel-bar > .cx-chip[data-fit="mark"] .cx-chip-word { display: none; }
 :root[data-theme] .cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
 :root[data-theme] .cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }

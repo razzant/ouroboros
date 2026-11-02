@@ -558,6 +558,7 @@ def _record_commit_attempt(
 ) -> None:
     """Record a commit attempt; supports positional or keyword commit_message/status."""
     strict = bool(legacy_kwargs.pop("_strict", False))
+    bind_owner = bool(legacy_kwargs.pop("_bind_owner", False))  # a reserved roster this process owns, paid or not
     if commit_message is not None:
         legacy_kwargs.setdefault("commit_message", commit_message)
     if status is not None:
@@ -666,22 +667,10 @@ def _record_commit_attempt(
                     existing = None
                 ctx._current_review_attempt_number = attempt_no
             elif attempt_no <= 0:
-                existing = state.latest_attempt_for(
-                    repo_key=repo_key,
-                    tool_name=tool_name,
-                    task_id=task_id,
-                )
-                if existing and existing.status == "reviewing" and not existing.finished_ts:
-                    attempt_no = int(existing.attempt or 0)
-                else:
-                    attempt_no = state.next_attempt_number(repo_key, tool_name, task_id)
-                    # A NEW attempt inherits NOTHING from the previous terminal
-                    # row (mirrors the reviewing branch above). Leaking the
-                    # prior attempt's fields here let every fresh preflight
-                    # record inherit paid=True/block_class/fingerprints from
-                    # the last real review — inflating the paid-cycle count
-                    # on every free refusal (found by the F1 eviction test).
-                    existing = None
+                # Only an already-bound call updates an old attempt. A new refusal must not adopt another
+                # wave's custody, paid flag or source reference, even when overlap filtering hides that wave.
+                attempt_no = state.next_attempt_number(repo_key, tool_name, task_id)
+                existing = None
                 ctx._current_review_attempt_number = attempt_no
             else:
                 existing = state.latest_attempt_for(
@@ -791,7 +780,7 @@ def _record_commit_attempt(
             )
             if status != "reviewing" and "late_result_pending" not in legacy_kwargs and not review_enforcement_blocks("blocking"):
                 attempt.late_result_pending = bool(getattr(existing, "late_result_pending", False)) or _attempt_has_active_review_custody(attempt)
-            stamp_paid_review_owner(attempt, paid=bool(paid))
+            stamp_paid_review_owner(attempt, paid=bool(paid) or bind_owner)
             state.record_attempt(attempt, semantic_redirects=_obligation_redirects)
 
         update_state(dr, _mutate)
@@ -1156,7 +1145,10 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
     import time
     from ouroboros.tools import git as git_mod
     from ouroboros.review_state import load_state, make_repo_key
+    from ouroboros.mutation_attribution import selection_disclosure
 
+    gap = selection_disclosure(getattr(ctx, "_commit_attribution", None))  # the reviewed composition's attribution gap
+    note = (gap + " " if gap else "") + note
     if not pending:  # a settled wave: no custody stays open behind its handback, in Cyber Pro too
         git_mod._record_commit_attempt(ctx, message, "reviewed", phase="review_only", block_reason=reason,
             late_result_pending=False, duration_sec=time.time() - started, pre_review_fingerprint=before["fingerprint"],
@@ -1195,7 +1187,7 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
             note = (event + " while the reviewers ran: this call returned and their paid "
                     "work continues separately; a [Review settled] notice follows the whole wave. " + note)
     if not pending:
-        git_mod.run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        git_mod._unstage_candidate(ctx)
     text = ("Review outcome returned before commit" + (": reviewers are still running. " if pending else ". ") + note + choice +
             "Current files are preserved; no commit, tag or push occurred.\n" + json.dumps({"review_reference": reference,
             "review_outcome": asdict(row) if row is not None else {}}, ensure_ascii=False, default=str))

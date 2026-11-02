@@ -3,7 +3,9 @@
 Only JSON Schema subschema positions are traversed. A value under ``default``,
 ``const``, ``enum``, ``examples`` or an unknown extension keyword is data, even
 when it contains keys named ``title`` or ``description``. Provider metadata is
-untrusted descriptive evidence, never a source of dispatch permissions.
+untrusted descriptive evidence, never a source of dispatch permissions. The same
+presentation owns MCP result text (``_stringify_call_result`` and its part renderers);
+``mcp_client`` re-exports those names for existing callers.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import re
 import urllib.parse
 
 from copy import deepcopy
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 
 from ouroboros.secret_masking import redact_known_values
 
@@ -178,6 +180,60 @@ def _exception_text(exc: BaseException, cfg: Any = None) -> str:
         return text
 
     return _redact_error_text(described(exc, frozenset()), cfg)
+
+
+def _content_part_text(item: Any) -> str:
+    """A text part's text, else a best-effort JSON dump of the part."""
+    text = getattr(item, "text", None)
+    if isinstance(text, str):
+        return text
+    try:
+        return json.dumps(_serialize_content_part(item), ensure_ascii=False)
+    except Exception:
+        return repr(item)
+
+
+def _stringify_call_result(result: Any) -> str:
+    """Stringify MCP content parts without inventing fields."""
+    is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
+    parts: List[str] = [_content_part_text(item) for item in getattr(result, "content", []) or []]
+    # structuredContent is protocol data in its own right (E5, capinv-447):
+    # carry it even when text/content parts exist, unless it duplicates one.
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
+        try:
+            dumped = json.dumps(structured, ensure_ascii=False)
+        except Exception:
+            dumped = repr(structured)
+        if dumped not in parts:
+            parts.append(f"structuredContent: {dumped}" if parts else dumped)
+    body = "\n\n".join(parts).strip() or "(empty result)"
+    if is_error:
+        return f"⚠️ MCP_TOOL_ERROR: {body}"
+    return body
+
+
+def _serialize_content_part(item: Any) -> Dict[str, Any]:
+    """Best-effort conversion of an MCP content part into a JSON-safe dict."""
+    out: Dict[str, Any] = {}
+    for attr in ("type", "uri", "mimeType", "data", "annotations"):
+        value = getattr(item, attr, None)
+        if value is not None and not callable(value):
+            out[attr] = value
+    # EmbeddedResource carries its payload in a NESTED resource object (E5,
+    # capinv-447): omitting it dropped the text/blob of every embedded resource.
+    resource = getattr(item, "resource", None)
+    if resource is not None and not callable(resource):
+        nested: Dict[str, Any] = {}
+        for attr in ("uri", "mimeType", "text", "blob"):
+            value = getattr(resource, attr, None)
+            if value is not None and not callable(value):
+                nested[attr] = str(value) if attr == "uri" else value
+        if nested:
+            out["resource"] = nested
+    if "uri" in out:
+        out["uri"] = str(out["uri"])  # AnyUrl is not JSON-serializable
+    return out
 
 
 def _model_facing_result(cfg: Any, tool_name: str, body: str) -> str:

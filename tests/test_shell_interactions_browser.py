@@ -7,6 +7,7 @@ runtime or reads live data. Synthetic CDP touch is Chromium's input pipeline, no
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -888,43 +889,69 @@ def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path
     assert facts['scrollLeft'] == 0 and facts['sidebarLeft'] == 0, facts
 
 
-# Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure.
+# What the panel shows: how many of its room's answers, and whether its loading row is up (chat_render_batch.js).
+PANEL_SHOWS = """(panel, answers) => ({
+    rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
+        .some(row => row.textContent.includes(answer))).length,
+    loading: [...panel.querySelectorAll('.chat-load-older[aria-busy="true"]')]
+        .some(row => !row.hidden && row.getClientRects().length > 0)})"""
+# Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure. `setOff`
+# is the time from just before the open was asked to the slide's start: the panel's own wait begins after the ask.
 PANEL_FRAMES = """({project, opening, answers}) => { const panel = document.getElementById('project-panel');
-    const sample = """ + SAMPLE_TRANSITION + """;
+    const sample = """ + SAMPLE_TRANSITION + """, shows = """ + PANEL_SHOWS + """;
+    let asked = 0, setOff = null;
     return sample({root: panel, target: () => panel, property: 'transform',
-        ready: () => panel.classList.contains('open') === opening,
-        act: () => { if (opening) window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}));
+        ready: () => { const ready = panel.classList.contains('open') === opening;
+                       if (ready && setOff === null) setOff = performance.now() - asked;
+                       return ready; },
+        act: () => { asked = performance.now();
+                     if (opening) window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}));
                      else panel.querySelector('#project-panel-close').click(); },
-        measure: () => ({left: panel.getBoundingClientRect().left, hidden: panel.hidden,
-                        rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
-                            .some(row => row.textContent.includes(answer))).length})}); }"""
-# A room's read takes 150 ms, as on a real link: a panel that set off at the click would cross the window empty.
-SLOW_HISTORY = """(() => { const real = window.fetch; window.fetch = (input, init) => { const answer = real(input, init);
-    return String(input?.url || input).includes('/api/chat/history')
-        ? answer.then((r) => new Promise((resolve) => setTimeout(() => resolve(r), 150))) : answer; }; })()"""
+        measure: () => ({left: panel.getBoundingClientRect().left, hidden: panel.hidden, ...shows(panel, answers)})})
+        .then(seen => ({...seen, setOff})); }"""
+# A room's read takes 150 ms, as on a real link: a panel that set off at the click would cross the window empty. A
+# held read lands only when the test releases it, so the panel's bounded wait for its room has to end on its own.
+HISTORY_READS = """(() => { const real = window.fetch, waiting = [];
+    window.__historyReads = {hold: false, held: () => waiting.length, release: () => waiting.splice(0).forEach(go => go())};
+    window.fetch = (input, init) => { const answer = real(input, init);
+        if (!String(input?.url || input).includes('/api/chat/history')) return answer;
+        const hold = window.__historyReads.hold;
+        return answer.then((r) => new Promise((resolve) => hold ? waiting.push(() => resolve(r))
+            : setTimeout(() => resolve(r), 150))); }; })()"""
 
 
-def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path):
-    """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted and goes
-    back there whole: samples along both real transitions show its rows, from the edge to Main and back."""
+@pytest.mark.parametrize('read', ['slow', 'held'])
+def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path, read):
+    """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted (or at
+    its read's bound, with its loading row) and goes back there whole: samples along both real transitions show where
+    it is and what it shows, from the edge to Main and back. A 150 ms read normally paints first, though a busy runner
+    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound."""
+    app_js = (setup_browser.WEB / 'app.js').read_text(encoding='utf-8')
+    bound = int(re.search(r'PANEL_ARRIVAL_BOUND_MS = (\d+);', app_js).group(1))
     page = seed_page(shell_ui, 1143, 790)
     page.emulate_media(reduced_motion='no-preference')
     rows = [{'role': 'assistant', 'text': f'Answer {i}. ' + 'Ordinary context. ' * 8,
              'content': f'Answer {i}.', 'ts': f'2026-10-14T09:{i:02d}:00Z'} for i in range(6)]
     answers = [row['content'] for row in rows]  # A startup System bubble is not the room's history.
     page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': []}))
-    page.add_init_script(SLOW_HISTORY)
-    facts = {'engine': shell_ui['engine']}
+    page.add_init_script(HISTORY_READS)
+    facts = {'engine': shell_ui['engine'], 'read': read, 'bound': bound}
+    room = f"() => ({PANEL_SHOWS})(document.getElementById('project-panel'), {json.dumps(answers)})"
     try:
         boot(page, shell_ui)
         width = page.evaluate('innerWidth')
+        page.evaluate('hold => { window.__historyReads.hold = hold; }', read == 'held')
         facts['opening'] = page.evaluate(PANEL_FRAMES, {'project': PROJECTS[0], 'opening': True, 'answers': answers})
+        facts['held'] = page.evaluate('window.__historyReads.held()')
+        page.evaluate('window.__historyReads.release()')
+        wait_quietly(page, f'() => {{ const shows = ({room})(); return shows.rows === {len(answers)} && !shows.loading; }}')
+        facts['room'] = page.evaluate(room)
         rest(page)
         page.locator('#project-panel-close').click(trial=True)
         facts['closing'] = page.evaluate(PANEL_FRAMES, {'opening': False, 'answers': answers})
         page.wait_for_function("() => document.getElementById('project-panel').hidden")
     finally:
-        evidence(tmp_path, f'shell-panel-arrival-{shell_ui["engine"]}', facts)
+        evidence(tmp_path, f'shell-panel-arrival-{read}-{shell_ui["engine"]}', facts)
         page.close()
     opening, closing = facts['opening']['values'], facts['closing']['values']
     home = opening[-1]['left']
@@ -937,7 +964,18 @@ def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(s
     assert len(moving(opening)) >= 3, ('the arrival is seen moving', opening)
     arriving = opening + facts['opening']['live']
     leaving = closing + facts['closing']['live']
-    assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
+    # The slide's first sample is the panel as it set off: its room already painted, or not (then it waited the bound).
+    painted = opening[1]['rows'] == len(answers)
+    if read == 'held':
+        assert facts['held'] >= 1 and not painted, ('its read was still held as it came in', facts)
+    if painted:
+        assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
+    else:
+        assert facts['opening']['setOff'] >= bound, ('without its room it waits until the bound', facts['opening'])
+        seen = ''.join('R' if f['rows'] == len(answers) else 'L' if f['loading'] and not f['rows'] else '?'
+                       for f in moving(arriving))
+        assert re.fullmatch('L+R*', seen), ('at the bound it comes in with its loading row, then its room', seen, arriving)
+    assert facts['room'] == {'rows': len(answers), 'loading': False}, ('its read lands in the room', facts['room'])
     assert len(moving(closing)) >= 3, ('the way back is seen moving', closing)
     assert all(f['rows'] == len(answers) for f in leaving if not f['hidden']), ('it goes back with its room', leaving)
 

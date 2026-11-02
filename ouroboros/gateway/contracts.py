@@ -32,7 +32,10 @@ from ouroboros.gateway.widgets import (
     ExtensionLiveSnapshot, WidgetFaultRequest, WidgetFaultResponse, WidgetTab, WidgetsResponse,
     WidgetAssetLeaseRequest, WidgetAssetTokenRequest, WidgetAssetLeaseResponse, WidgetAssetRevokeResponse,
 )
-from ouroboros.gateway.decision_contracts import DecisionRequest, DecisionResponse  # noqa: F401 -- public re-exports
+from ouroboros.gateway.decision_contracts import (  # noqa: F401 -- public re-exports
+    DecisionRequest, DecisionResponse, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretOutcome,
+    SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
+)
 from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
     UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
@@ -174,6 +177,10 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     closed_request_id: NotRequired[str]
     materials: NotRequired[List[Dict[str, Any]]]  # validated existing task artifact references
     question_delivery: NotRequired[Dict[str, Any]]  # canonical kind/state; pending stays current
+    # A mirrored secret request: its protected form, outcome and unconfirmed-save facts (no value).
+    secret_request: NotRequired[SecretRequestMeta]
+    secret_outcome: NotRequired[SecretOutcome]
+    secret_save: NotRequired[Dict[str, Any]]
     task_incident: NotRequired[str]
     # Historical rows only: the retired cancellation-fault notice named the PHYSICAL task it could not
     # settle when that differed from the logical id. Declared so stored rows keep their shape.
@@ -432,6 +439,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     task_id: NotRequired[str]
     project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
+    secret_request: NotRequired[SecretRequestMeta]  # an integration-secret request: answered only by its form
 
 
 class QuizStateOutbound(TypedDict):
@@ -459,6 +467,7 @@ class QuizStateOutbound(TypedDict):
     closed_by_task_id: NotRequired[str]
     closed_actor: NotRequired[str]
     closed_request_id: NotRequired[str]
+    secret_outcome: NotRequired[SecretOutcome]  # a secret request's typed completion, metadata only
 
 
 class TypingOutbound(TypedDict):
@@ -666,7 +675,7 @@ class EvolutionStateSnapshot(TypedDict):
     # None when the remaining budget is infinite (unbudgeted): inf is not JSON
     # compliant, so the snapshot serializes it as null.
     budget_remaining_usd: Optional[float]
-    budget_reserve_usd: float
+    budget_reserve_usd: float  # always 0.0: Evolution keeps no reserve of its own (owner, 2026-11-02)
     pending_count: int
     running_count: int
     queued_task_id: str
@@ -695,7 +704,7 @@ class ActiveDirectTurn(TypedDict):
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
 
 
-class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and control facts keep their own authority
+class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
     last_line: NotRequired[str]  # visible model narration, never host notes or display reasoning
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
@@ -791,7 +800,7 @@ class StateResponse(WorkStateFields):
     task_bindings_revision: str
     task_bindings_unchanged: bool
     active_direct_turns: NotRequired[List[ActiveDirectTurn]]
-    # Combined activity snapshot (direct/ephemeral turns + root managed queue tasks). Additive beside
+    # Combined activity snapshot (direct, root managed and live inline Presence turns). Additive beside
     # active_direct_turns, which stays unchanged for compatibility; new clients hydrate from this field.
     active_chat_activities: NotRequired[List[ActiveChatActivity]]
     active_chat_activities_complete: NotRequired[bool]
@@ -1505,6 +1514,8 @@ __all__ = [
     "QuizOption", "QuizOutbound", "QuizStateOutbound",
     "CardOutbound", "CardStateOutbound",
     "DecisionRequest", "DecisionResponse",
+    "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
+    "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
     "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",

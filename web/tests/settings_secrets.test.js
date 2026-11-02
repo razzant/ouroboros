@@ -181,6 +181,22 @@ test('failure and malformed success remain retryable, never a partial Show or a 
     assert.equal(f.status.hidden, true);
 });
 
+test('a surface the overlay never walks passes its own Show and Hide; Settings keeps the English it translates', async (t) => {
+    const read = t.mock.method(apiClient, 'revealSettingsSecret', async () => { throw new Error('unexpected read'); });
+    const localized = fixture({ value: 'typed draft', applied: '', copy: { show: 'Afficher', hide: 'Masquer' } });
+    assert.equal(localized.button.textContent, 'Afficher', 'the binding reset keeps the localized word');
+    await localized.button.emit('click');
+    assert.equal(localized.button.textContent, 'Masquer');
+    assert.equal(localized.preview.textContent, 'typed draft');
+    localized.controller.reset();
+    assert.equal(localized.button.textContent, 'Afficher');
+    const settings = fixture({ value: 'typed draft', applied: '' });
+    assert.equal(settings.button.textContent, 'Show');
+    await settings.button.emit('click');
+    assert.equal(settings.button.textContent, 'Hide');
+    assert.equal(read.mock.callCount(), 0);
+});
+
 test('gateway client sends only the selected identifier to the read endpoint', async (t) => {
     const requests = [];
     t.mock.method(globalThis, 'fetch', async (url, init) => {

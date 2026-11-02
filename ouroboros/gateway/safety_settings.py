@@ -5,6 +5,7 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.gateway._helpers import request_json_or
 from ouroboros.gateway.owner_settings import (
     _owner_audit, _owner_read_settings_raw, _owner_update_settings, owner_write_guard,
     settings_document_digest, settings_document_mutation, unsaved_error,
@@ -33,9 +34,9 @@ def audit_safety_change(request: Request, before: dict, after: dict) -> None:
 
 
 async def _write(request: Request, writer: Any) -> JSONResponse:
-    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+    from ouroboros.gateway.settings import _run_settings_writer
 
-    return await _run_settings_writer(writer, request, await _json_body_or_empty(request))
+    return await _run_settings_writer(writer, request, await request_json_or(request, {}))
 
 
 @owner_write_guard

@@ -23,10 +23,11 @@ from ouroboros.config import (
 )
 from ouroboros.config import ENDPOINT_AUTHORED_SETTINGS as _ENDPOINT_AUTHORED_SETTINGS
 from ouroboros.config import ENDPOINT_WRITTEN_SETTINGS as _ENDPOINT_WRITTEN_SETTINGS, ENDPOINT_WRITERS as _ENDPOINT_WRITERS
-from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root
+from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
 from ouroboros.gateway.owner_settings import (
     CommitBoundary,
     SettingsDocumentBusy,
+    SettingsDocumentUnreadable,
     SettingsLockUnavailable,
     _CONTEXT_MODE_KEYS,
     _owner_audit,
@@ -311,13 +312,6 @@ def _start_supervisor_if_needed_for_request(request: Request, settings: dict) ->
     return bool(callback(settings)) if callable(callback) else False
 
 
-async def _json_body_or_empty(request: Request) -> Any:
-    try:
-        return await request.json()
-    except Exception:
-        return {}
-
-
 def _has_running_agent_tasks() -> bool:
     # Known pre-existing residual: PENDING/RUNNING are read without the queue
     # lock, so a task mid-handoff (removed from PENDING, not yet in RUNNING)
@@ -400,7 +394,7 @@ async def _run_settings_writer(fn: Any, context: Any, body: Any) -> JSONResponse
 @owner_write_guard
 async def api_owner_runtime_mode(request: Request) -> JSONResponse:
     """Persist the owner-selected runtime mode for the next boot."""
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside): a slow
     # generic save must not be able to freeze the loop THROUGH this
     # endpoint's synchronous lock acquisition.
@@ -456,7 +450,7 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
 @owner_write_guard
 async def api_owner_auto_grant(request: Request) -> JSONResponse:
     """Persist the owner auto-grant toggle outside generic settings writes."""
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside): a slow
     # generic save must not be able to freeze the loop THROUGH this
     # endpoint's synchronous lock acquisition.
@@ -693,7 +687,7 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
     Ordinary modes use this owner path; Cyber can also author a generic save.
     The choice applies to subsequent tasks, so no restart is required.
     """
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     # Off the event loop, under the document lock (held inside): a slow
     # generic save must not be able to freeze the loop THROUGH this
     # endpoint's synchronous lock acquisition.
@@ -756,7 +750,7 @@ async def api_acknowledge_capability(request: Request) -> JSONResponse:
     Context and output acknowledgements have independent records and timestamps.
     They write the evidence store, never settings.json, so this endpoint deliberately
     has no ``owner_write_guard`` or settings lock and cannot answer ``settings_locked``."""
-    body = await _json_body_or_empty(request)
+    body = await request_json_or(request, {})
     provider = str((body or {}).get("provider") or "").strip()
     model = str((body or {}).get("model") or "").strip()
     if not provider or not model:
@@ -1408,4 +1402,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             return unsaved_error(str(e), 503, code="settings_locked")
         if isinstance(e, SettingsDocumentBusy):
             return unsaved_error(str(e), 503, code="settings_busy")
+        if isinstance(e, SettingsDocumentUnreadable):
+            return unsaved_error(str(e), 409, code="settings_unreadable")
         return unsaved_error(str(e), 400)

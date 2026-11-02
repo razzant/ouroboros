@@ -216,9 +216,9 @@ def test_s41_missing_or_pending_independent_review_stays_red(tmp_path, source, k
 
 @pytest.mark.parametrize("silent", ["", "not a review verdict"])
 def test_s41_a_first_review_without_any_verdict_buys_one_retry(tmp_path, source, silent):
-    """An empty or unreadable first answer is no opinion: the second paid cycle may ask again, and the retry's
-    verdict decides; a second silence stays red."""
-    retry = call(review_rebuttal="The previous review of this skill returned no verdict.")
+    """An empty or unreadable first answer is no opinion: the identical second call is a new paid cycle that asks
+    again (#2410), and the retry's verdict decides; a second silence stays red."""
+    retry = call()
     result, model = consume(tmp_path, source, [call(), retry], [silent, verdict()])
     assert result["review"]["status"] == "clean" and len(model.review_calls) == 2
     evidence = json.loads((tmp_path / "author/author-evidence.json").read_text())

@@ -190,8 +190,8 @@ def host_world(tmp_path, monkeypatch, provider_catalog_offline, request):
         for relative in ('BIBLE.md', 'prompts/SYSTEM.md'):
             shutil.copyfile(ROOT / relative, env.repo_dir / relative)
         shutil.copytree(ROOT / 'docs', env.repo_dir / 'docs', dirs_exist_ok=True)
-        memory.identity_path().write_text(memory._default_identity())
-        memory.scratchpad_path().write_text(memory._default_scratchpad() + '\nCurrent project notes. ' * 180)
+        memory.identity_path().write_text(memory._default_identity(), encoding='utf-8')
+        memory.scratchpad_path().write_text(memory._default_scratchpad() + '\nCurrent project notes. ' * 180, encoding='utf-8')
     monkeypatch.setattr(config, 'DATA_DIR', env.drive_root)
     monkeypatch.setenv('OUROBOROS_DATA_DIR', str(env.drive_root))
     monkeypatch.setattr(context, 'get_context_mode', lambda: owner_mode)

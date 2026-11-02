@@ -102,6 +102,31 @@ def _active_direct_roots(ctx: Any) -> list:
     return roots
 
 
+def _moved_presence_readers(ctx: Any) -> list:
+    """This process's live inline Presence authors a move bound to a Project, while their loop takes mail
+    (``author_intake_open``): addressable there like a direct turn. An unmoved author reads no room, and another
+    process's unreadable facts never hide a local reader; a local reader's own are the snapshot's gap."""
+    from ouroboros.conversation_lease import author_intake_open, resolved_presence_turns
+    from ouroboros.projects_registry import project_id_for_task
+    from ouroboros.room_reader import is_reading
+
+    roots = []
+    for fact in resolved_presence_turns(ctx.DRIVE_ROOT)["roots"]:
+        task_id, row = fact["task_id"], fact["row"]
+        project_id = project_id_for_task(ctx.DRIVE_ROOT, task_id, strict=True) if fact["local"] else ""
+        if not project_id or not author_intake_open(ctx.DRIVE_ROOT, task_id):
+            continue
+        if fact["state"] == "unreadable":
+            raise OSError(f"live author {task_id}: {fact['error']}")
+        if fact["state"] == "running":
+            roots.append({"task_id": task_id, "status": "running", "project_id": project_id,
+                          "title": _clip_marked(row.get("suggested_name") or row.get("title"), 120),
+                          "objective": "", "chat_id": row.get("chat_id"), "started_at": row.get("started_at"),
+                          "steerable": True, "inline_presence": True,
+                          "room_reader": is_reading(ctx.DRIVE_ROOT, task_id, row, running=True)})
+    return roots
+
+
 def addressable_roots(ctx: Any) -> RootSnapshot:
     """The roots one owner message may address, without choosing a target (``RootSnapshot``).
 
@@ -150,7 +175,8 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
                     "started_at": started_at,
                     "steerable": True, "room_reader": reader, **_late_input_author(task),
                 }, _task_chats(ctx, tid, task)))
-        pairs += [(row, _task_chats(ctx, row["task_id"], row)) for row in _active_direct_roots(ctx)]
+        pairs += [(row, _task_chats(ctx, row["task_id"], row))
+                  for row in [*_active_direct_roots(ctx), *_moved_presence_readers(ctx)]]
         return RootSnapshot(tuple(pairs))
     except Exception as exc:
         log.warning("Addressable roots are unavailable to this routing read", exc_info=True)

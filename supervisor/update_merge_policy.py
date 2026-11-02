@@ -77,6 +77,9 @@ HOT_CODE_PATHS = frozenset({
     "ouroboros/loop_model_call.py",
     "ouroboros/loop_nudges.py",
     "ouroboros/loop_round_limits.py",
+    # join_ledger received the direct-child reads of the hot forced-finalization
+    # leaf: the label follows the moved body.
+    "ouroboros/tools/join_ledger.py",
 })
 
 

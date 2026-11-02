@@ -30,6 +30,10 @@ tap, a reply to it and the answered-edit keep working exactly as for a short
 card; a reply to an earlier explanation part is an ordinary owner message
 carrying the bridge's host-row reference. An open question (no
 options) is the same card without a keyboard; its hint asks for a reply.
+
+A secret request (the event carries ``secret_request``) is never answered here: the host's
+question already says where to enter it, the card has no keyboard and asks for no reply, and a
+reply to it is answered locally and posted nowhere, so no value is relayed from this chat.
 """
 
 from __future__ import annotations
@@ -58,6 +62,9 @@ HostPost = Callable[[Any, str, Dict[str, Any]], Awaitable[Tuple[int, Dict[str, A
 _TEXTS_EN = {
     "hint": "Tap an option, or reply to this message with your own answer.",
     "hint_open": "Reply to this message with your answer.",
+    "hint_secret": "A reply here is not sent to Ouroboros.",
+    "secret_reply": "Not sent: a secret goes only into the protected form in the Ouroboros app. You can delete your message here.",
+    "secret_saved": "Saved in Ouroboros.",
     # The host's delivery of an accepted answer, as the web card says it; never a read receipt.
     "status_saved": "Answer saved · the task reads it when it continues",
     "status_pending": "Answer recorded · delivery pending",
@@ -118,6 +125,10 @@ def hint(lang: str) -> str:
 
 def hint_open(lang: str) -> str:
     return _texts(lang)["hint_open"]
+
+
+def hint_secret(lang: str) -> str:
+    return _texts(lang)["hint_secret"]
 
 
 def mint_token(task_id: str, quiz_id: str) -> str:
@@ -420,10 +431,12 @@ def lifecycle_edit(
     if state == "closed":
         reason = str(event.get("closed_reason") or "").strip()
         return f"{base}\n{texts['closed']}" + (f"\n{_echo(reason)}" if reason else ""), []
-    if state == "answered":
+    if state == "answered" and not record.get("secret"):
         return _answered_text(record, merge_answer_facts(record, event), lang), []
     if state == "superseded":
         return f"{base}\n{texts['superseded']}", []
+    if record.get("secret"):  # its form is in the app: no late-answer line, no buttons, no reply prompt
+        return (f"{base}\n{texts['secret_saved']}" if state == "answered" else f"{base}\n{texts['hint_secret']}"), []
     status = texts["resumed" if state == "open" else "expired_terminal"]
     labels = [str(label) for label in record.get("options") or []]
     if not labels:
@@ -633,7 +646,11 @@ async def answer_from_reply(
     chat_id: int, update_id: int, lang: str, post: HostPost,
 ) -> None:
     """A reply to the card → the owner's own verbatim answer (comment-only). The settled card is
-    its receipt; one message comes only for a problem (``_tell_outcome``)."""
+    its receipt; one message comes only for a problem (``_tell_outcome``). A reply to a secret
+    request is answered here and posted nowhere."""
+    if record.get("secret"):
+        await client.send_message(chat_id, _texts(lang)["secret_reply"], parse_mode="")
+        return
     status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text, update_id=update_id)
     outcome = _outcome(status, payload, {"comment": answer_text} if answer_text else {})
     await _tell_outcome(api, client, record, status, payload, outcome, chat_id, lang)

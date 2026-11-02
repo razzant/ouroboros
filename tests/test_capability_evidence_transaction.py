@@ -238,10 +238,10 @@ def test_revoke_failure_reaches_the_http_consumer_without_claiming_removal(tmp_p
     before = ce._store_path(tmp_path).read_bytes()
     audit = []
 
-    async def body(_request):
+    async def body(_request, _default):
         return {"provider": "openrouter", "model": "vendor/acked", "window_tokens": 0}
 
-    monkeypatch.setattr(settings, "_json_body_or_empty", body)
+    monkeypatch.setattr(settings, "request_json_or", body)
     monkeypatch.setattr(settings, "request_drive_root", lambda _request: tmp_path)
     monkeypatch.setattr(settings, "_owner_audit", lambda *args: audit.append(args))
     with monkeypatch.context() as failed:

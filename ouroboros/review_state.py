@@ -164,6 +164,13 @@ def _validate_attempt_authority_shape(data: Dict[str, Any]) -> List[Any]:
     return raw_attempts
 
 
+def _earlier_stale_markers_from(raw: Any) -> Dict[str, Dict[str, str]]:
+    """Displaced stale markers as saved, read as leniently as the newest one; a row without a time is none."""
+    rows = raw if isinstance(raw, dict) else {}
+    return {str(key): {name: str(row.get(name) or "") for name in ("ts", "reason", "task_id")}
+            for key, row in rows.items() if isinstance(row, dict) and row.get("ts")}
+
+
 def _load_state_unlocked(
     drive_root: pathlib.Path, *, strict_attempt_authority: bool = False,
     source_snapshot: Optional[List[tuple[str, Any]]] = None,
@@ -212,6 +219,7 @@ def _load_state_unlocked(
         last_stale_reason=str(data.get("last_stale_reason", "")),
         last_stale_repo_key=str(data.get("last_stale_repo_key", "")),
         last_stale_task_id=str(data.get("last_stale_task_id", "")),
+        earlier_stale_markers=_earlier_stale_markers_from(data.get("earlier_stale_markers")),
         archived_advisory_debts=[item for item in raw_debts if _is_archived_advisory_debt(item)],
     )
 
@@ -315,6 +323,7 @@ def _save_state_unlocked(
         for name in ("author_disposition", "review_input"):
             if not hasattr(attempt, name):
                 setattr(attempt, name, {})
+    earlier_markers = getattr(state, "earlier_stale_markers", None) or {}
     data: Dict[str, Any] = {
         "state_version": _STATE_SCHEMA_VERSION,
         "schema_version": _STATE_SCHEMA_VERSION,
@@ -330,6 +339,8 @@ def _save_state_unlocked(
         "last_stale_reason": state.last_stale_reason,
         "last_stale_repo_key": state.last_stale_repo_key,
         "last_stale_task_id": state.last_stale_task_id,
+        # Only once a marker of another scope was displaced: one scope keeps the legacy shape.
+        **({"earlier_stale_markers": earlier_markers} if earlier_markers else {}),
         "saved_at": unchanged_from[1] if unchanged_from is not None else _utc_now(),
     }
     content = json.dumps(
@@ -524,24 +535,27 @@ def invalidate_advisory_after_mutation(
         log.debug("invalidate_advisory_after_mutation failed (non-fatal): %s", e)
 
 
-def stale_marker_status(state: AdvisoryReviewState, drive_root: pathlib.Path, repo_key: str = "") -> tuple[bool, str]:
-    """Whether the stale marker staled the checkout's newest preflight look (D5-002), and
-    why that look could not be read ("" when it could).
+def stale_marker_status(state: AdvisoryReviewState, drive_root: pathlib.Path,
+                        repo_key: str = "") -> tuple[Dict[str, str], str]:
+    """The stale marker that staled the checkout's newest preflight look (D5-002; ``{}``
+    when none did, so its truth is whether one did), and why that look could not be read
+    ("" when it could).
 
     A marker no look precedes was written by the retired advisory lane: history kept in
     the file (owner decision: archive only), never current freshness. An unreadable look
     is a gap, not an absence: the checkout's marker stays shown and the gap is named.
-    An empty ``repo_key`` reads the marker's own checkout."""
+    An empty ``repo_key`` reads the newest marker's own checkout."""
     key = repo_key or state.last_stale_repo_key
-    if not state.last_stale_from_edit_ts or state.last_stale_repo_key not in ("", key):
-        return False, ""
+    if not state.stale_marker(key):
+        return {}, ""
     from ouroboros.review_ledger import latest_preflight_record
 
     try:
         look = latest_preflight_record(drive_root, repo_key=key)
     except Exception as exc:  # each caller's own fallback would drop its whole view
-        return True, f"{type(exc).__name__}: {exc}"
-    return state.marker_postdates(str((look or {}).get("ts") or ""), key), ""
+        return state.stale_marker(key), f"{type(exc).__name__}: {exc}"
+    look_ts = str((look or {}).get("ts") or "")
+    return (state.stale_marker(key, look_ts) if look_ts else {}), ""
 
 
 def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib.Path] = None) -> str:
@@ -781,4 +795,6 @@ from ouroboros.review_state_custody import (  # noqa: E402, F401 -- intentional 
     _review_roster_row_is_pending,
     _strip_attempt_heavy_payload,
     checkpoint_pending_review_invocation,
+    mark_review_attempt_paid,
+    settle_completed_round,
 )

@@ -309,6 +309,26 @@ def _blocked_executor_terminal(cap_info: Dict[str, Any], task: Optional[Dict[str
     return text, usage, {"reasoning_notes": ["subagent_executor_unavailable"], "tool_calls": []}
 
 
+def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """The named outcome of a known window that cannot hold a pooled task's start (``MinimumViewUnfit``).
+
+    Its numbers and, for a directly required handbook, the choices that remain; the host switches nothing. Money
+    stays the ledger's answer, and an earlier attempt's or started run's effects stay theirs: this attempt's own
+    loop evidence is absent, never a zero, so nothing here claims the task had no effect.
+    """
+    from ouroboros.context_budget import REQUIRED_BOOK_CHOICES
+    from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE
+
+    text = f"⚠️ This route's known window cannot hold this task's context. {unfit}."
+    if unfit.required_book_tokens:
+        text += (f" This task directly requires the whole development handbook (~{unfit.required_book_tokens:,} tokens); "
+                 f"without it the input is ~{unfit.estimated_input_tokens - unfit.required_book_tokens:,}. "
+                 + REQUIRED_BOOK_CHOICES.format("; a Continue keeps it"))  # ``context_capacity`` is a Continue cause
+    usage = {"execution_status": "infra_failed", "reason_code": "context_capacity",
+             "terminal_origin": TERMINAL_ORIGIN_HOST_NOTICE, "loop_evidence_unavailable": True}
+    return text, usage, {"reasoning_notes": ["context_capacity"], "tool_calls": [], "loop_evidence_unavailable": True}
+
+
 def _persist_early_origin_stub(drive_root: Any, task: Dict[str, Any]) -> None:
     _persist_early_origin_stub_impl(drive_root, task, write_result=_agent().write_task_result)
 

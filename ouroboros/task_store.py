@@ -388,6 +388,39 @@ def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, 
     return dict(_documents(fetched))
 
 
+def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+    """``(documents, faults)`` an owner message's operation may be: each row whose typed top-level origin is
+    ORIGIN (``<chat_id>:<client_message_id>``, ``store_hot_facts.task_columns``), and each row an older writer
+    left underived (NULL) whose stored body holds the client message id as a writer encodes it (the only way
+    its own origin could name it). The stored bodies (no handoff or card rows) are decoded after the read;
+    ``faults`` names each selected row whose body is missing or not its own task's object (``own_document``):
+    unknown, never absent. The key is discovery: the caller validates the complete origin of every document it
+    uses. Once every row derives its origin, unrelated rows cost nothing here."""
+    from ouroboros.store_hot_facts import ORIGIN_VERSION, own_document
+
+    client_message_id = str(origin).partition(":")[2]
+    needles = sorted({json.dumps(client_message_id, ensure_ascii=escaped) for escaped in (False, True)})
+    holds = " OR ".join("instr(b.body, ?) > 0" for _needle in needles)
+    with open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or 1) >= ORIGIN_VERSION:
+            select, params = ("SELECT task_id FROM tasks INDEXED BY tasks_origin WHERE origin=? AND origin<>'' UNION "
+                              "SELECT t.task_id FROM tasks AS t INDEXED BY tasks_underived_origin JOIN task_bodies AS b "
+                              f"ON b.task_id=t.task_id WHERE t.origin IS NULL AND ({holds})"), (str(origin), *needles)
+        else:  # a store before the column: every row is underived
+            select, params = f"SELECT b.task_id FROM task_bodies AS b WHERE {holds}", tuple(needles)
+        ids = sorted(row[0] for row in capture(txn.conn, select, params, ("task_id",)).tuples())
+        pages = [page for _ids, page in _pages(txn, ids, _BODY_PAGE, ("task_id", "body", "body_hex"))]
+    documents: Dict[str, Dict[str, Any]] = {}
+    faults: Dict[str, str] = {}
+    for record in _with_bodies([{"task_id": task_id} for task_id in ids], pages):  # each selected id, body or None
+        document, fault = own_document(record["task_id"], record["body"])
+        if fault:
+            faults[record["task_id"]] = fault
+        else:
+            documents[record["task_id"]] = document
+    return documents, faults
+
+
 # A display read (``task_reads``: history cards; ``effective_task_result`` with
 # ``materialize_artifacts=False``, retry successors and child replicas included) takes every
 # stored key except the bulky evidence no such reader uses — 94 MB of heads for 1.46 GB of

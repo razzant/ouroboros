@@ -15,6 +15,16 @@ if TYPE_CHECKING:
 
 ContextProfile = Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+#: A view receipt's estimator tokens of the start note a directly required handbook brings (``context_fit``).
+BOOK_NOTE_KEY = "required_book_note_tokens"
+
+
+def required_book_addition(plan: Any, mode: str) -> int:
+    """What this task's directly required handbook adds to ``mode``'s view of ``plan``, its start note included
+    (estimator tokens; 0 without a captured core): the window charges it, and no automatic choice is sized by it."""
+    core = getattr(plan, "core", None)
+    return 0 if core is None else core.required_book_tokens(mode) + int(
+        (plan.projection(mode).memory_facts or {}).get(BOOK_NOTE_KEY) or 0)
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,9 @@ class MainFitMeasurement:
     window_witness_bound: bool = False
     window_observation_fp: str = ""
     window: Dict[str, Any] = field(default_factory=dict)
+    # What a directly required handbook adds to this candidate, its start note included (density applied): it
+    # counts against the window, while nothing automatic narrows or shrinks for it and no owner target sizes it.
+    required_book_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -114,7 +127,9 @@ def measure_main_fit(
     the round and recovery. A known window with no tool-result room starts the same refusal
     passes before sending (owner revision, 20 October 2026); an unknown window never does.
     Both deficits count the mode's reply floor or the route's larger working reserve; the reply the
-    candidate will actually get is ``reply_allowance_tokens``.
+    candidate will actually get is ``reply_allowance_tokens``. The recorded target facts compare the
+    whole candidate; the reclaim goal, the reply and tool delivery are sized without a directly required
+    handbook (``required_book_addition``), which only the capacity deficit charges, beside that reply.
     """
     from ouroboros.context_fit import estimate_context_prompt_tokens
     from ouroboros.capability_evidence import canonical_evidence_root, is_known, resolve_main_token_density
@@ -144,10 +159,17 @@ def measure_main_fit(
     capacity = current.total_equivalent if current.usable is not None else None
     if capacity is None:
         reading = None
+    raw_book = required_book_addition(plan, rendered_mode)
+    book = math.ceil(raw_book * density)
+    # A directly required handbook keeps the reply the same candidate without it gets (Nano's is the only elastic one):
+    # a known window holds both or its deficit says so; nothing here shrinks for the book (owner 1.11.2026).
+    reply = reply_allowance_tokens(caller_max_tokens=ceiling, nano=nano, owner_nano=profile == "owner_nano",
+                                   input_tokens=estimated_input - book, raw_input_tokens=raw_input - raw_book, window_tokens=capacity)
     target_deficit = max(0, total - target) if target is not None else None
-    capacity_deficit = max(0, total - capacity) if capacity is not None else None
+    capacity_deficit = max(0, total + (max(0, reply - reserve) if book else 0) - capacity) if capacity is not None else None
+    economic_deficit = None if target_deficit is None else max(0, target_deficit - book)
     deficit = max(
-        [value for value in (target_deficit, capacity_deficit) if value is not None]
+        [value for value in (economic_deficit, capacity_deficit) if value is not None]
         or [0]
     )
     margin = reclaim_low_water_margin(target, capacity) if deficit > 0 else 0
@@ -171,9 +193,7 @@ def measure_main_fit(
         reclaim_goal_tokens=goal,
         low_water_margin_tokens=margin,
         raw_input_tokens=raw_input,
-        reply_allowance_tokens=reply_allowance_tokens(
-            caller_max_tokens=ceiling, nano=nano, owner_nano=profile == "owner_nano",
-            input_tokens=estimated_input, raw_input_tokens=raw_input, window_tokens=capacity),
+        reply_allowance_tokens=reply,
         anchor_input_tokens=anchor.input_tokens if anchor is not None else None,
         anchor_round=anchor.round if anchor is not None else None,
         anchor_rewritten=bool(anchor is not None and anchor.rewritten),
@@ -181,6 +201,7 @@ def measure_main_fit(
         window_reading_tokens=reading,
         window_witness_bound=plan.window_witness_bound,
         window_observation_fp=current.route_fp,
+        required_book_tokens=book,
     )
     action: Literal["send", "send_target_miss"] = (
         "send_target_miss" if target_deficit and target_deficit > 0 else "send")

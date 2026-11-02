@@ -1356,7 +1356,7 @@ def get_tools() -> List[ToolEntry]:
                     "only, never sent with retry_of; the host supplies the canonical work order."},
                 "subagent_id": {"type": "string", "description":
                     "Exact agent_session id from Available subagents, required for direct starts including continue_from. "
-                    "Omit for the configured snapshot and retry_of. Schedule API actors as recursive children instead."},
+                    "Omit for the configured snapshot and retry_of."},
                 "mode": {"type": "string", "enum": ["ask", "plan", "agent"], "description":
                     "Omit for access-derived execution. ask/plan are read-only. Plan artifacts return questions to the starter; "
                     "continue_from with mode=plan clarifies, mode=agent implements the frozen plan within its recorded ceiling."},
@@ -1390,7 +1390,7 @@ def get_tools() -> List[ToolEntry]:
                     "scope_paths; direct without scope equals omission."},
                 "scope_paths": {"type": "array", "items": {"type": "string"}, "description":
                     "Relative copy inputs or direct-work capture paths, including future outputs; ['.'] selects the "
-                    "whole folder. Copy requires nonempty scope. Read-only callers omit this and directory_strategy. "
+                    "whole folder. Copy requires nonempty scope. "
                     "Unselected large inputs stay at source. Direct work without selected/observed paths cannot "
                     "claim a complete changed-file list."},
                 "max_seconds": {"type": "integer", "description":
@@ -1407,7 +1407,7 @@ def get_tools() -> List[ToolEntry]:
                     "be empty. For resumable pool_exhausted or a limit with resetsAt, use "
                     "await_messages(wake_at=resetsAt) before continuing. Needs an observed terminal (not settled "
                     "money), not superseded, no ambiguous apply. Ordinary continuations never widen; plan implementation requires the starter's recorded ceiling. "
-                    "Select subagent_id as for a start; configured sessions omit it. Never combine with retry_of. A continuation inherits no attached documents: pass attachment_paths again."},
+                    "Never combine with retry_of."},
                 "continue_carrier": {"type": "string", "enum": ["auto", "packet"], "description":
                     "With continue_from: auto (default) reuses the session where possible; packet starts a new "
                     "session with retained evidence when the old session has gone astray. Omit for plan threads."},
@@ -1427,7 +1427,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "delegate_wait",
             "description": (
                 "Sleep on a delegated run until it ends, asks a question or needs you. Quiet progress costs "
-                "no model rounds: the host renews quiet transport windows with zero model calls, and journal "
+                "no model rounds: the host renews quiet transport windows, and journal "
                 "progress streams to the human without waking you. An unreachable daemon is the "
                 "same quiet renewal (typed reason daemon_unreachable, told to the owner once per "
                 "outage); while such a read hangs, a finalize_now/hurry control is noticed only "

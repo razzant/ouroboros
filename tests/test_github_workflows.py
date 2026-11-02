@@ -8,8 +8,10 @@ alternative cannot provide the same facts, or that model latency has improved.
 import hashlib
 import io
 import json
+import os
 import pathlib
 import subprocess
+import sys
 import zipfile
 from types import SimpleNamespace
 
@@ -652,3 +654,74 @@ def test_gh_readers_reach_readonly_child_that_cannot_use_shell(tmp_path, monkeyp
         assert registry.get_schema_by_name(name) is not None
         result = registry.execute_result(name, args)
         assert result.status == "ok" and content in result.text, (name, result.text)
+
+
+# --- the retained reader across a fork (#2539) ------------------------------------------------------------------------
+
+_ZIP_PROBE = ("import hashlib, json, pathlib, sys, zipfile\n"
+              "data = pathlib.Path(sys.argv[1]).read_bytes()\n"
+              "with zipfile.ZipFile(sys.argv[1]) as archive:\n"
+              "    names = archive.namelist()\n"
+              "    archive.extractall('unzipped')\n"
+              "print(json.dumps({'sha256': hashlib.sha256(data).hexdigest(), 'names': names}))\n")
+
+
+@pytest.mark.parametrize("forked", [False, True], ids=["ordinary", "forked"])
+def test_retained_reader_reaches_the_canonical_file_through_this_tasks_own_tools(tmp_path, monkeypatch, forked):
+    """#2539: bytes are retained in the task's canonical store, but a fork's ``artifact_store`` and process cwd are its
+    execution drive's. There the relative address listed only the fork's own sources and an unzip in
+    cwd=artifact_store found no archive. Each returned reader now lists and reads (or, for the archive, a process opens)
+    the exact retained bytes: a fork names the absolute canonical file without a root, an ordinary task keeps the
+    relative address, and the process cwd stays the task's own writable execution store."""
+    from ouroboros import safety
+    from ouroboros.tool_access import resource_root_path
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    canonical, system = tmp_path / "data", tmp_path / "system"
+    drive = canonical / "state" / "headless_tasks" / "task-fixture" / "data" if forked else canonical
+    own = task_artifact_dir_path(drive, "task-fixture") / "source_handles" / "tool_results"
+    own.mkdir(parents=True)
+    (own / f"owner-dialogue-{'0' * 64}.txt").write_text("the execution drive's own source\n", encoding="utf-8")
+    system.mkdir()
+    monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
+    monkeypatch.setattr(safety, "check_safety", lambda *_a, **_kw: (True, ""))
+    monkeypatch.setattr(github_workflows, "_gh_run", FakeGh(artifacts=[_DIST], artifact=_DIST, archive=ARCHIVE))
+    ctx = ToolContext(repo_dir=system, drive_root=drive, budget_drive_root=str(canonical) if forked else "",
+                      task_id="task-fixture")
+    registry = ToolRegistry(repo_dir=system, drive_root=drive)
+    registry.set_context(ctx)
+    store, cwd_store = task_artifact_dir_path(canonical, "task-fixture").resolve(), resource_root_path(ctx, "artifact_store")
+    assert (store == cwd_store) is not forked
+
+    for args, key, data in (({"method": "get", "kind": "run", "target": 11, "include": ["log"]}, "capture", LOG),
+                            ({"method": "list", "kind": "artifact", "target": 11, "limit": 100}, "saved_page", None),
+                            ({"method": "download", "kind": "artifact", "target": 501, "max_bytes": 4096}, "capture", ARCHIVE)):
+        result = registry.execute_result("github_read", args)
+        line, _, body = result.text.partition("\n")
+        payload = json.loads(body)
+        ref = payload[key]["retained"] if key == "capture" else payload[key]
+        exact = (store / ref["path"]).read_bytes()
+        assert data is None or exact == data
+        assert (ref["root"], ref["size"], ref["sha256"]) == ("artifact_store", len(exact), hashlib.sha256(exact).hexdigest())
+        reader = ref["read"]["arguments"]
+        root = {"root": reader["root"]} if "root" in reader else {}
+        listed = registry.execute_result("list_files", {**root, "path": os.path.dirname(reader["path"])})
+        assert pathlib.PurePath(ref["path"]).name in listed.text, listed.text
+        if data is ARCHIVE:  # A binary is opened by a process in cwd=artifact_store, where the view says to extract it.
+            opened = registry.execute_result("run_command", {
+                "cwd": "artifact_store", "cmd": [sys.executable, "-I", "-c", _ZIP_PROBE, reader["path"]]})
+            assert opened.status == "ok", opened.text
+            seen = json.loads(next(row for row in opened.text.splitlines() if row.startswith("{")))
+            assert seen == {"sha256": payload["capture"]["sha256"], "names": ["report.xml", "logs/pytest.txt"]}
+            assert (cwd_store / "unzipped" / "report.xml").read_bytes() == b"<testsuite/>"
+            assert not forked or not (store / "unzipped").exists()
+        else:
+            text = registry.execute_result("read_file", reader)
+            assert text.status == "ok" and exact.decode("utf-8").splitlines()[0][:60] in text.text, text.text
+        assert ref["read"] == {"tool": "read_file", "arguments": {
+            **({"path": str(store / ref["path"])} if forked else {"root": "artifact_store", "path": ref["path"]}),
+            "start_line": 1, "max_lines": 2000, "start_char": 0}}
+        view = line + "\n" + payload["view"]
+        assert key == "saved_page" or f": {reader['path'] if forked else 'artifact_store/' + ref['path']} (" in view
+        assert data is ARCHIVE or f"path={reader['path']!r}" in view
+        assert ("artifact_store" in view) is not forked, view

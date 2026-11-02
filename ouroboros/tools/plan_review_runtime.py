@@ -44,6 +44,8 @@ PLAN_REVIEW_SLOT_TIMEOUT_SEC = None
 # or unobserved — a disclosure, never a claim of full-surface coverage.
 HOST_FILE_READ_ASSEMBLED = "host_assembled_packet"
 HOST_FILE_READ_UNOBSERVED = "unobserved"
+# The ``observed_role`` of the one observed source that is the ask's own-room snapshot.
+ROOM_SNAPSHOT_ROLE = "own_room_snapshot"
 
 log = logging.getLogger(__name__)
 
@@ -334,11 +336,21 @@ def _plan_row_from_actor(actor: Dict[str, Any], slot: Any) -> dict:
 
 
 def _room_read_coverage(usage: Dict[str, Any]) -> Dict[str, Any]:
-    """What this reviewer read of the own-room snapshot (observed-source fold): a fact beside the verdict."""
-    rows = (usage.get("native_read_coverage") or {}).get("sources") if isinstance(usage.get("native_read_coverage"), dict) else None
-    row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) and rows[0].get("root") == "artifact_store" else {}
-    return {"status": str(row.get("status") or ""), "covered_chars": int(row.get("covered_chars") or 0),
-            "complete_chars": int(row.get("complete_chars") or 0), "provenance": str(usage.get("read_provenance") or "")} if row else {}
+    """What this reviewer's file reads covered of the own-room snapshot: a fact beside the verdict.
+
+    Only the row the plan declared as that snapshot (``observed_role``) answers, whose fold bound the reads to
+    its exact bytes; a paged brief or any other source never does. A row nothing measured over those bytes
+    (``unobserved``, a journal whose file no longer matches them) is absence, never 0 of N. Inline delivery is
+    the participant's ``room_delivery``; neither fact says what the reviewer understood."""
+    folds = (usage.get("observed_read_coverage"), usage.get("native_read_coverage"))
+    rows = [row for fold in folds if isinstance(fold, dict) and isinstance(fold.get("sources"), list)
+            for row in fold["sources"] if isinstance(row, dict)]
+    row = next((row for row in rows if row.get("observed_role") == ROOM_SNAPSHOT_ROLE), {})
+    if row.get("status") not in {"complete", "incomplete"} or row.get("reason") == "source_gap":
+        return {}
+    return {"status": str(row["status"]), "covered_chars": int(row.get("covered_chars") or 0),
+            "complete_chars": int(row.get("complete_chars") or 0),
+            "provenance": str(usage.get("read_provenance") or usage.get("host_file_read_attestation") or "")}
 
 
 def plan_row_typed_facts(row: Dict[str, Any]) -> Dict[str, Any]:

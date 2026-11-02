@@ -34,6 +34,29 @@ function hostObjections(detail) {
 }
 
 
+// What the own room reached a seat: the rows its delivery carried inline and what its file reads covered of the
+// exact snapshot. Separate facts, neither a measure of understanding: no percentage, no tone, and an unobserved read
+// says nothing at all. The rows were counted before any send: a seat never sent was delivered none, and a pending
+// outcome says the delivery may not have gone. A stored row with no provenance or measured status (an older
+// projector's paged brief or blank 0 of N) measured nothing of the room, so it says nothing either.
+const roomCount = (value) => Number(value || 0).toLocaleString('en-US');
+const READ_PROVENANCE_WORDS = { host_observed: 'observed by the host', harness_observed: 'inferred from the harness journal' };
+
+function planRoomLine(participant) {
+    const inline = participant.status !== 'not_dispatched' && participant.room_delivery && typeof participant.room_delivery === 'object'
+        ? participant.room_delivery : null;
+    const read = participant.room_read_coverage && typeof participant.room_read_coverage === 'object' ? participant.room_read_coverage : null;
+    const provenance = READ_PROVENANCE_WORDS[text(read?.provenance)];
+    const facts = [
+        inline ? `${roomCount(inline.conversation_inline_rows)} of ${roomCount(inline.conversation_rows)} conversation rows inline${
+            Number(inline.other_rows) > 0 ? `, ${roomCount(inline.other_rows)} other rows only in the snapshot file` : ''}` : '',
+        inline && participant.status === 'pending' ? 'counted for a delivery that may not have been sent' : '',
+        provenance && ['complete', 'incomplete'].includes(text(read.status))
+            ? `file reads covered ${roomCount(read.covered_chars)} of ${roomCount(read.complete_chars)} characters · ${provenance}` : '',
+    ].filter(Boolean);
+    return facts.length ? `Participant ${text(participant.seat_id)} room: ${facts.join(' · ')}` : '';
+}
+
 function planDoneWhenLines(revision) {
     const rows = Array.isArray(revision?.done_when) ? revision.done_when : [];
     if (!rows.length) return ['done_when: (none stated yet)'];
@@ -105,6 +128,7 @@ export function planRecordGroup(owner, record, detail) {
                 if (p.status === 'pending') return `${who}: awaiting`;
                 return `${who}: ${text(p.status)}${text(p.error || p.parse_error) ? ` — ${text(p.error || p.parse_error)}` : ''}`;
             }),
+            ...participants.map(planRoomLine).filter(Boolean),
             ...raised.map((o) => `objection ${o.seat}/${o.id}${o.holds ? '' : ' (never holds)'}${o.notAdjudicated ? ' (not adjudicated)' : ''}: ${o.text}`),
             'Cost unavailable',
         ];

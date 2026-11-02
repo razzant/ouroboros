@@ -1,9 +1,8 @@
 """The shared Light call (``_call_consolidation_llm``): complete requests, measured fit, typed failures.
 
-Reflection and scratchpad consolidation send through this one
-call. The old dialogue writer that split blocks around it is retired, so every test
-here sends one request directly. ``_LLM``, ``fit``, ``_paths`` and ``_write_chat`` are
-shared helpers other memory tests import.
+The fallback memory writer sends through this one call, one request per call, so every
+test here sends one request directly. ``_LLM``, ``fit``, ``_paths`` and ``_write_chat``
+are shared helpers other memory tests import.
 """
 from __future__ import annotations
 
@@ -84,7 +83,7 @@ def _write_chat(path, count=100, text_size=80, *, start=0):
 
 
 def _call(llm, prompt="Summarize this source.\n" + "source " * 100):
-    """One shared Light request, as reflection and scratchpad upkeep send it."""
+    """One Light request, as the fallback memory writer sends it."""
     return c._call_consolidation_llm(llm, prompt, "Probe")
 
 
@@ -130,6 +129,17 @@ def test_empty_output_is_non_success_with_real_usage(fit, raw):
     assert content == "" and len(llm.calls) == 1
     assert usage["cost"] == 0.02
     assert usage["_consolidation_errors"][-1]["kind"] == "empty_summary"
+
+
+@pytest.mark.parametrize("raw", ["summary", " \n"])
+def test_retirement_counters_of_the_physical_send_reach_the_returned_usage(fit, raw):
+    """What a send reports about retired reasoning and changed sent history stays in the Light
+    call's usage, for an answer and an unusable one alike; counters it never reported stay absent."""
+    counters = {"reasoning_retired": 1, "reasoning_retired_turns": 2, "reasoning_retired_blocks": 3,
+                "prompt_prefix_breaks": 1}
+    content, usage = _call(_LLM(effect=lambda *_: ({"content": raw}, {"cost": 0.02, **counters})))
+    assert content == raw.strip() and {key: usage.get(key) for key in counters} == counters
+    assert not counters.keys() & _call(_LLM())[1].keys()
 
 
 @pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "model_operation_interrupted", "model_outcome_unknown"])

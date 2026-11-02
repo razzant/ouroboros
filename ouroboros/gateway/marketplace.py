@@ -241,7 +241,7 @@ def _lifecycle_options(
 
 
 async def api_marketplace_install(request: Request) -> JSONResponse:
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     slug = str(body.get("slug") or "").strip()
     if not slug:
@@ -293,8 +293,9 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     err = _validate_path_param_name(sanitized)
     if err:
         return json_error(err, 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
-    body = body if isinstance(body, dict) else {}
+    body = await request_json_or(request, {})
+    if not isinstance(body, dict):
+        return json_error("request body must be a JSON object", 400)
     version = str(body.get("version") or "").strip() or None
     drive_root = _request_drive_root(request)
     repo_dir = _request_repo_dir(request)
@@ -453,7 +454,7 @@ async def api_skill_publication_clear(request: Request) -> JSONResponse:
     name = str(request.path_params.get("skill") or "").strip()
     if error := _validate_path_param_name(name):
         return json_error(error, 400)
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     expected = body.get("expected_published") if isinstance(body, dict) else None
     if not isinstance(expected, dict):
         return json_error("expected_published must contain the displayed publication receipt", 400)

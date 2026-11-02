@@ -127,10 +127,13 @@ def _route_project_chat_to_running_task(
         tid = str(candidate["task_id"])
         direct_agent = None
         direct_lock = None
-        if candidate.get("direct_chat"):
+        if candidate.get("direct_chat") or candidate.get("inline_presence"):
+            from ouroboros.conversation_lease import presence_author_agent
             from supervisor.workers import get_direct_chat_agent
 
-            direct_agent = get_direct_chat_agent(tid)
+            # A moved inline Presence author takes owner words exactly as a direct turn does: its own lock.
+            direct_agent = (presence_author_agent(ctx.DRIVE_ROOT, tid) if candidate.get("inline_presence")
+                            else get_direct_chat_agent(tid))
             direct_lock = getattr(direct_agent, "_owner_message_admission_lock", None)
             if direct_lock is None:
                 return ""
