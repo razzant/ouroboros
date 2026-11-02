@@ -334,14 +334,16 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
 
 
 def _direct_turns_snapshot_safe(*, availability=None) -> list:
-    """The inline executors' registered actors plus the conversation lane's RUNNING turns (one shape)."""
+    """The inline executors' registered actors plus the conversation lane's RUNNING turns (one shape): an inline
+    executor's turn is both, and is listed once, as its live actor (its own phase and model wait)."""
     try:
         from supervisor.active_activity import get_direct_activity_registry
         from supervisor.conversation_lane import lane_turn_rows
 
         registry = get_direct_activity_registry()
         rows = registry.snapshot() if availability is None else registry.snapshot(availability=availability)
-        return rows + lane_turn_rows()
+        listed = {row.get("activity_id") for row in rows}
+        return rows + [row for row in lane_turn_rows() if row.get("activity_id") not in listed]
     except Exception:
         if availability is not None:
             availability["complete"] = False
@@ -583,7 +585,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     from supervisor.owner_pause_control import warm_paused_member
 
     direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe(availability=availability)
-    presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability)
+    presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability,
+                                                  listed={row.get("activity_id") for row in direct_rows})
     try:
         with queue_mod._queue_lock:
             pending_rows = [dict(task) for task in queue_mod.PENDING]
@@ -623,14 +626,16 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                                          question_details, work_facts, presence_rows)
 
 
-def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None) -> list:
+def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None, listed=frozenset()) -> list:
     """``(task_id, row)`` of each live inline Presence turn (``resolved_presence_turns``): owners no queue map or direct
-    registry holds. One whose room or facts this read cannot know is a gap, never an absence."""
+    registry holds. One whose room or facts this read cannot know is a gap, never an absence, unless the census
+    already lists it (``listed``: a carried turn's lane row, whose author starts in its carrier)."""
     from ouroboros.conversation_lease import resolved_presence_turns
 
     observed = resolved_presence_turns(drive_root)
     rows = [(fact["task_id"], fact["row"]) for fact in observed["roots"] if fact["row"]]
-    if availability is not None and (not observed["complete"] or len(rows) < len(observed["roots"])):
+    unknown = [fact for fact in observed["roots"] if not fact["row"] and fact["task_id"] not in listed]
+    if availability is not None and (not observed["complete"] or unknown):
         availability["complete"] = False
     return rows
 

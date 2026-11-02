@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from tests import _dialogue as dialogue_test
 
-import functools
 import json
 import pathlib
 import time
@@ -372,8 +371,6 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
     h = host
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr("tests.presence_legacy_helpers._INITIATION_MARGIN_SEC", 0.5)
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     gate = threading.Event()
     callers_scope = usage_accounting.UsageScope(task_id="the-initiating-task", root_task_id="the-initiating-task")
     seen = {}
@@ -424,8 +421,6 @@ def _proactive_id(h, prompt, dedupe):
 def test_an_initiated_continuing_envelope_reaches_the_initiating_call(host, monkeypatch):
     """Finding 4: the initiating call is a version-1 consumer; a continuing author's first envelope reaches it."""
     h = host
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     h.script = author(deliver)
     result = _initiate(h, "Report the status.", "release")
     assert (result["status"], result["outcome"], result["text"], result["output_ref"]) == ("continuing", "deferred", "", "")

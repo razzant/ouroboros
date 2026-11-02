@@ -464,8 +464,8 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
                     continue
                 task = row.get("task") if isinstance(row.get("task"), dict) else {}
                 task_id = str(row.get("id") or task.get("id") or "").strip()
-                if (
-                    not task_id or task_id in seen
+                if (  # a carried Presence turn's lane row is its place's: the census below lists it once moved
+                    not task_id or task_id in seen or execution_kind(task) == "presence"
                     or str(task.get("parent_task_id") or "").strip()
                     or str(task.get("delegation_role") or "") == "subagent"
                 ):

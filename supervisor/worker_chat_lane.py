@@ -891,12 +891,12 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
 # ---------------------------------------------------------------------------
 
 def conversation_turn_live() -> bool:
-    """Whether any owner conversation is live: a lane row, or an inline executor's registered actor."""
+    """Whether any owner conversation is live (``live_turn_count``): a correspondent's Presence turn is not one."""
     from supervisor import queue
     from supervisor.conversation_lane import live_turn_count
 
     with queue._queue_lock:
-        return live_turn_count() > 0 or bool(_pool().chat_turn_liveness())
+        return live_turn_count() > 0
 
 
 def auto_resume_after_restart() -> None:

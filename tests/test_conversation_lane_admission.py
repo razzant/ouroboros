@@ -320,3 +320,74 @@ def test_a_dead_carriers_retry_whose_barrier_failed_waits_unstarted_for_its_row(
     monkeypatch.setattr(queue, "publish_queue_snapshot", real)
     conversation_lane.dispatch_awaiting_turns()
     assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == "turn-r"
+
+
+def test_a_damaged_cancel_intent_projection_holds_only_what_it_cannot_read(lane):
+    """Review N5: the lane's Stop hold reads the projection as every behaviour read does (fail-soft with
+    disclosure). A quarantined intent row holds its own turn and the turn beside it starts; a projection that
+    cannot be read at all, which no Stop can be minted into, holds no turn: it is disclosed, never a silent hold
+    of every awaiting turn while READY carriers sit idle."""
+    import json
+
+    from supervisor import queue
+
+    path = queue.DRIVE_ROOT / "state" / "cancel_intents.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    quarantined = _awaiting_turn(lane, "damaged hello", "cm-n5-row")
+    free = _awaiting_turn(lane, "free hello", "cm-n5-free")
+    path.write_text(json.dumps({"intents": {quarantined: "not a row"}}), encoding="utf-8")
+    handed = _dispatched_once_carriers_are_ready()
+    assert free in handed and quarantined not in handed
+    path.write_text("{not json", encoding="utf-8")
+    assert quarantined in _dispatched_once_carriers_are_ready()  # an unreadable projection holds nothing
+    trail = (queue.DRIVE_ROOT / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
+    assert '"op": "active_intents"' in trail and '"op": "active_intents_row"' in trail  # both disclosed
+
+
+def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_same_id(lane, monkeypatch):
+    """Review N7: custody keeps the running row through kill and persist and pops it at its publication. A resend
+    admitted under the same id meanwhile (another carrier's row) is another attempt's, as worker health and the
+    reaper read a row: custody settles its own attempt, leaves that row in RUNNING and emits no terminal for it."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import write_task_result
+    from supervisor import queue, task_lifecycle, worker_pool_lifecycle
+    from tests.conversation_carrier_support import lane_row
+
+    task = {"id": "turn-n7", "type": "task", "chat_id": 1, "text": "hello", "_is_direct_chat": True}
+    old = lane_row(workers, dict(task), wid=97)
+    write_task_result(queue.DRIVE_ROOT, "turn-n7", "running", chat_id=1, _is_direct_chat=True)
+    emitted, resend = [], {}
+
+    def kill(pid, **_kw):  # the old carrier dies; a resend is admitted under the same id before the publication
+        old.proc.is_alive = lambda: False
+        lane_row(workers, dict(task), wid=98)
+        resend["row"] = workers.RUNNING["turn-n7"]
+
+    monkeypatch.setattr(worker_pool_lifecycle, "kill_worker_tree", kill)
+    monkeypatch.setattr(queue, "_emit_cancel_task_done", lambda _t, tid, **_k: emitted.append(tid))
+    request_cancel(queue.DRIVE_ROOT, "turn-n7", reason="owner stop", source="owner", requested_by="owner")
+    task_lifecycle.cancel_task_custody("turn-n7")
+    assert workers.RUNNING.get("turn-n7") is resend["row"] and resend["row"]["worker_id"] == 98
+    assert emitted == []  # no terminal of the old attempt for the row the resend owns
+
+
+@pytest.mark.parametrize("live, resumes", [("presence", True), ("direct", False)])
+def test_a_correspondents_presence_turn_never_holds_the_owners_auto_resume(lane, monkeypatch, live, resumes):
+    """Review N8: the Host serves at boot before auto-resume, so a correspondent's Presence turn can be a live lane
+    row when the planned restart's resume runs. It is its place's conversation, never the owner's: only an owner
+    turn (base's registered direct actors) holds the resume."""
+    from tests.conversation_carrier_support import lane_row
+
+    started = []
+    (workers.DRIVE_ROOT / "state").mkdir(parents=True, exist_ok=True)
+    (workers.DRIVE_ROOT / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr(worker_chat_lane, "handle_chat_direct", lambda chat_id, text, *_a, **_k: started.append(text))
+    monkeypatch.setattr("ouroboros.delegate_recovery.import_legacy_restart", lambda _root: None)
+    monkeypatch.setattr("ouroboros.delegate_recovery.pending_owner_restart", lambda _root: None)
+    monkeypatch.setattr("ouroboros.installation_stop.panic_input", lambda _root: "")
+    turn = {"id": f"{live}-turn", "type": "task", "chat_id": 5 if live == "presence" else 7, "text": "hi",
+            "_is_direct_chat": True, "_execution_owner": {"kind": live}}
+    lane_row(workers, {**turn, **({"_presence_turn": True} if live == "presence" else {})}, wid=97)
+    worker_chat_lane.auto_resume_after_restart()
+    assert bool(started) is resumes and all(text.startswith("[auto-resume after restart]") for text in started)
