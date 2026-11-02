@@ -998,14 +998,20 @@ def _capture_context_core(
                          if isinstance(section, HostSection) else snapshot_labelled(section, captured_at)
                          for section in recent)
     try:
+        from ouroboros.consciousness_authority import is_focus_wake
+        from ouroboros.place_reply import reply_carrier
         from ouroboros.presence_context import build_presence_context_section
 
+        inline = bool(task.get("_presence_turn")) or is_focus_wake(task_metadata)
+        scheduled = bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn")
         presence_section = build_presence_context_section(
             pathlib.Path(env.drive_root),
             task_metadata.get("presence"),
             str(task.get("id") or ""),
             status_root=canonical_root,  # a forked promoted root finds its binding's work canonically
-            scheduled=bool(task_metadata.get("schedule_occurrence")) and not task.get("_presence_turn"),
+            scheduled=scheduled,
+            # The same carrier that speaks this root's final names its audience (FOCUS does inline).
+            answers_conversation=not inline and not scheduled and bool(reply_carrier(task_metadata)),
         )
         if presence_section:
             dynamic_parts.append(presence_section)
