@@ -556,6 +556,7 @@ def test_an_unreadable_model_request_set_holds_a_cold_sleep_beside_damage_it_cou
 def test_a_census_names_no_gap_while_a_link_source_is_unreadable(tmp_path, monkeypatch, source):
     """Unknown is never "nothing ties it": the row holds, named, beside the unreadable source."""
     from ouroboros import delegate_custody_current, owner_pause
+    from supervisor import tree_census
     from supervisor.continuation_admission import conflicting_writers
 
     queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
@@ -571,6 +572,9 @@ def test_a_census_names_no_gap_while_a_link_source_is_unreadable(tmp_path, monke
     if source == "model_requests":
         monkeypatch.setattr(owner_pause, "tree_model_requests", unreadable)
     else:
+        # The census's revision reads the same custody rows: a store that cannot answer one cannot answer
+        # the other. While it does answer and nothing moved, the ids read at that revision are known.
+        monkeypatch.setattr(tree_census, "read_revision", unreadable)
         monkeypatch.setattr(delegate_custody_current, "tree_task_ids", unreadable)
     gaps = []
     blockers = conflicting_writers(queue, "root-1", drive_root=tmp_path, gaps=gaps)
