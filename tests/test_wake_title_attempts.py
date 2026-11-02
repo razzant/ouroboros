@@ -46,7 +46,8 @@ def test_wake_cause_title_is_the_carriers_first_frame_and_finish_replaces_only_w
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(lane, "_WORKER_BUS", None)
     workers.open_repo_writer_admission()
-    spare = install_lane_spare(workers, 90)
+    spare = install_lane_spare(workers, 90)  # the idle carrier the wake takes
+    install_lane_spare(workers, 91)  # the owner's reserved spare: a wake never takes the last idle carrier (4A)
 
     def handle(task):
         task_id = task["id"]

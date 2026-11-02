@@ -62,7 +62,8 @@ def race(runtime, monkeypatch):  # noqa: F811
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
         broadcast=frames.append, send_chat_action=lambda *a, **k: frames.append({"type": "activity"})))
     monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
-    spare = install_lane_spare(runtime.workers, 90)  # the lane's ready spare: an admitted wake is handed to it
+    spare = install_lane_spare(runtime.workers, 90)  # an idle lane carrier: an admitted wake is handed to it
+    install_lane_spare(runtime.workers, 91)  # the owner's reserved spare: a wake never takes the last idle carrier (4A)
     get_direct_activity_registry().clear()
     start = time.time()
     clock = BackgroundConsciousness(root, root / "repo", lambda: 7, now=start - FLOOR - 1)
