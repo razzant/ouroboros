@@ -251,7 +251,10 @@ def test_the_identity_order_is_posix_component_order_under_windows_path_rules_to
     order = ["VERSION", "docs/install/index.html", "docs/install.json", "server.py", "web/Zeta.css", "web/alpha.css"]
     assert [path.as_posix() for path in check.product_files(tmp_path)] == order
     identity = check.source_identity(tmp_path)
-    monkeypatch.setattr(check, "Path", pathlib.PureWindowsPath)
+    class WindowsRules(pathlib.PureWindowsPath):
+        def relative_to(self, other):  # keep the emulated walk and its real on-disk root in one path flavour
+            return super().relative_to(pathlib.PureWindowsPath(str(other)))
+    monkeypatch.setattr(check, "Path", WindowsRules)
     assert [path.as_posix() for path in check.product_files(tmp_path)] == order
     assert check.source_identity(tmp_path) == identity
 

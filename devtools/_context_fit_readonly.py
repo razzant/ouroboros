@@ -18,8 +18,8 @@ def server_alive(root):
 
     Nothing is signalled (on Windows ``os.kill(pid, 0)`` is CTRL_C_EVENT to the pid's console group): a recorded
     pid clears only when ``pid_provably_gone``. The admission lock is tried on the existing file, read-only,
-    through the descriptor lock ``admit_data_root`` holds (same flock / LockFileEx range); none is created."""
-    from ouroboros.platform_layer import file_lock_exclusive_nb, file_unlock, pid_provably_gone
+    with a shared lock against ``admit_data_root`` (same flock / LockFileEx range); none is created."""
+    from ouroboros.platform_layer import file_lock_shared, file_unlock, pid_provably_gone
     for relative in ('state/server_process.json', 'server.pid', 'state/server.pid', 'ouroboros.pid'):
         path = root / relative
         if not path.exists():
@@ -35,7 +35,7 @@ def server_alive(root):
     if lock.exists():
         try:
             with lock.open('rb') as handle:
-                file_lock_exclusive_nb(handle.fileno())
+                file_lock_shared(handle.fileno(), blocking=False)
                 file_unlock(handle.fileno())  # a Windows lock goes before its handle
         except OSError:
             return True  # held by its server, unreadable or refused: none proves the root offline

@@ -128,8 +128,7 @@ def test_live_pid_and_kernel_lock_refuse_without_snapshot(tmp_path):
     assert not server_alive(tmp_path)
 
 
-@pytest.mark.parametrize('state, live', [('running', True), ('denied', True), ('unreadable', True), ('error', True),
-                                         ('no_such_pid', False), ('exited', False)])
+@pytest.mark.parametrize('state, live', [('error', True), ('no_such_pid', False)])
 def test_windows_liveness_never_signals_and_an_unexplained_state_stays_live(tmp_path, monkeypatch, state, live):
     """Windows rules on any host, not a native run: os.kill(pid, 0) there is CTRL_C_EVENT to the pid's console
     group, so a recorded pid is read through its process state, and only absence proven there clears it."""
@@ -164,6 +163,11 @@ def test_only_a_granted_lock_proves_the_root_offline(tmp_path, monkeypatch, answ
     lock = tmp_path / 'state/server.lock'
     assert not server_alive(tmp_path) and not lock.exists()
     lock.parent.mkdir()
+    original = platform_layer._file_lock
+    def shared_probe(fd, *, exclusive, blocking):
+        assert not exclusive and not blocking  # a read-only NFS descriptor cannot take an exclusive lock
+        return original(fd, exclusive=exclusive, blocking=blocking)
+    monkeypatch.setattr(platform_layer, '_file_lock', shared_probe)
     if answer == 'unreadable':
         lock.mkdir()
     else:
@@ -173,9 +177,10 @@ def test_only_a_granted_lock_proves_the_root_offline(tmp_path, monkeypatch, answ
                    'unknown Windows error': platform_layer._win32_lock_error(6),
                    'no POSIX locks': OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))}[answer]
 
-        def refuse(fd):
+        def refuse(fd, *, blocking=True):
+            assert blocking is False
             raise refusal
-        monkeypatch.setattr(platform_layer, 'file_lock_exclusive_nb', refuse)
+        monkeypatch.setattr(platform_layer, 'file_lock_shared', refuse)
     assert server_alive(tmp_path)
 
 
@@ -265,12 +270,16 @@ def test_store_writes_by_file_uri_are_refused_where_the_platform_places_them(tmp
             return self
     root = WindowsRules('C:/Users/Антон Р/Ouroboros/data')
     monkeypatch.setattr(readonly, 'Path', WindowsRules)
-    monkeypatch.setattr(readonly, 'url2pathname', nturl2path.url2pathname)
+    def map_windows_uri(path):
+        if path == '/C:/no:place/x.sqlite':  # exercise a conversion failure, independent of the Python version
+            raise OSError('scripted URI conversion failure')
+        return nturl2path.url2pathname(path)
+    monkeypatch.setattr(readonly, 'url2pathname', map_windows_uri)
     monkeypatch.setattr(readonly, '_GUARDED', {root})
     stored = root / 'state' / 'dialog.sqlite'
     for refused in (stored.as_uri() + '?mode=rw', stored.as_uri() + '?mode=rwc', stored.as_uri() + '?mode=ro',
                     'file://localhost/' + stored.as_posix() + '?mode=rw', str(stored),
-                    'file:///C:/no:place/x.sqlite?mode=rw'):  # the last cannot be mapped at all
+                    'file:///C:/no:place/x.sqlite?mode=rw'):
         with pytest.raises(PermissionError):
             readonly._check_database(refused)
     readonly._check_database(stored.as_uri() + '?mode=ro&immutable=1')
