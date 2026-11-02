@@ -120,7 +120,7 @@ ouroboros/ — agent core and shared runtime (§6)
   extension_companion.py, extension_reconcile_queue.py — host-supervised companion processes for transport skills; durable worker→server reconcile markers (§12; §13)
   event_bus.py — typed in-process event bus for skill subscriptions
   event_usage.py, event_token_totals.py — event token counters, offline totals (§11.4)
-  evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoint ledger; canonical objective fingerprint for repeat gating
+  evolution_checkpoints.py, evolution_fingerprint.py — append-only campaign checkpoint ledger; canonical objective fingerprint for repeat counts
   improvement_backlog.py — the authored backlog note's complete current text for the evolution chooser and context; no host writer (§6 Post-task work)
   loop.py — the LLM tool loop, finalization nudges and the FINAL ANSWER candidate (§6 Task lifecycle)
   late_review_marks.py — a review settled after its author could receive it (a plan reply, a left wave), kept in its room's view until the mind releases it (§6 Review stack)

@@ -600,7 +600,6 @@ def init_state(*, origin: str = "first_boot") -> StateRead:
 
 
 TOTAL_BUDGET_LIMIT: float = 0.0
-EVOLUTION_BUDGET_RESERVE: float = 2.0  # Stop evolution when remaining < this
 
 
 def set_budget_limit(limit: float) -> None:

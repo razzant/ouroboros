@@ -330,9 +330,9 @@ export function renderSettingsPage() {
                                 </div>
                             </div>
                             <div class="form-field ui-field">
-                                <label for="s-evo-budget">Per-Cycle Budget Reserve (USD)</label>
+                                <label for="s-evo-budget">Post-task Start Floor (USD)</label>
                                 <input id="s-evo-budget" placeholder="0" class="ui-control" name="s-evo-budget" type="text" aria-describedby="s-evo-budget-help">
-                                <div class="settings-inline-note ui-field-help" id="s-evo-budget-help">Minimum remaining global budget required to start a post-task cycle. <code>0</code> = rely on the normal gates. Running cycles still inherit the global per-task hard cost cap and the supervisor's reserved-budget floor.</div>
+                                <div class="settings-inline-note ui-field-help" id="s-evo-budget-help">Minimum remaining global budget required to start a post-task cycle. <code>0</code> = rely on the normal gates. Running cycles still inherit the global per-task hard cost cap and the global budget limit.</div>
                             </div>
                         </div>
                         <div class="form-field ui-field">

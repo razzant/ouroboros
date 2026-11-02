@@ -675,7 +675,7 @@ class EvolutionStateSnapshot(TypedDict):
     # None when the remaining budget is infinite (unbudgeted): inf is not JSON
     # compliant, so the snapshot serializes it as null.
     budget_remaining_usd: Optional[float]
-    budget_reserve_usd: float
+    budget_reserve_usd: float  # always 0.0: Evolution keeps no reserve of its own (owner, 2026-11-02)
     pending_count: int
     running_count: int
     queued_task_id: str

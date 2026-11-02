@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -67,25 +68,132 @@ def test_evolution_campaign_pause_resume_preserves_history(tmp_path):
     assert "cost_usd" not in resumed["history"][0]
 
 
-def test_evolution_auto_stop_pauses_campaign(tmp_path, monkeypatch):
+def _owner_campaign(tmp_path, monkeypatch, **live_fields):
+    """An owner-selected campaign over the real tick, admission and completion consumers
+    (isolated drive; the pytest repo root has no Git, so cycle cleanup runs no Git command)."""
     from supervisor import queue
     from supervisor import state as supervisor_state
 
     supervisor_state.init(tmp_path)
     supervisor_state.save_state({})  # an initialized install (#1307)
-    monkeypatch.setattr(queue, "send_with_budget", lambda *args, **kwargs: None)
     queue.init(tmp_path)
-    queue.init_queue_refs([], {}, {"value": 0})
-    queue.start_evolution_campaign("Improve", source="test")
-    st = supervisor_state.load_state()
-    st["evolution_mode_enabled"] = True
-    st["owner_chat_id"] = 1
-    st["evolution_consecutive_failures"] = 3
-    supervisor_state.save_state(st)
+    pending: list = []
+    queue.init_queue_refs(pending, {}, {"value": 0})
+    notices: list = []
+    monkeypatch.setattr(queue, "send_with_budget", lambda _chat, text, **_kw: notices.append(text))
+    queue.start_evolution_campaign("Improve", source="owner")
+    supervisor_state.update_state(lambda live: live.update(
+        evolution_mode_enabled=True, owner_chat_id=1, **live_fields))
+    ctx = SimpleNamespace(
+        RUNNING={}, WORKERS={}, DRIVE_ROOT=tmp_path, REPO_DIR=tmp_path,
+        load_state=supervisor_state.load_state, save_state=supervisor_state.save_state,
+        append_jsonl=supervisor_state.append_jsonl, persist_queue_snapshot=lambda reason="": None,
+        bridge=SimpleNamespace(push_log=lambda event: None),
+    )
+    return pending, notices, ctx
+
+
+def _settle(tmp_path, task_id, cost):
+    """One real physical attempt in the usage ledger, settled at ``cost`` (a late charge may
+    exceed its small reservation, as a real one can)."""
+    from ouroboros import usage_accounting as ua
+    from supervisor import state as supervisor_state
+
+    reservation = ua.reserve_attempt(ua.AttemptRequest(
+        model="openai/gpt-5.2", provider="openai", reservation_usd=0.01,
+        global_limit_usd=float(supervisor_state.TOTAL_BUDGET_LIMIT or 0) or None,
+        drive_root=tmp_path, task_id=task_id, root_task_id=task_id, source="test"))
+    ua.mark_dispatched(reservation)
+    ua.settle_attempt(reservation, {"prompt_tokens": 5, "completion_tokens": 2}, cost_usd=cost, cost_final=True)
+
+
+def _admit_and_finish_cycle(tmp_path, pending, ctx, outcome, *, cost=0.10):
+    """One tick admits a cycle that makes one model call; its terminal goes through the real
+    task_done consumer."""
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_FAILED, write_task_result
+    from supervisor import queue
+    from supervisor.events import _handle_task_done
+
+    queue.enqueue_evolution_task_if_needed()
+    assert [row["type"] for row in pending] == ["evolution"]
+    row = pending.pop()
+    _settle(tmp_path, row["id"], cost)
+    failed = outcome == "failed"
+    status = STATUS_FAILED if failed else STATUS_COMPLETED
+    write_task_result(tmp_path, row["id"], status, outcome_axes={
+        "lifecycle": {"status": status}, "execution": {"status": "failed" if failed else "ok"},
+        "objective": {"status": "not_evaluated", "source": "none"},
+        "artifacts": {"status": "not_applicable"}, "review": {"status": "skipped"},
+    })
+    _handle_task_done({"type": "task_done", "task_id": row["id"], "task_type": "evolution", "status": status,
+                       "metadata": {"evolution_transaction": row["metadata"]["evolution_transaction"]}}, ctx)
+    return row
+
+
+@pytest.mark.parametrize("outcome", ["failed", "completed_without_commit"])
+def test_cycles_past_the_former_count_stops_keep_the_campaign_admitting(tmp_path, monkeypatch, outcome):
+    """Owner decision 2026-11-02: neither three consecutive failures nor three unabsorbed
+    cycles of one objective pause, disable or refuse a selected campaign. Both counts stay
+    recorded as evidence by the completion consumer."""
+    from ouroboros.evolution_fingerprint import canonical_objective_fingerprint
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+
+    pending, notices, ctx = _owner_campaign(tmp_path, monkeypatch)
+    for _cycle in range(3):
+        _admit_and_finish_cycle(tmp_path, pending, ctx, outcome)
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+    assert [tx["cycle_outcome"] for tx in campaign["transaction_history"]] == ["no_op"] * 3
+    assert campaign["objective_repeat_counts"] == {canonical_objective_fingerprint("Improve"): 3}
+    failures = int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0)
+    assert failures == (3 if outcome == "failed" else 0)
+
+    queue.enqueue_evolution_task_if_needed()  # the fourth cycle crosses the former stop(s)
+
+    assert [row["metadata"]["evolution_transaction"]["cycle"] for row in pending] == [4]
+    snapshot = queue.get_evolution_status_snapshot()
+    assert (snapshot["status"], snapshot["campaign"]["status"], snapshot["enabled"]) == ("queued", "active", True)
+    assert snapshot["consecutive_failures"] == failures
+    assert notices == []
+
+
+def test_a_one_shot_campaign_still_ends_after_its_cycle(tmp_path, monkeypatch):
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+
+    pending, notices, ctx = _owner_campaign(tmp_path, monkeypatch, post_task_autostop=True)
+    _admit_and_finish_cycle(tmp_path, pending, ctx, "completed_without_commit")
+    live = supervisor_state.load_state()
+    assert (live["evolution_mode_enabled"], live["post_task_autostop"]) == (False, False)
 
     queue.enqueue_evolution_task_if_needed()
 
-    assert queue.get_evolution_status_snapshot()["campaign"]["status"] == "paused"
+    assert pending == [] and notices == []
+
+
+def test_known_money_below_two_dollars_admits_and_only_exhaustion_refuses(tmp_path, monkeypatch):
+    """Positive remaining money is ordinary money for Evolution; an exhausted limit refuses the
+    next cycle without switching the owner's campaign off, and a raised limit admits again."""
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+
+    pending, notices, ctx = _owner_campaign(tmp_path, monkeypatch)
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 5.0)
+    _settle(tmp_path, "earlier-work", 3.50)
+    assert supervisor_state.budget_remaining({}, strict=True) == pytest.approx(1.50)
+    _admit_and_finish_cycle(tmp_path, pending, ctx, "completed_without_commit")  # costs $0.10
+
+    _settle(tmp_path, "late-charge", 1.50)  # known spend now exceeds the $5 limit
+    assert supervisor_state.budget_remaining({}, strict=True) <= 0
+    queue.enqueue_evolution_task_if_needed()
+    assert pending == []
+    snapshot = queue.get_evolution_status_snapshot()
+    assert (snapshot["status"], snapshot["campaign"]["status"], snapshot["enabled"]) == ("budget_blocked", "active", True)
+    assert notices == []
+
+    monkeypatch.setattr(supervisor_state, "TOTAL_BUDGET_LIMIT", 6.0)
+    queue.enqueue_evolution_task_if_needed()
+    assert [row["metadata"]["evolution_transaction"]["cycle"] for row in pending] == [2]
 
 
 def test_evolution_enqueue_attaches_lightweight_transaction(tmp_path, monkeypatch):
