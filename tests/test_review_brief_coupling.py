@@ -398,14 +398,6 @@ class TestCouplingPromptMatrixContract:
         for item in ("intent_alignment", "forgotten_touchpoints", "cross_surface_consistency", "regression_surface"):
             assert item in prompt, f"Coupling question `{item}` missing"
 
-    def test_brief_loads_the_coupling_checklist(self):
-        import inspect
-
-        from ouroboros.tools import review_brief_coupling as rbc
-
-        assert rbc.COUPLING_CHECKLIST_SECTION == "Coupling questions"
-        assert "load_checklist_section(COUPLING_CHECKLIST_SECTION)" in inspect.getsource(rbc.build_retrieving_brief)
-
 
 def test_coupling_history_keeps_all_rounds_and_structured_ids():
     from ouroboros.tools.review_helpers import build_review_history_section

@@ -1,11 +1,7 @@
-"""The verbs a task uses to put something in front of a human.
-
-Photo, video and document delivery to the owner chat; link buttons; and
-``escalate``, the one question verb — an owner quiz card at the root, a
-parent mailbox frame below it. The payload validators for the two structured
-frames (link actions, quiz) live here with the verbs that emit them, because
-they define those wire shapes; ``supervisor.message_bus`` re-validates
-through the same functions on the delivery side.
+"""Task verbs that deliver material or questions to a human: photo/video/document,
+link buttons and ``escalate`` (owner quiz at the root, parent mailbox below).
+The link/quiz payload validators live with their emitting verbs, which own those
+wire shapes; ``supervisor.message_bus`` re-validates through the same functions.
 """
 
 from __future__ import annotations
@@ -705,6 +701,11 @@ def _escalate(
 
         if is_a2a_chat_id(getattr(ctx, "current_chat_id", None)):
             return "⚠️ ESCALATE_UNAVAILABLE: this machine-to-machine chat has no owner question delivery."
+        from ouroboros.native_task_wait import armed_conflict
+
+        if conflict := armed_conflict(ctx):  # checked before any card is recorded or sent
+            return (f"⚠️ ESCALATE_UNAVAILABLE: {conflict}. The quiz was not sent; ask with "
+                    "wait_for_answer=false now, or wait for the answer in a later turn.")
     if delegation_role not in ("", "root") and not parent_task_id:
         # A root has no parent. A child missing its lineage must not fall
         # through to the owner card path.

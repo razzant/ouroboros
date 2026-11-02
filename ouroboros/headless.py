@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import logging
 import os
@@ -1071,35 +1072,14 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
                 artifact_axis["status"] = str(artifact_bundle.get("status") or artifact_status or "")
                 axes["artifacts"] = artifact_axis
                 fields["outcome_axes"] = axes
-            refreshed_ledger = refresh_verification_ledger_artifacts(
-                existing.get("verification_ledger"),
-                artifact_bundle,
-            )
-            if refreshed_ledger is not None:
-                fields["verification_ledger"] = refreshed_ledger
-            for item in merged:
-                if not isinstance(item, dict) or str(item.get("kind") or "") != "verification_ledger":
-                    continue
-                ledger_path = pathlib.Path(str(item.get("path") or ""))
-                if not ledger_path.is_file():
-                    continue
-                try:
-                    raw_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-                    refreshed_artifact_ledger = refresh_verification_ledger_artifacts(raw_ledger, artifact_bundle)
-                    if isinstance(refreshed_artifact_ledger, dict):
-                        atomic_write_json(ledger_path, refreshed_artifact_ledger, trailing_newline=True)
-                        data = ledger_path.read_bytes()
-                        item["size"] = len(data)
-                        item["sha256"] = sha256(data).hexdigest()
-                        item["status"] = ARTIFACT_STATUS_READY
-                        stub = fields.get("verification_ledger")
-                        if isinstance(stub, dict) and stub.get("omitted_to_artifact") and isinstance(refreshed_artifact_ledger.get("summary"), dict):
-                            fields["verification_ledger"] = {**stub, "summary": dict(refreshed_artifact_ledger["summary"])}
-                except Exception:
-                    log.debug("Failed to refresh verification ledger artifact for task %s", task_id, exc_info=True)
-            # The loop rewrote the ledger file in place, so the bundle computed
-            # before it no longer describes the bytes on disk.
-            fields["artifact_bundle"] = artifact_bundle_from_result(provisional)
+            # The row's ledger gets the current artifact status; a published ledger file keeps
+            # its captured bytes, so the identity copy-back recorded stays true (#2472).
+            ledger = refresh_verification_ledger_artifacts(existing.get("verification_ledger"), artifact_bundle)
+            if isinstance(ledger, dict) and ledger.get("omitted_to_artifact"):
+                current = _published_ledger_summary(task_id, merged, artifact_bundle)
+                ledger = {**ledger, **current} if current else None  # unverified file: the stub stays
+            if isinstance(ledger, dict):
+                fields["verification_ledger"] = {**ledger, "summary_refreshed_at": fields["artifact_finalized_at"]}
         except Exception:
             log.warning("Artifact bundle/ledger refresh failed for task %s", task_id, exc_info=True)
         write_task_result(
@@ -1109,6 +1089,29 @@ def _finalize_task_artifacts_locked(parent_drive_root: pathlib.Path, task: Dict[
             **fields,
         )
     return artifacts
+
+
+def _published_ledger_summary(task_id: str, rows: List[Dict[str, Any]],
+                              artifact_bundle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """An omitted ledger's current summary, computed in memory from the first complete file
+    whose bytes verify against their recorded identity, with that identity as its source;
+    None when none verifies. The stub is never a source and the file is never rewritten."""
+    from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.outcomes import refresh_verification_ledger_artifacts
+
+    for row in rows:
+        if not isinstance(row, dict) or row.get("kind") != "verification_ledger" or not row.get("path"):
+            continue
+        body = io.BytesIO()
+        try:
+            measured = stream_artifact_file(str(row["path"]), body, expected=row)
+            current = refresh_verification_ledger_artifacts(json.loads(body.getvalue().decode("utf-8")), artifact_bundle)
+        except Exception:
+            log.debug("Verification ledger of task %s unavailable for its summary", task_id, exc_info=True)
+            continue
+        if isinstance(current, dict) and not current.get("omitted_to_artifact") and isinstance(current.get("summary"), dict):
+            return {"summary": current["summary"], "summary_source_sha256": measured["sha256"]}
+    return None
 
 
 def build_memory_export(child_drive_root: pathlib.Path, task: Dict[str, Any]) -> Dict[str, Any]:

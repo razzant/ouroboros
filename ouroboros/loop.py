@@ -82,6 +82,7 @@ from ouroboros.loop_transport import (
 from ouroboros.pricing import estimate_cost_optional  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.budget_pause import load_budget_pause, resume_paused_loop
 from ouroboros.owner_wait import load_owner_wait, park_for_left_review, resume_native_loop, wait_after_tools
+from ouroboros.native_task_wait import deliver_owed as deliver_owed_task_wait
 from ouroboros.presence_continuation import (
     conversation_lost as _presence_conversation_lost,
     lost_conversation_terminal as _presence_lost_terminal,
@@ -436,6 +437,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_route_observation, ctx._accepted_route_binding, ctx._primary_return_requested = None, None, None
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
+    ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
 
 
 def _initial_round_route(ctx: Any, llm: LLMClient, initial_effort: str) -> tuple:
@@ -687,6 +689,7 @@ def run_llm_loop(
                             accumulated_usage=accumulated_usage, drive_logs=drive_logs, task_id=task_id, model=active_model, emit_progress=emit_progress)):
                     msg, cost = None, 0.0
                 else:
+                    deliver_owed_task_wait(limit_ctx)  # a woken native task wait answers in this very request
                     _inject_round_checkpoints(
                         round_idx=round_idx, messages=messages, accumulated_usage=accumulated_usage, tools=tools,
                         event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,

@@ -1047,9 +1047,19 @@ def test_project_shade_hold_outside_press_switch_and_latest_root(room_ui):
     # Switching rooms takes the control along; the new room shows only its own.
     open_project(page, OTHER_PROJECT)
     switched = wait_facts(page, "project", lambda f: f["exists"], "the other Project's control")
-    assert switched["disabled"] and switched["rows"] == [], switched
+    assert switched["rows"] == [], switched
     assert page.locator("#panel-pchat-rw-proj").count() == 0
     assert page.locator("#project-panel .rw-trigger").count() == 1
+    # With nothing listed the title still opens the list: the room's whole name heads it and it says so (DESIGN
+    # "Room work status"; the name's one line in the bar may be cut).
+    assert not switched["disabled"], switched
+    page.locator("#project-panel .app-page-title").click()
+    empty = wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the empty Project's list")
+    assert empty["rows"] == [] and empty["note"] == "Nothing running or queued.", empty
+    assert page.locator("#project-panel .rw-shade:not(.cx-shade) .rw-title").inner_text() == OTHER_PROJECT["name"]
+    assert page.locator("#project-panel .app-page-title").get_attribute("title") == OTHER_PROJECT["name"]
+    page.keyboard.press("Escape")
+    wait_facts(page, "project", lambda f: f["surfaceHidden"], "the empty list closed")
     page.locator("#project-panel-close").click()
     main = wait_facts(page, "main", lambda f: f["exists"], "Main's control")
     assert main["disabled"], "Main keeps no finished list"

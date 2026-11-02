@@ -65,9 +65,11 @@ def test_connection_registry_and_tool_surface(tmp_path):
     assert "screenshot" in api.tools
     assert "click" in api.tools
 
+    import json as _json_mod
+
     impl = mod._ComputerUse(api)
     result = impl.add_connection(name="osw", backend="osworld_http", target="http://127.0.0.1:5000", activate=True)
-    assert '"ok": true' in result
+    assert _json_mod.loads(result)["ok"] is True
     assert impl._active_backend_name() == "osworld_http"
     assert "osw" in impl.list_connections()
 
@@ -76,6 +78,8 @@ def test_connection_registry_and_tool_surface(tmp_path):
 
 
 def test_remote_screenshot_result_confined_and_transform(tmp_path):
+    import json as _json_mod
+
     mod = _load_plugin()
     api = _API(tmp_path)
     impl = mod._ComputerUse(api)
@@ -91,20 +95,21 @@ def test_remote_screenshot_result_confined_and_transform(tmp_path):
         input_h=1080,
     )
 
-    assert '"ok": true' in out
-    assert '"observed_effect"' not in out  # Reading a screenshot is not an input effect.
+    shot = _json_mod.loads(out)
+    assert shot["ok"] is True
+    assert "observed_effect" not in shot  # Reading a screenshot is not an input effect.
     # Path confinement: screenshots are returned in place (job/state dir), never
     # copied to a data/uploads directory (OS-agnostic: check both separators).
     assert "/uploads/" not in out and "\\uploads\\" not in out
-    assert '"view_image_ready": true' in out
+    assert shot["view_image_ready"] is True
     # 1920x1080 capped at 1280x800 downscales to 1280x720, so the transform maps
     # image space back to input space at 1.5x. The previous expectation of sx=1.0
     # only held because the stub PNG was undecodable and _downscale silently
     # no-oped on it — an identity transform over a full-resolution image is the
     # coordinate-space mismatch this transform exists to prevent.
-    assert '"image_width": 1280' in out and '"image_height": 720' in out
-    assert '"sx": 1.5' in out
-    assert '"input_w": 1920' in out
+    assert (shot["image_width"], shot["image_height"]) == (1280, 720)
+    assert shot["coord_transform"]["sx"] == 1.5
+    assert shot["coord_transform"]["input_w"] == 1920
 
 # ---------------------------------------------------------------------------
 # Remote-backend honesty fixes (PR #64 finalization).
