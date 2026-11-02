@@ -731,24 +731,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
         except Exception:
             log.debug("Crash-requeue retry reset failed for %s", task_id, exc_info=True)
-        from contextlib import nullcontext
-        from supervisor.conversation_lane import conversation_row, readmit_after_crash
-
-        lane_turn = conversation_row(meta)  # a carrier's turn retries on its lane, never the project queue
-        with (nullcontext() if lane_turn else queue.prepared_root_billing(task)), _queue_lock:  # ledger read off Q
-            if not _dead_job_is_current(job):
-                return
-            # #1183: the dead attempt's own active fence must not refuse its retry
-            # (an unknown pid proves no exact owner, so its fence stays).
-            from supervisor.queue_transitions import clear_acceptance_fence_for_attempt
-            if isinstance(getattr(w.proc, "pid", None), int):
-                clear_acceptance_fence_for_attempt(task_id, task_attempt=attempt, pid=w.proc.pid)
-            _pool().RUNNING.pop(task_id)
-            try:
-                admitted = readmit_after_crash(task, meta) if lane_turn else queue.enqueue_task(task, front=True)
-            except Exception:
-                _pool().RUNNING[task_id] = meta
-                raise
+        admitted = _readmit_crash_retry(job, queue, task, attempt)
+        if admitted is None:
+            return
         admission_block = (
             str(admitted.get("_admission_blocked") or "")
             if isinstance(admitted, dict) else ""
@@ -802,6 +787,34 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             task, task_id, terminal_event[0],
             reason_code=terminal_event[1], cost_fields=r_cost_fields,
         )
+
+
+def _readmit_crash_retry(job: dict, queue: Any, task: dict, attempt: int) -> Optional[dict]:
+    """The crash retry's admission, one Q transaction; None when the job is no longer current (nothing touched).
+
+    A conversation-lane turn returns to its lane (``conversation_lane.readmit_after_crash``): its recovery
+    never waits on the project pool's capacity or crash fuse. Project work re-enters PENDING at the front,
+    its billing binding read before Q.
+    """
+    from contextlib import nullcontext
+    from supervisor.conversation_lane import conversation_row, readmit_after_crash
+    from supervisor.queue_transitions import clear_acceptance_fence_for_attempt
+
+    w, task_id, meta = job["worker"], job["task_id"], job["meta"]
+    lane_turn = conversation_row(meta)
+    with (nullcontext() if lane_turn else queue.prepared_root_billing(task)), _queue_lock:
+        if not _dead_job_is_current(job):
+            return None
+        # #1183: the dead attempt's own active fence must not refuse its retry
+        # (an unknown pid proves no exact owner, so its fence stays).
+        if isinstance(getattr(w.proc, "pid", None), int):
+            clear_acceptance_fence_for_attempt(task_id, task_attempt=attempt, pid=w.proc.pid)
+        _pool().RUNNING.pop(task_id)
+        try:
+            return readmit_after_crash(task, meta) if lane_turn else queue.enqueue_task(task, front=True)
+        except Exception:
+            _pool().RUNNING[task_id] = meta
+            raise
 
 
 def _reaper():
