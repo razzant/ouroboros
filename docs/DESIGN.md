@@ -1648,6 +1648,34 @@ control, without a body until hover. The card uses tokens for every
 type size and colour, including pill radius and option gap. Every focusable control shares the 2px `--focus-accent-border` ring
 with 2px offset; the answer's frame wears the field idiom instead (§3 Focus). Component min/max widths keep local literals, as elsewhere in chat.
 
+**Secret request.** A question asked with `showSecretHitl(pluginName, fields)` is the same card with the
+same head, status and waiting line; its question is the host's sentence (`Secret needed for <plugin>: <fields>.`).
+It has no options, no free answer and no ×: a field list (each id in `--text-primary` at 600, then `Saved in
+Settings as <KEY>` in meta ink) and two actions, `Enter secret…` (primary) and `Cancel request`. The form is the
+shared modal: title `<plugin>: secret needed`, the sentence `The value is saved to Settings. It is not sent in this
+conversation.`, then per field Settings' own secret row (masked `.ui-control.secret-input` labelled by its id,
+`Show`/`Hide` of the typed draft only, never a saved value) with `Saved in Settings as <KEY> · not set` or `· a
+value is set (hidden)` (`· could not be read` when its read failed: an earlier form's read never shows as current), the skills that read the key (`name · enabled|disabled · its grant covers it|needs <KEY>
+granted in Skills`; an enabled reader missing its grant explains that it cannot run after saving until the keys
+are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
+the enabled readers: they may use the new value on their next call, some keep the old one until disabled and
+re-enabled. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
+refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
+the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
+disabled while a save or cancel is in flight, for at most 15 s as on a quiz card: a save with no reply or no readable body by then is shown as unconfirmed (Save blocked, `Check status` offered, Close available, nothing resent), a stalled cancel frees the card's actions and a stalled status read offers `Check status`; the call itself is never abandoned, and its late reply still settles the request but never rewrites a form it was not made for); only the card's `Cancel request` cancels. A finished task's card keeps both actions and says that saving
+stores the key and resumes nothing. Saving shows `Saving…` with read-only fields; while a save is in flight or of
+unknown outcome the head's mark is neutral, as for any answer in flight. A refusal that saved nothing is one
+`.ui-status` sentence of fixed copy under the fields (never the reply's own text) and keeps the entries; an unknown
+outcome (no reply, an unconfirmed attempt, a value written but not verified or recorded) disables Save and offers
+`Check status`, which never says nothing was saved: an unconfirmed earlier attempt allows saving again as a new
+request, no recorded save allows resending the same request (it cannot save twice), a recorded result settles the
+card. The form belongs to the request: a re-rendered card keeps it, another
+window's save or cancel closes it with a toast, and moves focus to the question only if the form held it. Success closes the form; the card says `Saved to Settings:
+<fields>. Saving connects nothing and grants nothing.` (or `Replaced in Settings: …`) with the readers' lines, or
+`Which skills read this key could not be read.` when the host could not read them.
+Values live only in the form's controls (never a draft, storage, toast or the card), and every close empties them.
+A chat transport shows such a request as the host's note on where to enter it, without buttons or a reply prompt.
+
 **Project question mirror.** Main is the list of what needs the owner; nothing waits in a section of its own. A Project question's Main copy is the Project's own `buildQuizCard` card, whole as anatomized above, in an assistant bubble at its ask time in the feed; the Project reference in its voice line opens the exact original, and answers, materials and recovery controls work in Main. It uses the shared ring and `--project` tints; names ellipsize (full titles); the head stays the room's own row. History, live pointers and the census share one task/quiz card and lifecycle wording; the canonical current questions only confirm or settle copies the feed holds, never mount them, and an incomplete read withholds only what its typed gaps name. Optional, resumed and terminal-author questions stay answerable until answered or closed; no display/history cap drops them. Replaced questions stay read-only. The owner closes from the card; a model closes its own or a host-proven continued task line's question, or a finished task's, always with its own reason. Closure records a reason, never an answer/approval. A late answer left delivery-unknown by a restart offers Remove from pending (no resend, never marked delivered). Publication destination stays fixed across Project conversion; current room membership controls display. Explicit materials use registered task artifacts and the existing reader.
 
 A task that cannot continue without the owner is one System message in the feed, stamped when first seen: the task, one sentence, its own controls (revision-bound model access, Resume/Stop, children's included; activity counts each work once, its helpers within it). Sign-in, unobservable automatic access, disabled automatic continuation, budget pauses and Resume-only holds qualify; viable automatic account/quota recovery, queues, self-waking sleep, background scope verification and own Pause stay quiet. Deduplicate the same quiz/wait identity, not all waits on a task; the message leaves when a complete census drops the row. Missing action evidence stays unavailable; visibility never authorizes login, budget changes or automatic Resume.

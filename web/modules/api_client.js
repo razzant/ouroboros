@@ -527,6 +527,20 @@ export const apiClient = {
         { cache: 'no-store' }),
     /** @param {{key: string}|{mcp_server_id: string, header_name?: string}} selector @returns {Promise<{value: string}>} */
     revealSettingsSecret: (selector) => jsonPost('/api/settings/secret', selector),
+    /**
+     * The integration-secret form's save (showSecretHitl's form): the owner's values go in this one
+     * body to Settings and nowhere else, with `observed` (whether the form showed each key as set).
+     * Reuse `request_id` only for unchanged values; an OK reply it cannot read is an unknown outcome.
+     * @param {import('./decision_types.js').SecretDecisionRequest} payload
+     * @returns {Promise<import('./decision_types.js').SecretDecisionResponse>}
+     */
+    saveSecretToken: (payload, options = {}) => jsonPost('/api/decisions/secret', payload, { requireBody: true, ...options }),
+    /** Cancel the request: this request saves nothing and the waiting task learns secret_cancelled. */
+    cancelSecretRequest: ({ request_id, decision_id }, options = {}) => jsonPost('/api/decisions/secret',
+        { request_id, decision_id, action: 'cancel' }, options),
+    /** What the form shows: whether each asked key is set (never a value), its readers and the request's state. */
+    secretRequestStatus: ({ decision_id }, options = {}) => jsonPost('/api/decisions/secret',
+        { decision_id, action: 'status' }, options),
     /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
     uiPreferences: (init = {}) => fetchJson('/api/ui/preferences', { cache: 'no-store', ...init }),
     saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),

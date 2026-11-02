@@ -139,6 +139,7 @@ def test_an_unreadable_document_makes_credentials_unavailable_never_stale(monkey
         assert config.runtime_setting("OPENAI_API_KEY") is None and _targets()["openai"]["api_key"] == ""
         assert "OPENAI_API_KEY" not in config.runtime_settings() and "OPENAI_API_KEY" not in config.runtime_environ()
         assert config.runtime_setting("OUROBOROS_MODEL") == "openai::old"  # a model name is not a credential: the entry view
+        config.SETTINGS_PATH.unlink()  # repaired by moving it aside: a save never writes over an unreadable document
         save_owner(_document("new"))  # the failure is never memoised: the repaired document answers at once
         assert config.runtime_setting("OPENAI_API_KEY") == "key-new" and config.runtime_setting("OUROBOROS_MODEL") == "openai::new"
 

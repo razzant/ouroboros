@@ -12,23 +12,23 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 47 | 0 |
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 47 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 48 | 0 |
 | D06 | Review stack | 95 | 0 |
 | D07 | Delegation, subagents & Claudexor | 104 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 73 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 113 | 0 |
+| D11 | Gateway, server & Web UI | 114 | 0 |
 | D12 | Settings & configuration | 27 | 0 |
 | D13 | Safety, guards & runtime mode | 11 | 0 |
-| D14 | Skills & extensions | 70 | 0 |
+| D14 | Skills & extensions | 71 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 34 | 0 |
 | D16 | Observability, usage accounting & cost | 29 | 0 |
 | D17 | Projects, workspaces & task results | 54 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 37 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 22 | 0 |
-| **total** | | **966** | **0** |
+| **total** | | **969** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -419,6 +419,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/tools/query_data.py`
 - `ouroboros/tools/recent_tasks.py`
 - `ouroboros/tools/search.py`
+- `ouroboros/tools/secret_hitl.py`
 - `ouroboros/tools/services.py`
 - `ouroboros/tools/shell.py`
 - `ouroboros/tools/shell_audit.py`
@@ -843,6 +844,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/schedule_contracts.py`
 - `ouroboros/gateway/schedules.py`
 - `ouroboros/gateway/schema.py`
+- `ouroboros/gateway/secret_decision.py`
 - `ouroboros/gateway/secret_rows.py`
 - `ouroboros/gateway/settings.py`
 - `ouroboros/gateway/settings_secrets.py`
@@ -973,6 +975,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/marketplace/install_specs.py`
 - `ouroboros/marketplace/isolated_deps.py`
 - `ouroboros/marketplace/provenance.py`
+- `ouroboros/secret_requests.py`
 - `ouroboros/skill_acceptance.py`
 - `ouroboros/skill_builtin.py`
 - `ouroboros/skill_catalogue.py`

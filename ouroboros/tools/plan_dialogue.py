@@ -202,6 +202,10 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
     if row.get("type") == "quiz_closed":
         actor = "owner" if quiz.get("closed_actor") == "owner" else f"task {quiz.get('closed_by_task_id')}"
         return f"[question closed without answer {qid}] by {actor}: {quiz.get('closed_reason') or ''}. No approval recorded."
+    if row.get("type") == "quiz_answer" and quiz.get("secret_request") and isinstance(quiz.get("secret_outcome"), dict):
+        from ouroboros.owner_quiz import secret_outcome_summary
+
+        return f"[secret request {qid}] {secret_outcome_summary(quiz)}"  # host metadata: plugin and field ids, never a value
     if row.get("type") == "quiz_answer":
         index = quiz.get("answered_index")
         # The choice is my human's; an offered option's words are the asking task's, never theirs.

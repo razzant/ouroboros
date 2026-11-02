@@ -51,6 +51,7 @@ from ouroboros.configured_subagents import (
 
 from ouroboros.gateway.owner_settings import (
     CommitBoundary,
+    SettingsDocumentUnreadable,
     SettingsLockUnavailable,
     SettingsPreconditionFailed,
     _owner_audit,
@@ -896,6 +897,8 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
                 # "nothing was saved" here would send the owner back through an
                 # onboarding that is already complete (BIBLE P1).
                 return post_commit_failure_response(exc, boundary)
+            if isinstance(exc, SettingsDocumentUnreadable):
+                return unsaved_error(str(exc), 409, code="settings_unreadable")
             if isinstance(exc, SettingsPreconditionFailed):
                 return unsaved_error(str(exc), 409, code="onboarding_state_changed")
             if isinstance(exc, SettingsLockUnavailable):
