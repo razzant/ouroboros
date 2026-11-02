@@ -533,6 +533,10 @@ def _get_task_result(
 
     if unread := unread_mail_notice(data.get("unread_mailbox")):
         output += f"\n\n{unread}"  # TZ-1 V10: mail written to this task that its model never read
+    from ouroboros.history_retention import raw_evidence_notice
+
+    if gap := raw_evidence_notice(data):
+        output += f"\n\n{gap}"
     if trace and not unchanged:
         output += f"\n\n[SUBTASK_TRACE]\n{trace}\n[/SUBTASK_TRACE]"
     from ouroboros.task_finalization import provider_terminal_body, terminal_host_notice_text
@@ -1264,6 +1268,10 @@ def _compact_child_projection(tid: str, data: Dict[str, Any], known_hash: Any) -
     notice = terminal_host_notice_text(data)
     if notice:
         projected["terminal_host_notice"] = notice
+    from ouroboros.history_retention import raw_evidence_notice
+
+    if gap := raw_evidence_notice(data):
+        projected["test_evidence_gap"] = gap
     if data.get("duplicate_of"):
         projected["duplicate_of"] = str(data.get("duplicate_of"))
     # A capability reduction is a SEMANTIC handoff fact, not forensics: it is
