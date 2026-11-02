@@ -110,7 +110,7 @@ async def api_skill_sources(request: Request) -> JSONResponse:
 async def api_skill_source_probe(request: Request) -> JSONResponse:
     from ouroboros.skill_source_catalog import probe_source
 
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     url, path = str(body.get("url") or "").strip(), str(body.get("path") or "").strip()
     if bool(url) == bool(path):
@@ -144,7 +144,7 @@ async def api_skill_source_add(request: Request) -> JSONResponse:
     from ouroboros.skill_source_catalog import probe_source
     from ouroboros.skill_sources import with_added_source
 
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     url, path = str(body.get("url") or "").strip(), str(body.get("path") or "").strip()
     name, trust = str(body.get("name") or "").strip(), str(body.get("trust") or "").strip()
@@ -185,8 +185,9 @@ async def api_skill_source_change(request: Request) -> JSONResponse:
     from ouroboros.skill_sources import with_changed_source
 
     source_id = str(request.path_params.get("source_id") or "")
-    body = await request_json_or(request, {}, exceptions=(Exception,))
-    body = body if isinstance(body, dict) else {}
+    body = await request_json_or(request, {})
+    if not isinstance(body, dict):
+        return json_error("request body must be a JSON object", 400)
     trust = body.get("trust")
     if trust is not None and trust not in {"trusted", "review"}:
         return json_error("trust is trusted or review", 400)
@@ -296,7 +297,7 @@ def _after_install(drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Any:
 async def api_skill_catalog_install(request: Request) -> JSONResponse:
     from ouroboros.skill_source_install import install_item, plan_install
 
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     item_id = str(body.get("id") or "").strip()
     if "/" not in item_id:
@@ -323,7 +324,7 @@ async def api_skill_update(request: Request) -> JSONResponse:
     from ouroboros.skill_source_install import update_installed
 
     name = str(request.path_params.get("skill") or "").strip()
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    body = await request_json_or(request, {})
     body = body if isinstance(body, dict) else {}
     mode = str(body.get("mode") or "")
     if mode not in {"replace", "keep", "merge"}:

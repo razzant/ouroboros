@@ -210,9 +210,9 @@ class Shape(NamedTuple):
     the TypedDict its items follow (``sse/TaskEvent``), or alternatives joined by ``|``.
     ``request`` uses the same body words (plus ``multipart``); ``query`` names the parameters
     the handler reads and ``headers`` the request headers it reads (a ``!`` suffix: required).
-    Gateway-wide rules cover what a row does not list: 403 ``cross_origin_request`` and 415
-    ``json_content_type_required`` from the browser boundary, 401 from the network auth gate, and 500
-    as ``ErrorResponse`` or plain text for an unexpected failure.
+    Gateway-wide rules cover what a row does not list: 403 ``cross_origin_request`` from the browser
+    boundary, 401 from the network auth gate, and 500 as ``ErrorResponse`` or plain text for an
+    unexpected failure.
     """
 
     responses: str
@@ -512,7 +512,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/local-model/install-runtime": Shape("200:StatusResponse",
                                                    note="installing or already_installing; poll status runtime_status"),
     "GET /api/mcp/status": Shape("200:McpStatusResponse"),
-    "POST /api/mcp/refresh": Shape("200:McpRefreshResponse", "McpRefreshRequest", note="safe to repeat"),
+    "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/test": Shape("200:McpTestResponse 400,404,409:ErrorResponse", "McpTestRequest",
                                 note="connects once and saves nothing; a failed test is 200 with ok false"),
     "POST /api/mcp/import/preview": Shape("200,400:MCPImportPreviewResponse", "MCPImportPreviewRequest",
