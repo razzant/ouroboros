@@ -12,7 +12,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 47 | 0 |
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 46 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 47 | 0 |
 | D06 | Review stack | 95 | 0 |
 | D07 | Delegation, subagents & Claudexor | 104 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 73 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 37 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 22 | 0 |
-| **total** | | **964** | **0** |
+| **total** | | **965** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -396,6 +396,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/mcp_client.py`
 - `ouroboros/mcp_headers.py`
 - `ouroboros/mcp_import.py`
+- `ouroboros/mcp_result_images.py`
 - `ouroboros/mcp_schema.py`
 - `ouroboros/process_interpreters.py`
 - `ouroboros/query_data_sql.py`
