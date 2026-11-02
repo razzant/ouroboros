@@ -166,3 +166,49 @@ def test_a_partial_bundle_is_rewritten_by_a_barrier_even_when_the_facts_match_th
     assert queue_publication._STATE["write_failed"] is False
 
 
+# ---- R3-B: an in-flight quiet refresh never resurrects a certificate a failed barrier revoked ------
+
+def test_an_inflight_quiet_refresh_cannot_recertify_after_a_failed_barrier(published, monkeypatch):
+    root, now = _seed(published)
+    original = _read(root, "queue.alive")["generation"]
+    now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC * 2
+    reached, proceed = threading.Event(), threading.Event()
+    due = queue_publication._alive_due
+
+    def paused_due(heartbeats):
+        if threading.current_thread().name == "quiet-tick":
+            reached.set()
+            assert proceed.wait(5)
+        return due(heartbeats)
+
+    monkeypatch.setattr(queue_publication, "_alive_due", paused_due)
+    answers, errors = [], []
+
+    def refresh():
+        try:
+            answers.append(queue_publication.publish_queue_changes())
+        except BaseException as exc:  # noqa: BLE001 - the thread's failure is the assertion's evidence
+            errors.append(repr(exc))
+
+    thread = threading.Thread(target=refresh, name="quiet-tick")
+    thread.start()
+    try:
+        assert reached.wait(5)
+        with queue._queue_lock:
+            queue.RUNNING["r"]["owner_wait"] = {"kind": "review", "state": "waiting"}
+        with monkeypatch.context() as fail:
+            fail.setattr(queue, "atomic_write_text", lambda *_a, **_kw: False)
+            assert queue.publish_queue_snapshot("barrier") is False
+        assert not (root / "state/queue.alive").exists()
+    finally:
+        proceed.set()
+        thread.join(5)
+    assert not thread.is_alive() and errors == []
+    assert not (root / "state/queue.alive").exists(), "the revoked certificate stays revoked"
+    assert answers == [False], "the refresh answers what it did: nothing certified"
+    # The next tick repairs the bundle and certifies a new generation.
+    assert queue_publication.publish_queue_changes() is True
+    assert _read(root, "queue.alive")["generation"] != original
+    assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"] == {"kind": "review", "state": "waiting"}
+
+

@@ -452,6 +452,8 @@ def _refresh_alive() -> Optional[bool]:
     if not _alive_due(heartbeats):
         return True
     with _PUBLISH_LOCK:
+        if _STATE["write_failed"]:
+            return False  # a barrier failed while this refresh was in flight: its revoked certificate stays revoked (R3-B)
         if _queue().QUEUE_PUBLICATION is not published:
             return True  # a publication landed meanwhile and certified itself
         try:
