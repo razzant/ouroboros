@@ -26,7 +26,7 @@ from ouroboros.skill_conflicts import (
     enabled_skill_conflicts,  # noqa: F401
     skill_conflict_status,  # noqa: F401
 )
-from ouroboros.skill_review_status import ACCEPTANCE_REASONS, STATUS_BLOCKERS, STATUS_CLEAN, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, normalize_skill_review_status, skill_review_gate, status_from_findings
+from ouroboros.skill_review_status import ACCEPTANCE_REASONS, STATUS_BLOCKERS, STATUS_PENDING, STATUS_WARNINGS, VALID_SKILL_REVIEW_STATUSES, normalize_skill_review_status, skill_review_gate, status_from_findings
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 from ouroboros.review_records import validate_author_disposition
 from ouroboros.skill_schedule_suggestions import suggested_schedule_fields
@@ -41,10 +41,8 @@ _SKILL_DIR_CACHE_NAMES = frozenset({"__pycache__", "node_modules", ".git", ".hg"
 # Sensitive files are excluded from review prompts and hashes; their presence
 # in a runtime-reachable skill tree is handled as a hard block below.
 
-_REVIEW_STATUS_PASS = STATUS_CLEAN
 _REVIEW_STATUS_FAIL = STATUS_BLOCKERS
 _REVIEW_STATUS_ADVISORY = STATUS_WARNINGS
-_REVIEW_STATUS_ADVISORY_PASS = STATUS_WARNINGS
 _REVIEW_STATUS_PENDING = STATUS_PENDING
 _REVIEW_STATUS_DEFERRED_PHASE4 = "pending_phase4"
 
@@ -693,19 +691,11 @@ def requested_core_setting_keys(env_keys: List[str]) -> List[str]:
 
 
 
-_GRANTABLE_SKILL_PERMISSIONS = frozenset({
-    "page_module",
-    "live_conversation",
-    "call_peer",
-    "inject_chat",
-    "presence",
-    "notify_owner",
-    "context_snapshot",
-    "subscribe_event:chat.outbound",
-    "subscribe_event:chat.typing",
-    "subscribe_event:chat.photo",
-    "subscribe_event:chat.video",
-})
+# The privileged permissions an owner grants, in the order a request lists them; subscribe_event is granted by topic.
+_GRANTABLE_PERMISSIONS = ("inject_chat", "presence", "notify_owner", "page_module", "context_snapshot",
+                          "live_conversation", "call_peer")
+_GRANTABLE_SKILL_PERMISSIONS = frozenset({*_GRANTABLE_PERMISSIONS, *(
+    f"subscribe_event:chat.{topic}" for topic in ("outbound", "typing", "photo", "video"))})
 
 
 def requested_skill_permissions(
@@ -714,9 +704,7 @@ def requested_skill_permissions(
 ) -> List[str]:
     """Return manifest-requested privileged permissions needing owner grants."""
     permission_set = {str(item or "").strip() for item in (permissions or [])}
-    requested = [permission for permission in (
-        "inject_chat", "presence", "notify_owner", "page_module", "context_snapshot", "live_conversation", "call_peer"
-    ) if permission in permission_set]
+    requested = [permission for permission in _GRANTABLE_PERMISSIONS if permission in permission_set]
     if "subscribe_event" in permission_set:
         for raw_topic in subscribe_events or []:
             topic = str(raw_topic or "").strip()
@@ -1139,8 +1127,10 @@ def _skill_location_inventory(
     *,
     selected_manifestless_name: str = "",
 ) -> tuple[_SkillLocationCandidate, ...]:
-    """Inventory data buckets and connected local roots, using the projected settings without disk reads."""
+    """Inventory data buckets and connected local roots, using the projected settings without disk reads;
+    the walk is reused while the directories it lists hold (``skill_discovery_reuse``)."""
     from ouroboros.config import SKILL_SOURCE_SUBDIRS
+    from ouroboros.skill_discovery_reuse import reused_inventory
     from ouroboros.skill_sources import load_sources
 
     settings = dict(os.environ)
@@ -1160,49 +1150,32 @@ def _skill_location_inventory(
         if candidate.is_dir():
             roots.append((candidate, True))
 
-    inventory: List[_SkillLocationCandidate] = []
-    seen_dirs: set[pathlib.Path] = set()
-    for root, include_manifestless_root in roots:
-        excluded_children = (
-            frozenset(SKILL_SOURCE_SUBDIRS)
-            if not include_manifestless_root
-            else frozenset()
-        )
-        for entry in _walk_skill_packages(
-            root,
-            selected_manifestless_name=selected_manifestless_name,
-            include_manifestless_root=include_manifestless_root,
-            excluded_manifestless_children=excluded_children,
-        ):
-            try:
-                resolved = entry.resolve()
-            except OSError:
-                continue
-            if resolved in seen_dirs:
-                continue
-            seen_dirs.add(resolved)
-            try:
-                location = _classify_skill_location(
-                    resolved,
-                    data_skills_root=data_skills_root,
-                    user_repo_root=root if include_manifestless_root else None,
-                )
-            except OSError:
-                continue
-            inventory.append(
-                _SkillLocationCandidate(
-                    name=_sanitize_skill_name(resolved.name),
-                    location=location,
-                    skill_dir=resolved,
-                )
-            )
+    def walk() -> tuple[_SkillLocationCandidate, ...]:
+        inventory: List[_SkillLocationCandidate] = []
+        seen_dirs: set[pathlib.Path] = set()
+        for root, include_manifestless_root in roots:
+            excluded_children = frozenset(SKILL_SOURCE_SUBDIRS) if not include_manifestless_root else frozenset()
+            for entry in _walk_skill_packages(root, selected_manifestless_name=selected_manifestless_name,
+                                              include_manifestless_root=include_manifestless_root,
+                                              excluded_manifestless_children=excluded_children):
+                try:
+                    resolved = entry.resolve()
+                except OSError:
+                    continue
+                if resolved in seen_dirs:
+                    continue
+                seen_dirs.add(resolved)
+                try:
+                    location = _classify_skill_location(resolved, data_skills_root=data_skills_root,
+                                                        user_repo_root=root if include_manifestless_root else None)
+                except OSError:
+                    continue
+                inventory.append(_SkillLocationCandidate(name=_sanitize_skill_name(resolved.name), location=location,
+                                                         skill_dir=resolved))
+        return tuple(sorted(inventory, key=lambda item: (item.name, item.location, str(item.skill_dir))))
 
-    return tuple(
-        sorted(
-            inventory,
-            key=lambda item: (item.name, item.location, str(item.skill_dir)),
-        )
-    )
+    return reused_inventory((str(drive_root), tuple(roots), selected_manifestless_name),
+                            [root for root, _manifestless in roots], walk)
 
 
 def skill_identity_collision_names(
@@ -1333,13 +1306,31 @@ def _native_platform_visible(skill_dir: pathlib.Path, manifest: SkillManifest) -
         return False
 
 
+def _load_candidate(candidate: _SkillLocationCandidate, drive_root: pathlib.Path,
+                    include_manifestless: bool) -> Optional[LoadedSkill]:
+    """One package of an inventory with its location and source, None when it is not a skill of this install."""
+    loaded = load_skill(candidate.skill_dir, drive_root)
+    if loaded is None and include_manifestless:
+        loaded = _broken_skill(candidate.skill_dir, "manifest missing")
+    if loaded is None:
+        return None
+    loaded.location = candidate.location
+    loaded.source = _classify_skill_source(candidate.skill_dir, location=candidate.location, drive_root=drive_root)
+    if loaded.source == "native" and not _native_platform_visible(candidate.skill_dir, loaded.manifest):
+        return None  # a launcher seed for another platform is not part of this install
+    return loaded
+
+
 def _load_skill_location_candidates(
     candidates: tuple[_SkillLocationCandidate, ...],
     *,
     drive_root: pathlib.Path,
     include_manifestless: bool = False,
 ) -> List[LoadedSkill]:
-    """Load one inventory with the ordinary collision/source semantics."""
+    """Load one inventory with the ordinary collision/source semantics; each package's load is reused while what it
+    read holds (``skill_discovery_reuse``)."""
+    from ouroboros.skill_discovery_reuse import reused_skill
+
     skills: List[LoadedSkill] = []
     by_name: Dict[str, List[_SkillLocationCandidate]] = {}
     for candidate in candidates:
@@ -1367,18 +1358,11 @@ def _load_skill_location_candidates(
             continue
 
         candidate = group[0]
-        loaded = load_skill(candidate.skill_dir, drive_root)
-        if loaded is None and include_manifestless:
-            loaded = _broken_skill(candidate.skill_dir, "manifest missing")
-        if loaded is None:
-            continue
-        loaded.location = candidate.location
-        loaded.source = _classify_skill_source(
-            candidate.skill_dir, location=candidate.location, drive_root=drive_root,
-        )
-        if loaded.source == "native" and not _native_platform_visible(candidate.skill_dir, loaded.manifest):
-            continue  # a launcher seed for another platform is not part of this install
-        skills.append(loaded)
+        loaded = reused_skill((str(drive_root), candidate, include_manifestless), candidate.skill_dir,
+                              skill_state_dir_path(drive_root, name),
+                              lambda: _load_candidate(candidate, drive_root, include_manifestless))
+        if loaded is not None:
+            skills.append(loaded)
 
     skills.sort(key=lambda skill: (skill.name, str(skill.skill_dir)))
     return skills
