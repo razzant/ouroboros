@@ -1895,8 +1895,16 @@ deck. Telegram receives only a relay that passes his words, as plain text. Main 
 its one receipt line. The row menu (right-click, Shift+F10, ContextMenu on the focused
 row, long press on touch) offers Reply, Copy, Open project and a work card's
 Resume, Pause and Stop… exactly when the card does. Esc/outside press closes it
-and returns focus; selected words keep the browser's menu. On touch the row sinks a
-little while the finger holds and lifts over the dimmed feed while its menu is open.
+and returns focus. Links, selected words and fields keep their native content menu;
+the desktop shell removes only commands that cannot work there (navigation away, stalls or no-ops).
+On touch the row sinks a little while held and lifts over the dimmed feed while its
+menu is open.
+
+Across reading, setup and dialog surfaces, people can copy a link's destination,
+copy selected text and edit fields through familiar host actions (owner choice, 2 Nov 2026).
+Yielding to a menu that the host disables does not meet this rule. Text copy buttons
+share one clipboard path; image copy writes the image. Both report the actual outcome,
+including refusal; text fallback preserves focus and selection.
 
 On a phone a row that offers Reply can be swiped left to reply, as in Telegram: it
 follows the finger, a reply mark at the room's right side fills as it nears the reply
