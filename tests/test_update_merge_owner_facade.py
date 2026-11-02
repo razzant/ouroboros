@@ -29,7 +29,8 @@ UPDATE_MERGE_LEAF_OWNERS: dict[str, str] = {
         "update_tx_phase update_tx_phase_or_keep worktree_snapshot_tree "
         "find_update_stash_sha restore_stash_with_marker restore_update_stash "
         "stash_local_changes_for_update lookup_update_stash "
-        "destructive_apply_guard project_version_carriers"
+        "destructive_apply_guard project_version_carriers "
+        "RESOLVER_POOL ensure_assisted_resolver_ready refuse_unready_boot_resolver resolver_slot_owed"
     ),
 }
 
