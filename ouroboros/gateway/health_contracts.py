@@ -47,7 +47,8 @@ class BootDocument(TypedDict):
     are answered), ``ready``, ``failed`` (the generation cannot become ready; ``error`` says why).
     ``dialogue_ready``: an owner message is accepted durably. ``tasks_ready``: pooled task starts
     are admitted. ``steps``: the boot coordinator's and the supervisor init's named steps.
-    ``jobs``: the store's named background jobs (``{}`` while the store is unpublished).
+    ``jobs``: the store's named background jobs as the last state publication read them (``{}`` while the
+    store is unpublished or before the first publication).
     """
 
     phase: Literal["starting", "serving", "ready", "failed"]
