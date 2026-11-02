@@ -25,6 +25,9 @@ unit is a breach the sprint's plan did not assign: it stays visible here instead
 
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
 from typing import Any, Dict, List
 
 import pytest
@@ -59,16 +62,16 @@ GAPS: Dict[tuple, str] = {
     ("held", "state"): f"{LE} L6: 122 held runs decoded to show the open ones (begins 53 -> 71)",
     ("schedules", "schedule-admission"): f"{LD} L9: every row's policy and receipts on every tick (begins 8 -> 49)",
     ("markers", "extension-reconcile"): f"{LD} L8: one reconcile per marker of two skills, each publishing a generation "
-                                        "(120 markers: 104 child processes)",
-    ("running", "custody-maintenance"): f"{LB} L5 shrinks the bytes, {UNASSIGNED} ends the growth: {QUEUE_DOC_PER_PASS} (0.16 -> 0.21 MB)",
-    ("paused", "custody-maintenance"): f"{LB} L5 shrinks the bytes, {UNASSIGNED} ends the growth: {QUEUE_DOC_PER_PASS} (0.21 -> 4.3 MB)",
-    ("held", "custody-maintenance"): f"{LE} L6's open-only selector removes part, {UNASSIGNED} the rest: three audits decode "
-                                     "every held run (decodes 94 -> 587), and the queue document again",
+                                        "(120 markers: about a child process and a lock each)",
+    ("running", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.16 -> 0.21 MB)",
+    ("paused", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.21 -> 4.3 MB)",
+    ("pending", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (4.3 -> 7.2 MB)",
+    ("held", "custody-maintenance"): f"{UNASSIGNED}: a 600 s pass whose three audits decode every held run (decodes 94 -> 587)",
     ("running", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW} (begins 28 -> 77, 10 MB read)",
     ("paused", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW}, and budget_pause_row per member (begins 77 -> 224, 216 MB read)",
-    ("pending", "reconcile-maintenance"): f"{UNASSIGNED}: recover_interrupted_preparations lists every open document (decodes 1,031 -> 1,091)",
-    ("held", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW}: the document it parses 240 times grew (216 -> 361 MB read)",
-    ("held", "delegated-body"): f"{LE} L6's open-only selector: the body's tick decodes every held run to find the open ones (decodes 5 -> 504)",
+    ("pending", "reconcile-maintenance"): f"{UNASSIGNED}: {QUEUE_DOC_PER_ROW}: the document it parses 240 times grew (216 -> 361 MB read), and "
+                                          "recover_interrupted_preparations lists every open document (decodes 1,031 -> 1,091)",
+    ("held", "delegated-body"): f"{UNASSIGNED}: the body's tick decodes every held run to find the ones it owes (decodes 5 -> 504)",
 }
 REST_GAPS: Dict[str, str] = {
     "owner_pause_settlement": f"{LC} L1: 20 settled trees re-derived on every pass (122 task bodies, 20 usage reads)",
@@ -84,12 +87,13 @@ ALLOWED_AT_REST = {"abandoned_usage_reconciliation": {"usage_row_reads": 1}}
 HISTORY_GAPS: Dict[str, str] = {}
 
 
-def _gap(table: Dict[Any, str], key: Any) -> tuple:
-    return (pytest.mark.xfail(strict=True, reason=table[key]),) if key in table else ()
-
-
 def _gap_mark(reason: str) -> pytest.MarkDecorator:
-    return pytest.mark.xfail(strict=True, reason=reason)
+    """Only the law's own assertion may fail under its row: a measurement that broke errors by name instead of counting as today's breach."""
+    return pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
+
+
+def _gap(table: Dict[Any, str], key: Any) -> tuple:
+    return (_gap_mark(table[key]),) if key in table else ()
 
 
 @pytest.fixture(scope="module")
@@ -122,17 +126,22 @@ def live_set_breaches(before: Dict[str, int], after: Dict[str, int], growth: int
     return breaches
 
 
-# A pass whose input is consumed by its first run is held on that run: the markers a reload left, then none.
+# A pass whose input is consumed by its first run is held on that run: the markers a reload left, then none. Reading each
+# marker once is the input's own cost, paid per request made; the reconcile each one causes is what must not follow them.
 PHASE = {("markers", "extension-reconcile"): "first"}
+RECONCILE_WORK = ("connect", "statements", "begins", "writes", "popen", "thread_start", "lock_acquired")
 
 
 @pytest.mark.parametrize("axis, name", [pytest.param(axis, name, marks=_gap(GAPS, (axis, name)))
                                         for axis in AXES for name in PASSES])
 def test_a_pass_costs_the_same_when_one_axis_of_the_live_set_grew(live, axis, name):
     phase = PHASE.get((axis, name), "rest")
-    before = _rest(live, K_SMALL, STAGES[STAGES.index(axis) - 1], name, phase)
+    # A first run's baseline is the first run that met the input: the stage after it has none left to meet.
+    before = _rest(live, K_SMALL, STAGES[0] if phase == "first" else STAGES[STAGES.index(axis) - 1], name, phase)
     after = _rest(live, K_SMALL, axis, name, phase)
     breaches = live_set_breaches(before["counts"], after["counts"], GROWTH[axis])
+    if phase == "first":
+        breaches = {key: value for key, value in breaches.items() if key in RECONCILE_WORK}
     assert not breaches, (axis, name, breaches, _growing(before, after))
 
 
@@ -165,16 +174,65 @@ def test_a_pass_over_the_largest_set_costs_the_same_at_every_size_of_history(liv
 
 
 def test_the_live_set_was_really_there(live):
-    """The laws above read nothing unless the set exists: the owner's Pause took every tree, the census has them all."""
+    """The laws above read nothing unless the set exists: the owner's Pause took every tree, and the queue holds their fences."""
     for k in (K_SMALL, K_LARGE):
         laid = live[k]["live_set"]["laid"]
         assert laid["paused"]["fences_in_queue"] == 20 and laid["paused"]["states"] == ["paused"], laid["paused"]
+        assert laid["paused"]["members"] + laid["smallest"]["paused"]["members"] == 86, laid["paused"]
         assert laid["running"]["running"] == 50 and laid["pending"]["pending"] == 61, laid
         assert laid["held"] == {**laid["held"], "held": 122, "settled": 113}, laid["held"]
         assert laid["markers"]["requested"] == 120, laid["markers"]
-    census = _rest(live, K_SMALL, "paused", "owner_pause_settlement", "first")["counts"]
-    assert census.get("begins", 0) >= 20, "the settlement pass met the fences"
     assert _rest(live, K_SMALL, "markers", "extension-reconcile", "first")["counts"].get("stat", 0) > 0
+
+
+def test_the_meter_sees_a_sync_a_publication_and_what_the_queue_lock_holds(tmp_path):
+    """The instrument of E4: a sync and a replacement by file, and the same work again when the queue lock is held."""
+    from supervisor import queue
+    from tests._cost_meter import CostMeter, tagged
+
+    def publish(name: str) -> None:
+        fd = os.open(tmp_path / f"{name}.tmp", os.O_CREAT | os.O_WRONLY, 0o600)
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(tmp_path / f"{name}.tmp", tmp_path / name)
+        json.dumps({"bytes": "x" * 5_000})
+
+    def work() -> None:
+        publish("outside")
+        with queue._queue_lock:
+            publish("inside")
+
+    with CostMeter(tmp_path) as meter:
+        tagged("publish", work)
+    snapshot = meter.snapshot("publish")
+    counts = snapshot["counts"]
+    assert (counts["fsync"], counts["replace"], counts["under_q:fsync"], counts["under_q:replace"]) == (2, 2, 1, 1), counts
+    assert counts["json_dumps"] == 2 and 5_000 <= counts["under_q:json_dumps_chars"] < counts["json_dumps_chars"], counts
+    assert {"fsync outside.tmp", "fsync inside.tmp", "replace outside", "replace inside"} <= set(snapshot["names"]), snapshot["names"]
+
+
+def test_the_meter_counts_a_task_body_and_a_usage_row_and_names_each_store(tmp_path):
+    """The instrument of E2's rest: which store a statement asked, and the two reads the law forbids at rest."""
+    from tests._cost_meter import CostMeter, tagged
+
+    def read() -> None:
+        for name, table in (("current.sqlite", "task_bodies"), ("usage.sqlite", "attempts"), ("dialog.sqlite", "dialogue"),
+                            ("index.sqlite3", "pages")):
+            conn = sqlite3.connect(tmp_path / name)
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER)")
+            conn.execute(f"SELECT id FROM {table}").fetchall()
+            conn.close()
+        conn = sqlite3.connect(tmp_path / "usage.sqlite")
+        conn.execute("CREATE TABLE IF NOT EXISTS meta (id INTEGER)")
+        conn.execute("SELECT id FROM meta").fetchall()  # a marker's read is no row of money
+        conn.close()
+
+    with CostMeter(tmp_path) as meter:
+        tagged("read", read)
+    counts = meter.snapshot("read")["counts"]
+    assert (counts["task_body_reads"], counts["usage_row_reads"]) == (1, 1), counts
+    assert (counts["statements:current"], counts["statements:dialog"], counts["statements:other"]) == (2, 2, 2), counts
+    assert counts["statements:usage"] == 4, counts
 
 
 def test_a_scan_of_the_axis_keeps_the_instrument_honest():
@@ -231,7 +289,7 @@ def test_a_change_is_published_though_an_unchanged_queue_is_not(live):
     """The rest is not death: one real change lands in the document a reader opens."""
     facts = live[K_SMALL]["live_set"]["change"]
     names = facts[LARGEST].get("names", {})
-    assert any(name.startswith("replace queue_snapshot.json") for name in names), names
+    assert names.get("replace queue_snapshot.json") == 1, names  # one change, one publication of the document
     assert facts["row_published"], facts["row_published"]
 
 

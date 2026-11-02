@@ -36,7 +36,8 @@ from tests._cost_driver import _body_pass, _duty_rows, _event_ctx, _measured_pas
 MAIN = 1
 SETTLE_PASSES = 3  # a pass whose first run moved its own inputs: bounded by this transport, never a judgment
 # One owner message by value on every row, as the 46,277-byte message rode 20 rows of the 01.11 queue document (R3 §C.2).
-OWNER_TEXT = ("the owner's long brief for the campaign, with every issue named in full. " * 700)[:46_277]
+OWNER_NEEDLE = "the owner's one long message of this live set"  # once in the text, so its copies can be counted
+OWNER_TEXT = (OWNER_NEEDLE + ": " + "the long brief for the campaign, with every issue named in full. " * 800)[:46_277]
 BODY_BYTES = 40_000  # a task document's size class (75-106 KB on the owner's install, rounded down to stay quick)
 
 
@@ -80,6 +81,7 @@ def grow_running(root: pathlib.Path, have: int, want: int) -> Dict[str, Any]:
         with queue._queue_lock:
             queue.RUNNING[task_id] = {"task": _task(task_id), "worker_id": 1000 + index, "attempt": 1,
                                       "started_at": time.time(), "last_heartbeat_at": time.time()}
+            queue.persist_queue_snapshot(reason="live_set")
     return {"running": want}
 
 
@@ -90,11 +92,12 @@ def grow_paused(root: pathlib.Path, have: int, want: int, members: int) -> Dict[
     from supervisor import queue
     from supervisor.owner_pause_control import refresh_owner_pause_tree, request_owner_pause
 
-    states, trees = {}, want - have
-    per_tree, more = divmod(members, want)
+    states, trees, laid = {}, want - have, 0
+    per_tree, more = divmod(members, trees)
     for index in range(have, want):
         root_id = f"live-paused-{index:03d}"
         size = per_tree + (index - have < more)
+        laid += size
         write_task_result(root, root_id, "scheduled", chat_id=MAIN, text=f"paused root {root_id}", root_task_id=root_id,
                           result=_body(root_id))
         child = f"{root_id}-child-0"
@@ -112,7 +115,7 @@ def grow_paused(root: pathlib.Path, have: int, want: int, members: int) -> Dict[
         states[root_id] = refresh_owner_pause_tree(root_id)
     with queue._queue_lock:
         fences = sum(fence.get("cause") == "owner_pause" for fence in queue.BUDGET_ROOT_FENCES.values())
-    return {"trees": trees, "fences_in_queue": fences, "states": sorted(set(states.values()))}
+    return {"trees": trees, "members": laid, "fences_in_queue": fences, "states": sorted(set(states.values()))}
 
 
 def grow_pending(root: pathlib.Path, have: int, want: int) -> Dict[str, Any]:
@@ -125,6 +128,7 @@ def grow_pending(root: pathlib.Path, have: int, want: int) -> Dict[str, Any]:
                           result=_body(task_id))
         with queue._queue_lock:
             queue.PENDING.append(_task(task_id))
+            queue.persist_queue_snapshot(reason="live_set")
     return {"pending": want}
 
 
@@ -230,7 +234,7 @@ def tick_pass(sm: Any, name: str, stop: threading.Event) -> None:
 
 def _passes(meter: Any, srv: Any, client: Any, root: pathlib.Path, stubs: Dict[str, Any],
             stop: threading.Event) -> Dict[str, Callable[[], Any]]:
-    from ouroboros import server_maintenance as sm
+    from ouroboros import server_maintenance as sm, utils
     from ouroboros.config import load_settings
     from ouroboros.delegate_collection import body_runtime
     from ouroboros.extension_reconcile_queue import process_extension_reconcile_requests
@@ -239,6 +243,9 @@ def _passes(meter: Any, srv: Any, client: Any, root: pathlib.Path, stubs: Dict[s
     from supervisor.queue_timeouts import enforce_task_timeouts
     from supervisor.worker_assignment import assign_tasks
 
+    # A file read within a clock tick of its write cannot prove its identity (``utils._RACY_NS``): bounded by time, not by the
+    # set, it would make a rest depend on the milliseconds since the stage's last write. The stages run without that window.
+    utils._RACY_NS = 0
     runtime, park = body_runtime(root), stubs["park"]
     ctx = _event_ctx(srv)
     probe = "live-run-000"
@@ -253,14 +260,20 @@ def _passes(meter: Any, srv: Any, client: Any, root: pathlib.Path, stubs: Dict[s
     table.update({
         "delegated-body": lambda: _body_pass(runtime, park.tick),
         "extension-reconcile": lambda: process_extension_reconcile_requests(root, load_settings),
-        "heartbeat": lambda: _handle_task_heartbeat(
-            {"task_id": probe, "phase": "running", "root_task_id": probe}, ctx),
+        "heartbeat": lambda: _handle_task_heartbeat(_beat(probe), ctx),
         "state": state,
         "publication": lambda: _publish_as_the_tick_does(queue),
         "assign": assign_tasks,
         "timeouts": lambda: enforce_task_timeouts(pending_events=()),
     })
     return table
+
+
+def _beat(task_id: str) -> Dict[str, Any]:
+    """A worker's heartbeat as it reaches the drain: stamped when it was spoken."""
+    from ouroboros.utils import utc_now_iso
+
+    return {"task_id": task_id, "phase": "running", "root_task_id": task_id, "ts": utc_now_iso()}
 
 
 def _publish_as_the_tick_does(queue: Any) -> Any:
@@ -402,10 +415,9 @@ def _heartbeat_facts(meter: Any, srv: Any, client: Any, result: Dict[str, Any], 
     from supervisor.events_worker_reports import _handle_task_heartbeat
 
     ctx, probe = _event_ctx(srv), "live-run-000"
-    event = {"task_id": probe, "phase": "running", "root_task_id": probe}
     with queue._queue_lock:
         queue.RUNNING[probe]["last_heartbeat_at"] = 0.0
-    alone = _measured_pass(meter, "L:heartbeat:no-clients", lambda: _handle_task_heartbeat(event, ctx), sm, root, stop, result)
+    alone = _measured_pass(meter, "L:heartbeat:no-clients", lambda: _handle_task_heartbeat(_beat(probe), ctx), sm, root, stop, result)
     stamped = queue.RUNNING[probe]["last_heartbeat_at"] > 0.0
 
     def read_frames(socket: Any, frames: List[int]) -> None:
@@ -420,7 +432,7 @@ def _heartbeat_facts(meter: Any, srv: Any, client: Any, result: Dict[str, Any], 
                    for socket, frames in zip((first, second), counted)]
         for reader in readers:
             reader.start()
-        watched = _measured_pass(meter, "L:heartbeat:two-clients", lambda: _handle_task_heartbeat(event, ctx), sm, root, stop, result)
+        watched = _measured_pass(meter, "L:heartbeat:two-clients", lambda: _handle_task_heartbeat(_beat(probe), ctx), sm, root, stop, result)
         for reader in readers:
             reader.join(30.0)
     return {"stamp_moved": stamped, "frames_per_client": [sum(frames) for frames in counted],
@@ -428,9 +440,12 @@ def _heartbeat_facts(meter: Any, srv: Any, client: Any, result: Dict[str, Any], 
 
 
 def _state_change_facts(client: Any, root: pathlib.Path) -> Dict[str, Any]:
-    """E2's positive half for the state: one more pending row is in the next answer."""
+    """E2's positive half for the state: one more pending row, published as the tick publishes it, is in the next answer."""
+    from supervisor import queue
+
     before = client.get("/api/state").json()["pending_count"]
     grow_pending(root, 1_000, 1_001)
+    _publish_as_the_tick_does(queue)
     return {"before": before, "after": client.get("/api/state").json()["pending_count"]}
 
 
@@ -442,6 +457,11 @@ def measure(meter: Any, srv: Any, client: Any, result: Dict[str, Any], root: pat
     out = result.setdefault("live_set", {"stages": {}, "laid": {}, "shape": shape._asdict()})
     _previous_process_work_gone(root)
     _child_jobs_done(meter, root, result)
+    # This thread stands for the held supervisor's tick: where queue changes are published by revision, a mark then waits
+    # for the publisher (``_publish_as_the_tick_does``) instead of writing under the mark's own lock.
+    from supervisor import queue
+
+    getattr(queue, "tick_publisher_started", lambda: None)()
     table = None
     change: Dict[str, Any] = {}
     for stage in STAGES:
@@ -455,7 +475,7 @@ def measure(meter: Any, srv: Any, client: Any, result: Dict[str, Any], root: pat
     largest = change[STAGES[-1]]
     change["order"] = [name.split(" ", 1)[1] for name in largest["names"] if name.startswith("replace ")]
     document = (root / "state" / "queue_snapshot.json").read_text(encoding="utf-8")
-    change.update(row_published=f"live-change-{STAGES[-1]}" in document, owner_text_copies=document.count(OWNER_TEXT[:400]),
+    change.update(row_published=f"live-change-{STAGES[-1]}" in document, owner_text_copies=document.count(OWNER_NEEDLE),
                   reader_sees_owner_text=_reader_sees_owner_text(root))
     out["change"] = change
     out["crashes"] = _crash_after_each_replacement(root)

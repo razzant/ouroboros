@@ -4,11 +4,12 @@ tests/_stand.py builds the shape in the booted driver process (no worker, no mod
 reduced shape runs in the default lane; the full one (50 running, 20 paused trees, 61 pending, 122 held runs, 35 schedules, 2,000
 markers, 500 rooms, a 125k-token story) is the opt-in ``integration`` lane (``-m integration -o addopts=''``), as the cost contract's
 k=100 is. History's axis at this live set is held by tests/test_cost_live_set.py, E2's positive companions by tests/test_cost_contract.py
-(B7). E1, E5, E7, E9 and E10 need real processes: tests/system_e2e/test_stand_server.py.
+(B7), the reuse of one story capture by tests/test_memory_story_reuse.py. E1, E5, E7, E9 and E10 need real processes:
+tests/system_e2e/test_stand_server.py.
 
 Every law here is an equality of what the meter counts. A breach in today's code is a strict xfail naming the unit that removes it,
-from the live-set axis's own gap tables, so the two cannot disagree. Wall-clock figures are reported (``OUROBOROS_STAND_FACTS``), never
-judged.
+from the live-set axis's own gap tables, so the two cannot disagree. Wall-clock figures are reported (into ``OUROBOROS_TEST_EVIDENCE_ROOT``),
+never judged.
 """
 
 from __future__ import annotations
@@ -23,8 +24,8 @@ import pytest
 from tests._live_set import STAGES
 from tests._stand import CHARS_PER_TOKEN, SHAPES
 from tests.test_cost_contract import COUNT_JITTER, ROUND, measure
-from tests.test_cost_live_set import (ALLOWED_AT_REST, BYTE_JITTER, GAPS, LB, LD, PASSES, PHASE, RESTING, REST_GAPS, UNASSIGNED,
-                                      live_rest_breaches, live_set_breaches)
+from tests.test_cost_live_set import (ALLOWED_AT_REST, BYTE_JITTER, GAPS, LB, LD, PASSES, PHASE, RECONCILE_WORK, RESTING, REST_GAPS,
+                                      UNASSIGNED, _gap, _gap_mark, live_rest_breaches, live_set_breaches)
 
 pytestmark = pytest.mark.scale
 
@@ -48,10 +49,6 @@ def stand(request, tmp_path_factory) -> Dict[str, Any]:
     return measured
 
 
-def _gap(table: Dict[Any, str], key: Any) -> tuple:
-    return (pytest.mark.xfail(strict=True, reason=table[key]),) if key in table else ()
-
-
 def _pass(stand: Dict[str, Any], stage: str, name: str, phase: str = "rest") -> Dict[str, Any]:
     return stand["live_set"]["stages"][stage][name][phase]
 
@@ -62,7 +59,10 @@ def _pass(stand: Dict[str, Any], stage: str, name: str, phase: str = "rest") -> 
 def test_e2_a_pass_costs_the_same_over_the_smallest_and_the_largest_set(stand, name):
     phase = PHASE.get(("markers", name), "rest")
     little, big = _pass(stand, STAGES[0], name, phase), _pass(stand, STAGES[-1], name, phase)
-    assert not (breaches := live_set_breaches(little["counts"], big["counts"], 50)), (name, breaches)
+    breaches = live_set_breaches(little["counts"], big["counts"], 50)
+    if phase == "first":
+        breaches = {key: value for key, value in breaches.items() if key in RECONCILE_WORK}
+    assert not breaches, (name, breaches)
 
 
 @pytest.mark.parametrize("name", [pytest.param(name, marks=_gap(REST_GAPS, name)) for name in RESTING])
@@ -84,7 +84,7 @@ def test_e2_the_set_was_really_there(stand):
 
 # ---- E3: the heartbeat ---------------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason=f"{LD} L4: a root heartbeat costs two store transactions on the drain")
+@_gap_mark(f"{LD} L4: a root heartbeat costs two store transactions on the drain")
 def test_e3_a_heartbeat_touches_no_store(stand):
     counts = _pass(stand, STAGES[-1], "heartbeat")["counts"]
     assert not {key: counts[key] for key in ("begins", "statements", "connect") if counts.get(key)}, counts
@@ -97,7 +97,7 @@ def test_e3_one_stamp_and_one_frame_per_client(stand):
 
 # ---- E4: the queue's publication -------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason=f"{LB} L5: the owner's message rides every row by value")
+@_gap_mark(f"{LB} L5: the owner's message rides every row by value")
 def test_e4_the_owner_s_words_appear_once_in_the_document(stand):
     assert stand["live_set"]["change"]["owner_text_copies"] == 1
 
@@ -106,14 +106,14 @@ def test_e4_a_reader_still_gets_the_whole_row(stand):
     assert stand["live_set"]["change"]["reader_sees_owner_text"]
 
 
-@pytest.mark.xfail(strict=True, reason=f"{LB} L5: documents are built, serialized and synced under Q")
+@_gap_mark(f"{LB} L5: documents are built, serialized and synced under Q")
 def test_e4_work_under_the_queue_lock_does_not_follow_the_queue_s_bytes(stand):
     little, big = (stand["live_set"]["change"][stage]["counts"] for stage in (STAGES[0], STAGES[-1]))
     assert not {key: big[key] for key in ("under_q:fsync", "under_q:replace") if big.get(key)}, big
     assert big.get("under_q:json_dumps_chars", 0) - little.get("under_q:json_dumps_chars", 0) <= BYTE_JITTER, (little, big)
 
 
-@pytest.mark.xfail(strict=True, reason=f"{LB} L5: queue.alive is synced like the documents")
+@_gap_mark(f"{LB} L5: queue.alive is synced like the documents")
 def test_e4_the_certificate_is_written_without_a_sync(stand):
     names = stand["live_set"]["change"][STAGES[-1]].get("names", {})
     assert not [name for name in names if name.startswith("fsync") and "queue.alive" in name], names
@@ -136,7 +136,7 @@ def test_e4_a_kill_after_each_step_never_certifies_what_did_not_land(stand):
 
 # ---- E6: the owner's wait ------------------------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason=BESIDE_GAP)
+@_gap_mark(BESIDE_GAP)
 def test_e6_the_owner_s_turn_makes_the_same_round_trips_beside_other_turns(stand):
     facts = stand["stand"]
     assert facts["others_held"] == SHAPES[stand["shape_name"]].turns - 1, facts["others_held"]
@@ -170,13 +170,6 @@ def test_e8_two_foci_over_one_chronicle_read_the_same_bytes(stand):
     assert len(shas) == 1 and "" not in shas, shas
 
 
-@pytest.mark.xfail(strict=True, reason="LF L13: every build re-reads the chronicle though the bytes are the same for every focus")
-def test_e8_the_second_focus_reuses_the_capture_of_one_chronicle(stand):
-    """``statements:other``: the chronicle index's statements (it is the one store of its kind a turn reads)."""
-    first, second = (stand["stand"][tag]["counts"].get("statements:other", 0) for tag in ("T:stand:first", "T:stand:alone"))
-    assert second < first, (first, second)
-
-
 # ---- the facts --------------------------------------------------------------------------------------------------------------
 
 def test_the_stand_reports_what_it_timed_as_facts(stand):
@@ -187,8 +180,8 @@ def test_the_stand_reports_what_it_timed_as_facts(stand):
              "slowest_passes_sec": sorted(((stages[stage][name]["seconds"], stage, name) for stage in stages for name in stages[stage]),
                                           reverse=True)[:10]}
     print(json.dumps(facts, indent=1))
-    target = os.environ.get("OUROBOROS_STAND_FACTS", "")
+    target = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT", "")  # the launcher keeps this folder past the run
     if target:
-        path = pathlib.Path(target) / f"counts-{stand['journal']}-{stand['shape_name']}.json"
+        path = pathlib.Path(target) / f"stand-counts-{stand['journal']}-{stand['shape_name']}.json"
         path.write_text(json.dumps(facts, indent=1), encoding="utf-8")
     assert facts["slowest_passes_sec"]

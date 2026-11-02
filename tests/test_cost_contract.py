@@ -49,7 +49,8 @@ rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
 request carries the newest open row. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
 strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
-The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py.
+The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py. The law's second axis,
+every recurring pass against the live set rather than history, is tests/test_cost_live_set.py.
 """
 
 from __future__ import annotations

@@ -65,6 +65,9 @@ Boundaries (tags in the output):
   history they must not reread is laid after the import, untagged, and the install brought to the
   steady state its maintenance child and its boot keep (the stored tail facts, the recorded OpenRouter
   catalogue, the archive listing; tests/_turn_shapes.py).
+
+A spec's ``plan`` measures something else on the same booted process instead of these boundaries: ``live_set`` every recurring pass
+as the live set grows (tests/_live_set.py), ``stand`` the production shape and the owner's turns over it (tests/_stand.py).
 """
 
 from __future__ import annotations
@@ -223,12 +226,17 @@ class _NoProcess:
 def _stub_duty_effects(result: Dict[str, Any]) -> Dict[str, Any]:
     """What the duty passes must not reach: the daemon (every gateway read refuses typed, as an
     install without one answers), the maintenance child's process (its spawn is recorded), the body's
-    own driver clock (parked; the pass drives the tick and advances the clock itself) and a process
-    behind the event bus."""
-    from ouroboros import claudexor_daemon, delegate_collection, maintenance
+    own driver clock and the lifespan's reconcile pickup (parked; a pass drives them and advances the
+    clock itself) and a process behind the event bus."""
+    from ouroboros import claudexor_daemon, delegate_collection, extension_reconcile_queue, maintenance
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from supervisor import workers
     from supervisor.event_observation import ObservedEventQueue
+
+    async def pickup_parked(*_args, **_kwargs):
+        await asyncio.Event().wait()  # until the lifespan cancels it: a pass measures the markers, not a race with its loop
+
+    extension_reconcile_queue.extension_reconcile_pickup_loop = pickup_parked
 
     def no_daemon(*_args, **_kwargs):
         raise ClaudexorUnavailable("daemon_unreachable", "cost contract: no daemon on these boundaries")
@@ -458,6 +466,32 @@ def _addressed_stream(root: pathlib.Path, result: Dict[str, Any]) -> None:
 _UPDATE_IDS = iter(range(9_000_000, 10_000_000))
 
 
+def no_carrier_can_start() -> None:
+    """No worker starts in this measurement, and a turn's body must run where it is counted: the physical fact the
+    conversation lane's disclosed degraded carrier answers to (a tree without the lane runs every turn here anyway). Called
+    once the boot is over: a pool generation starts with no refusal on record."""
+    try:
+        from supervisor import conversation_lane
+    except ImportError:
+        return
+    conversation_lane._SPAWN_REFUSED[0] = "cost contract: no worker process here"
+
+
+def _lane_rows_ended() -> None:
+    """A turn this driver ended at its first request sends no ``task_done``: its lane row, if the tree has lanes, ends here,
+    or every later turn would count it among the live roots."""
+    try:
+        from supervisor.conversation_lane import conversation_row
+    except ImportError:
+        return
+    from supervisor import queue
+
+    with queue._queue_lock:
+        for task_id, meta in list(queue.RUNNING.items()):
+            if conversation_row(meta):
+                queue.RUNNING.pop(task_id, None)
+
+
 def _owner_turn(srv: Any, ctx: Any, chat_id: int, message_id: str) -> int:
     """One owner message as the supervisor loop handles it (``server._handle_bridge_update_batch``): the state
     read, the canonical inbound row, the routing pre-pass and the direct turn it starts on its own thread, which
@@ -492,7 +526,15 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
     # history, it would make two turns' counts depend on the milliseconds between them. B10 runs without that
     # window; a file's identity (inode, size, nanosecond times) still names every write the turns meet here.
     utils._RACY_NS = skill_identity._RACY_NS = 0
+    no_carrier_can_start()
     ctx, k = _event_ctx(srv), int(facts.get("k") or 1)
+
+    def breadth() -> Dict[str, Any]:
+        from supervisor import queue
+
+        laid = shapes.grow_breadth(root, shapes.BREADTH)
+        queue.persist_queue_snapshot(reason="breadth")  # the tick publishes what it holds: a roster reads the document
+        return laid
 
     def activity() -> Dict[str, Any]:
         _completion(root, "turn", k)
@@ -504,7 +546,7 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
         return grown
 
     shape_steps = {"history": lambda: shapes.turn_history(root, k), "steady": lambda: shapes.steady_state(root),
-                   "activity": activity, "breadth": lambda: shapes.grow_breadth(root, shapes.BREADTH), "rows": rows,
+                   "activity": activity, "breadth": breadth, "rows": rows,
                    "archive": lambda: shapes.archive_history(root, shapes.ARCHIVED)}
     plan = ["history", "steady", "census", ("T:main", 1), ("T:mainw", 1), "activity", ("T:main:foreign", 1),
             ("T:room", int(facts["late_chat_id"]))]
@@ -523,6 +565,7 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
             tag, chat_id = step
             _boundary(meter, result, tag, lambda chat_id=chat_id, index=index: _owner_turn(
                 srv, ctx, chat_id, f"cost-turn-{index}"), timeout=600.0)
+            _lane_rows_ended()
 
 
 def _duty_rows(sm: Any) -> List[Any]:
