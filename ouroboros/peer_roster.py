@@ -350,6 +350,14 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task
 
 
 
+def _presence_task(task: Dict[str, Any]) -> bool:
+    """A Presence turn by its own facts: the lane's seed mark, or the stored row's provenance (``source``,
+    ``metadata.presence``) — an author started by the runner alone carries no seed mark."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return bool(task.get("_presence_turn") or str(task.get("source") or "") == "presence"
+                or isinstance(metadata.get("presence"), dict))
+
+
 def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bool = False,
                   canonical_root: Optional[pathlib.Path] = None,
                   queue_row: Optional[Dict[str, Any]] = None,
@@ -365,8 +373,9 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
         "status": status,
         "drive_root": str(task.get("child_drive_root") or task.get("drive_root") or ""),
         # A live direct conversation: the retired fragment's rows, and the conversation lane's RUNNING
-        # rows (an owner turn carried by the pool is still the owner's conversation, never a task).
-        "direct_chat": bool(direct or task.get("_is_direct_chat")),
+        # rows (an owner turn carried by the pool is still the owner's conversation, never a task). A
+        # Presence turn is a place's conversation, not the owner's, wherever it runs (``inline_presence``).
+        "direct_chat": bool(direct or (task.get("_is_direct_chat") and not _presence_task(task))),
     }
     queue_row = queue_row if isinstance(queue_row, dict) else {}
     # Focus is durably written before the supervisor projection event.  Read
