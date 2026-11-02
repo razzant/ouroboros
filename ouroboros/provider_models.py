@@ -501,6 +501,22 @@ ALL_PROVIDER_CREDENTIAL_KEYS: frozenset[str] = frozenset(
 ROUTE_CREDENTIAL_SETTING_KEYS: frozenset[str] = ALL_PROVIDER_CREDENTIAL_KEYS | {CONNECTIONS_KEY}
 
 
+def _search_route_models(settings: dict) -> list[str]:
+    """Routed spellings, in route order, of the legs the configured built-in search of ``settings``
+    sends its choice on, whatever their local readiness: every leg of the saved model (its named
+    connection kept); where the Source's recommendations are the choice instead (blank or unapplied
+    Model, or a saved one no transport serves, which a call naming its own model meets), every
+    recommended leg. Auto's other-model fallback behind a saved model is no part of that choice."""
+    from ouroboros.search_routes import resolve_web_search_route
+
+    route = resolve_web_search_route(settings=settings)
+    if route.get("error"):
+        route = resolve_web_search_route(settings=settings, model="")
+    legs = [leg for leg in route["legs"] + route["unavailable"] if leg["source"] != "ddgs"]
+    chosen = [leg for leg in legs if leg["model_source"] == "selection"] or legs
+    return [f"{connection_id(leg['source'], leg.get('connection', ''))}::{leg['model']}" for leg in chosen]
+
+
 def provider_credential_plan(
     settings: dict,
     *,
@@ -513,9 +529,15 @@ def provider_credential_plan(
     at all) the plan is the FULL credential universe, because a benchmark that dies on a
     missing key at hour six is worse than one that carries a spare.  The optional
     ``include_claude_sdk_defaults`` switch is RETIRED (no-op): the Claude-SDK transport and
-    its dedicated model slots are gone, so both values produce the same plan."""
+    its dedicated model slots are gone, so both values produce the same plan. The web search
+    Model is planned as the routes its configured search sends (``_search_route_models``),
+    never by reading its value as a chat route."""
+    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+
     declared = declared_model_settings(settings)
-    providers = providers_for_declared_models(declared)
+    search_key = MODEL_ROLE_SETTINGS["websearch"]
+    chat = {key: value for key, value in declared.items() if key != search_key}
+    providers = providers_for_declared_models({**chat, search_key: ",".join(_search_route_models(settings or {}))})
     planned = credential_keys_for_providers(providers)
     if any(parse_model_route(model).connection for models in providers.values() for model in models):
         planned += (CONNECTIONS_KEY,)  # a named connection travels as its row, not as flat keys

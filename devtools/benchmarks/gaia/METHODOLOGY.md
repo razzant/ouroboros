@@ -33,10 +33,11 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
     comparison with older web-off runs.
   Note on the fixed-model `web_search` TOOL (profiles that leave it enabled): its
   backends `openai_responses`/`openrouter_server_tool`/`anthropic_server_tool` issue
-  a SEPARATE provider call whose model is `OUROBOROS_WEBSEARCH_MODEL` (default
-  `gpt-5.2`) — pin it to the solve model if the tool is enabled, or a second model
-  enters the scaffold. `quality_openrouter_web` sidesteps this by disabling the tool
-  and searching through the main-loop native path instead.
+  a SEPARATE provider call whose model is `OUROBOROS_WEBSEARCH_MODEL` (blank by
+  default: each source's recommended model, `search_routes.SEARCH_MODELS`) — pin it
+  to the solve model if the tool is enabled, or a second model enters the scaffold.
+  `quality_openrouter_web` sidesteps this by disabling the tool and searching through
+  the main-loop native path instead.
 - **Paid result reviews are bounded (2026-08-15).** The owner's shared
   `OUROBOROS_REVIEW_MAX_CYCLES` (default 2, `unlimited` available) bounds the paid result
   waves of a root under EVERY policy, including `required`+`blocking`; the result review
