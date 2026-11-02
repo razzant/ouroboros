@@ -4,20 +4,22 @@
 // `POST /api/storage/measure` starts one complete count in a server child; `GET /api/storage` is its passive
 // projection, polled only while counting, listing or freeing (including trash deletion, not an entry the
 // maintenance child reported stuck) AND this tab is on screen. The bar is drawn only for a finished count (the
-// owner's choice «Полоса и группы», 2026-10-05): five group shares that sum to the headline; a running, stopped
-// or failed count never replaces the saved one, so the bar and the list stay while a new count runs. Each group
+// owner's choice «Полоса и группы», 2026-10-05): five group shares that sum to the headline; a count replaces the saved
+// one only once its places finish, so the bar and the list stay while a new count runs. Each group
 // folds under its head, its places, sizes and removers one press away. Unknown is never zero: a place that could
 // not be listed has no size. The first card holds the flow of Free temporary space (storage_free.js): a pure
 // preview, the ordinary pool read whole by its real ids, one Remove, progress and the result in place. Finished
 // copies not verified saved are a separate, deliberate form: their own list read whole, each id chosen by the owner
 // (nothing chosen to begin with), the shared confirm dialog as the acknowledgement of the whole copy's loss.
+// The folders deleted projects left behind are one read-only fold under the groups (storage_deleted.js).
 
 import { apiClient, isStoreMigrating } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { fmt } from './i18n.js';
 import { showToast } from './toast.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
-import { DOTS, durationLabel, formatBytes, isSize, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
+import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
+import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
 import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
@@ -206,7 +208,10 @@ function factsLine(count, now) {
 }
 
 function progressHtml(counting) {
-    const sentence = fmt('Measuring {place} · {current} · {size} so far · {done} of {total} places. You can leave this tab.', {
+    const sentence = counting.place === 'deleted_projects' ? fmt('Measuring folders of deleted projects outside these places · {current} · {size} so far. You can leave this tab.', {
+        current: counting.current || '',
+        size: formatBytes(counting.bytes || 0),
+    }) : fmt('Measuring {place} · {current} · {size} so far · {done} of {total} places. You can leave this tab.', {
         place: words({ id: counting.place }).label ? fmt(words({ id: counting.place }).label) : '',
         current: counting.current || '',
         size: formatBytes(counting.bytes || 0),
@@ -320,15 +325,7 @@ function whyLine(row) {
     return `<span class="storage-place-why" data-i18n-fmt="storage.why">${text(notes.filter(Boolean).join(' · '))}</span>`;
 }
 
-function partsHtml(row) {
-    if (!row.parts.length) return '';
-    const items = row.parts.map((part) => `<li><span data-i18n-authored>${text(part.name)}</span><span data-i18n-fmt="storage.size">${text(formatBytes(part.bytes))}</span></li>`);
-    if (row.rest) items.push(`<li class="storage-parts-rest" data-i18n-fmt="storage.rest">${text(fmt('and {n} more, {size}', { n: number(row.rest.count), size: formatBytes(row.rest.bytes) }))}</li>`);
-    return `<details class="activity-history storage-parts" data-key="parts-${attr(row.id)}">
-            <summary data-key="parts-${attr(row.id)}-open">Largest parts</summary>
-            <ul class="storage-parts-list">${items.join('')}</ul>
-        </details>`;
-}
+const partsHtml = (row) => largestPartsHtml(row.parts, row.rest, `parts-${row.id}`, `parts-${row.id}-open`);
 
 const removerHtml = (row) => (row.remover
     ? `<span class="storage-place-remover" data-i18n-fmt="storage.remover">${text(row.remover)}</span>` : '');
@@ -369,7 +366,7 @@ function groupHtml(group) {
         </details></li>`;
 }
 
-function placesHtml(response, now) {
+function placesHtml(response, now, deletedShown = {}) {
     const count = response?.count;
     if (!count) return '';
     const days = response.retention_days ?? 7;
@@ -377,14 +374,15 @@ function placesHtml(response, now) {
     // and sizes (the language overlay translates an aria-label by its English text).
     const segments = barSegments(count, days).map((segment) => `<span class="storage-bar-seg" data-group="${attr(segment.group)}" data-share="${segment.share}"></span>`);
     const bar = segments.length ? `<div class="storage-bar" role="img" aria-label="Share of each group; sizes are listed below">${segments.join('')}</div>` : '';
-    return `${bar}<ul class="storage-groups">${groupRows(placeRows(count, days, response.removers, now)).map(groupHtml).join('')}</ul>`;
+    const deleted = deletedProjectsHtml(count, { placeLabel: (id) => fmt(words({ id }).label), shown: deletedShown, now });
+    return `${bar}<ul class="storage-groups">${groupRows(placeRows(count, days, response.removers, now)).map(groupHtml).join('')}</ul>${deleted}`;
 }
 
 export const freeOf = (response) => response?.free || { state: 'idle', groups: [], run: null, error: null, done: 0, total: 0, pool: null };
 
 /** The whole view for one response: markup per region, the measure action's label and busy flag, whether
  *  Stop and the door are offered, and the flow for the owner's state (see `trayHtml`). */
-export function renderStorage(response, { pending = false, readFailed = false, now = new Date(), tray = null } = {}) {
+export function renderStorage(response, { pending = false, readFailed = false, now = new Date(), tray = null, deletedShown = {} } = {}) {
     const state = storageState(response);
     const counting = state === 'counting' || (pending && !response?.count);
     const busy = Boolean(pending || response?.counting);
@@ -395,7 +393,7 @@ export function renderStorage(response, { pending = false, readFailed = false, n
         auto: response ? fmt('Leftovers of finished one-off work clear by themselves after {days} days (Settings › Advanced › Cleanup), a project task’s scratch and copies too. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
         status: countStatusHtml(response, now),
         announce: announceSentence(response, { readFailed, now, tray }),
-        places: placesHtml(response, now),
+        places: placesHtml(response, now, deletedShown),
         tray: response ? trayHtml(freeOf(response), tray || { checked: new Set(), dismissed: false }, response.retention_days ?? 7, { volume: response.volume, now }) : '',
         door: Boolean(response) && doorOffered(trayState(freeOf(response), tray?.dismissed)),
         measure: { label, busy },
@@ -491,6 +489,7 @@ export function initStorage({ state, mount } = {}) {
     let generation = 0;
     let controller = null;
     let timer = 0;
+    const deletedShown = {};  // how far the owner continued each list of deleted projects' folders
 
     const onScreen = () => !document.hidden && state?.activePage === 'dashboard' && state?.dashboardActiveSubtab === 'storage';
 
@@ -513,7 +512,7 @@ export function initStorage({ state, mount } = {}) {
 
     function paint() {
         syncPlan();
-        const view = renderStorage(response, { pending: measuring, readFailed, tray: ui });
+        const view = renderStorage(response, { pending: measuring, readFailed, tray: ui, deletedShown });
         const top = scroller.scrollTop;
         const flowHeld = regions.tray.contains(document.activeElement) || document.activeElement === door;
         patch(regions.summary, view.summary, painted);
@@ -930,6 +929,15 @@ export function initStorage({ state, mount } = {}) {
         if (which === 'left' && excludedCount(freeOf(response).pool) > 0) wantList('excluded');
         else if (which === 'each') wantList('outcomes');
     };
+    /** Show more on a list of deleted projects' folders: draws the next rows, and focus lands on the first of them, where the button was. */
+    const onPlacesClick = (event) => {
+        const key = event.target?.closest?.('[data-deleted-more]')?.dataset.deletedMore;
+        if (!key) return;
+        const from = deletedShown[key] || DELETED_ROWS;
+        deletedShown[key] = from + DELETED_ROWS;
+        paint();
+        regions.places.querySelector(`[data-deleted-list="${key}"]`)?.children[from]?.focus({ preventScroll: true });
+    };
     const onSubtab = (event) => {
         if (event?.detail?.tab === 'storage' && onScreen()) void refresh();
         else cancelRead();
@@ -944,6 +952,7 @@ export function initStorage({ state, mount } = {}) {
     regions.tray.addEventListener('click', onTrayClick);
     regions.tray.addEventListener('change', onTrayChange);
     regions.tray.addEventListener('toggle', onTrayToggle, true);
+    regions.places.addEventListener('click', onPlacesClick);
     window.addEventListener('ouro:dashboard-subtab-shown', onSubtab);
     window.addEventListener('ouro:page-shown', onPage);
     document.addEventListener('visibilitychange', onPage);
@@ -958,6 +967,7 @@ export function initStorage({ state, mount } = {}) {
         regions.tray.removeEventListener('click', onTrayClick);
         regions.tray.removeEventListener('change', onTrayChange);
         regions.tray.removeEventListener('toggle', onTrayToggle, true);
+        regions.places.removeEventListener('click', onPlacesClick);
         window.removeEventListener('ouro:dashboard-subtab-shown', onSubtab);
         window.removeEventListener('ouro:page-shown', onPage);
         document.removeEventListener('visibilitychange', onPage);

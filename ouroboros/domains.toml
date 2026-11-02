@@ -896,6 +896,7 @@ D20 = "Presence"
 "ouroboros/usage_ledger.py" = "D16"
 "ouroboros/usage_store.py" = "D16"
 "ouroboros/storage.py" = "D16"  # Dashboard Storage: the complete count of every owned place behind gateway/storage.py
+"ouroboros/storage_deleted.py" = "D16"  # Dashboard Storage: the folders deleted Projects left behind, as one count saw them
 "ouroboros/storage_free_view.py" = "D16"  # Temporary space pool and paged item views over the held plan
 "ouroboros/storage_free.py" = "D16"  # Dashboard Storage: the owner's free-space preview and run over the existing retirers
 "ouroboros/storage_removers.py" = "D16"  # Dashboard Storage: each place's removers and how their last pass ended

@@ -5,7 +5,7 @@ it: `docs/DESIGN.md` "References and actions". Rows are sorted by text so that t
 the same thing sit together: when your diff adds a row, read its neighbours.
 
 279 controls with fixed text in 254 rows, 184 distinct texts;
-152 more controls build their text at run time and are not listed.
+154 more controls build their text at run time and are not listed.
 
 ## Fixed control text
 
@@ -133,7 +133,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Keep it | `btn btn-default btn-sm` | modules/place_sheet.js | 1 |
 | Keep on Widgets | `btn btn-default btn-sm chat-card-action` | modules/chat_cards.js | 1 |
 | Keep one per model | `btn btn-default` | modules/subagents_settings.js | 1 |
-| Largest parts | `(no class)` | modules/storage.js | 1 |
+| Largest parts | `(no class)` | modules/storage_format.js | 1 |
 | Last attempt | `(no class)` | modules/updates.js | 1 |
 | Later | `btn btn-default` | modules/skill_dialogs.js | 1 |
 | Load models | `btn btn-secondary` | modules/onboarding_wizard.js | 1 |
