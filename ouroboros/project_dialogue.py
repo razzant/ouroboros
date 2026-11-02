@@ -622,6 +622,9 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "subagent_target": "that task is a helper of another task",
     "cancel_pending": "that task is being stopped",
     "target_closed": "that task has already finished",
+    "presence_author_closed": "that conversation turn is not taking messages now",
+    "presence_author_elsewhere": "that conversation turn runs in another process",
+    "presence_author_unreadable": "that conversation turn's state could not be read",
     "target_finished": "that task has already finished",
     "acceptance_fence_sealed": "that task has already finished",
     "mailbox_write_failed": "the message could not be saved",
@@ -672,15 +675,9 @@ def routing_refusal_cause(action: str, status: str, reason: str, options: Any = 
         return ""
     if status_text == "needs_manual_target" and isinstance(options, list) and options:
         return ""
-    action_text = str(action or "").strip()
-    if status_text == "unconfirmed":
-        prefix = "Not confirmed"
-    elif action_text == "steer_task":
-        prefix = "Not delivered"
-    elif action_text == "ensure_project_scope":
-        prefix = "Not moved"
-    else:
-        prefix = "Not started"
+    prefix = "Not confirmed" if status_text == "unconfirmed" else {
+        "steer_task": "Not delivered", "ensure_project_scope": "Not moved",
+    }.get(str(action or "").strip(), "Not started")
     reason_text = str(reason or "").strip()
     phrase = ROUTING_REFUSAL_CAUSES.get(reason_text, "")
     if phrase:

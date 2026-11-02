@@ -695,7 +695,7 @@ class ActiveDirectTurn(TypedDict):
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
 
 
-class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and control facts keep their own authority
+class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
     last_line: NotRequired[str]  # visible model narration, never host notes or display reasoning
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
@@ -791,7 +791,7 @@ class StateResponse(WorkStateFields):
     task_bindings_revision: str
     task_bindings_unchanged: bool
     active_direct_turns: NotRequired[List[ActiveDirectTurn]]
-    # Combined activity snapshot (direct/ephemeral turns + root managed queue tasks). Additive beside
+    # Combined activity snapshot (direct, root managed and live inline Presence turns). Additive beside
     # active_direct_turns, which stays unchanged for compatibility; new clients hydrate from this field.
     active_chat_activities: NotRequired[List[ActiveChatActivity]]
     active_chat_activities_complete: NotRequired[bool]

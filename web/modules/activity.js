@@ -92,25 +92,30 @@ function lateWorkHtml(a, late) {
     return { name: esc(late.title || 'Answered task'), sub: `Remaining work ${state} · answer delivered${when}` };
 }
 
-/** A census-only live root (a direct turn, or an answered root whose late work remains):
+/** A census-only live root (a direct turn, a live inline Presence turn, or an answered root whose late work remains):
  * its state in the chip's own words (never the census code), and the shared control —
  * Resume only where its work's Resume control targets it (`resume`, work_status.resumeTargets).
- * `slot` marks where the caller paints a known outcome (`ownOutcomePhase`). */
-export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false) {
+ * `slot` marks where the caller paints a known outcome (`ownOutcomePhase`). A Presence turn says its `work`'s name and
+ * line (a recorded Stop, what runs beside it) and offers no control before its first durable write (`cancelable`
+ * false: no door takes it yet). */
+export function liveActivityRowHtml(a, nowMs = Date.now(), slot = null, resume = false, work = null) {
     const names = { direct_chat: 'Direct turn', managed_task: 'Managed task' };
     const started = Number(a.started_at) || 0;
     const spent = started > 0 ? elapsedWords(nowMs / 1000 - started) : '';
     const elapsed = spent ? ` · ${spent}` : '';
     const late = a.late_work && typeof a.late_work === 'object' ? lateWorkHtml(a, a.late_work) : null;
     const outcome = !late && slot && ownOutcomePhase(a);
+    const presence = a.kind === 'presence';
+    const named = !late && presence && work?.name;
+    const line = presence && work ? workLine(work) : '';
     return `<div class="activity-row">
                 <div class="activity-row-main">
-                    <span class="activity-name">${late ? late.name : esc(names[a.kind] || 'Live turn')}</span>
+                    <span class="activity-name"${named ? ' data-i18n-authored' : ''}>${late ? late.name : esc(named || names[a.kind] || 'Live turn')}</span>
                     <span class="activity-sub">${late ? late.sub : `${outcome ? slot(outcome)
-                        : `<span data-i18n-skip>${esc(censusWords(a))}</span>`}${elapsed}`}</span>
+                        : `<span data-i18n-skip>${esc([censusWords(a), line].filter(Boolean).join(' · '))}</span>`}${elapsed}`}</span>
                 </div>
                 <div class="activity-row-actions">
-                    <button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>
+                    ${presence && a.cancelable === false ? '' : `<button type="button" class="btn btn-xs btn-default" data-act="task-control" data-id="${esc(a.activity_id || '')}" data-root="1"${a.phase === 'budget_paused' ? ' data-budget-paused="1"' : ''}${resume ? ' data-resume="1"' : ''}>${esc(TASK_CONTROL_TRIGGER_LABEL)}</button>`}
                 </div>
             </div>`;
 }
@@ -367,7 +372,8 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         const known = new Set([...running, ...pending].map((q) => String(q.id || q.task?.id || '')));
         const live = activities.filter((a) => a && !known.has(String(a.activity_id || '')));
         const parts = [...running.map((q) => row(q, 'running')), ...pending.map((q) => row(q, 'pending')),
-            ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || ''))))];
+            ...live.map((a) => liveActivityRowHtml(a, Date.now(), phaseSlot, resumable.has(String(a.activity_id || '')),
+                workOfEpisode(census, a.activity_id)))];
         if (parts.length) return parts.join('');
         return census?.active_chat_activities_complete === true
             ? '<div class="activity-empty">Nothing running or queued.</div>'
