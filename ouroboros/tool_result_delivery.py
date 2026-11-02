@@ -256,7 +256,9 @@ def _positive(value: Any) -> Optional[int]:
 
 
 def _tokens(measurement: Mapping[str, Any]) -> int:
-    return max(0, int(measurement.get("estimated_input_tokens") or 0))
+    """The input a batch is sized against: a directly required handbook is the next admission's to charge (owner
+    1.11.2026), so every unasked share, target and window room is the one the same view without it gets."""
+    return max(0, int(measurement.get("estimated_input_tokens") or 0) - int(measurement.get("required_book_tokens") or 0))
 
 
 def frame_bounds(measurement: Mapping[str, Any]) -> Tuple[Optional[int], int, int]:

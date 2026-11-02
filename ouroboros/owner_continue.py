@@ -96,6 +96,10 @@ TECHNICAL_REASON_CODES = frozenset({
     # A running direct turn's accounting wait outlived its idle window (``_usage_wait``): storage, not
     # the work, ended it; Continue is its manual path, never an automatic retry.
     "accounting_wait_expired",
+    # A pooled start its own context capture refused: a known window that cannot hold it, or a handbook the task
+    # itself requires that could not be read (the producer's own cause; other authority refusals keep theirs). The
+    # successor keeps that requirement; a larger route, the Context mode or a new task without it is the caller's choice.
+    "context_capacity", "required_reference_unavailable",
 })
 # The loop's forced-finalization rails that are technical limits: an extracted
 # best-effort answer settles ``completed``, the host fallback ``failed``

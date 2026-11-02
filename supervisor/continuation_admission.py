@@ -430,35 +430,32 @@ def _recorded_work_limits(result: Dict[str, Any], metadata: Dict[str, Any], cont
     Each field is read the way the predecessor's registry and acceptance readers bound it: withheld tools from every
     carrier (``task_disabled_tools``), resources with the contract winning per key over the row's own map, the policy,
     the ingress claims, the answer protocol, the delegation rights and the budget profile (its cost stop) an API caller
-    declared from the contract (canonical over stored) else the row, as ``build_task_contract`` reads them. The
-    successor holds them on its stored contract carrier, which its admission builds into its own contract
-    (``enqueue_task``) and its scheduled result keeps for a successor that never starts; its workspace executor rides
-    where the API door stores it. Nothing is added or widened, and only these fields move: the whole contract would
-    also hand on the predecessor's identity (lineage, objective, source).
+    declared from the contract (canonical over stored) else the row, as ``build_task_contract`` reads them, and its own
+    direct handbook answer, false too, from the contract alone. The successor holds them on its stored contract carrier,
+    which its admission builds into its own contract (``enqueue_task``) and its scheduled result keeps for a successor
+    that never starts; its workspace executor rides where the API door stores it. Nothing is added or widened, and only
+    these fields move: the whole contract would also hand on the predecessor's identity (lineage, objective, source).
     """
     from ouroboros.consciousness_authority import task_disabled_tools
     from ouroboros.contracts.task_contract import (
-        build_task_contract, normalize_acceptance_claims, normalize_allowed_resources, normalize_answer_protocol,
-        normalize_disabled_tools, normalize_resource_policy,
+        build_task_contract, normalize_allowed_resources, normalize_answer_protocol, normalize_disabled_tools,
     )
 
     resources: Dict[str, Any] = {}
     for source in (result, metadata, contract):
         resources.update(normalize_allowed_resources(source.get("allowed_resources")))
-    claims = contract.get("acceptance_claims")
-    if claims is None:  # ``success_criteria`` is the builder's input alias of the same claims
-        claims = contract.get("success_criteria") or result.get("acceptance_claims") or metadata.get("acceptance_claims")
+    built = build_task_contract(result)  # merges ``contract`` the same way: its policy and claims, read once
     limits = {
         "allowed_resources": resources,
-        "resource_policy": normalize_resource_policy(contract.get("resource_policy") or metadata.get("resource_policy")
-                                                     or result.get("resource_policy")),
+        "resource_policy": built["resource_policy"],
         "disabled_tools": normalize_disabled_tools(sorted(task_disabled_tools({**result, "task_contract": contract}))),
-        "acceptance_claims": normalize_acceptance_claims(claims),
+        "acceptance_claims": built["acceptance_claims"],
         "answer_protocol": normalize_answer_protocol(contract.get("answer_protocol") or metadata.get("answer_protocol")
                                                      or result.get("answer_protocol")),
-        **{key: value for key, value in build_task_contract(result).items() if key in {"delegation_budget", "budget_profile"}},
+        **{key: value for key, value in built.items()
+           if key in {"delegation_budget", "budget_profile", "context_requires_development"}},
     }
-    fields = {key: value for key, value in limits.items() if value}
+    fields = {key: value for key, value in limits.items() if value or value is False}  # a direct handbook "no" moves too
     carried: Dict[str, Any] = {"task_contract": fields} if fields else {}
     executor = metadata.get("executor_ref") or result.get("executor_ref")
     if isinstance(executor, dict) and executor:

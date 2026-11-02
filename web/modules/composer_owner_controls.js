@@ -18,7 +18,7 @@ const HANDLES = ['min', 'rec', 'max'];
 const CONTEXT_MODES = ['nano', 'low', 'max'];
 const CONTEXT_LABELS = Object.freeze({ nano: 'Nano', low: 'Low', max: 'Max' });
 const CONTEXT_MEANINGS = Object.freeze({
-    nano: 'The compact owner window.', low: 'About 250K tokens: fits local models.', max: 'The full context window.',
+    nano: 'The compact owner window.', low: 'Aims for about 250K tokens.', max: 'The full context window.',
 });
 // When a capsule's change takes effect, said once for all three under each one's meaning (the hint's rule line).
 export const CHANGE_RULE = 'Applies to new steps; running work finishes.';
