@@ -126,6 +126,36 @@ def awaiting_turns() -> List[Dict[str, Any]]:
     return sorted(rows, key=lambda meta: float(meta.get("started_at") or 0.0))
 
 
+def _held_by_a_stop(rows: List[Dict[str, Any]]) -> set:
+    """The awaiting rows a Stop owns: one read of the durable cancel-intent projection (custody settles them).
+
+    Read only while turns await a carrier; an unreadable projection holds every row for this pass (an unknown
+    is never a start), a quarantined intent row holds its own."""
+    ids = {str(meta["task"].get("id") or "") for meta in rows}
+    if not ids:
+        return set()
+    from ouroboros.cancel_intents import read_active_intents
+
+    try:
+        intents, unseen = read_active_intents(_pool().DRIVE_ROOT, strict=True)
+    except Exception:
+        log.warning("cancel intents unreadable: the awaiting conversation turns wait a pass", exc_info=True)
+        return ids
+    return ids & (set(intents) | set(unseen or ()))
+
+
+def take_awaiting_turn(task_id: str) -> Any:
+    """Under Q: a Stop's custody takes a lane turn no carrier holds yet out of RUNNING, as it takes a PENDING row.
+
+    No process exists, so custody settles it typed ``cancelled`` with its pre-start cost and publishes its
+    ``task_done``; the turn never reaches a carrier. None for a held row or no lane row (the kill path's)."""
+    meta = _pool().RUNNING.get(str(task_id))
+    if (not conversation_row(meta) or meta.get("worker_id") is not None
+            or isinstance(meta.get("_terminal_file_recovery"), dict)):
+        return None
+    return _pool().RUNNING.pop(str(task_id))
+
+
 def live_turn_count() -> int:
     """Under Q: the lane's live rows plus the inline executors' registered actors (the census at entry)."""
     from supervisor.active_activity import get_direct_activity_registry
@@ -245,12 +275,14 @@ def dispatch_awaiting_turns() -> int:
     """
     from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, refused_carrier_reason, start_inline_turn
 
+    waiting = awaiting_turns()
+    held = _held_by_a_stop(waiting)  # a Stop's custody settles these rows: no carrier ever takes them
     moved = 0
-    for meta in awaiting_turns():  # a wake waiting for the spare never holds up the owner's turn behind it
-        slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
+    for meta in waiting:  # a wake waiting for the spare never holds up the owner's turn behind it
+        slot = None if str(meta["task"].get("id") or "") in held else ready_idle_carrier(for_owner=owner_turn(meta["task"]))
         if slot is not None and hand_to_carrier(meta, slot):
             moved += 1
-    waiting = awaiting_turns()
+    waiting = [meta for meta in awaiting_turns() if str(meta["task"].get("id") or "") not in held]
     if waiting and not any(w.booting and w.busy_task_id is None for w in lane_carriers()):
         reason = refused_carrier_reason()
         if reason:

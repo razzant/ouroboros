@@ -221,3 +221,63 @@ def test_consecutive_owner_turns_reuse_the_returned_carrier_without_a_boot(lane)
     worker_chat_lane.handle_chat_direct(1, "two", None, task_metadata={"client_message_id": "cm-2"})
     assert row("two")["worker_id"] == 5, "the returned carrier takes the next turn; no spawn wait"
     assert len(lane.created) == 1  # the booting replacement already stands as the spare
+
+
+
+def _awaiting_turn(lane, text, client_message_id):
+    lane.spare.busy_task_id = "other"  # the spare is busy: the owner's new turn awaits a carrier
+    worker_chat_lane.handle_chat_direct(1, text, None, task_metadata={"client_message_id": client_message_id})
+    meta = next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION and m["task"]["text"] == text)
+    assert meta["worker_id"] is None
+    return meta["task"]["id"]
+
+
+def _dispatched_once_carriers_are_ready():
+    """The lane starts carriers, the readiness watcher marks them READY, the tick reconciles: the ids handed out."""
+    lifecycle.reconcile_worker_capacity(lambda: 0)
+    for slot in [w for w in workers.WORKERS.values() if w.lane == LANE_CONVERSATION and w.booting]:
+        affirm_ready(slot)
+        slot.reaping = False
+    lifecycle.reconcile_worker_capacity(lambda: 0)
+    handed = set()
+    for slot in [w for w in workers.WORKERS.values() if w.lane == LANE_CONVERSATION]:
+        while True:
+            try:
+                handed.add(slot.in_q.get_nowait().get("id"))  # quiescence probes carry none
+            except stdqueue.Empty:
+                break
+    return handed - {None}
+
+
+def test_stop_of_a_turn_awaiting_its_carrier_cancels_it_and_no_carrier_ever_runs_it(lane, monkeypatch):
+    """Review K1: a lane turn no carrier holds yet (RUNNING, ``worker_id`` None, no stored row) has no process to
+    kill. Custody takes it like a PENDING row: typed ``cancelled`` with its pre-start cost, its ``task_done``
+    published, the intent settled; a carrier that becomes ready afterwards is never handed it."""
+    from ouroboros.cancel_intents import active_intent, request_cancel
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue, task_lifecycle
+
+    events = stdqueue.Queue()
+    monkeypatch.setattr(workers, "get_event_q", lambda: events)
+    task_id = _awaiting_turn(lane, "hello", "cm-k1")
+    request_cancel(queue.DRIVE_ROOT, task_id, reason="owner stop", source="owner", requested_by="owner")
+    assert task_lifecycle.cancel_task_custody(task_id) == task_lifecycle.CANCEL_CANCELLED
+    assert task_id not in workers.RUNNING and active_intent(queue.DRIVE_ROOT, task_id) is None
+    assert (load_task_result(queue.DRIVE_ROOT, task_id) or {}).get("status") == "cancelled"
+    done = [frame for frame in list(events.queue) if frame.get("type") == "task_done"]
+    assert [(frame["task_id"], frame["status"]) for frame in done] == [(task_id, "cancelled")]
+    assert task_id not in _dispatched_once_carriers_are_ready()
+
+
+def test_a_turn_awaiting_its_carrier_with_a_stop_on_record_is_never_dispatched(lane):
+    """The dispatch side of K1: until custody settles it, a Stop's intent on record holds the awaiting row back
+    from every carrier (and from the degraded executor); the turn beside it without one is dispatched."""
+    from ouroboros.cancel_intents import request_cancel
+    from supervisor import queue
+
+    held = _awaiting_turn(lane, "stopped hello", "cm-k1-held")
+    free = _awaiting_turn(lane, "free hello", "cm-k1-free")
+    request_cancel(queue.DRIVE_ROOT, held, reason="owner stop", source="owner", requested_by="owner")
+    handed = _dispatched_once_carriers_are_ready()
+    assert free in handed and held not in handed
+    assert workers.RUNNING[held]["worker_id"] is None and workers.RUNNING[free]["worker_id"] is not None
