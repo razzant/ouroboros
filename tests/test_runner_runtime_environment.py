@@ -121,7 +121,8 @@ def test_real_manager():
         assert queue.get(timeout=5) == 'owned'
         address = manager.address
         assert len(os.fsencode(address)) < 104
-        pathlib.Path({str(manager_report)!r}).write_text(json.dumps({{'address': address, 'tmpdir': os.environ['TMPDIR']}}), encoding='utf-8')
+        pathlib.Path({str(manager_report)!r}).write_text(json.dumps({{
+            'address': address, 'tmpdir': os.environ['TMPDIR'], 'engine': os.environ.get('OUROBOROS_UI_BROWSER_ENGINE')}}), encoding='utf-8')
 ''', encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "real nested runtime witnesses")
@@ -130,6 +131,7 @@ def test_real_manager():
     for key in ("TMPDIR", "TEMP", "TMP"):
         monkeypatch.setenv(key, str(ambient))
     monkeypatch.setattr(tempfile, "tempdir", str(ambient))
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", "webkit")  # safe_test keeps a person's choice; the gate never does
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the gate must really run two workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
@@ -139,17 +141,22 @@ def test_real_manager():
     assert Path(json.loads(node_report.read_text(encoding="utf-8"))["node"]).resolve() == Path(selected).resolve()
     facts = json.loads(manager_report.read_text(encoding="utf-8"))
     assert Path(facts["tmpdir"]).is_relative_to(Path("/tmp").resolve())
+    assert facts["engine"] is None
 
 
 @SHORT_TEMP
-def test_a_gate_rooted_in_the_inherited_long_temp_fails_its_nested_manager(tmp_path, monkeypatch):
+def test_a_gate_rooted_in_the_inherited_long_temp_cannot_hold_its_nested_managers_socket(tmp_path, monkeypatch):
     """The negative of the short default: the same real gate rooted where the old non-macOS rule
     put it (the inherited TMPDIR) gives its nested multiprocessing manager a socket path past the
-    AF_UNIX limit (#2110: the reporter's Linux fence and saved-pause failures)."""
+    AF_UNIX limit (#2110: the reporter's Linux fence and saved-pause failures). The interpreter
+    refuses it, or (CPython 3.14) listens in the shared /tmp instead: never inside that parent."""
     repo = _tiny_repo(tmp_path)
+    report = tmp_path / "manager.json"
     (repo / "tests/test_serial.py").write_text(
-        "import multiprocessing, pytest\n\n\n@pytest.mark.serial\ndef test_real_manager():\n"
-        "    with multiprocessing.Manager() as manager:\n        assert manager.Queue() is not None\n",
+        "import json, multiprocessing, os, pathlib, pytest\n\n\n@pytest.mark.serial\ndef test_real_manager():\n"
+        "    with multiprocessing.Manager() as manager:\n        assert manager.Queue() is not None\n"
+        f"        pathlib.Path({str(report)!r}).write_text(json.dumps({{\n"
+        "            'address': manager.address, 'tmpdir': os.environ['TMPDIR']}), encoding='utf-8')\n",
         encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "a nested manager")
@@ -165,7 +172,14 @@ def test_a_gate_rooted_in_the_inherited_long_temp_fails_its_nested_manager(tmp_p
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
     error = preflight_runner.run_hermetic_pytest(repo, timeout=120, max_output=12000)
-    assert error and "AF_UNIX path too long" in error, error
+    if error or not report.exists():
+        assert error and "AF_UNIX path too long" in error, error
+    else:
+        facts = json.loads(report.read_text(encoding="utf-8"))
+        print(f"NESTED_MANAGER {facts}")
+        # The gate's temp was inside the long parent and its manager listened elsewhere: one healthy there disproves it.
+        assert Path(facts["tmpdir"]).is_relative_to(ambient.resolve()), facts
+        assert not Path(facts["address"]).resolve().is_relative_to(ambient.resolve()), facts
 
 
 @POSIX

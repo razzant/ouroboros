@@ -31,7 +31,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, NamedTuple
 
-from tests._cost_driver import _body_pass, _duty_rows, _event_ctx, _measured_pass, _summary, tagged
+from tests._cost_driver import _body_pass, _duty_rows, _event_ctx, _measured_pass, _summary, refused, tagged
 
 MAIN = 1
 SETTLE_PASSES = 3  # a pass whose first run moved its own inputs: bounded by this transport, never a judgment
@@ -301,22 +301,36 @@ def _before_rest(name: str, stubs: Dict[str, Any]) -> None:
 
 def _one_stage(meter: Any, stage: str, table: Dict[str, Callable[[], Any]], root: pathlib.Path, stubs: Dict[str, Any],
                stop: threading.Event, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Every pass at ``stage``: its first run, the settling runs while it wrote, its rest. ``tags`` names each run in
+    order: what a run's maintenance child reported stays under its tag (``child_reports``, ``_drain``), and a law that
+    reads the count reads that too (tests/test_cost_live_set.py ``judged_pass``)."""
     from ouroboros import server_maintenance as sm
 
     measured: Dict[str, Any] = {}
     for name, one in table.items():
         started = time.monotonic()
+        tags = [f"L:{stage}:{name}:first"]
         _before_rest(name, stubs)
-        first = _measured_pass(meter, f"L:{stage}:{name}:first", one, sm, root, stop, result)
+        first = _measured_pass(meter, tags[-1], one, sm, root, stop, result)
         settled = first
         for attempt in range(SETTLE_PASSES):
             if not settled["counts"].get("writes"):
                 break
             _before_rest(name, stubs)
-            settled = _measured_pass(meter, f"L:{stage}:{name}:settle{attempt}", one, sm, root, stop, result)
+            tags.append(f"L:{stage}:{name}:settle{attempt}")
+            settled = _measured_pass(meter, tags[-1], one, sm, root, stop, result)
         _before_rest(name, stubs)
-        rest = _measured_pass(meter, f"L:{stage}:{name}:rest", one, sm, root, stop, result)
-        measured[name] = {"rest": rest, "first": first, "seconds": round(time.monotonic() - started, 3)}
+        tags.append(f"L:{stage}:{name}:rest")
+        rest = _measured_pass(meter, tags[-1], one, sm, root, stop, result)
+        measured[name] = {"rest": rest, "first": first, "seconds": round(time.monotonic() - started, 3), "tags": tags}
+    if stage == STAGES[0]:
+        # The smallest set's rest again, once every pass has met it: a pass the table runs before another's first
+        # run (the skills' state the extension reconcile writes, the schedule's wake) would count that run's
+        # effect as the next axis's growth. Its first runs stay the markers law's baseline; its rest is this one,
+        # which answers for every run before it.
+        for name, entry in _one_stage(meter, f"{stage}-steady", table, root, stubs, stop, result).items():
+            measured[name]["rest"] = entry["rest"]
+            measured[name]["tags"] += entry["tags"]
     return measured
 
 
@@ -332,13 +346,17 @@ def _previous_process_work_gone(root: pathlib.Path) -> None:
 
 
 def _child_jobs_done(meter: Any, root: pathlib.Path, result: Dict[str, Any]) -> None:
-    """What the install's maintenance child would have run by now, so that no stage's pass pays for it."""
+    """What the install's maintenance child would have run by now, so that no stage's pass pays for it. Each run's own
+    report is read as the cost contract's preparation reads it (``refused``): a run that refused did nothing, and every
+    stage would then be measured on an install whose maintenance never ran (#2465), so the driver fails by name."""
     from ouroboros import maintenance
 
     for _attempt in range(3):
         if not maintenance.due(root):
             break
-        tagged("L:child-jobs", lambda: maintenance.run(root, should_stop=lambda: False))
+        report = tagged("L:child-jobs", lambda: maintenance.run(root, should_stop=lambda: False))
+        if refused(report):
+            result["errors"].append(f"L:child-jobs refused: {refused(report)}")
     result["live_set"]["child_jobs"] = _summary(meter, "L:child-jobs")["counts"]
 
 
@@ -472,12 +490,6 @@ def measure(meter: Any, srv: Any, client: Any, result: Dict[str, Any], root: pat
         if table is None:
             table = _passes(meter, srv, client, root, stubs, stop)
         out["stages"][stage] = _one_stage(meter, stage, table, root, stubs, stop, result)
-        if stage == STAGES[0]:
-            # The smallest set's rest again, once every pass has met it: a pass the table runs before another's first
-            # run (the skills' state the extension reconcile writes, the schedule's wake) would count that run's
-            # effect as the next axis's growth. Its first runs stay the markers law's baseline.
-            for name, entry in _one_stage(meter, f"{stage}-steady", table, root, stubs, stop, result).items():
-                out["stages"][stage][name]["rest"] = entry["rest"]
     for stage in (STAGES[0], STAGES[-1]):
         change[stage] = _published_change(meter, root, stage, result, stop)
     largest = change[STAGES[-1]]

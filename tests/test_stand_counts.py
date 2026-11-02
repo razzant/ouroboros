@@ -36,6 +36,7 @@ from tests.test_cost_live_set import (
     RESTING,
     _gap,
     _gap_mark,
+    judged_pass,
     live_rest_breaches,
     live_set_breaches,
 )
@@ -63,7 +64,9 @@ def stand(request, tmp_path_factory) -> Dict[str, Any]:
 
 
 def _pass(stand: Dict[str, Any], stage: str, name: str, phase: str = "rest") -> Dict[str, Any]:
-    return stand["live_set"]["stages"][stage][name][phase]
+    """The live-set axis's own read: these laws compare only the smallest and the largest set, so the passes of the stages
+    between answer through the largest one's count (``judged_pass``)."""
+    return judged_pass(stand, stage, name, phase)
 
 
 # ---- E2: the rest law on the live set ------------------------------------------------------------------------------------

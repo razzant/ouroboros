@@ -60,6 +60,7 @@ import time
 import pytest
 
 from ouroboros import dialogue_store
+from ouroboros.test_evidence import keep_startup_log
 from tests import test_ui_smoke_playwright as smoke
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
@@ -370,14 +371,17 @@ def _evidence_dir(data_dir, name):
 
 
 def _owner_restart(page, url, data_dir):
-    """Confirm the header Restart and wait for the re-executed generation to serve."""
+    """Confirm the header Restart and wait for the re-executed generation to serve.
+
+    This wait bypasses the fixture's start_server, so on failure it keeps the server's own log itself."""
     boots = len(_events(data_dir, "startup_verification"))
-    page.locator(".confirm-dialog [data-confirm-ok]").click()
-    page.wait_for_function("window.__restartSends === 1", timeout=10_000)
-    _wait(lambda: len(_events(data_dir, "startup_verification")) > boots, 120, "the restarted generation")
-    smoke._wait_health(url, 60)
-    smoke._wait_supervisor_ready(url, 60)
-    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=60_000)
+    with keep_startup_log(data_dir.parent, "server-stdio.log"):
+        page.locator(".confirm-dialog [data-confirm-ok]").click()
+        page.wait_for_function("window.__restartSends === 1", timeout=10_000)
+        _wait(lambda: len(_events(data_dir, "startup_verification")) > boots, 120, "the restarted generation")
+        smoke._wait_health(url, 60)
+        smoke._wait_supervisor_ready(url, 60)
+        page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=60_000)
 
 
 def _launch(pw):

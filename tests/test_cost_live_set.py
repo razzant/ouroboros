@@ -20,6 +20,8 @@ The laws (FINAL_PLAN E2, E3, E4; counts, never a clock):
 
 A law a tree cannot meet yet is ``xfail(strict=True)`` naming its measured numbers and the unit that removes it (``GAPS``),
 so it stays visible instead of being averaged away, and flips (XPASS) when the unit lands; the row is then deleted.
+Every count is read with what the maintenance children behind it reported (``judged_pass``): a child that refused, or a
+counted rest whose own child left work pending, makes the read an error by name, never a count that holds (#2465).
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from tests._cost_driver import name_owed, refused
 from tests._live_set import STAGES
 from tests.test_cost_contract import BYTE_JITTER, DUTY_NAMES, contract_breaches, measure, rest_breaches, vm_allowance
 
@@ -65,10 +68,29 @@ def live(tmp_path_factory) -> Dict[int, Dict[str, Any]]:
     return {k: measure(tmp_path_factory.mktemp("live"), k, plan="live_set") for k in (K_SMALL, K_LARGE)}
 
 
-def _rest(live: Dict[int, Any], k: int, stage: str, name: str, phase: str = "rest") -> Dict[str, Any]:
-    entry = live[k]["live_set"]["stages"][stage].get(name)
-    assert entry is not None, f"{name} was not driven at {stage}, k={k}"
+def judged_pass(measured: Dict[str, Any], stage: str, name: str, phase: str = "rest", where: str = "") -> Dict[str, Any]:
+    """A pass's count at ``stage``, once the maintenance behind it is read (``refused``, tests/_cost_driver.py). A child
+    that refused did no work, so no count over it proves anything (#2465), and its failed job need not fall due again:
+    the count answers for every run of this pass up to it, at this stage and the earlier ones (``tags``). Pending is
+    owed work a later run may do, named, except in the counted rest itself, where every job that ran finished. A run
+    that spawned no child has nothing to read. A refusal raises no AssertionError, so a law under a gap row
+    (``_gap_mark``) errors by name instead of counting it as today's breach."""
+    stages = measured["live_set"]["stages"]
+    entry = stages[stage].get(name)
+    assert entry is not None, f"{name} was not driven at {stage}{where}"
+    own = entry["tags"] if phase == "rest" else entry["tags"][:1]
+    behind = [*(tag for earlier in STAGES[:STAGES.index(stage)] for tag in stages[earlier][name]["tags"]), *own]
+    reports = measured.get("child_reports", {})
+    refusals = [(tag, lines) for tag in behind for report in reports.get(tag, ())
+                if (lines := refused(report, rest=phase == "rest" and tag == own[-1]))]
+    if refusals:
+        raise RuntimeError(f"{own[-1]}{where} was counted over maintenance that did not do its work: {refusals}")
+    name_owed(f"{own[-1]}{where}", *reports.get(own[-1], ()))
     return entry[phase]
+
+
+def _rest(live: Dict[int, Any], k: int, stage: str, name: str, phase: str = "rest") -> Dict[str, Any]:
+    return judged_pass(live[k], stage, name, phase, f" at k={k}")
 
 
 def _growing(before: Dict[str, Any], after: Dict[str, Any]) -> List[tuple]:
