@@ -328,21 +328,21 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
     if paths and not normalized_paths:
         return _vcs_validation_refusal(ctx, _git()._vcs_result("⚠️ RESTORE_ERROR: No valid paths provided.", binding))
     repo_dir = binding.base_path
+    # The paths, else this whole folder: never the rest of a repository that encloses it.
+    scope = normalized_paths or ["."]
     try:
-        # NUL-delimited porcelain via the shared review helper: run_cmd() strips
-        # its stdout, and a worktree-only modification renders as " M path", so
-        # the stripped first line lost its leading space and the column-based
-        # line parser dropped the first CHARACTER of that path — the protected
-        # gate then judged "IBLE.md" while the restore acted on BIBLE.md.
-        from ouroboros.tools.review_helpers import list_changed_paths_from_git_status
-
-        dirty_files = list_changed_paths_from_git_status(
-            pathlib.Path(repo_dir), include_sources_for_renames=True,
-        )
+        # One NUL-delimited porcelain read of the scope is judged, previewed, acted on and re-read
+        # alike. run_cmd() strips its stdout, and a worktree-only modification renders as " M path",
+        # so the stripped first line once lost its leading space and the column parser dropped the
+        # first CHARACTER of that path — the protected gate then judged "IBLE.md" while the restore
+        # acted on BIBLE.md.
+        changes = _scope_changes(pathlib.Path(repo_dir), scope)
     except Exception as e:
         return _git()._vcs_result(f"⚠️ RESTORE_ERROR: git status failed: {e}", binding)
+    dirty_files = [path for _state, path in changes]
     if not dirty_files:
-        return _git()._vcs_result("Nothing to restore — working directory is already clean.", binding)
+        return _git()._vcs_result("Nothing to restore — no uncommitted change matches paths." if normalized_paths
+                                  else "Nothing to restore — working directory is already clean.", binding)
     targets_system = _git().binding_targets_system_repo(ctx, binding)
     affected_protected = _git().protected_paths_in(dirty_files) if targets_system else []
     if normalized_paths and targets_system:
@@ -350,10 +350,8 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
         # and "." to a FILE SET, so judging the requested string alone let
         # `paths=["."]`, `["ouroboros"]`, or `["ouroboros/safety.*"]` reach dirty
         # protected files past a gate that only knew exact names. Judge the
-        # damage set instead: the files this restore would actually mutate —
-        # dirty tracked matches (checkout reverts them) and untracked matches
-        # (`git clean -fd` deletes them) — resolved by git itself from the SAME
-        # pathspecs the action below consumes.
+        # damage set instead: the files this restore would actually mutate, resolved
+        # by git itself from the requested pathspecs; the action below acts on exactly them.
         for norm in normalized_paths:
             if _git().is_protected_runtime_path(norm):
                 return _git()._vcs_result(
@@ -361,25 +359,12 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
                     "Protected core/contract/release paths must be changed through reviewed commits.",
                     binding,
                 )
-        try:
-            # The SAME pathspec-scoped porcelain the dirty set came from — not
-            # `git ls-files`, which resolves against the index and so cannot see
-            # a STAGED deletion or rename-away of a protected file (the path is
-            # gone from the index but `checkout HEAD -- .` would resurrect it,
-            # discarding the protected staged change). Porcelain lists staged
-            # deletes, rename sources, and untracked files alike.
-            from ouroboros.tools.review_helpers import list_changed_paths_from_git_status
-
-            scoped_dirty = list_changed_paths_from_git_status(
-                pathlib.Path(repo_dir), normalized_paths,
-                include_sources_for_renames=True,
-            )
-        except Exception as e:
-            return _git()._vcs_result(
-                f"⚠️ RESTORE_ERROR: could not resolve pathspec matches: {e}", binding,
-            )
+        # The scoped porcelain, not `git ls-files`, which resolves against the index and so
+        # cannot see a STAGED deletion or rename-away of a protected file (the path is gone
+        # from the index but a restore would resurrect it, discarding the protected staged
+        # change). Porcelain lists staged deletes, rename sources, and untracked files alike.
         damage_protected = sorted({
-            f for f in scoped_dirty if f and _git().is_protected_runtime_path(f)
+            f for f in dirty_files if f and _git().is_protected_runtime_path(f)
         })
         if damage_protected:
             return _git()._vcs_result(
@@ -396,62 +381,139 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
             binding,
         )
     if not confirm:
-        try:
-            diff_stat = _git().run_cmd(["git", "diff", "--stat"], cwd=repo_dir).strip()
+        try:  # HEAD to working files: staged and unstaged edits, additions and deletions alike
+            diff_stat = _git().run_cmd(["git", "diff", "--stat", "HEAD", "--", *scope], cwd=repo_dir).strip()
         except Exception:
             diff_stat = "(could not generate diff)"
-        try:
-            untracked = _git().run_cmd(
-                ["git", "ls-files", "--others", "--exclude-standard"], cwd=repo_dir,
-            ).strip()
-        except Exception:
-            untracked = ""
         preview = ["Uncommitted changes that will be lost:", "", diff_stat]
-        if untracked:
-            preview.append("")
-            preview.append("Untracked files that will be removed:")
-            for f in untracked.splitlines()[:15]:
-                preview.append(f"  {f}")
+        for title, names in (("New files in the index that will be deleted:", [p for s, p in changes if s[0] == "A"]),
+                             ("Untracked files that will be removed:", [p for s, p in changes if s == "??"])):
+            if names:
+                preview += ["", title, *(f"  {_shown(f)}" for f in names[:15])]
+                preview += [f"  … and {len(names) - 15} more"] if len(names) > 15 else []
         preview.append("")
         preview.append("Call again with confirm=true to proceed.")
         return _git()._vcs_result("\n".join(preview), binding)
-    if normalized_paths:
-        # Reuse the exact contained, normalized paths the gate above judged.
-        try:
-            _git().run_cmd(["git", "checkout", "HEAD", "--"] + normalized_paths, cwd=repo_dir)
-        except Exception as e:
-            return _git()._vcs_result(f"⚠️ RESTORE_ERROR: git checkout failed: {e}", binding)
-        try:
-            _git().run_cmd(["git", "clean", "-fd", "--"] + normalized_paths, cwd=repo_dir)
-        except Exception as e:
-            # Do not swallow: the checkout landed but untracked cleanup did not,
-            # so the working tree does NOT fully match HEAD. Report it.
-            return _git()._vcs_result(
-                f"⚠️ RESTORE_PARTIAL: checked out {len(normalized_paths)} path(s), "
-                f"but `git clean` failed and untracked files may remain: {e}",
-                binding,
-            )
-        return _git()._vcs_result(f"Restored {len(normalized_paths)} path(s) to HEAD.", binding)
-    else:
-        try:
-            _git().run_cmd(["git", "checkout", "HEAD", "--", "."], cwd=repo_dir)
-        except Exception as e:
-            return _git()._vcs_result(f"⚠️ RESTORE_ERROR: git checkout failed: {e}", binding)
-        try:
-            _git().run_cmd(["git", "clean", "-fd"], cwd=repo_dir)
-        except Exception as e:
-            # A swallowed failure previously let this claim "matches HEAD" while
-            # untracked files survived. Surface it instead of asserting a state
-            # that was not verified.
-            return _git()._vcs_result(
-                f"⚠️ RESTORE_PARTIAL: tracked changes discarded, but `git clean` "
-                f"failed and untracked files may remain: {e}",
-                binding,
-            )
+    from ouroboros.git_observation import _pathspec_batches
+
+    tracked = [path for state, path in changes if state != "??"]
+    try:  # status names rows from the repository's top level, which may enclose this folder: act there
+        top = pathlib.Path(repo_dir) / _git().run_cmd(["git", "rev-parse", "--show-cdup"], cwd=repo_dir)
+        ancestors = {str(parent) for path in tracked for parent in pathlib.PurePosixPath(path).parents
+                     if str(parent) != "."}
+        parent_rows = _scope_changes(top, [f":(literal){name}" for name in sorted(ancestors)]) if ancestors else []
+        outside_index = {path for state, path in parent_rows if path in ancestors and path not in tracked
+                         and state[0] not in {" ", "D", "?"}}
+    except Exception as e:
+        return _git()._vcs_result(f"⚠️ RESTORE_ERROR: repository or index paths could not be read: {e}", binding)
+    # No overlay: an entry HEAD lacks (a staged addition, a rename's new side) leaves the index
+    # and the files too. Exact literal names of the read rows, in argv-sized batches: a request
+    # naming only untracked files is unknown to checkout, and the action stays the judged set.
+    checkout, restored = ["git", "checkout", "--no-overlay", "HEAD", "--"], 0
+    added = {path for state, path in changes if state[0] == "A"}  # HEAD lacks them: checkout removes them
+    # A staged parent file can have no working file at all. Writing a child would silently drop
+    # that outside-scope index entry; filesystem occupancy alone cannot protect its saved bytes.
+    index_held = {path for path in tracked
+                  if any(str(parent) in outside_index for parent in pathlib.PurePosixPath(path).parents)}
+    # Git writes a HEAD file by deleting whatever holds its path (a file-to-folder change, or a file where
+    # its folder belongs), so such a file waits until the removals and the cleanup below cleared the way.
+    later = [path for path in tracked if path in index_held or (path not in added
+             and (_occupied(top, path) or any(name.startswith(path + "/") for name in added)))]
+    try:
+        for batch in _pathspec_batches(checkout, [path for path in tracked if path not in later]):
+            _git().run_cmd([*checkout, *batch], cwd=top)
+            restored += len(batch)
+    except Exception as e:
         return _git()._vcs_result(
-            "All uncommitted changes discarded. Working directory matches HEAD.",
-            binding,
-        )
+            f"⚠️ RESTORE_PARTIAL: restored {restored} of {len(tracked)} tracked path(s), then git checkout failed: {e}"
+            if restored else f"⚠️ RESTORE_ERROR: git checkout failed: {e}", binding)
+    # Only the original untracked names, never a new scan. -x keeps checkout's changed ignore
+    # rules from hiding those targets; initially ignored files are absent from this exact set.
+    clean, untracked = ["git", "clean", "-fdx", "--"], [path for state, path in changes if state == "??"]
+    try:
+        for batch in _pathspec_batches(clean, untracked):
+            _git().run_cmd([*clean, *batch], cwd=top)
+    except Exception as e:
+        # Do not swallow: the checkout landed but untracked cleanup did not, so the
+        # working tree does NOT fully match HEAD; a swallowed failure once claimed it did.
+        return _git()._vcs_result(
+            f"⚠️ RESTORE_PARTIAL: checked out {restored} path(s), but `git clean` failed and "
+            f"untracked files may remain: {e}", binding)
+    _prune_emptied(top, untracked, pathlib.Path(repo_dir))
+    kept = [path for path in later if path in index_held or _occupied(top, path)]
+    try:
+        for batch in _pathspec_batches(checkout, [path for path in later if path not in kept]):
+            _git().run_cmd([*checkout, *batch], cwd=top)
+            restored += len(batch)
+    except Exception as e:
+        return _git()._vcs_result(
+            f"⚠️ RESTORE_PARTIAL: restored {restored} of {len(tracked)} tracked path(s) and removed the untracked "
+            f"ones, then git checkout failed: {e}" if restored or untracked
+            else f"⚠️ RESTORE_ERROR: git checkout failed: {e}", binding)
+    try:  # the claim below is observed, not assumed
+        remaining = [_shown(path) for _state, path in _scope_changes(pathlib.Path(repo_dir), scope)]
+    except Exception as e:
+        remaining = [f"(the scope could not be re-read: {e})"]
+    if remaining:
+        return _git()._vcs_result(
+            f"⚠️ RESTORE_PARTIAL: checkout and clean ran, but {len(remaining)} path(s) in scope still differ "
+            f"from HEAD: {', '.join(remaining[:15])}" + (f" and {len(remaining) - 15} more" if len(remaining) > 15 else "")
+            + (f". Not restored, to keep files or index entries that hold their path: {', '.join(map(_shown, kept))}" if kept else ""),
+            binding)
+    if normalized_paths:
+        return _git()._vcs_result(f"Restored {len(dirty_files)} path(s) to HEAD.", binding)
+    return _git()._vcs_result("All uncommitted changes discarded. Working directory matches HEAD.", binding)
+
+
+def _scope_changes(repo_dir: pathlib.Path, paths: List[str]) -> List[tuple]:
+    """The ``git status`` rows of a restore scope as (XY, path): staged and working changes with
+    rename sides apart, and each untracked file; ignored files are never listed. ``paths`` resolve
+    from ``repo_dir``, while each row names its path from the repository's top level."""
+    import subprocess
+
+    from ouroboros.git_observation import host_git_env
+
+    # --untracked-files=all: a repo-local status.showUntrackedFiles=no would EMPTY the
+    # untracked half, and dir-collapsing ("dir/") hides the files a protected judgment needs.
+    res = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+                          "--", *paths], cwd=repo_dir, capture_output=True, timeout=10, env=host_git_env())
+    if res.returncode != 0:
+        err = (res.stderr or b"").decode("utf-8", errors="replace").strip()[:200]
+        raise RuntimeError(f"git status --porcelain=v1 -z failed (exit {res.returncode}): {err}")
+    return [(row[:2].decode("ascii", "replace"), row[3:].decode("utf-8", "surrogateescape"))
+            for row in res.stdout.split(b"\0") if len(row) > 3]
+
+
+def _occupied(top: pathlib.Path, path: str) -> bool:
+    """Whether writing HEAD's file at ``path`` would make Git delete something there: a folder that holds
+    anything (ignored files included) at the path, or a file or link where one of its folders belongs."""
+    target = top / path
+    try:
+        if target.is_dir() and not target.is_symlink():
+            return next(target.iterdir(), None) is not None
+        return any((top / folder).is_symlink() or (top / folder).is_file()
+                   for folder in pathlib.PurePosixPath(path).parents if str(folder) != ".")
+    except OSError:  # unreadable: never write over it
+        return True
+
+
+def _prune_emptied(top: pathlib.Path, names: List[str], folder: pathlib.Path) -> None:
+    """Remove the folders that removing ``names`` left empty, inside ``folder`` only: rmdir deletes
+    no content, so a folder still holding anything, an ignored file included, stays."""
+    root = folder.resolve()
+    for name in names:
+        parent = (top / name).parent.resolve()
+        while parent != root and root in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
+def _shown(path: str) -> str:
+    """A path for display: bytes that are not UTF-8 become backslash escapes."""
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
 
 
 def _revert_commit(

@@ -195,7 +195,7 @@ def _free_cycle_gate(
             log.debug("commit_review_free_replay event emission failed", exc_info=True)
         return {"advisory_replay": message, "replay_reason": reason}
     try:
-        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        _unstage_candidate(ctx)
     except Exception:
         pass
     if _authorized_managed_update_resolver(ctx):
@@ -551,7 +551,7 @@ def _preflight_and_tests_gate(
         _handle_review_block_or_warning(ctx, True, message, "")
     elif message:
         try:
-            run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+            _unstage_candidate(ctx)  # the tests ran unguarded for minutes: keep paths staged meanwhile
         except Exception:
             pass
         # Preflight, not a review verdict: must neither inflate nor reset the
@@ -976,36 +976,24 @@ def _task_attributed_commit_paths(
     ctx: ToolContext,
     paths: Optional[List[str]],
 ) -> tuple[Optional[List[str]], Optional[Dict[str, Any]], str, Optional[tuple]]:
-    """Resolve the exact task-owned commit candidates through the attribution SSOT.
+    """Resolve candidates and their (results_root, evidence_task_id) binding for baseline advancement.
 
-    Returns (paths, attribution, error, binding) where binding is the
-    (results_root, evidence_task_id) pair a successful commit uses to advance
-    the baseline epoch. NOTE: the results root must resolve to the same
-    location the host wrote the baseline to (agent.py uses the task's
-    budget_drive_root falling back to the env drive root; for queued tasks the
-    task/metadata field carries that value into this context).
+    The results root must match the producer in agent.py: the task/metadata budget_drive_root,
+    else the execution drive. Use the candidate owner's same resolver, not a second copy.
     """
-    from ouroboros.mutation_attribution import (
-        attribution_task_id,
-        resolve_attributed_git_paths,
-    )
+    from ouroboros import body_candidate
+    from ouroboros.commit_admission import version_sync_refusal
+    from ouroboros.mutation_attribution import attribution_task_id, resolve_attributed_git_paths
 
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    # A bound body candidate is attributed like the serving checkout: ``body_candidate.bind``
-    # appends it to the lineage's baseline, so its candidates resolve on ``ctx.repo_dir`` below.
+    # A bound body candidate is attributed like the serving checkout: ``body_candidate.bind`` records it in
+    # the lineage's baseline (re-established here when that failed or came late), resolving on ``ctx.repo_dir``.
     if not task_id:
         return paths, None, "", None
-    metadata = getattr(ctx, "task_metadata", {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-    results_root = pathlib.Path(
-        str(
-            metadata.get("budget_drive_root")
-            or getattr(ctx, "budget_drive_root", "")
-            or ctx.drive_root
-        )
-    )
-    root_task_id = str(metadata.get("root_task_id") or "").strip() or task_id
+    bound = body_candidate.is_bound(ctx)
+    attached = body_candidate.attach_attribution(ctx) if bound else {}
+    results_root = body_candidate._results_root(ctx)
+    root_task_id = str(body_candidate._metadata(ctx).get("root_task_id") or "").strip() or task_id
     evidence_task_id = attribution_task_id(results_root, (root_task_id, task_id))
     if not evidence_task_id:
         # No host-captured baseline (manual ToolContext, external dry-run
@@ -1016,7 +1004,18 @@ def _task_attributed_commit_paths(
         evidence_task_id,
         pathlib.Path(ctx.repo_dir),
         paths,
+        candidate_root=bound,
+        retained=bool(getattr(ctx, "_review_resume_pending", False) or getattr(ctx, "_review_collected_peer", None)),
     )
+    # Staging's VERSION sync adds the carriers it rewrites, whole: only work this selection takes may ride along.
+    if not (error or getattr(ctx, "_review_resume_pending", False)):
+        error = version_sync_refusal(pathlib.Path(ctx.repo_dir), selected, attribution)
+        selected = [] if error else selected
+    if attached.get("state") == "failed":  # distinct from known foreign work: the record itself is missing
+        attribution["attach_failure"] = attached.get("error")
+        error += f" Recording this body candidate in the task baseline failed: {attached.get('error')}." if error else ""
+    # The selected composition's facts reach the wave's brief, the author's handback and the next epoch.
+    ctx._commit_attribution = None if error else attribution.get("selection")
     return selected, attribution, error, (results_root, evidence_task_id)
 
 
@@ -1154,8 +1153,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     ctx._left_review_wait = None  # a new commit act is the author's explicit next choice
     continuation = review_reference is not None or author_disposition is not None
     collecting_reference = review_reference is not None and author_disposition is None
+    from ouroboros.tools.review_collection import collected_open_peer, prepare_commit_collection
     if collecting_reference:
-        from ouroboros.tools.review_collection import prepare_commit_collection
         try:
             source = prepare_commit_collection(ctx, review_reference, commit_message=commit_message,
                 mutations=(review_rebuttal, goal, scope, reviewers, reason, preflight_reviewer, ctx._review_since))
@@ -1177,6 +1176,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         if not managed_resume and not collecting_reference:
             overlap_err = _check_overlapping_review_attempt(ctx)
             collecting = bool(getattr(ctx, "_review_resume_pending", False))
+            ctx._review_collected_peer = collected_open_peer(ctx, commit_message, goal, scope, review_rebuttal, paths)
     panel, refusal = _commit_request_refusals(  # before any staging, review or record
         ctx, root=root, preflight_reviewer=preflight_reviewer, skipped=skip_advisory_pre_review,
         continuation=continuation, reviewers=reviewers, reason=reason,
@@ -1233,20 +1233,18 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
             scope_raw_result=getattr(ctx, "_last_scope_raw_result", {})), msg)[1]
     try:
-        came_from_detached_checkout, preparation_error = (False, "")
+        came_from_detached_checkout = False
         if not bool(getattr(ctx, "_review_resume_pending", False)):
-            came_from_detached_checkout, preparation_error = _prepare_review_commit_worktree(
-                ctx, _managed_tx
-            )
-        if preparation_error:
-            return _fail(preparation_error)
+            came_from_detached_checkout, preparation_error = _prepare_review_commit_worktree(ctx, _managed_tx)
+            if preparation_error:
+                return _fail(preparation_error)
         evolution_claim: Dict[str, str] = {}
         if str(ctx.current_task_type or "") == "evolution":
             evolution_claim, authority_error = _check_evolution_commit_stage(ctx, commit_message, _commit_start, phase="pre_review_authority")
             if authority_error:
                 return authority_error
         outcome = _run_reviewed_stage_cycle(
-            ctx, commit_message, _commit_start, paths=paths,
+            ctx, commit_message, _commit_start, paths=paths, attribution=None if _managed_tx else _attribution,
             skip_advisory_pre_review=skip_advisory_pre_review, skip_tests=skip_tests,
             goal=goal, scope=scope, review_rebuttal=review_rebuttal,
             came_from_detached_checkout=came_from_detached_checkout,
@@ -1417,6 +1415,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                     attribution_binding[0],
                     attribution_binding[1],
                     pathlib.Path(ctx.repo_dir),
+                    commit=commit_sha, attribution=getattr(ctx, "_commit_attribution", None),
                 )
             except Exception:
                 log.warning("mutation baseline advance failed after commit", exc_info=True)
@@ -1496,9 +1495,9 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("vcs_restore", {
             "name": "vcs_restore",
             "description": (
-                'Restore all uncommitted changes, or paths, to HEAD. Deletes untracked files in scope; ignored files '
-                "stay. confirm=false previews; true executes. Dirty protected paths in Ouroboros's own repository are "
-                'refused.'
+                'Restore all uncommitted changes, or paths, to HEAD in index and files. Deletes new files in scope, '
+                "staged or not; ignored files stay. confirm=false previews; true executes. Dirty protected paths in "
+                "Ouroboros's own repository are refused."
             ),
             "parameters": {"type": "object", "properties": {
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo"], "default": "active_workspace", "description": "Omit for the active project workspace; use system_repo for Ouroboros source."},
@@ -1538,7 +1537,9 @@ from ouroboros.tools.git_plumbing import (  # noqa: E402,F401
     _publish_review_blocked,
     _release_git_lock,
     _sanitize_git_error,
+    _staged_index,
     _unstage_binaries,
+    _unstage_candidate,
 )
 
 

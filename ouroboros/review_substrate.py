@@ -85,8 +85,11 @@ class _CustodyUsageContext:
         setattr(object.__getattribute__(self, "_target"), name, value)
 
 
-def review_repo_dirs_for(ctx: Any) -> tuple[pathlib.Path, pathlib.Path]:
-    """Return validated ``(governance, subject)`` roots for plan/scope review."""
+def review_repo_dirs_for(ctx: Any, *, task_folder_first: bool = False) -> tuple[pathlib.Path, pathlib.Path]:
+    """Return validated ``(governance, subject)`` roots for plan/scope review. ``task_folder_first``
+    (``plan_ask.planning_roots``) puts a task's explicit workspace or room folder ahead of a bound candidate;
+    an unavailable room is then refused, never replaced."""
+    from ouroboros.tool_access import project_room_lens_dir
     from ouroboros.tools.registry import active_repo_dir_for
 
     workspace_raw = getattr(ctx, "workspace_root", None)
@@ -99,9 +102,10 @@ def review_repo_dirs_for(ctx: Any) -> tuple[pathlib.Path, pathlib.Path]:
     governance = (system or pathlib.Path(getattr(ctx, "repo_dir"))).resolve(strict=False)
     from ouroboros import body_candidate
 
-    # The bound candidate is what the context authors and commits: it stays the subject
-    # even when the task also carries a workspace/project folder as its active root.
-    subject_raw = body_candidate.descriptor(ctx).get("path") if body_candidate.is_bound(ctx) else None
+    # The bound candidate is what the context authors and commits, so it is the subject here
+    # unless the caller keeps the task's own folder first (its checkout is then not required).
+    own_folder = task_folder_first and (workspace is not None or project_room_lens_dir(ctx) is not None)
+    subject_raw = body_candidate.descriptor(ctx).get("path") if body_candidate.is_bound(ctx) and not own_folder else None
     subject = pathlib.Path(subject_raw or active_repo_dir_for(ctx)).resolve(strict=False)
     if not governance.is_dir() or not subject.is_dir():
         raise ValueError(f"unavailable governance/subject root: {governance} / {subject}")
