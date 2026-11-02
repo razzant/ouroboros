@@ -643,7 +643,8 @@ def test_project_shade_lists_only_its_room_and_survives_disconnect(direct_server
                 page.wait_for_selector(f"#panel-pchat-{second['id']}", state="attached", timeout=30_000)
                 other = _wait_facts(page, "project", lambda f: f["exists"], "the other Project's control")
                 evidence.record("switched", other)
-                assert other["disabled"] and not other["rows"], other
+                # A Project's title always opens its list (its whole name heads it), so the empty one stays enabled.
+                assert not other["disabled"] and not other["rows"], other
                 assert page.locator(f"#panel-pchat-{first['id']}").count() == 0
                 evidence.shot(page, "03-other-project")
 
@@ -655,12 +656,13 @@ def test_project_shade_lists_only_its_room_and_survives_disconnect(direct_server
                 page.wait_for_timeout(1500)
                 after = _facts(page, "project")
                 evidence.record("after_finish", after)
-                if not after["disabled"]:
-                    page.locator("#project-panel .project-panel-bar .rw-trigger").click()
-                    after = _wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the Shade after finish")
-                    evidence.record("after_finish_open", after)
-                    assert all(r["slot"] == "latest" or r["settled"] for r in after["rows"]), after
-                    assert not any(r["more"] or r["resume"] or r["question"] for r in after["rows"]), after
+                # The title still opens the list after the work finished: at most its latest root, settled, no controls.
+                assert not after["disabled"], after
+                page.locator("#project-panel .project-panel-bar .rw-trigger").click()
+                after = _wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the Shade after finish")
+                evidence.record("after_finish_open", after)
+                assert all(r["slot"] == "latest" or r["settled"] for r in after["rows"]), after
+                assert not any(r["more"] or r["resume"] or r["question"] for r in after["rows"]), after
                 evidence.shot(page, "04-project-after-finish")
                 assert _decision_posts(log) == []
                 assert log["pageerrors"] == [], log["pageerrors"]
