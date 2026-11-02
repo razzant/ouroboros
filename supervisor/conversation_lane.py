@@ -85,14 +85,36 @@ def lane_carriers(pool: Any = None) -> list:
     return [slot for slot in lane_slots(pool) if is_worker_slot(slot)]
 
 
-def ready_idle_carrier() -> Any:
-    """Under Q: the reserved spare, a READY idle lane carrier nothing else holds, or None."""
+def idle_carriers() -> list:
+    """Under Q: the READY idle lane carriers nothing else holds, in slot order."""
     from supervisor.worker_pool_lifecycle import worker_ready
 
-    for slot in lane_carriers():
-        if (slot.busy_task_id is None and worker_ready(slot) and not slot.retiring
-                and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", "")):
-            return slot
+    return [slot for slot in lane_carriers()
+            if slot.busy_task_id is None and worker_ready(slot) and not slot.retiring
+            and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", "")]
+
+
+def owner_turn(task: Dict[str, Any]) -> bool:
+    """A turn the reserved spare is for: the owner's Main or room turn (and its auto-resume) and a Presence
+    turn a correspondent waits on (FINAL_PLAN §3: the spare is the conversation lane's). A consciousness wake
+    is not (owner decision 4A, packet A6): it takes another idle carrier or starts its own."""
+    from ouroboros.consciousness_authority import wake_cause
+
+    return not wake_cause(task.get("metadata"))
+
+
+def ready_idle_carrier(*, for_owner: bool = True) -> Any:
+    """Under Q: a READY idle lane carrier for this turn, or None.
+
+    The owner's turn takes any idle carrier, the reserved spare included. Another focus (a wake,
+    a Presence turn) takes an idle carrier only while one remains for the owner: the last idle
+    carrier is the spare and stays, so the owner's next turn never waits for a boot behind a wake.
+    """
+    idle = idle_carriers()
+    if not idle:
+        return None
+    if for_owner or len(idle) > 1:
+        return idle[0]
     return None
 
 
@@ -154,7 +176,7 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     pool.RUNNING[task_id] = meta
     # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn.
     queue.publish_queue_snapshot(reason="conversation_turn_admitted")
-    slot = None if hold_carrier else ready_idle_carrier()
+    slot = None if hold_carrier else ready_idle_carrier(for_owner=owner_turn(task))
     if slot is not None:
         hand_to_carrier(meta, slot)
     return meta
@@ -198,11 +220,9 @@ def dispatch_awaiting_turns() -> int:
     from supervisor.inline_carrier import EXECUTOR_INLINE_DEGRADED, refused_carrier_reason, start_inline_turn
 
     moved = 0
-    for meta in awaiting_turns():
-        slot = ready_idle_carrier()
-        if slot is None:
-            break
-        if hand_to_carrier(meta, slot):
+    for meta in awaiting_turns():  # a wake waiting for the spare never holds up the owner's turn behind it
+        slot = ready_idle_carrier(for_owner=owner_turn(meta["task"]))
+        if slot is not None and hand_to_carrier(meta, slot):
             moved += 1
     waiting = awaiting_turns()
     if waiting and not any(w.booting and w.busy_task_id is None for w in lane_carriers()):
@@ -236,9 +256,13 @@ def reconcile_conversation_lane() -> None:
 
     pool = _pool()
     with _queue_lock:
-        if not armed() or not pool.WORKERS or pool.repo_writer_admission_closed():
+        if not armed() or not pool.WORKERS:
             return
+        # A marker window forbids a spawn, never a waiting turn's carrier (a spare that finished booting)
+        # or its degraded executor: the turns are looked at first, the window decides growth below.
         dispatch_awaiting_turns()
+        if pool.repo_writer_admission_closed():
+            return
         carriers = lane_carriers()
         if any(getattr(slot, "readiness_exhausted", False) for slot in carriers):
             return
@@ -269,6 +293,25 @@ def reconcile_conversation_lane() -> None:
 # ---------------------------------------------------------------------------
 # census and frames
 # ---------------------------------------------------------------------------
+
+def replenish_after_claim() -> None:
+    """A turn was admitted: reconcile the lane now, not at the next tick (owner decision 4A) — the spare a
+    claim took is replaced, a waiting turn's own carrier is started.
+
+    Outside Q (the caller's admission transaction has ended). The lifecycle serializer is taken
+    without waiting: a tick or a stop that holds it reconciles the lane itself.
+    """
+    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
+
+    if not armed() or not _WORKER_LIFECYCLE_LOCK.acquire(blocking=False):
+        return
+    try:
+        reconcile_conversation_lane()
+    except Exception:
+        log.exception("Conversation lane replenishment after a claim failed")
+    finally:
+        _WORKER_LIFECYCLE_LOCK.release()
+
 
 def lane_turn_rows() -> List[Dict[str, Any]]:
     """``active_direct_turns`` rows for the lane's RUNNING turns (the registry's shape), by value.

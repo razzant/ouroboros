@@ -55,7 +55,9 @@ def test_spawn_states_no_proxy_only_for_a_forked_child():
     for method, expected in (("spawn", False), ("forkserver", False), ("fork", True)):
         captured.clear()
         worker_process.spawn_worker_process(Ctx(method), 0, None, None, "/repo", "/data")
-        assert captured[0][-1] is expected, method
+        # The flag rides only with a forked child; a spawned child keeps the seven-argument entry
+        # (``worker_main``'s ``transport_no_proxy`` defaults), so every stub of the entry stays valid.
+        assert (len(captured[0]) == 8 and captured[0][-1] is True) if expected else len(captured[0]) == 7, method
 
 
 def test_presence_post_task_reads_the_admission_fact_not_the_process():

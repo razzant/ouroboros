@@ -342,7 +342,11 @@ def task_execution_observation(
     snapshot = queue_snapshot if queue_snapshot is not None else _load_queue_snapshot(root)
     queue_seen = queue_snapshot_observation(snapshot)
     queued, _task = _queue_task_status(snapshot, tid)
-    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED}:
+    # The queue never owns a Presence turn: its body runs in a conversation-lane carrier (or the
+    # disclosed degraded executor), whose liveness is observed locally (below) or proven by its
+    # controller, never by a snapshot row a dead carrier left published. A pooled or direct row keeps
+    # the queue-ownership reading (restore relies on it to dedup a live direct root's running row).
+    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED} and kind != "presence":
         return {**observation, **queue_seen, "kind": "pooled", "state": "active",
                 "reason": "queue_ownership", "status": queued}
     try:
@@ -1114,7 +1118,13 @@ def effective_task_result(
         queue_snapshot = (reads.queue_snapshot(drive_root) if reads is not None
                           else _load_queue_snapshot(pathlib.Path(drive_root)))
         queue_status, queue_task = _queue_task_status(queue_snapshot, task_id)
-        if queue_status and queue_status != "unknown":
+        # The queue never owns a Presence turn (its body runs in a conversation-lane carrier or the
+        # disclosed degraded executor, admitted to a RUNNING snapshot row): a stale lane row a dead
+        # carrier left behind must not read as live ownership and mask the turn's own end fact. Its
+        # liveness is the carrier/controller's, decided below exactly as the Host work view decides it.
+        _meta = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
+        presence_turn = isinstance(_meta.get("presence"), dict)
+        if queue_status and queue_status != "unknown" and not presence_turn:
             merged["status"] = _merge_queue_status(parent_status, queue_status, queue_task)
             from ouroboros.project_admission import project_hold_fact
             from ouroboros.work_stop import task_current_stop

@@ -1233,29 +1233,38 @@ def spawn_workers(n: int = 0) -> None:
 
 
 @_serialized_worker_lifecycle
-def _partition_slots_for_stop(lanes: Optional[frozenset]) -> tuple:
-    """Under Q: the slots a stop owns (marked ``reaping``) and the RUNNING rows it spares.
+def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
+    """Under Q: the slots a stop owns, marked ``reaping``.
 
-    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the
-    stop). A project fence spares the conversation carriers' rows and the conversation
-    rows still awaiting a carrier: popped here, restored by ``kill_workers`` at its end.
+    ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
     """
-    doomed = [w for w in WORKERS.values() if lanes is None or w.lane in lanes]
+    doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
     if lanes is None:
         from supervisor import conversation_lane
 
         conversation_lane.arm(None)
-    spared_ids = {w.busy_task_id for w in WORKERS.values() if w not in doomed and w.busy_task_id}
-    spared_rows = {tid: meta for tid, meta in RUNNING.items()
-                   if tid in spared_ids or (lanes is not None and LANE_CONVERSATION not in lanes
-                                            and isinstance(meta, dict) and meta.get("lane") == LANE_CONVERSATION)}
-    for tid in spared_rows:
-        RUNNING.pop(tid, None)
     for w in doomed:
         # The timeout reaper's ownership mark: assignment, the health check
         # and the crash detector skip the slot while it is torn down.
         w.reaping = True
-    return doomed, spared_rows
+    return doomed
+
+
+def _spare_rows_for_stop(lanes: Optional[frozenset], doomed: List[Worker]) -> Dict[str, Dict[str, Any]]:
+    """Under the SAME Q hold as the stop's terminalization: the RUNNING rows the stop spares, popped.
+
+    A project fence spares the rows of the slots it does not own and every conversation-lane row,
+    the ones awaiting a carrier and the ones admitted while the doomed slots were torn down outside
+    Q included: a lane turn is never failed by a project stop. ``kill_workers`` restores them at its end.
+    """
+    spared_ids = {w.busy_task_id for w in WORKERS.values() if w not in doomed and w.busy_task_id}
+    lane_spared = lanes is not None and LANE_CONVERSATION not in lanes
+    spared_rows = {tid: meta for tid, meta in RUNNING.items()
+                   if tid in spared_ids or (lane_spared and isinstance(meta, dict)
+                                            and meta.get("lane") == LANE_CONVERSATION)}
+    for tid in spared_rows:
+        RUNNING.pop(tid, None)
+    return spared_rows
 
 
 def _tear_down_slots(doomed: List[Worker]) -> None:
@@ -1334,12 +1343,15 @@ def kill_workers(
                 _WORKER_POOL_DISABLED_REASON = previous_disable_reason
                 log.error("Worker shutdown blocked: disable fence was not durable")
                 return False
-        doomed, spared_rows = _partition_slots_for_stop(lanes)
-        cleared_running = len(RUNNING)
+        doomed = _partition_slots_for_stop(lanes)
     # Kill and join OUTSIDE the queue lock: the lifecycle serializer still
     # excludes pool starts and kills, and ingress/stop doors are not held.
     _tear_down_slots(doomed)
     with _queue_lock:
+        # The spared rows are chosen under THIS hold, the one the terminalization below runs under:
+        # a lane turn admitted during the teardown is spared with the rest.
+        spared_rows = _spare_rows_for_stop(lanes, doomed)
+        cleared_running = len(RUNNING)
         dead_pids, unconfirmed_pids = _confirm_dead_slots(doomed)
         for w in doomed:
             if WORKERS.get(w.wid) is w:

@@ -144,10 +144,19 @@ def test_an_inline_turn_that_dies_before_its_result_store_keeps_its_conversation
 
     room.h.script = [bind_then_finish]
     monkeypatch.setattr(pipeline, "_store_task_result", die)
-    dying = TestClient(create_host_service_app(room.data, presence_runner=lambda **kw: run_presence_turn(
-        repo_dir=room.h.repo, drive_root=room.data, agent_factory=room.h.factory, **kw))).__enter__()
-    with pytest.raises(WorkerDeath):  # that Host dies with the turn; nothing closes it
-        turn(room, client=dying)
+    # The body runs in the disclosed degraded executor now (owner decision 2A): a death in its own
+    # thread does not take the Host with it. The executor catches it and reports a settlement, so the
+    # Host answers a typed retry; the store write never happened, so the row below is still running and
+    # the already-stamped delivery stands — the same facts the synchronous Host left, now disclosed.
+    payload = {"event": {"source_event_id": "chat:a:1", "provider": "chat", "account_id": "a",
+                         "conversation_id": "r", "thread_id": "", "conversation_key": "ignored-by-host",
+                         "actor": {"platform_actor_id": "person"}, "conversation": {},
+                         "message": {"message_id": "chat:a:1"}, "text": "Please check the three services.",
+                         "facts": ["mention"]}, "delivery_reporting_version": 1}
+    with TestClient(create_host_service_app(room.data, presence_runner=lambda **kw: run_presence_turn(
+            repo_dir=room.h.repo, drive_root=room.data, agent_factory=room.h.factory, **kw))) as dying:
+        reply = dying.post("/presence/turn", json=payload, headers=HEADERS)
+        assert reply.status_code == 500 and "WorkerDeath" in reply.json()["error"], reply.text
     tid, calls, result = room.h.agents[-1].tools._ctx.task_id, room.h.calls, stamped[-1]
     spoken = ("message", FINAL) if case in {"speech", "paused_since"} else ("silent", "")
     assert (result["outcome"], result["text"]) == spoken and bool(result["output_ref"]) == (spoken[0] == "message")

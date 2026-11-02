@@ -408,7 +408,29 @@ def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str
         row = json.loads(_intake_path(drive_root, task_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return bool(row.get("accepting")) and (not conversation_key or row.get("conversation_key") == conversation_key)
+    if not row.get("accepting") or (conversation_key and row.get("conversation_key") != conversation_key):
+        return False
+    # The fact is the writer's: a carrier that died before its release left it standing, and a dead
+    # author reads no mail (an arrival appended to it would be swallowed). Its process must be alive.
+    return _writer_alive(row.get("pid"))
+
+
+def _writer_alive(pid: Any) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive, another user's
+    except OSError:
+        return False
+    return True
 
 
 def _write_intake(drive_root: Any, task_id: str, row: dict) -> None:

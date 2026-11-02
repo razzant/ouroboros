@@ -791,6 +791,19 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
         return chosen_idx, False
 
 
+def _reconcile_fenced_lane() -> None:
+    """The conversation lane is independent of the project pool's crash fuse (FINAL_PLAN §2, the
+    11.10 recovery channel). Under the fence ``assign_tasks`` returns before ``reconcile_worker_capacity``,
+    the lane's only other caller, so the lane is reconciled here: a waiting turn is dispatched, a
+    refused spawn noticed, the degraded executor started. Lifecycle serializer held by the caller."""
+    from supervisor.conversation_lane import reconcile_conversation_lane
+
+    try:
+        reconcile_conversation_lane()
+    except Exception:
+        log.exception("Conversation lane reconcile under the project fence failed")
+
+
 def assign_tasks() -> None:
     from supervisor import queue
     from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
@@ -805,6 +818,8 @@ def assign_tasks() -> None:
         return
     try:
         maintain_owner_wait_capacity()
+        if _pool()._WORKER_POOL_DISABLED_REASON:
+            _reconcile_fenced_lane()
     finally:
         _WORKER_LIFECYCLE_LOCK.release()
     _tick_parked_work(queue)  # custody observation may wait on a remote operation

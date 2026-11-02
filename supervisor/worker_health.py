@@ -285,6 +285,13 @@ def recover_confirmed_dead_worker(job: dict) -> None:
     w, task_id, task = job["worker"], job["task_id"], job["task"]
     root = pathlib.Path(job["drive_root"])
     _pool()._reconcile_confirmed_dead_review_owner(int(getattr(w.proc, "pid", 0) or 0))
+    if task_id and isinstance(task, dict) and task.get("_presence_turn"):
+        try:  # the dead carrier was a Presence author: its intake fact dies with it
+            from ouroboros.conversation_lease import close_author_intake
+
+            close_author_intake(root, task_id)
+        except Exception:
+            log.debug("author intake of %s not closed after its carrier died", task_id, exc_info=True)
     if task_id and task:
         try:
             from ouroboros.tools.services import archive_task_service_logs

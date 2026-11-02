@@ -172,3 +172,82 @@ def test_a_remote_author_accepts_mail_only_while_its_durable_intake_is_open(tmp_
     # (``presence_runner.run_presence_turn``), after the wait scope closed: never inside the agent's release.
     close_author_intake(root, "author-1")  # closing twice is quiet
     assert not author_intake_accepting(root, "author-1", "key-1")
+
+
+_REAL_THREAD = __import__("threading").Thread  # the pool fixture stubs the lifecycle's threads; the inline carrier needs one
+
+
+def test_without_a_pool_generation_the_host_turn_runs_on_the_disclosed_degraded_executor(pool, tmp_path, monkeypatch):
+    """A process with no started pool generation (a Host serving alone, a server before its first spawn or
+    after a whole-table stop) is a physical fact (2A): the body runs on this process's thread as
+    ``inline_degraded``, disclosed in the row and the vitals, and its own frames resolve the Host's waiter."""
+    from supervisor import inline_carrier, message_bus
+
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", None)  # no generation is armed here
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("a Presence body needs no native agent"))
+    monkeypatch.setattr(inline_carrier, "threading", SimpleNamespace(Thread=_REAL_THREAD))
+    monkeypatch.setattr(inline_carrier, "_INLINE", type(inline_carrier._INLINE)(maxlen=50))
+    monkeypatch.setattr(inline_carrier, "_DEGRADED_TOTAL", [0])
+    monkeypatch.setattr(message_bus, "_BRIDGE", SimpleNamespace(send_chat_action=lambda *a, **k: None,
+                                                                 broadcast=lambda m: None, push_log=lambda *a, **k: None))
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
+    (pool.root / "logs").mkdir(parents=True, exist_ok=True)
+    admission, event = _admission(), _event()
+    from ouroboros import presence_admission
+    monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **kw: admission)
+    ran = []
+
+    def runner(**kwargs):
+        ran.append(kwargs)
+        return PresenceTurnResult(outcome="message", text="Hi", task_id=kwargs["admitted"].conversation_key and "x")
+
+    presence_carrier.set_presence_runner(pool.root, runner)
+    try:
+        registry = PresenceTurnExecutions()
+        turn_id = presence_runner.presence_turn_task_id(admission.binding_id, event.source_event_id)
+        execution, started = registry.start_or_dispatch(
+            turn_id, identity="id-u", reserve=lambda: True, release=lambda: None,
+            dispatch=lambda execution: dispatch_presence_turn(
+                execution, drive_root=pool.root, skill_name="telegram-bot", admission=admission, event=event,
+                event_payload=_payload(event), staged_files=[], gate_wait=True))
+        assert started
+        assert execution.result.result(timeout=10).text == "Hi"  # settled by the executor's own frame
+        assert ran and ran[0]["carrier_owner"]["executor"] == "inline_degraded"
+        assert turn_id not in workers.RUNNING and registry.find(turn_id) is None
+        vitals = inline_carrier.inline_vitals()
+        assert vitals["degraded_total"] == 1 and vitals["inline_executions"][-1]["reason"] == "pool_not_started"
+        assert vitals["inline_executions"][-1]["task_id"] == turn_id
+    finally:
+        presence_carrier.set_presence_runner(pool.root, None)
+        for slot in list(workers.WORKERS.values()):
+            if getattr(slot.proc, "join", None) and slot.proc.pid is None:
+                slot.proc.join(5)
+
+
+def test_a_dead_carriers_intake_accepts_nothing_and_the_rows_end_closes_it(tmp_path):
+    """A carrier that died before its release leaves ``accepting: true`` behind: the fact is its writer's, so a
+    dead writer accepts nothing (an arrival would be swallowed), and the row's end in the server closes it."""
+    import json
+    import subprocess
+    import sys
+
+    from ouroboros.conversation_lease import author_intake_accepting, open_author_intake
+
+    root = tmp_path
+    (root / "memory" / "owner_mailbox").mkdir(parents=True)
+    open_author_intake(root, "author-dead", "key")
+    assert author_intake_accepting(root, "author-dead", "key")
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()  # reaped: its pid names no process now
+    path = root / "memory" / "owner_mailbox" / "author-dead.intake.json"
+    row = json.loads(path.read_text())
+    row["pid"] = gone.pid
+    path.write_text(json.dumps(row))
+    assert not author_intake_accepting(root, "author-dead", "key"), "a dead writer reads no mail"
+    open_author_intake(root, "author-live", "key")
+    assert author_intake_accepting(root, "author-live", "key")
+    handle_presence_turn_settled({"turn_id": "author-live", "physical_id": "author-live", "error": None, "result": None},
+                                 SimpleNamespace(RUNNING={}, WORKERS={}, DRIVE_ROOT=root))
+    assert not author_intake_accepting(root, "author-live", "key")
+    assert not (root / "memory" / "owner_mailbox" / "author-live.intake.json").exists()

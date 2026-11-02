@@ -306,7 +306,20 @@ from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional pu
 from supervisor.worker_owner_wait import handle_owner_wait  # noqa: E402
 from supervisor.worker_pool_lifecycle import handle_worker_quiescent  # noqa: E402
 from supervisor.conversation_lane import handle_direct_turn_bound, handle_direct_turn_phase, handle_task_named  # noqa: E402
-from ouroboros.presence_carrier import handle_presence_turn_initial, handle_presence_turn_settled  # noqa: E402
+
+
+def handle_presence_turn_initial(evt: Dict[str, Any], ctx: Any) -> None:
+    """A carrier published a continuing author's initial envelope (lazy: the dispatcher does not import Presence)."""
+    from ouroboros.presence_carrier import handle_presence_turn_initial as handler
+
+    handler(evt, ctx)
+
+
+def handle_presence_turn_settled(evt: Dict[str, Any], ctx: Any) -> None:
+    """A carrier's Presence turn ended: its Host waiter, row and slot are released (lazy, as above)."""
+    from ouroboros.presence_carrier import handle_presence_turn_settled as handler
+
+    handler(evt, ctx)
 
 from supervisor.events_mind_controls import handle_mind_task_control
 
