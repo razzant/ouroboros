@@ -75,8 +75,10 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last capture
 # written. Captures are numbered under Q too (``capture_seq``): the number decides which of two
 # captures is newer, whatever their revisions (a tick captures without a bump). Census: the last
-# census WRITTEN, never a census merely captured, so a failed write is retried by the next tick;
-# while a write has failed, the certificate is not refreshed over the stale document.
+# census WRITTEN, never a census merely captured. A failed write leaves the bundle on disk unknown
+# (torn or old) with its certificate revoked: from then on the publisher owes a fresh capture and a
+# complete rewrite of every document under a new generation, whatever the bytes say against the last
+# cache, and ``write_failed`` clears only when that write lands; no certificate is written meanwhile.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "capture_seq": 0, "published_seq": 0, "write_failed": False,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
@@ -181,11 +183,15 @@ def publish_queue_changes() -> Optional[bool]:
     published = _queue().QUEUE_PUBLICATION
     direct_moved = published is not None and published[1].get("direct_roots.json") != machine_json(direct)
     with _queue()._queue_lock:
+        if _kept_by_memo():
+            return None  # the saved queue is still kept: decided once, not copied or counted again
         # The census: what the rows publish without a transition (worker reports mutate RUNNING in place
         # with no mark). One small identity per tick, so a changed fact is published and an unchanged
-        # live set still captures, serializes and writes nothing.
+        # live set still captures, serializes and writes nothing. A failed write is itself a reason to
+        # publish: the bundle on disk is unknown until a complete rewrite lands (R2).
         census = _census()
-        moved = _STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
+        moved = (_STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
+                 or _STATE["write_failed"])
         capture = _capture(_STATE["reason"] or "main_loop", direct, census=census) if moved else None
     if not moved:
         return _refresh_alive()
@@ -235,23 +241,33 @@ def _census() -> str:
     return machine_json([rows, _pool_counts()])
 
 
+def _custody_key() -> tuple:
+    """Under Q: what the kept decision depends on (the revision, and whether a restore owns the saved queue)."""
+    from supervisor.queue_snapshot import _RESTORED, _RESTORING
+
+    key = str(_queue().QUEUE_SNAPSHOT_PATH.absolute())
+    return (_STATE["revision"], key in _RESTORED, _RESTORING.get(key))
+
+
+def _kept_by_memo() -> bool:
+    """Under Q: the saved queue was decided kept at this same custody, so nothing is copied or counted."""
+    return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
+
+
 def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
+    if _kept_by_memo():
+        return None
     census = _census() if census is None else census
     _STATE["capture_seq"] += 1
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
     budget_root_fences = [_frozen(row) for row in _queue().BUDGET_ROOT_FENCES.values()]
-    key = str(_queue().QUEUE_SNAPSHOT_PATH.absolute())
-    from supervisor.queue_snapshot import _RESTORED, _RESTORING
-
-    custody = (_STATE["revision"], key in _RESTORED, _RESTORING.get(key))
-    if _STATE["kept"] == custody or _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
-                                                       acceptance_fences, budget_root_fences, (direct or {}).get("roots")):
-        if _STATE["kept"] != custody:
-            log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
-        _STATE["kept"] = custody
+    if _keeps_saved_queue(_queue().QUEUE_SNAPSHOT_PATH, pending_items, running_items,
+                          acceptance_fences, budget_root_fences, (direct or {}).get("roots")):
+        log.info("Queue snapshot kept (reason=%s): this process has not taken the saved queue into custody", reason)
+        _STATE["kept"] = _custody_key()
         return None
     pending_rows = []
     for t in pending_items:
@@ -404,8 +420,13 @@ def _publish(capture: Dict[str, Any]) -> bool:
     with _PUBLISH_LOCK:
         previous = _queue().QUEUE_PUBLICATION
         if previous is not None and _STATE["published_seq"] > capture["seq"] and not capture["forced"]:
-            return True  # a later capture of this process already published newer documents
-        changed = previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
+            # A later capture already published newer documents; while a later write failed, the bundle on
+            # disk is unknown, so that publication is no durability for this caller either.
+            return not _STATE["write_failed"]
+        # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
+        # so every document is rewritten under a new generation and certified (R2/R3-A).
+        changed = (previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
+                   or _STATE["write_failed"])
         generation = uuid.uuid4().hex if changed else previous[2]
         state = _queue().QUEUE_SNAPSHOT_PATH.parent
         try:
@@ -445,6 +466,8 @@ def _refresh_alive() -> Optional[bool]:
     if not _alive_due(heartbeats):
         return True
     with _PUBLISH_LOCK:
+        if _STATE["write_failed"]:
+            return False  # a barrier failed while this refresh was in flight: its revoked certificate stays revoked (R3-B)
         if _queue().QUEUE_PUBLICATION is not published:
             return True  # a publication landed meanwhile and certified itself
         try:
