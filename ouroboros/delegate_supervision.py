@@ -1035,7 +1035,11 @@ def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
     in the engine catalog. A capability, never a liveness verdict; an unreadable
     catalog, an unknown route or a read slower than one beat is ``unknown`` (never a
     refusal, and nothing is read on the wake path). A row without the field is an
-    engine that has no live-input channel at all: ``none``."""
+    engine that has no live-input channel at all: ``none``. One catalog read (the engine's
+    full harness doctor) per exact engine build serves every later wait
+    (``claudexor_run_events.declared_live_input``)."""
+    from ouroboros.gateways.claudexor_run_events import declared_live_input
+
     try:
         _status, entry = custody.lookup(
             custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)
@@ -1046,15 +1050,13 @@ def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
     if reader is None:
         return "unknown"
     try:
-        catalog = reader.agent_capabilities(timeout_sec=_TICK_SEC)
-        row = next((item for item in (catalog.get("harnesses") or [])
-                    if isinstance(item, dict) and item.get("id") == route), None)
+        value = declared_live_input(reader, route, timeout_sec=_TICK_SEC)
     except Exception:
-        row = None
+        value = None
     finally:
         if reader is not gateway:
             _drop_gateway(reader)
-    return "unknown" if row is None else str(row.get("liveInput") or "none")
+    return "unknown" if value is None else value
 
 
 def _since_last_model_response_sec(ctx: Any) -> Optional[float]:
@@ -1220,6 +1222,9 @@ def supervised_wait(
     # Holding the run is a wait, never this task's own work; what the run does is its
     # recorded observation (``observed_run_activity``, DESIGN §9 Telegram typing).
     hold_key, hold_until, activity = "delegate:" + ",".join(run_ids), 0.0, None
+    from ouroboros.delegate_progress import HoldLease
+
+    lease = HoldLease(ctx)  # the hold's one idle-rail lease, renewed only before it would lapse
     selected_index = 0
     try:
         while True:
@@ -1244,6 +1249,7 @@ def supervised_wait(
             else:
                 if owns_transport and gateway is None:
                     gateway = _loop_gateway()
+                lease.renew(run_id)
                 raw = wait_once(ctx, run_id, _TICK_SEC, int(state.get("journal_cursor") or 0),
                                 **({"gateway": gateway} if gateway is not None else {}))
             payload, readable = _payload(raw, run_id)
@@ -1393,6 +1399,7 @@ def supervised_wait(
             if resumed:
                 model_sleep.announce_resumed(ctx)  # the held run works again, as recorded: no new start says so
     finally:
+        lease.release()
         if hold_until:
             model_sleep.end_in_slot_wait(ctx, hold_key)
         _drop_gateway(gateway)

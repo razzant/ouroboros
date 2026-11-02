@@ -448,17 +448,14 @@ def test_an_unreadable_card_is_disclosed_with_the_owners_words(tmp_path):
 
 def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monkeypatch):
     """Main / no live root: the late answer starts an ordinary owner turn whose
-    task carries the late_answer provenance; the model's first user content (and
-    therefore the run's initial owner directive) is the rebuilt frame, while the
-    owner's row stays their words. A turn without that provenance is unchanged."""
-    import queue as queue_mod
-
-    import supervisor.workers as workers
+    task carries the late_answer provenance; the carrier's first step rebuilds the
+    frame, so the model's first user content (and therefore the run's initial owner
+    directive) is the rebuilt frame, while the owner's row stays their words. A turn
+    without that provenance is unchanged."""
     from ouroboros.context import build_user_content
+    from tests.test_attachment_staging import carried_turn
 
     block = _answered_late(tmp_path, option_index=1, comment="prod parity")
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue_mod.Queue())
 
     class _Agent:
         task = None
@@ -468,7 +465,7 @@ def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monke
             return []
 
     agent = _Agent()
-    workers._run_chat_task(agent, 1, "prod parity", None, task_metadata={
+    carried_turn(monkeypatch, tmp_path, agent, 1, "prod parity", None, task_metadata={
         "client_message_id": "quiz_late_answer:task-1:q1",
         "late_answer": {"task_id": "task-1", "quiz_id": "q1"},
     })
@@ -480,7 +477,7 @@ def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monke
     assert "Owner comment (verbatim): prod parity" in content
 
     plain = _Agent()
-    workers._run_chat_task(plain, 1, "prod parity", None, task_metadata={"client_message_id": "m-2"})
+    carried_turn(monkeypatch, tmp_path, plain, 1, "prod parity", None, task_metadata={"client_message_id": "m-2"})
     assert plain.task["text"] == "prod parity"
 
 

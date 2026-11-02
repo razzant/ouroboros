@@ -394,8 +394,8 @@ def reconcile_transport_wait(
         unknown = unknown_again
         if msg_present or (error_kind != "transport_unavailable" and not unknown and not refused):
             return None
-        from ouroboros.task_carrier import inline_execution
-        interactive = inline_execution(ctx)
+        from ouroboros.task_carrier import conversation_origin
+        interactive = conversation_origin(ctx)  # the owner's foreground turn, carried or inline
         episode = TransportWaitEpisode(
             wait_cause=error_kind,
             outcome_custody=dict((getattr(ctx, "_accumulated_usage", {}) or {}).get("_pending_transport_outcome") or {}),

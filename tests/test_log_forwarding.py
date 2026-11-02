@@ -502,14 +502,15 @@ def test_turn_event_queue_stamps_by_value_at_the_producer():
     named.put_nowait({"type": "log_event", "data": {"type": "tool_call_started", "task_id": "turn2", "tool": "run_command"}})
     assert fired == [1]
 
-    # The execution half of the direct lane installs the proxy around
-    # agent.handle_task (admission registers the turn; execution runs it).
+    # The carrier's body installs the endpoint around agent.handle_task (the
+    # admission writes the turn's row; the carrier runs it with the turn's hooks).
     import inspect
 
-    from supervisor.worker_chat_lane import _execute_chat_task
+    from supervisor.worker_process import run_worker_task
 
-    src = inspect.getsource(_execute_chat_task)
-    assert "_TurnEventQueue" in src and "agent._event_queue = turn_queue" in src
+    src = inspect.getsource(run_worker_task)
+    assert "task_event_queue(out_q, task" in src and "runner._event_queue = task_queue" in src
+    assert "carrier_turn.hooks()" in src
 
 
 def test_llm_usage_explicit_zero_survives_running_row(production_sink, monkeypatch):

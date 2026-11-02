@@ -49,7 +49,8 @@ rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
 request carries the newest open row. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
 strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
-The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py.
+The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py. The law's second axis,
+every recurring pass against the live set rather than history, is tests/test_cost_live_set.py.
 """
 
 from __future__ import annotations
@@ -123,8 +124,9 @@ def _child(module: str, args: List[str], env: Dict[str, str], log: pathlib.Path)
     assert done.returncode == 0, f"{module} exited {done.returncode}:\n{(done.stdout + done.stderr)[-6000:]}"
 
 
-def measure(base: pathlib.Path, k: int) -> Dict[str, Any]:
-    """Build the k-root in one interpreter, then boot and query it in another (cold)."""
+def measure(base: pathlib.Path, k: int, **plan: Any) -> Dict[str, Any]:
+    """Build the k-root in one interpreter, then boot and query it in another (cold); ``plan``: what the driver
+    measures instead of the contract's boundaries (the live-set axis, tests/test_cost_live_set.py)."""
     home = base / f"k{k:03d}"
     root, repo = home / "data", home / "repo"
     root.mkdir(parents=True)
@@ -132,11 +134,11 @@ def measure(base: pathlib.Path, k: int) -> Dict[str, Any]:
     # The delegated copies live under the worktree root the build and the boot both name (tests/_scale_root.py).
     env = {**os.environ, "OUROBOROS_DATA_DIR": str(root), "OUROBOROS_SETTINGS_PATH": str(root / "settings.json"),
            "OUROBOROS_REPO_DIR": str(repo), "OUROBOROS_HOST_SERVICE_PORT": "0",
-           "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(worktree_root(root))}
+           "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(worktree_root(root)), "COST_STORE_JOURNAL": str(plan.get("journal") or "")}
     facts_path, spec_path, out_path = home / "facts.json", home / "spec.json", home / "measured.json"
     _child("tests._scale_root", [str(root), str(k), str(facts_path)], env, home / "build.log")
     facts = json.loads(facts_path.read_text(encoding="utf-8"))
-    spec_path.write_text(json.dumps({"root": str(root), "facts": facts}), encoding="utf-8")
+    spec_path.write_text(json.dumps({"root": str(root), "facts": facts, **plan}), encoding="utf-8")
     _child("tests._cost_driver", [str(spec_path), str(out_path)], env, home / "drive.log")
     measured = json.loads(out_path.read_text(encoding="utf-8"))
     assert not measured["errors"], f"k={k}: the driver failed:\n" + "\n".join(measured["errors"])
@@ -348,12 +350,15 @@ def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measur
     """L2. An integrating turn makes the same round trips and decodes the same dialogue rows at k=1 and k=30:
     Main's (the process's first, the next one, one after activity elsewhere) and a project room's direct turn,
     which integrates as a root task does (BIBLE P1: the whole horizon stays resident there, so its view holds
-    every room's story and a line per live room). Its payload is free: an integrating view shows its story."""
+    every room's story and a line per live room). Its payload is free: an integrating view shows its story. The
+    transactions ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing)
+    bring their statements, as in L3; a read per unit of history still adds 29 transactions."""
     large = measured["large"]
     little, big = at_request(measured, tag, K_SMALL), at_request(measured, tag, large)
     keys = (*ROUND, "rows_decoded")
-    hold_turn_law("L2", tag, _growth(little, big, keys), dict.fromkeys(keys, COUNT_JITTER), readers_of(little, big),
-                  scale=(large - K_SMALL) / 29)
+    per_begin = little["counts"].get("statements", 0) / max(1, little["counts"].get("begins", 0))
+    allowed = {**dict.fromkeys(keys, COUNT_JITTER), "statements": math.ceil(per_begin * COUNT_JITTER)}
+    hold_turn_law("L2", tag, _growth(little, big, keys), allowed, readers_of(little, big), scale=(large - K_SMALL) / 29)
 
 
 @pytest.mark.parametrize("law, tag, before, step", [
@@ -546,14 +551,12 @@ COMPANION_COUNTERS = {
     "question_delivery_replay": ("writes",),
     "terminal_delivery_replay": ("open",),
     "cancel_intent_sweep": ("writes",),
-}
-COMPANIONS_NOT_BUILT = {
-    "pause_notice_replay": "a pause notice obligation needs a parked episode's fence and its notice row",
-    "post_task_synthesis_recovery": "a pending root synthesis dispatches a model turn (refused here)",
-    "held_continuation_recheck": "a writer-held Continue needs a pending continuation under queue custody",
-    "cold-custody": "sleep custody needs a live actor in the queue or the direct registry",
-    "owner_pause_settlement": "a requested owner pause stops members through the daemon (absent here)",
-    "schedule-admission": "a due schedule admits a task into the queue the held supervisor never serves",
+    "owner_pause_settlement": ("writes",),
+    "cold-custody": ("writes",),
+    "schedule-admission": ("writes",),
+    "held_continuation_recheck": ("writes",),
+    "pause_notice_replay": ("writes",),
+    "post_task_synthesis_recovery": ("writes",),
 }
 
 
@@ -617,9 +620,8 @@ def test_b7_each_duty_works_again_when_its_input_changes(measured, name):
             assert work > rest, (name, k, counter, rest, work, measured[k]["duties"][name].get("companion"))
 
 
-def test_b7_every_duty_has_a_companion_or_a_named_reason():
-    assert set(DUTY_NAMES) == set(COMPANION_COUNTERS) | set(COMPANIONS_NOT_BUILT)
-    assert not set(COMPANION_COUNTERS) & set(COMPANIONS_NOT_BUILT)
+def test_b7_every_duty_has_a_companion():
+    assert set(DUTY_NAMES) == set(COMPANION_COUNTERS)
 
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=_gap(BOUNDARY_GAPS, tag)) for tag in BOUNDARIES])

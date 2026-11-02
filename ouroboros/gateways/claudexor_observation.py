@@ -34,11 +34,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+log = logging.getLogger(__name__)
 
 WAIT_MANY_OPERATION = ("POST", "/v2/runs/wait-many")
 # The contract probe's target: a run id no engine can own, acknowledged (``seen: null``) with a
@@ -62,6 +66,36 @@ WAKE_REASONS = frozenset({"attention", "problems", "timeout", "aborted"})
 # same-build restart keeps it). The catalog itself is the event stream module's shared one.
 _SUPPORT: Dict[Tuple[str, str], bool] = {}
 _SUPPORT_LOCK = threading.Lock()
+_RUN_READ = re.compile(r"/v2/runs/[^/]+")
+_ABSENT_RUN_SITES: set = set()  # the code sites seen asking for a run the engine did not know
+
+
+def tag_absent_run_read(response: Any, error: Any) -> None:
+    """Name the code that read a run the engine does not know — a diagnostic, never a verdict.
+
+    ``GET /v2/runs/:id`` answered 404 95,697 times on 01.11 (~2.9/s) from a poller nobody could
+    name. The 404 proves nothing about the run here: completion, custody and ownership stay with
+    their owners (``delegate_custody.daemon_says_absent`` decides absence on its own terms). The
+    refusal carries ``caller_site``, the innermost frames outside the gateway package and the
+    standard library, and each distinct site is logged once per process, so the caller is found
+    without a line per poll."""
+    try:
+        request = response.request
+        if response.status_code != 404 or request.method != "GET" or not _RUN_READ.fullmatch(request.url.path):
+            return
+        frames, frame = [], sys._getframe(1)
+        while frame is not None and len(frames) < 3:
+            module = str(frame.f_globals.get("__name__", ""))
+            if not (module.startswith("ouroboros.gateways") or module == "ouroboros.observability"
+                    or module.split(".")[0] in sys.stdlib_module_names):
+                frames.append(f"{module}:{frame.f_code.co_name}:{frame.f_lineno}")
+            frame = frame.f_back
+        error.caller_site = " < ".join(frames)
+        if error.caller_site not in _ABSENT_RUN_SITES:
+            _ABSENT_RUN_SITES.add(error.caller_site)
+            log.info("Claudexor answered 404 to GET /v2/runs/:id (a run it does not know) for %s", error.caller_site)
+    except Exception:
+        log.debug("absent-run read was not tagged", exc_info=True)  # the refusal stands as raised
 
 
 class ClaudexorObservationGateway:

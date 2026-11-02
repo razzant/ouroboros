@@ -568,6 +568,9 @@ def _finish_task_done_dispatch(
             if not getattr(ctx.WORKERS[worker_id], "reaping", False):
                 ctx.WORKERS[worker_id].busy_task_id = None
     if task_id:
+        from ouroboros.presence_carrier import settle_ended_turn
+
+        settle_ended_turn(str(task_id))  # the row is released: a Host waiter its carrier never settled settles now
         try:
             clear_acceptance_fence_for_root(str(task_id))
         except Exception:
@@ -979,8 +982,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             _events()._resolve_lifecycle_fault(evt, ctx, _evt_status)
             return
     recovery = meta.get("_terminal_file_recovery") or {}
-    from ouroboros.task_carrier import inline_execution
-    if task and not (inline_execution(task) or _evt_status == STATUS_INTERRUPTED):
+    from ouroboros.task_carrier import conversation_origin
+    if task and not (conversation_origin(task) or _evt_status == STATUS_INTERRUPTED):  # a turn owes no files
         if prepared_attempt is None or (recovery and not recovery.get("event_sent")):
             from supervisor.task_reaper import enqueue_terminal_file_recovery
 

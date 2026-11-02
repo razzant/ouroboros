@@ -355,6 +355,40 @@ def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str
         raise ValueError(f"{noun} is unreadable or invalid: task:{task_id}")
 
 
+def load_task_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
+    """Many results in ONE read transaction (``task_store.documents_by_ids``), each strictly admitted.
+
+    A reader over every live root pays one round trip however many roots live. An unreadable store is
+    one aggregate fact (``{"_unavailable": exc}``); a row the strict admission refuses is named on its
+    own entry (``{"_refused": exc}``), never read as an absent result. Absent ids are absent keys."""
+    from ouroboros.task_store import documents_by_ids
+
+    if not task_ids:
+        return {}
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[task_id] = validate_task_id(task_id)
+        except ValueError:
+            valid[task_id] = ""
+    try:
+        documents = documents_by_ids(drive_root, sorted({tid for tid in valid.values() if tid}))
+    except Exception as exc:
+        return {"_unavailable": exc}
+    results: Dict[str, Any] = {}
+    for task_id, tid in valid.items():
+        data = documents.get(tid) if tid else None
+        if data is None:
+            continue
+        try:
+            _admit_stored(data, tid, strict=True, noun="task result authority")
+        except Exception as exc:
+            results[task_id] = {"_refused": exc}
+            continue
+        results[task_id] = _normalize_swarm_efficiency(data)
+    return results
+
+
 def list_task_results(
     drive_root: Any,
     *,

@@ -207,7 +207,10 @@ def test_census_lists_the_author_in_its_room_with_stop_only_and_no_queue_row(roo
     assert work["room"] == seen["chat"] and _actions(work) == ["stop"]
     # The positive control, read in the same body: the filter is the author's, never a phase's.
     assert {"pause", "stop"} <= set(_actions(_work(works, "direct-control")))
-    assert seen["handover"] == (["direct-control"], ["direct-control"])
+    # The restart handover is untouched by the census: the control stays a live direct turn; the direct-roots
+    # fragment names nothing on this tree (every live focus is a RUNNING row of the queue snapshot; a
+    # registry-only control has no lane row), the retired fragment's empty residual.
+    assert seen["handover"] == ([], ["direct-control"])
     # Main's own room gains nothing: the author's work is its conversation's, then its Project's.
     assert all(str(work.get("room")) != "1" for work in works["works"] if work["work_id"] == task_id)
     # Once the turn ended, the census drops the author and nothing else stands for it.

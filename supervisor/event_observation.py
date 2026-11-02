@@ -10,7 +10,9 @@ with these facts kept under its own mutex and nothing else:
   any exists, else the oldest telemetry event, FIFO inside each lane, so a
   backlog of worker telemetry can never sit in front of an answer or a control
   (owner decision, 14 Oct 2026). Producers keep one ``put``; the single
-  supervisor consumer keeps one bounded ``get`` loop. Nothing is re-put.
+  supervisor consumer takes one bounded batch per drain pass in that same order
+  (``drain``: one manager round trip, not one per event) and hands an unserved
+  tail back to the front of its lanes (``restore_front``). Nothing is re-put.
 * **Pending idle inputs.** The bounded drain cannot conclude idleness while a
   fact that may change that decision is still queued, in either lane. This
   index counts only pending envelopes; it neither folds activity nor grants a
@@ -27,7 +29,7 @@ with these facts kept under its own mutex and nothing else:
 * **Lane depth and age.** Each envelope keeps the manager process's own
   monotonic stamp of its put; ``lane_facts`` answers per lane how many wait
   and how long the oldest has (the per-minute ``supervisor_load`` row reads
-  it), one process and one clock. A re-put envelope ages from its new put.
+  it), one process and one clock. A restored envelope keeps its first stamp.
 """
 from __future__ import annotations
 
@@ -98,14 +100,47 @@ class ObservedEventQueue(queue.Queue):
         if delivery_id:
             self._outstanding[delivery_id] += 1
 
-    def _get(self) -> Any:
+    def _take(self) -> tuple:
         lane = self._lanes[CONTROL_LANE] or self._lanes[TELEMETRY_LANE]
-        item, addresses, _put_at = lane.popleft()
+        item, addresses, put_at = lane.popleft()
         for address in addresses:
             self._pending[address] -= 1
             if not self._pending[address]:
                 del self._pending[address]
-        return item
+        return item, put_at
+
+    def _get(self) -> Any:
+        return self._take()[0]
+
+    def drain(self, max_items: int) -> list:
+        """Up to ``max_items`` envelopes ``(event, put_at)`` in ONE call, in the order that many
+        consecutive ``get`` calls would serve them now: control lane first, FIFO in each lane.
+
+        The consumer's one manager round trip per drain pass (cost law L11; one ``get_nowait``
+        per event paid ~940 proxy round trips a minute on 01.11). ``put_at`` is this bus's own
+        put stamp, opaque to the consumer: ``restore_front`` keeps the lane ages exact with it.
+        The idle-input index forgets what is taken exactly as ``get`` does; delivery membership
+        is untouched (the consumer releases each send after its handler, as before).
+        """
+        with self.mutex:
+            taken = [self._take() for _ in range(min(max(0, int(max_items)), self._qsize()))]
+            if taken:
+                self.not_full.notify(len(taken))
+        return taken
+
+    def restore_front(self, envelopes: list) -> None:
+        """Hand back the unserved tail of a ``drain``: each envelope returns to the FRONT of its
+        lane, in its order, with its own put stamp and its idle-input addresses, ahead of
+        everything put since — as if it had never been taken. Used when a drain pass stops at
+        its time bound or a handler raises; no producer put happens, membership was never released.
+        """
+        with self.mutex:
+            for item, put_at in reversed(list(envelopes)):
+                addresses = idle_input_addresses(item)
+                self._lanes[event_lane(item)].appendleft((item, addresses, put_at))
+                self._pending.update(addresses)
+            if envelopes:
+                self.not_empty.notify(len(envelopes))
 
     def pending_idle_inputs(self) -> set[str]:
         """One atomic snapshot of addresses with an unconsumed idle input, both lanes."""

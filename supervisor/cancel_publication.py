@@ -439,12 +439,12 @@ def _publish_cancelled_task(
         return CANCEL_FAILED  # Publication/cleanup cannot outrun terminal source custody.
 
     settled_status = str((stored or {}).get("status") or STATUS_CANCELLED)
-    # The row leaves RUNNING only NOW — death confirmed, terminal result durable; its #939 clock closes first.
-    # A natural task_done that raced us may have consumed the row already (it closed the clock and emitted the
-    # terminal event), so whoever pops the row owns the emit and the card resolves exactly once.
-    record_execution_close(q.DRIVE_ROOT, task_id, task, q.RUNNING.get(task_id))
+    # The row leaves RUNNING only NOW (death confirmed, result durable; its #939 clock closes first), custody's own
+    # only (its reaping slot's): a raced task_done consumed it and owns the emit; a newer row is another attempt's.
+    row = q.RUNNING.get(task_id) if (q.RUNNING.get(task_id) or {}).get("worker_id", worker.wid) == worker.wid else None
+    record_execution_close(q.DRIVE_ROOT, task_id, task, row)
     with q._queue_lock:
-        row_owned = q.RUNNING.pop(task_id, None) is not None
+        row_owned = row is not None and q.RUNNING.get(task_id) is row and q.RUNNING.pop(task_id) is row
     try:
         from ouroboros.tools.services import archive_task_service_logs
         archive_task_service_logs(pathlib.Path(q.DRIVE_ROOT), str(task_id), task)

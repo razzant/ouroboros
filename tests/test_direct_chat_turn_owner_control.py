@@ -1,18 +1,21 @@
-"""Owner-control addressability of the in-process direct-chat turn.
+"""Owner-control addressability of a direct-chat turn an INLINE EXECUTOR runs in the server process.
 
-The class (rc.7 QA regress, item 010): a self-modification typed into the
-chat runs as a DIRECT-CHAT TURN — minted by ``worker_chat_lane.py`` with an
-8-hex id and executed on the long-lived chat agent inside the supervisor,
-never through the queue. ``agent.py`` writes its ordinary durable
-``running`` row, so ``GET /api/tasks?status=running`` listed it while every
-queue-keyed owner control (cancel, hurry, decisions) answered 404 "task not
+The class (rc.7 QA regress, item 010): a self-modification typed into the chat ran as a
+DIRECT-CHAT TURN on an actor inside the supervisor, never through the queue. ``agent.py``
+writes its ordinary durable ``running`` row, so ``GET /api/tasks?status=running`` listed
+it while every queue-keyed owner control (cancel, hurry, decisions) answered 404 "task not
 found or not active" and the spend kept growing until ``/restart``.
 
-The contract pinned here: ``supervisor.workers.direct_chat_turn`` is the ONE
-reader every ingress, the ownership predicate and the graceful-stop episode
-resolve a live direct turn through — so a turn the task list shows as
-running is addressable, and custody stops it COOPERATIVELY (the finalize
-control on the canonical owner mailbox; there is no worker process to kill).
+Today an owner turn is carried by a conversation-lane worker and its Stop is the pooled
+custody of its RUNNING row (``tests/test_conversation_lane_laws.py``, E9). A registered
+in-process actor remains the shape of the two disclosed inline executors — a live
+realtime call (``executor=inline_call``) and the degraded carrier (``inline_degraded``) —
+which run the worker body on a thread of the server and register their actor in the
+``DirectActivityRegistry``. The contract pinned here is theirs: ``supervisor.workers.direct_chat_turn``
+is the ONE reader every ingress, the ownership predicate and the graceful-stop episode
+resolve such a turn through — so a turn the task list shows as running is addressable,
+and custody stops it COOPERATIVELY (``inline_carrier.stop_direct_chat_turn``: the finalize
+control on the canonical owner mailbox, armed under the actor's admission lock).
 
 The two ``orphan`` cases at the top pin the Stop of a durable running row
 that NOTHING owns (no queue row, no worker, no live chat turn): the intent is
@@ -73,8 +76,8 @@ def _write_snapshot(tmp_path, running_ids=()):
 
 
 def _live_chat_agent(monkeypatch, task_id=TURN_ID, *, accepting=True, chat_id=0):
-    """The chat agent mid-turn, shaped exactly as agent.py leaves it (the
-    fields steering.py and workers.chat_turn_liveness read)."""
+    """An inline executor's actor mid-turn, shaped exactly as agent.py leaves it (the fields
+    steering.py and workers.chat_turn_liveness read), registered as ``start_inline_turn`` registers it."""
 
     import threading
 

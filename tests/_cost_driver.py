@@ -65,6 +65,9 @@ Boundaries (tags in the output):
   history they must not reread is laid after the import, untagged, and the install brought to the
   steady state its maintenance child and its boot keep (the stored tail facts, the recorded OpenRouter
   catalogue, the archive listing; tests/_turn_shapes.py).
+
+A spec's ``plan`` measures something else on the same booted process instead of these boundaries: ``live_set`` every recurring pass
+as the live set grows (tests/_live_set.py), ``stand`` the production shape and the owner's turns over it (tests/_stand.py).
 """
 
 from __future__ import annotations
@@ -83,7 +86,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 from tests._cost_meter import BOUNDARY, CostMeter, tag_of, tagged
-from tests._scale_root import CURRENT, money, spend_limit_usd, terminal_detail
+from tests._scale_root import CURRENT, force_store_journal, money, spend_limit_usd, terminal_detail
 
 READY_TIMEOUT_SEC = 240.0  # the transport bound of this measurement, not a judgment about the boot
 # The supervisor is held before its first tick, and the body's driver parked, for the whole measurement;
@@ -222,14 +225,25 @@ class _NoProcess:
 
 def _stub_duty_effects(result: Dict[str, Any]) -> Dict[str, Any]:
     """What the duty passes must not reach: the daemon (every gateway read refuses typed, as an
-    install without one answers), the maintenance child's process (its spawn is recorded) and the
-    body's own driver clock (parked; the pass drives the tick and advances the clock itself)."""
-    from ouroboros import claudexor_daemon, delegate_collection, maintenance
+    install without one answers), the maintenance child's process (its spawn is recorded), the body's
+    own driver clock and the lifespan's reconcile pickup (parked; a pass drives them and advances the
+    clock itself) and a process behind the event bus."""
+    from ouroboros import claudexor_daemon, delegate_collection, extension_reconcile_queue, maintenance
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from supervisor import workers
+    from supervisor.event_observation import ObservedEventQueue
+
+    async def pickup_parked(*_args, **_kwargs):
+        await asyncio.Event().wait()  # until the lifespan cancels it: a pass measures the markers, not a race with its loop
+
+    extension_reconcile_queue.extension_reconcile_pickup_loop = pickup_parked
 
     def no_daemon(*_args, **_kwargs):
         raise ClaudexorUnavailable("daemon_unreachable", "cost contract: no daemon on these boundaries")
 
+    # The bus the spawned pool would have created: without it the duties that hand work to it fail before their first
+    # read, and a duty that cannot run rests by default. Nothing drains it here: the supervisor is held.
+    workers._EVENT_Q = ObservedEventQueue()
     claudexor_daemon.read_owned_gateway = no_daemon
     claudexor_daemon.ensure_owned_gateway = no_daemon
     maintenance.spawn_maintenance_job = lambda data_root, repo_dir, purpose, **_k: (
@@ -452,6 +466,32 @@ def _addressed_stream(root: pathlib.Path, result: Dict[str, Any]) -> None:
 _UPDATE_IDS = iter(range(9_000_000, 10_000_000))
 
 
+def no_carrier_can_start() -> None:
+    """No worker starts in this measurement, and a turn's body must run where it is counted: the physical fact the
+    conversation lane's disclosed degraded carrier answers to (a tree without the lane runs every turn here anyway). Called
+    once the boot is over: a pool generation starts with no refusal on record."""
+    try:
+        from supervisor import conversation_lane
+    except ImportError:
+        return
+    conversation_lane._SPAWN_REFUSED[0] = "cost contract: no worker process here"
+
+
+def _lane_rows_ended() -> None:
+    """A turn this driver ended at its first request sends no ``task_done``: its lane row, if the tree has lanes, ends here,
+    or every later turn would count it among the live roots."""
+    try:
+        from supervisor.conversation_lane import conversation_row
+    except ImportError:
+        return
+    from supervisor import queue
+
+    with queue._queue_lock:
+        for task_id, meta in list(queue.RUNNING.items()):
+            if conversation_row(meta):
+                queue.RUNNING.pop(task_id, None)
+
+
 def _owner_turn(srv: Any, ctx: Any, chat_id: int, message_id: str) -> int:
     """One owner message as the supervisor loop handles it (``server._handle_bridge_update_batch``): the state
     read, the canonical inbound row, the routing pre-pass and the direct turn it starts on its own thread, which
@@ -486,7 +526,15 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
     # history, it would make two turns' counts depend on the milliseconds between them. B10 runs without that
     # window; a file's identity (inode, size, nanosecond times) still names every write the turns meet here.
     utils._RACY_NS = skill_identity._RACY_NS = 0
+    no_carrier_can_start()
     ctx, k = _event_ctx(srv), int(facts.get("k") or 1)
+
+    def breadth() -> Dict[str, Any]:
+        from supervisor import queue
+
+        laid = shapes.grow_breadth(root, shapes.BREADTH)
+        queue.persist_queue_snapshot(reason="breadth")  # the tick publishes what it holds: a roster reads the document
+        return laid
 
     def activity() -> Dict[str, Any]:
         _completion(root, "turn", k)
@@ -498,7 +546,7 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
         return grown
 
     shape_steps = {"history": lambda: shapes.turn_history(root, k), "steady": lambda: shapes.steady_state(root),
-                   "activity": activity, "breadth": lambda: shapes.grow_breadth(root, shapes.BREADTH), "rows": rows,
+                   "activity": activity, "breadth": breadth, "rows": rows,
                    "archive": lambda: shapes.archive_history(root, shapes.ARCHIVED)}
     plan = ["history", "steady", "census", ("T:main", 1), ("T:mainw", 1), "activity", ("T:main:foreign", 1),
             ("T:room", int(facts["late_chat_id"]))]
@@ -517,6 +565,7 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
             tag, chat_id = step
             _boundary(meter, result, tag, lambda chat_id=chat_id, index=index: _owner_turn(
                 srv, ctx, chat_id, f"cost-turn-{index}"), timeout=600.0)
+            _lane_rows_ended()
 
 
 def _duty_rows(sm: Any) -> List[Any]:
@@ -630,16 +679,15 @@ def _body_pass(runtime: Any, tick: Callable[..., Any]) -> None:
 
 
 def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str, Callable[[], str]]:
-    """One addressed input change per duty, after whose arrival the duty has work again. Each returns
-    what it changed. A duty without one is listed with the reason in tests/test_cost_contract.py."""
+    """One addressed input change per duty, after whose arrival the duty has work again (the live set's own six in
+    tests/_live_set.py). Each returns what it changed."""
     from ouroboros import delegate_custody as custody
-    from ouroboros import maintenance_jobs, owner_quiz
+    from ouroboros import maintenance_jobs, owner_quiz, store
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.delegate_collection import observe_run
     from ouroboros.late_review_marks import OWED_SET
     from ouroboros.task_results import write_task_result
     from supervisor.terminal_delivery import delivery_id_for, register_pending_delivery
-    from ouroboros import store
 
     companion = facts["companion"]
 
@@ -696,9 +744,11 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
         request_cancel(root, "cur-cancel-me", reason="cost contract", source="owner", requested_by="owner")
         return "an open cancel intent for a task nobody runs"
 
+    from tests._live_set import companions as live_set_companions
+
     return {"delegated-body": body, "abandoned_usage_reconciliation": late_body, "custody-maintenance": owed_projection,
             "reconcile-maintenance": owed_mark, "maintenance-child": child_job, "question_delivery_replay": question,
-            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel}
+            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, **live_set_companions(root)}
 
 
 def _completion(root: pathlib.Path, who: str, _k: int) -> None:
@@ -814,6 +864,27 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
                child.request if duty.name == "maintenance-child" else (lambda: None))
 
 
+def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str, Any], root: pathlib.Path,
+                      facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
+    from ouroboros import utils
+
+    utils._RACY_NS = 0  # a file within a clock tick of its write proves nothing and ends a probe early: bounded by time, not by history
+    _chat_frame(meter, client, result, "B4", "cost-contract-1")
+    _request(meter, client, result, "B3", "GET", "/api/state")
+    _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
+    _request(meter, client, result, "R_late", "GET", f"/api/chat/history?chat_id={facts['late_chat_id']}")
+    _chat_frame(meter, client, result, "B4w", "cost-contract-2")
+    _request(meter, client, result, "B3w", "GET", "/api/state")
+    _request(meter, client, result, "R_activew", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
+    _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel", json={"cascade": True})
+    _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
+    if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
+        _heartbeats(root)
+        _measure_boundaries(meter, srv, result, root, facts)
+        _measure_duties(meter, srv, result, root, facts, stubs)
+    _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
+
+
 def run(spec: Dict[str, Any]) -> Dict[str, Any]:
     root = pathlib.Path(spec["root"])
     result: Dict[str, Any] = {"facts": spec.get("facts", {}), "errors": [], "_started": time.monotonic()}
@@ -828,6 +899,7 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
 
         import server as srv
 
+        force_store_journal()
         _mark(result, "imported")
         _stub_external_effects(srv, result, meter)
         stubs = _stub_duty_effects(result)
@@ -868,21 +940,16 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
                 BOUNDARY.reset(token)
             try:
                 facts = spec.get("facts", {})
-                _chat_frame(meter, client, result, "B4", "cost-contract-1")
-                _request(meter, client, result, "B3", "GET", "/api/state")
-                _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
-                _request(meter, client, result, "R_late", "GET", f"/api/chat/history?chat_id={facts['late_chat_id']}")
-                _chat_frame(meter, client, result, "B4w", "cost-contract-2")
-                _request(meter, client, result, "B3w", "GET", "/api/state")
-                _request(meter, client, result, "R_activew", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
-                _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel",
-                         json={"cascade": True})
-                _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
-                if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
-                    _heartbeats(root)
-                    _measure_boundaries(meter, srv, result, root, facts)
-                    _measure_duties(meter, srv, result, root, facts, stubs)
-                _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
+                if spec.get("plan") == "live_set":  # the live-set axis grows the set on this booted root instead
+                    from tests import _live_set
+
+                    _live_set.measure(meter, srv, client, result, root, spec, stubs)
+                elif spec.get("plan") == "stand":  # the production-shaped stand: that set, the rooms and the turns
+                    from tests import _stand
+
+                    _stand.measure(meter, srv, client, result, root, spec, stubs)
+                else:
+                    _measure_contract(meter, srv, client, result, root, facts, stubs)
             finally:
                 result["process_at_end"] = _all_counts(meter)
                 if stubs:

@@ -485,8 +485,8 @@ def _handle_budget_exceeded(
                 physical_calls = None
     except Exception:
         log.exception("Could not inspect task attempts after budget rail")
-    from ouroboros.task_carrier import inline_execution
-    direct_chat = inline_execution(ctx.tools._ctx)
+    from ouroboros.task_carrier import conversation_origin
+    direct_chat = conversation_origin(ctx.tools._ctx)  # the owner's foreground turn, in whichever process
     replay_safe = physical_calls == 0 and not direct_chat
     scope = str(getattr(exc, "limit_scope", "global") or "global")
     resource_limit = {

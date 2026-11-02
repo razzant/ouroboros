@@ -9,12 +9,20 @@ name; the dialogue and usage stores share ``store.transaction``) and per ``read`
 ``count``, ``failed``, ``total_sec``, ``cpu_sec`` (the holding thread's own CPU: wall minus it is
 time spent holding the lock while waiting for the GIL, a core or a lock), ``max_sec`` and
 ``max_site``, the code site (``module:function:line``) of the window's longest hold, the first frame
-outside the store modules, and ``sites``: the ``TOP_SITES`` sites with the most summed hold, each
-with the same counts, with ``sites_omitted`` saying how many sites that cut left out of the row.
-``drain()`` returns the window as ``{kind: {"read": {...}, "write": {...}}}``
-(only buckets with a count) and resets it: the per-minute diagnostics row publishes it. Nothing here
-writes to disk, takes a store lock or raises into the caller: a failure inside the hook is swallowed
-and the transaction's outcome stands.
+outside the store modules. ``drain()`` returns it as ``{kind: {"read": {...}, "write": {...}}}`` (only
+buckets with a count) and resets it: the per-minute row in the journal whose tail every context reads.
+
+The site table is a window of its own, because it weighs what the code's call paths weigh (36 to 42 KB
+for a busy minute on the stand), not what a row a minute in that journal can: every site that held a
+lock, most summed hold first, each with the same counts. It is bounded by the distinct sites the code
+has, not by a cut: when one reader is hidden by a cut, its share is what nobody can read (40 to 48 of 43
+to 51 sites were invisible behind a top three during the 01.11 saturation). A site's ``chains`` attribute
+it to who called it: one ``{"chain", "count", "total_sec"}`` per distinct call chain, whose tag
+(``_call_chain``) is the thread's class and the site's nearest first-party callers, so a site reached by
+a duty, a request and a turn says how much each of them spent. ``drain_sites()`` returns it as
+``{kind: {"read": [...], "write": [...]}}`` and resets it, on its publisher's own cadence
+(``server_liveness._publish_store_sites``). Nothing here writes to disk, takes a store lock or raises
+into the caller: a failure inside the hook is swallowed and the transaction's outcome stands.
 
 ``metered()`` scopes a second, private count to one unit of work on the calling context (an owner
 turn on its thread; a ``ContextVar``, the ``store._WAIT_BUDGET`` idiom): the same transactions as
@@ -27,18 +35,24 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
+import re
 import sys
 import threading
 import time
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Tuple
 
 KINDS = {"current.sqlite": "current", "dialog.sqlite": "dialog", "usage.sqlite": "usage"}
 # The frames the site skips: the store transport, not the owner that opened the transaction.
 _STORE_FRAMES = frozenset({"store.py", "store_timing.py", "store_hot_facts.py", "store_task_cards.py", "task_store.py",
                            "dialogue_store.py", "usage_store.py", "store_capture.py", "contextlib.py"})
-TOP_SITES = 3  # sites per bucket in the published row: the row's size bound (one row a minute), not a policy
+# A call chain's tag names this many first-party callers above the site: its shape, enough to tell the callers
+# of one site apart in a row a minute (the thread's class says which duty or request reached them), not a policy.
+CHAIN_CALLERS = 2
+_OWN_PACKAGES = frozenset({"ouroboros", "supervisor", "server", "__main__"})  # whose frames can name a caller
+_INSTANCE_TOKEN = re.compile(r"[-_ ]?[^-_ ]*\d[^-_ ]*")  # ``asyncio_12``, ``wake-turn-8f3a``: an instance, not a class
 _LOCK = threading.Lock()
 _WINDOW: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_SITES: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}  # kind -> side -> site -> counts and chains
 _METER: contextvars.ContextVar = contextvars.ContextVar("store_timing_meter", default=None)
 # The hold clock: high resolution on every OS (``time.monotonic`` ticks at ~15.6 ms on Windows, where a short hold
 # would measure 0.0); the holding thread's own CPU beside it.
@@ -68,18 +82,24 @@ def record(conn: Any, write: bool, since: tuple, *, failed: bool = False) -> Non
         held, cpu = clock() - since[0], max(0.0, cpu_clock() - since[1])
         kind = getattr(conn, "_store_kind", None) or "other"
         try:
-            site = _site()
+            site, chain = _site()
         except Exception:  # a site walk that fails still counts the hold
-            site = ""
+            site, chain = "", ""
+        hold = "write" if write else "read"
         with _LOCK:
-            bucket = _WINDOW.setdefault(kind, {}).setdefault("write" if write else "read", {**_bucket(), "max_site": "",
-                                                                                              "sites": {}})
-            for counts in (bucket, *((bucket["sites"].setdefault(site, _bucket()),) if site else ())):
+            bucket = _WINDOW.setdefault(kind, {}).setdefault(hold, {**_bucket(), "max_site": ""})
+            at_site = (_SITES.setdefault(kind, {}).setdefault(hold, {}).setdefault(site, {**_bucket(), "chains": {}})
+                       if site else None)
+            for counts in (bucket, *((at_site,) if at_site is not None else ())):
                 counts["count"] += 1
                 counts["failed"] += int(failed)
                 counts["total_sec"] += held
                 counts["cpu_sec"] += cpu
                 counts["max_sec"] = max(counts["max_sec"], held)
+            if at_site is not None:
+                by_chain = at_site["chains"].setdefault(chain, {"count": 0, "total_sec": 0.0})
+                by_chain["count"] += 1
+                by_chain["total_sec"] += held
             if held >= bucket["max_sec"]:
                 bucket["max_site"] = site
             meter = _METER.get()
@@ -122,25 +142,53 @@ def snapshot(meter: Any) -> Dict[str, Any]:
         return {key: round(value, 6) if isinstance(value, float) else value for key, value in meter.items()}
 
 
-def _site() -> str:
+def _site() -> Tuple[str, str]:
+    """The site that opened this transaction, the first frame outside the store modules, and its call chain."""
     frame = sys._getframe(1)
     while frame is not None and os.path.basename(frame.f_code.co_filename) in _STORE_FRAMES:
         frame = frame.f_back
-    return "" if frame is None else f"{frame.f_globals.get('__name__', '?')}:{frame.f_code.co_name}:{frame.f_lineno}"
+    if frame is None:
+        return "", ""
+    return f"{frame.f_globals.get('__name__', '?')}:{frame.f_code.co_name}:{frame.f_lineno}", _call_chain(frame.f_back)
+
+
+def _call_chain(frame: Any) -> str:
+    """Who reached a site: ``<thread class>: <caller> < <its caller>``, innermost first. The thread's class is its
+    name without instance tokens (a duty's thread carries the duty's name, ``asyncio_12`` is the HTTP executor); a
+    caller is a first-party ``module:function``, the module's last name kept (the stdlib and the dependencies
+    between two first-party frames name nobody). Distinct chains are bounded by the code's call paths."""
+    callers = []
+    while frame is not None and len(callers) < CHAIN_CALLERS:
+        module = str(frame.f_globals.get("__name__", ""))
+        if module.partition(".")[0] in _OWN_PACKAGES:
+            callers.append(f"{module.rpartition('.')[2]}:{frame.f_code.co_name}")
+        frame = frame.f_back
+    return f"{_INSTANCE_TOKEN.sub('', threading.current_thread().name)}: {' < '.join(callers)}"
 
 
 def _rounded(counts: Dict[str, Any]) -> Dict[str, Any]:
     return {key: round(value, 6) if isinstance(value, float) else value for key, value in counts.items()}
 
 
+def _published_site(site: str, counts: Dict[str, Any]) -> Dict[str, Any]:
+    chains = sorted(counts["chains"].items(), key=lambda item: -item[1]["total_sec"])
+    return {"site": site, **_rounded({key: value for key, value in counts.items() if key != "chains"}),
+            "chains": [{"chain": chain, **_rounded(facts)} for chain, facts in chains]}
+
+
 def drain() -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """The window since the last drain (seconds rounded to microseconds; per bucket the ``TOP_SITES``
-    sites by summed hold and the count of sites the cut left out), then an empty window."""
+    """The window since the last drain (seconds rounded to microseconds), then an empty window."""
     with _LOCK:
-        window = {kind: {side: {**_rounded({key: value for key, value in bucket.items() if key != "sites"}),
-                                "sites": [{"site": site, **_rounded(counts)} for site, counts in sorted(
-                                    bucket["sites"].items(), key=lambda item: -item[1]["total_sec"])[:TOP_SITES]],
-                                "sites_omitted": max(0, len(bucket["sites"]) - TOP_SITES)}
-                         for side, bucket in sides.items()} for kind, sides in _WINDOW.items()}
+        window = {kind: {side: _rounded(bucket) for side, bucket in sides.items()} for kind, sides in _WINDOW.items()}
         _WINDOW.clear()
     return window
+
+
+def drain_sites() -> Dict[str, Dict[str, list]]:
+    """Every site since the last drain of this table, most summed hold first, with its call chains; then an empty table."""
+    with _LOCK:
+        table = {kind: {side: [_published_site(site, counts) for site, counts in sorted(
+            sites.items(), key=lambda item: -item[1]["total_sec"])] for side, sites in sides.items()}
+            for kind, sides in _SITES.items()}
+        _SITES.clear()
+    return table
