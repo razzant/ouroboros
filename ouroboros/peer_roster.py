@@ -46,6 +46,7 @@ from ouroboros.dialogue_provenance import is_presence_task, presence_caller_bind
 from ouroboros.focus import compact_focus, focus_fingerprint
 from ouroboros.task_status import SETTLED_STATUSES, _load_queue_snapshot, queue_snapshot_observation
 from ouroboros.task_carrier import execution_kind
+from ouroboros.task_results import load_task_results
 from ouroboros.queue_observation import load_queue_document
 
 log = logging.getLogger(__name__)
@@ -352,11 +353,9 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task
 
 
 def _presence_task(task: Dict[str, Any]) -> bool:
-    """A Presence turn by its own facts: the lane's seed mark, or the stored row's provenance (``source``,
-    ``metadata.presence``) — an author started by the runner alone carries no seed mark."""
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    return bool(task.get("_presence_turn") or str(task.get("source") or "") == "presence"
-                or isinstance(metadata.get("presence"), dict))
+    """A Presence turn by its seed mark or its stored provenance (a runner-started author has no mark)."""
+    m = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return bool(task.get("_presence_turn") or task.get("source") == "presence" or isinstance(m.get("presence"), dict))
 
 
 def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bool = False,
@@ -364,8 +363,7 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
                   queue_row: Optional[Dict[str, Any]] = None,
                   trees: Optional[Dict[str, Dict[str, Any]]] = None,
                   results: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """One roster row. ``results`` is the ONE read of every listed root's stored result
-    (``_stored_results``): a turn reads its horizon in one transaction, never a root at a time."""
+    """One roster row; ``results``: every listed root's stored result from ONE read (``load_task_results``)."""
     row = {
         "task_id": task_id,
         "title": str(task.get("title") or "").strip(),
@@ -373,9 +371,7 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
         "project_id": str(task.get("project_id") or ""),
         "status": status,
         "drive_root": str(task.get("child_drive_root") or task.get("drive_root") or ""),
-        # A live direct conversation: the retired fragment's rows, and an attempt whose recorded owner is
-        # the owner's turn (``execution_kind``), wherever it runs. A Presence turn is a place's conversation,
-        # and a turn handed to the project pool (``continue_in_background``) is pooled work: neither is.
+        # The owner's live conversation wherever it runs: not a Presence turn, not a turn handed to the pool.
         "direct_chat": bool(direct or (execution_kind(task) == "direct" and not _presence_task(task))),
     }
     queue_row = queue_row if isinstance(queue_row, dict) else {}
@@ -387,15 +383,10 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
     stored: Dict[str, Any] = {}
     if canonical_root is not None:
         try:
-            if results is not None:
-                if results.get("_unavailable"):
-                    raise results["_unavailable"]
-                loaded = results.get(task_id)
-                if isinstance(loaded, dict) and loaded.get("_refused") is not None:
-                    raise loaded["_refused"]
-            else:
-                from ouroboros.task_results import load_task_result
-                loaded = load_task_result(pathlib.Path(canonical_root), task_id, strict=True)
+            loaded = (results or {}).get(task_id)
+            failure = (results or {}).get("_unavailable") or (loaded.get("_refused") if isinstance(loaded, dict) else None)
+            if failure is not None:
+                raise failure
             stored = loaded if isinstance(loaded, dict) else {}
             if stored.get("status"):
                 if str(stored.get("status")) in SETTLED_STATUSES:
@@ -452,42 +443,6 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
     return row
 
 
-def _stored_results(root: pathlib.Path, task_ids: List[str]) -> Dict[str, Any]:
-    """Every listed root's stored result in ONE read transaction (``task_store.documents_by_ids``):
-    the roster shows every live root and costs the turn one round trip, however many roots live
-    (B10: a Main turn reads pages, not roots). A store that cannot be read is one aggregate fact
-    (``_unavailable``) every row then discloses; a row the strict admission refuses
-    (``task_results._admit_stored``: an identity or status that does not bind) is named on ITS
-    row (``{"_refused": exc}``) and never reads as an absent result or an ended wait."""
-    from ouroboros.task_results import _admit_stored, _normalize_swarm_efficiency, validate_task_id
-    from ouroboros.task_store import documents_by_ids
-
-    if not task_ids:
-        return {}
-    valid: Dict[str, str] = {}
-    for task_id in task_ids:
-        try:
-            valid[task_id] = validate_task_id(task_id)
-        except ValueError:
-            valid[task_id] = ""
-    try:
-        documents = documents_by_ids(root, sorted({tid for tid in valid.values() if tid}))
-    except Exception as exc:
-        return {"_unavailable": exc}
-    results: Dict[str, Any] = {}
-    for task_id, tid in valid.items():
-        data = documents.get(tid) if tid else None
-        if data is None:
-            continue
-        try:
-            _admit_stored(data, tid, strict=True, noun="task result authority")
-        except Exception as exc:
-            results[task_id] = {"_refused": exc}
-            continue
-        results[task_id] = _normalize_swarm_efficiency(data)
-    return results
-
-
 def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Every host-listed active independent root, compact (id, title, room, status).
 
@@ -528,11 +483,10 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
             listed.append((task_id, row, "running", True, None))
     from ouroboros.conversation_lease import resolved_presence_turns
 
-    # Live Presence authors a move bound to a Project (the census reads wherever they run): their rows join the
-    # ONE read of every listed root's result, so the roster never pays one transaction per root (B10 L3).
+    # Live Presence authors moved to a Project join the ONE read of every listed root's result (B10 L3).
     presence = resolved_presence_turns(root)
     moved = [fact["task_id"] for fact in presence["roots"] if fact["state"] == "running" and fact["task_id"] not in seen]
-    results = _stored_results(root, [task_id for task_id, *_rest in listed] + moved)
+    results = load_task_results(root, [task_id for task_id, *_rest in listed] + moved)
     rows: List[Dict[str, Any]] = [
         _compact_root(task_id, task, status=status, direct=direct, canonical_root=root, queue_row=queue_row,
                       trees=trees, results=results)

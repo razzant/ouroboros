@@ -102,7 +102,7 @@ def _unreadable_results(monkeypatch, failing):
     from ouroboros import task_results
     from ouroboros.store import StoreBusy
 
-    real = task_results._admit_stored  # the roster's one read admits each row here (peer_roster._stored_results)
+    real = task_results._admit_stored  # the roster's one read admits each row here (task_results.load_task_results)
 
     def admit(data, task_id, *args, **kwargs):
         if str(task_id) in failing:
