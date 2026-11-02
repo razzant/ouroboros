@@ -537,8 +537,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             messages.append(notice)
         return receipt.status == "applied"
 
-    def _read_coverage(self) -> dict:
-        """Fold exact delivered intervals over the caller's complete required manifest.
+    def _read_coverage(self, manifest_key: str = "") -> dict:
+        """Fold exact delivered intervals over one complete declared manifest: ``manifest_key``, else the one
+        ``session_read_facts`` chooses, the required manifest when its key exists (an empty one included),
+        else the ``observed_sources`` the host only observes.
 
         Four states: ``unobserved`` when the surface declared no manifest at all,
         ``declared_empty`` (a complete coverage of nothing) when it declared an
@@ -546,16 +548,16 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         """
         from ouroboros.tool_access import resource_root_path
         policy = self.assignment.request.policy or {}
-        required = policy.get("native_required_sources")
-        if not isinstance(required, list):
+        manifest = policy.get(manifest_key or ("native_required_sources" if "native_required_sources" in policy else "observed_sources"))
+        if not isinstance(manifest, list):
             return {"status": "unobserved", "reason": "required_source_manifest_missing", "sources": []}
-        if not required:
+        if not manifest:
             return {"status": "complete", "reason": "declared_empty", "sources": [],
                     "required_source_count": 0}
         if self._inspection_ctx is None:
-            return {"status": "unobserved", "reason": "native_inspection_unavailable", "sources": required}
+            return {"status": "unobserved", "reason": "native_inspection_unavailable", "sources": manifest}
         rows = []
-        for source in required:
+        for source in manifest:
             row = dict(source) if isinstance(source, dict) else {"source": source}
             try:
                 total = row["complete_chars"]
@@ -598,21 +600,24 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._record_round_source()
         policy = self.assignment.request.policy or {}
         coverage = self._read_coverage()
+        required = "native_required_sources" in policy
+        # A required manifest (a paged brief creates its own) never hides what the host observed.
+        observed = {"observed_read_coverage": self._read_coverage("observed_sources")} if required and "observed_sources" in policy else {}
         if self._source_gap and coverage["status"] == "complete":
             coverage = {**coverage, "status": "incomplete", "reason": self._source_gap}
         history_ref = self._store_source("history", {
             "required_sources": policy.get("native_required_sources"),
-            "required_sources_ref": policy.get("native_required_sources_ref"),
+            "required_sources_ref": policy.get("native_required_sources_ref"), "observed_sources": policy.get("observed_sources"),
             "round_sources": self._round_source_refs, "read_receipts": self._tool_receipts,
-            "coverage": coverage, "view_changes": self._view_changes,
+            "coverage": coverage, **observed, "view_changes": self._view_changes,
         })
         if self._source_gap and coverage["status"] == "complete":
             coverage = {**coverage, "status": "incomplete", "reason": self._source_gap}
-        facts = {"native_read_coverage": coverage, "native_history_source": history_ref,
+        facts = {"native_read_coverage": coverage, **observed, "native_history_source": history_ref,
                  "native_view_changes": self._view_changes, "native_source_gap": self._source_gap}
         if self._initial_source:
             facts["native_initial_source"] = self._initial_source
-        if coverage["status"] == "incomplete":
+        if required and coverage["status"] == "incomplete":  # an observed source is no capability delta
             facts["native_incomplete"] = "required_source_coverage_incomplete"
         return facts
 
@@ -1007,9 +1012,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 required.append({"root": "artifact_store", "path": source["path"],
                                  **source_text_identity(self.episode_prompt.encode("utf-8")),
                                  "coverage_basis": "candidate_blob"})
-                policy["native_required_sources"] = required
                 ref = self._store_source("required-sources", required)
-                policy["native_required_sources_ref"] = ref
+                self.assignment = replace(self.assignment, request=replace(self.assignment.request, policy={  # this seat's own: a wave shares one request
+                    **policy, "native_required_sources": required, "native_required_sources_ref": ref}))
                 messages = native_first_send_messages(native_paged_prompt(paged_review_text(
                     self.episode_prompt, source, label="review brief", delegated=False), self._output_contract()), ref)
         return registry, schemas, messages, _wire_size(messages, schemas)

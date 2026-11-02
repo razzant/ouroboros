@@ -31,7 +31,7 @@ and requires K passes for EACH selected scenario.
 Preserve the typed SM1 refusal trail from `commit_refusal_facts`: advisory
 `block_reason`s, every `commit_reviewed` / `preflight_review` result's
 `⚠️ CODE:` (including `PREFLIGHT_BLOCKED`, `TESTS_PREFLIGHT_BLOCKED`,
-`SCOPE_REVIEW_BLOCKED`), landing skip flags and the terminal `reason_code`
+`REVIEW_BLOCKED`), landing skip flags and the terminal `reason_code`
 (for example `budget_exhausted` or `deadline_local`). The stub projects its
 release bump offline through `release_sync.sync_release_metadata` plus the
 README history row and exercises the same hermetic preflight. Its canned

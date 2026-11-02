@@ -32,8 +32,8 @@ def evidence_directory(repo, *, parent=None, ctx=None) -> Path:
         if drive and task:
             from ouroboros.task_custody import canonical_owner_root
             # Raw gate inputs/logs are sources, not thousands of deliverables.
-            # Place them with the durable owner immediately: an unregistered
-            # input subtree in the execution drive is not generic copyback work.
+            # Place them with the durable owner immediately: a standalone destination in
+            # the execution drive's store waits for ``history_retention.carry_raw_evidence``.
             parent = canonical_owner_root(drive) / "task_results" / "artifacts" / str(task) / "source_handles" / "test-evidence"
             outer = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
             if outer and parent.resolve().is_relative_to(Path(outer).resolve()):
