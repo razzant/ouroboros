@@ -22,7 +22,7 @@ from ouroboros import server_maintenance as sm
 def _started_by_one_tick(monkeypatch) -> List[str]:
     """Drive one maintenance tick with every due condition true; the names it starts, in order."""
     from ouroboros import maintenance
-    from supervisor import continuation_admission, queue
+    from supervisor import continuation_admission, queue, schedule_time
 
     names: List[str] = []
 
@@ -39,6 +39,7 @@ def _started_by_one_tick(monkeypatch) -> List[str]:
     # An owner Pause; the 20 s block owes its look: owner-pause settlement is due.
     monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {"cur-paused": {"cause": "owner_pause", "fence_id": "f"}})
     monkeypatch.setattr(continuation_admission, "held_continuation_predecessors", lambda pending: ["cur-pred"])
+    monkeypatch.setattr(schedule_time, "_WAKES", {})  # no completed schedule pass here: one is due
     # A child of this test's own: owed by construction (a process's first tick), never the process
     # singleton an earlier test's server shutdown stopped (``server._emergency_process_cleanup``).
     monkeypatch.setattr(maintenance, "child", maintenance.MaintenanceChild())
