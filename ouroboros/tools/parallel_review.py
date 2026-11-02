@@ -158,15 +158,14 @@ def _commit_review_retry_key(
     ``since_review`` included, only when given; host observations never)."""
     material = str(binding_fingerprint or "").strip()
     if not material:
+        from ouroboros.tools.review_subject import staged_patch
+
         try:
-            diff_bytes = run_cmd(
-                ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
-                cwd=ctx.repo_dir,
-            ).encode()
+            _patch, diff_sha = staged_patch(ctx.repo_dir)
             tree_sha = run_cmd(["git", "write-tree"], cwd=ctx.repo_dir).strip()
         except Exception:
-            diff_bytes, tree_sha = b"", ""
-        material = hashlib.sha256(tree_sha.encode() + b"\0" + diff_bytes).hexdigest()
+            diff_sha, tree_sha = "", ""
+        material = hashlib.sha256(tree_sha.encode() + b"\0" + diff_sha.encode()).hexdigest()
     return "commit_review:" + hashlib.sha256(json.dumps({
         "binding": material, "commit_message": commit_message,
         "goal": goal, "scope": scope,
@@ -287,13 +286,13 @@ def run_parallel_review(
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "") or review_retry_key(subject)
         ctx._current_review_retry_key = retry_key
     else:
+        from ouroboros.tools.review_subject import staged_patch
+
         try:
-            diff_bytes = run_cmd(
-                ["git", "diff", "--cached", "--binary", "--no-ext-diff"], cwd=ctx.repo_dir,
-            ).encode()
+            # The same identity a frozen gate subject reads: one patch keeps one history across both paths.
+            _patch, snapshot_digest = staged_patch(ctx.repo_dir)
         except Exception:
-            diff_bytes = b""
-        snapshot_digest = hashlib.sha256(diff_bytes).hexdigest()
+            snapshot_digest = hashlib.sha256(b"").hexdigest()
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "") or (
             _commit_review_retry_key(
                 ctx, commit_message, goal=goal, scope=scope,

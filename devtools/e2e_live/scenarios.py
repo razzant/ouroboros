@@ -206,7 +206,7 @@ def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
     Three durable sources, none of them model prose: the review state's attempt rows
     (``phase``/``status``/``block_reason``), the tools.jsonl rows of
     the two review tools (their typed ``status`` plus the runtime's own ``⚠️ CODE:`` refusal
-    prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, SCOPE_REVIEW_BLOCKED, ...), and the
+    prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, REVIEW_BLOCKED, ...), and the
     task's terminal ``reason_code`` (``budget_exhausted`` = BudgetExceeded, ``deadline_local``
     = the deadline). The first paid run's SM1 lanes failed on exactly this ladder and the
     result rows named none of it."""

@@ -20,6 +20,8 @@ from ouroboros.review_execution import (
 )
 from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot
+from ouroboros.tools.review_response import parse_model_response
+from ouroboros.triad_review import parse_seat_answer
 
 _VERDICT = '[{"severity": "advisory", "item": "x", "evidence": "e", "recommendation": "r"}]'
 
@@ -97,6 +99,10 @@ def test_episode_reads_then_answers(subject_repo):
     usage = result.usage
     assert usage["native_rounds"] == 2
     assert usage["host_file_read_attestation"] == "host_observed"
+    # The wave's seat row prefers `read_provenance`: a second stamp on this usage would relabel
+    # the host's own receipts as a delegated session's inference in the recorded manifest.
+    row = parse_model_response("openai/fake-reviewer", {"usage": usage, "choices": [{"message": {"content": _VERDICT}}]}, {})
+    assert parse_seat_answer(row, ["coupling"]).context_manifest["read_provenance"] == "host_observed"
     assert usage["native_tool_receipts"][0]["tool"] == "read_file"
     assert usage["native_tool_receipts"][0]["path"] == "greeting.txt"
     assert len(observed_usage) == 2

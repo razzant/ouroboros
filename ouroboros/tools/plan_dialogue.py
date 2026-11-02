@@ -373,7 +373,7 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     Each slot's fit lands in ``dialogue_delivery``; a session slot with an engine bound also
     records ``input_limit`` (the bound, the measured ``prompt_chars``, ``fits``).
     """
-    from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, slot_retrieves, slot_is_session
+    from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, ROOM_SNAPSHOT_ROLE, slot_retrieves, slot_is_session
     from ouroboros.tools.review_synthesis import build_plan_review_messages, per_slot_input_token_limits
     from ouroboros.tools.plan_packet import plan_user_stable_len
     from ouroboros.tools.scope_required_sources import source_text_identity
@@ -390,10 +390,10 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     api = [slot for slot in slots if not slot_retrieves(slot)]
     limits = per_slot_input_token_limits([s.model for s in api], output_reserve=PLAN_REVIEW_MAX_TOKENS,
                                        tokenizer_margin=155_000, slots=api)
-    # What each session reviewer may read of the room: the snapshot declared as an OBSERVED
-    # source (never a required manifest, which would order multi-MB reads), so the harness
-    # journal fold records per-reviewer coverage as a fact (`review_session_reads`).
-    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"],
+    # What each retrieving reviewer may read of the room: the snapshot declared as an OBSERVED
+    # source (never a required manifest, which would order multi-MB reads), so the host's or
+    # the harness journal's fold records per-reviewer coverage as a fact.
+    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"], "observed_role": ROOM_SNAPSHOT_ROLE,
                   **source_text_identity(str(own.get("text") or "").encode("utf-8"))}]
                 if own.get("source_ref") and own.get("file") else [])
     for slot in slots:
