@@ -144,6 +144,94 @@ def owner_process_ended(drive_root: Any, result: Dict[str, Any]) -> bool:
     return (observed["kind"], observed["state"], observed["reason"]) == ("direct", "unknown", "live_execution_unobserved")
 
 
+def direct_owner_generation_gone(drive_root: Any, stored: Dict[str, Any]) -> bool:
+    """Whether a durable direct row's bound owner names a generation this process replaced.
+
+    ``owner_process_ended`` is the full predicate for rows nobody else claims: it
+    cross-checks the queue observation so a row the LIVE queue still owns is never
+    called dead. Snapshot restore cannot use it on a pending-listed row: the only
+    snapshot on disk is the dead process's own last publication, and a fresh one
+    would read as queue ownership — masking the one fact that decides the row. This
+    is that predicate's core: a bound direct owner stamped by another generation,
+    while THIS process holds the data root's admission, on a stored row that is
+    neither terminal nor already in cancellation custody.
+
+    It is a fact about the OWNER only. A row that passes may still be owned by a
+    saved form — an exact pause, an acknowledged owner wait, a working-recovery
+    handoff, a schedule occurrence — whose own actor survives the restart;
+    ``direct_row_has_surviving_owner`` checks those, and a caller that fences on
+    this fact alone must filter them first.
+    """
+    from ouroboros.process_custody import current_custody_session_id
+    from ouroboros.server_entrypoint import admission_held
+    from ouroboros.task_results import STATUS_CANCEL_REQUESTED, _TRULY_TERMINAL_STATUSES
+
+    owner = stored.get("execution_owner") if isinstance(stored.get("execution_owner"), dict) else {}
+    if str(owner.get("kind") or "") != "direct":
+        return False
+    stamp = str(owner.get("process") or "")
+    status = str(stored.get("status") or "")
+    return bool(
+        stamp
+        and stamp != current_custody_session_id()
+        and status not in _TRULY_TERMINAL_STATUSES
+        and status != STATUS_CANCEL_REQUESTED
+        and admission_held(pathlib.Path(drive_root))
+    )
+
+
+def direct_row_has_surviving_owner(drive_root: Any, stored: Dict[str, Any], task: Dict[str, Any]) -> bool:
+    """Whether a saved form — not the dead owner's process — still owns this direct row.
+
+    The fence for a previous-generation direct orphan cancels what nothing else
+    can finish; these forms keep an actor that survives the restart, and each one
+    is answered by an explicit Resume, so restore's own retention branches keep
+    the row instead of this fence:
+
+    - a queue-row carrier: a parked pause marker (``_budget_pause``), a granted
+      resume handoff (``_budget_pause_resume``), an owner-wait handoff
+      (``_owner_wait_resume``), a working-recovery row (``_working_recovery``)
+      or a pending terminalization retry (``_terminalization_retry``);
+    - a schedule occurrence (``metadata.schedule_occurrence``): the scheduler's
+      occurrence reconcile owns the row, never this fence;
+    - a stored acknowledged wait (``owner_wait`` still ``waiting`` with a
+      source): the owner can still answer it;
+    - a durable saved pause (``pause_retention``'s saved, unused-grant, sleep
+      and owner-pause forms — the same reading the restart cancel census uses
+      to keep a cancel intent off a saved pause).
+
+    An unreadable pause row reads as not saved here (``pause_retention``'s own
+    semantics); the queue-row carrier is a pause's canonical locator at a stop,
+    and an unexpected authority failure stays with retention, never the fence.
+    """
+    if not isinstance(task, dict):
+        return True  # unknown shape: retention, not the fence, decides
+    for key in ("_budget_pause", "_budget_pause_resume", "_owner_wait_resume",
+                "_working_recovery", "_terminalization_retry"):
+        if isinstance(task.get(key), dict):
+            return True
+    meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if isinstance(meta.get("schedule_occurrence"), dict):
+        return True
+    wait = stored.get("owner_wait") if isinstance(stored.get("owner_wait"), dict) else {}
+    if wait.get("state") == "waiting" and wait.get("source_ref"):
+        return True
+    task_id = str(task.get("id") or "") or str(stored.get("task_id") or "")
+    if task_id:
+        from supervisor.restart_retention import (
+            RETAIN_OWNER_PAUSE, RETAIN_SAVED, RETAIN_SLEEP, RETAIN_UNUSED_GRANT, pause_retention,
+        )
+
+        try:
+            if pause_retention(drive_root, task_id) in {
+                RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP, RETAIN_OWNER_PAUSE,
+            }:
+                return True
+        except Exception:
+            return True  # unknown pause authority: retention, not the fence, decides
+    return False
+
+
 def adopt_orphaned_direct_results(drive_root: Any, taken: Dict[str, Any]) -> Dict[str, Any]:
     """Add the direct turns a crash left durable but unlisted to the roster's handover.
 
