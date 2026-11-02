@@ -56,7 +56,11 @@ def _row_projection(row: dict, stream: str, ordinal: int, root: Any = None, *, p
     # One attribution source, the row's own fields: a quiz answer is the Owner's, a
     # mailbox delivery keeps its own provenance, every other row is signed by its fields
     # and, for a chat row with a stream position, by the activation's lineage epoch.
-    if stream == "mailbox" and row.get("type") != "quiz_answer":
+    from ouroboros.owner_quiz import secret_outcome_block
+
+    if stream == "mailbox" and secret_outcome_block(row) is not None:
+        result["author"] = "host"  # a secret request's outcome frame, never the owner's words
+    elif stream == "mailbox" and row.get("type") != "quiz_answer":
         result["author"] = str(row.get("provenance") or "Owner")
     else:
         result["author"] = row_author(row, pos=pos, **(lineage if pos is not None and lineage else {}))["label"]

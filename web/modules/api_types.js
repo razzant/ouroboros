@@ -245,6 +245,9 @@
  * @property {string=} closed_actor
  * @property {string=} closed_request_id
  * @property {Array<Object>=} materials Validated existing artifact references with task_id, name, sha256, size and download_url.
+ * @property {import('./decision_types.js').SecretRequestMeta=} secret_request A mirrored secret request's metadata.
+ * @property {import('./decision_types.js').SecretOutcome=} secret_outcome
+ * @property {Object=} secret_save An attempt's claim; state "writing" is an unconfirmed save.
  * @property {string=} quiz_id
  * @property {string=} quiz_state
  * @property {number=} project_chat_id
@@ -638,6 +641,7 @@
  * @property {string=} kind
  * @property {Object.<string,number>=} room_revisions
  * @property {number[]=} also_rooms  // a private Main question: its work's Project shows the same row, one frame
+ * @property {import('./decision_types.js').SecretRequestMeta=} secret_request An integration-secret request: answered only by its protected form.
  */
 
 /**
@@ -662,6 +666,7 @@
  * @property {boolean=} wait_for_answer
  *   False once a bounded wait closed and the task resumed; the card stays open and answerable.
  * @property {number=} chat_id
+ * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
  */
 
 /** @typedef {import('./decision_types.js').DecisionRequest} DecisionRequest */

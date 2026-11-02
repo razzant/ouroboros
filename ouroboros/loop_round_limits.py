@@ -238,6 +238,17 @@ def _drain_incoming_messages(
                     messages[-1].setdefault("review_feedback", []).append(dict(entry["review_feedback"]))
                 ack_content(entry)
                 continue
+            if kind in (KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED):
+                from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND, secret_outcome_block
+
+                if secret_outcome_block(entry) is not None:
+                    # The host reports a form outcome, not words or a new directive. The actual
+                    # cancel action remains in the canonical question with its owner attribution.
+                    deliver_quiz_answer(entry, task_id, event_queue if kind == KIND_QUIZ_ANSWER else None,
+                        lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
+                                                                           kind=SECRET_OUTCOME_ROW_KIND))
+                    ack_content(entry)
+                    continue
             if kind in (KIND_QUIZ_CLOSED, KIND_CARD_INPUT):  # host frames around the owner's own act
                 _loop()._record_owner_directive(owner_ctx, source="owner_mailbox",
                     content=dmsg, msg_id=str(entry.get("msg_id") or ""))

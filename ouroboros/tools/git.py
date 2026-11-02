@@ -109,7 +109,8 @@ def _free_cycle_gate(
     goal: str = "",
     scope: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Collect paid identity before preflight; only new work reads today's pool or cycle limits."""
+    """Collect paid identity before preflight (an open attempt, a reference, or the usable verdict of the round's
+    completed wave, whose replays end when it formed none); only new work reads today's pool or cycle limits."""
     from ouroboros.config import get_review_enforcement
 
     if getattr(ctx, "_review_cyber_pending", "") and not review_enforcement_blocks("blocking"):
@@ -152,6 +153,15 @@ def _free_cycle_gate(
     identical_msg = check_identical_verdict_refusal(
         ctx, fp, rebuttal_sha256=rebuttal_sha, contract_fingerprint=contract_fp
     )
+    if not identical_msg:
+        from ouroboros.review_state import make_repo_key, settle_completed_round
+        reusable = settle_completed_round(  # collected with its own roster at $0 after this call's checks
+            ctx, pathlib.Path(ctx.drive_root), repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
+            tool_name=_current_review_tool_name(ctx), task_id=str(getattr(ctx, "task_id", "") or ""),
+            review_retry_key=retry_key, exclude_attempt=int(getattr(ctx, "_current_review_attempt_number", 0) or 0))
+        if reusable is not None:
+            ctx._pending_review_attempt, ctx._review_reconcile_only = reusable, True
+            return None
     ceiling = None if identical_msg else check_review_cycles_ceiling(
         ctx, root_task_id=root_task_id
     )
@@ -220,17 +230,20 @@ def _install_paid_dispatch_stamp(
     commit_start: float,
     pre_fingerprint: Dict[str, Any],
 ) -> None:
-    """WRITE-AHEAD paid stamp (Q16 fix round, F2): durably merge ``paid=True``
-    onto the current attempt row immediately BEFORE the first physical
-    reviewer transport call, on EITHER side — triad and scope dispatch in
-    parallel, so scope spend can coexist with a triad assembly overflow, and
-    any side dispatching makes the cycle paid. Assembly-only exits (triad fit
-    ladder, scope pack signals) never invoke the stamp, so a $0 attempt stays
-    outside the ceiling; a crash after dispatch keeps the paid fact
-    (write-ahead). The coordinator captures ``ctx._review_paid_stamp`` and
-    each route executor invokes that exact object at its point of no return —
-    the seam where the L-review lane's two-phase admission slots in."""
+    """WRITE-AHEAD paid stamp (Q16 fix round, F2): the reservation merges the
+    roster onto the current attempt row, owned by this process, before any
+    worker starts; ``paid=True`` joins that exact row immediately BEFORE the
+    first physical reviewer transport call (``mark_review_attempt_paid``), on
+    EITHER side — triad and scope dispatch in parallel, and any side
+    dispatching makes the cycle paid. Assembly-only exits, replays and refusals
+    before a send never invoke the stamp, and a rejoin's own send stamps the
+    attempt it collects, so a $0 attempt stays outside the ceiling; a crash
+    after dispatch keeps the paid fact (write-ahead). The coordinator captures
+    ``ctx._review_paid_stamp`` and each route executor invokes that exact object
+    at its point of no return."""
     from ouroboros.review_dispatch import ReviewPaidStamp
+    from ouroboros.review_state import (
+        checkpoint_pending_review_invocation, load_state, make_repo_key, mark_review_attempt_paid)
 
     ctx._review_reserved_roster = None
     ctx._review_reserved_operations = {}
@@ -239,8 +252,9 @@ def _install_paid_dispatch_stamp(
     reserved_repo_key = ""
     reserved_tool_name = _current_review_tool_name(ctx)
     reserved_task_id = str(getattr(ctx, "task_id", "") or "")
+    drive = pathlib.Path(ctx.drive_root)
 
-    def _write() -> None:
+    def _record(*, paid: bool) -> None:
         nonlocal reserved_attempt_number, reserved_repo_key, reserved_retry_key
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "")
         if not retry_key:
@@ -273,7 +287,7 @@ def _install_paid_dispatch_stamp(
             phase="review",
             pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
             fingerprint_status="pending",
-            paid=True,
+            paid=paid,
             rebuttal_sha256=str(getattr(ctx, "_current_review_rebuttal_sha256", "") or ""),
             review_contract_fingerprint=str(
                 getattr(ctx, "_current_review_contract_fingerprint", "") or ""
@@ -287,16 +301,15 @@ def _install_paid_dispatch_stamp(
                 {"raw_results": scope_rows} if scope_rows is not None else None
             ),
             _strict=True,
+            _bind_owner=True,
         )
-        from ouroboros.review_state import load_state, make_repo_key
-
-        recorded = load_state(pathlib.Path(ctx.drive_root)).latest_attempt_for(
+        recorded = load_state(drive).latest_attempt_for(
             repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
             tool_name=_current_review_tool_name(ctx),
             task_id=str(getattr(ctx, "task_id", "") or ""),
             attempt=int(getattr(ctx, "_current_review_attempt_number", 0) or 0),
         )
-        if recorded is None or not recorded.paid or recorded.review_retry_key != retry_key:
+        if recorded is None or (paid and not recorded.paid) or recorded.review_retry_key != retry_key:
             raise RuntimeError("commit review paid write-ahead could not be verified")
         if isinstance(reserved, dict):
             expected = {
@@ -320,17 +333,21 @@ def _install_paid_dispatch_stamp(
         reserved_retry_key = retry_key
         reserved_repo_key = make_repo_key(pathlib.Path(ctx.repo_dir))
 
-    ctx._review_paid_stamp = ReviewPaidStamp(_write, fail_closed=True)
+    def _write() -> None:
+        if reserved_attempt_number:  # the reserved row: only the paid fact, whenever the first send happens
+            mark_review_attempt_paid(drive, repo_key=reserved_repo_key, tool_name=reserved_tool_name,
+                                     task_id=reserved_task_id, attempt=reserved_attempt_number,
+                                     review_retry_key=reserved_retry_key)
+        else:  # a rejoin's own send: the attempt it collects
+            _record(paid=True)
+
+    ctx._review_paid_stamp = ReviewPaidStamp(_write, fail_closed=True, reserve=lambda: _record(paid=False))
 
     def _checkpoint_pending_invocation(
         *, surface: str, slot_id: str, operation_id: str, invocation_id: str,
     ) -> None:
-        from ouroboros.review_state import (
-            checkpoint_pending_review_invocation,
-        )
-
         checkpoint_pending_review_invocation(
-            pathlib.Path(ctx.drive_root),
+            drive,
             repo_key=reserved_repo_key,
             tool_name=reserved_tool_name,
             task_id=reserved_task_id,
@@ -384,7 +401,7 @@ def _tests_preflight_block_message(managed_needs_proof: bool, test_err: str) -> 
             f"{test_err}"
         )
     return (
-        "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before the review panel runs.\n"
+        "⚠️ TESTS_PREFLIGHT_BLOCKED: Tests must pass before the review panel runs and before Git.\n"
         "Fix the failures below, then re-run commit_reviewed "
         "(skip_tests=True for intentionally incomplete work).\n"
         "Set OUROBOROS_PRE_PUSH_TESTS=0 to skip tests entirely.\n\n"
@@ -490,16 +507,19 @@ def _preflight_and_tests_gate(
     goal: str = "",
     scope: str = "",
     review_only: bool = False,
+    landing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Ahead of the panel: the free deterministic checks, the tests preflight, then the author's
     preflight when one row was named (decision 3A). The checks and the tests block as before
-    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed."""
+    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed.
+    ``landing``: a resumed attempt's collected verdict, before Git, owes only this call's tests (#2410)."""
     from ouroboros.commit_admission import preflight_evidence_unavailable, run_tests_preflight_with_proof
     from ouroboros.tools.commit_gate import deterministic_preflight, run_commit_preflight
 
     ctx._commit_preflight = {"status": "skipped" if skip_advisory_pre_review else "not_performed", "record_id": ""}
     named = bool(preflight_reviewer) and not skip_advisory_pre_review
-    message = deterministic_preflight(ctx, commit_message, classification_paths or None, review_only=review_only)
+    message = "" if landing else deterministic_preflight(
+        ctx, commit_message, classification_paths or None, review_only=review_only)
     reason = "infra_failure" if preflight_evidence_unavailable(message) else "preflight"
     _managed_needs_proof = _managed_candidate_needs_proof(ctx)
     # The retired advisory's own tests rule, for every commit: the suite runs unless the author
@@ -507,7 +527,7 @@ def _preflight_and_tests_gate(
     if not message and (not skip_tests or _managed_needs_proof):
         ctx.emit_progress_fn(
             "Managed candidate lacks a pre-commit test proof — running the mandatory hermetic suite before review..."
-            if _managed_needs_proof else "Running the tests preflight before the review panel...")
+            if _managed_needs_proof else f"Running the tests preflight before {'Git' if landing else 'the panel'}...")
         test_err = run_tests_preflight_with_proof(
             ctx, runner=lambda c, **kw: _run_review_preflight_tests(c, **kw))
         if test_err:

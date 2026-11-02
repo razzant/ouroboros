@@ -339,6 +339,7 @@ def test_failed_reload_discloses_then_binds_previous_env_and_resets():
     def body(task):
         # An unreadable document makes a credential unavailable, never the mirrored old key (route_choice).
         assert config.runtime_setting("OPENAI_API_KEY") is None and config.runtime_setting("OUROBOROS_EFFORT_TASK") == "high"
+        config.SETTINGS_PATH.unlink()  # repaired by moving it aside: a save never writes over an unreadable document
         save_owner(document("new"))
         subagent_runtime.apply_task_start_settings()
         assert config.runtime_setting("OPENAI_API_KEY") == "test-key-new"  # repaired: read at once

@@ -106,12 +106,12 @@ def _stored_projection(body) -> tuple:
 
 
 def _refuse_custody(monkeypatch, words: str) -> None:
-    """The write-ahead custody stamp fails before any worker starts (the producer's typed refusal)."""
+    """The unpaid custody reservation fails before any worker starts (the producer's typed refusal)."""
     from ouroboros import review_dispatch
 
     def refuse(ctx):
         raise OSError(words)
-    monkeypatch.setattr(review_dispatch, "stamp_review_paid_on_dispatch", refuse)
+    monkeypatch.setattr(review_dispatch, "reserve_review_roster", refuse)
 
 
 def test_a_custody_refusal_before_any_send_reaches_record_tool_parent_door_and_card(body, monkeypatch):

@@ -236,10 +236,10 @@ read-only tools, so the run does not depend on a very large reviewer window.
 Reading coverage is diagnostic: incomplete or unobserved ranges are recorded
 beside the received verdict and never remove a responding reviewer from quorum,
 block a commit or automatically buy another review. The author judges whether
-a concrete gap warrants more reading. A coupling review that cannot run at
-all — an unreadable repository, an unavailable review subject, a reviewer that
-failed or answered outside the contract — is reported as
-`SCOPE_REVIEW_BLOCKED` with its cause, and the evidence packet is preserved
+a concrete gap warrants more reading. A review that cannot run at all (an
+unreadable repository, an unavailable review subject, no reviewer answering
+within the contract) ends as a typed block naming its cause in `block_reason`,
+such as `review_not_performed`, with exit 3; the evidence packet is preserved
 and marked incomplete. The agentic checklist review above needs none of this.
 
 The run keeps its own writes off your data root: its review drive

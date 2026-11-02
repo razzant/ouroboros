@@ -466,3 +466,170 @@ def _edit_through_the_tool_path(drive, repo, task_id, *, changed):
     from ouroboros.tools.commit_gate import _invalidate_advisory
 
     _invalidate_advisory(_ctx(drive, repo, task_id), changed_paths=changed, source_tool="edit_text")
+
+
+# --- separate checkouts on one review-state root (#2573) ---------------------------------
+#
+# Each checkout's look is its own preflight record bound to its live tree, but the newest
+# marker lives in one slot. The next checkout's mutation used to overwrite it: the first
+# checkout lost the editor of its invalidation, and its bytes returned to the reviewed tree
+# then read fresh although a recorded mutation followed its look. Real Git trees, the
+# ordinary tool path and every durable reader.
+
+
+def _git_checkout(tmp_path, name):
+    import subprocess
+
+    repo = tmp_path / name
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.py"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+                    "commit", "-qm", "baseline"], cwd=repo, check=True)
+    return repo
+
+
+def _tree_look(drive, repo):
+    """The checkout's preflight look bound to its live tree, stamped when written."""
+    from supervisor.update_candidate import worktree_snapshot_tree
+
+    tree, error = worktree_snapshot_tree("HEAD", cwd=str(repo))
+    assert tree and not error, error
+    review_ledger.write_record(drive, {
+        "record_id": review_ledger.new_record_id(), "state": "settled", "surface": "preflight",
+        "task_id": "task-look", "verdict": {"aggregate": "PASS"},
+        "subject": {"root": str(repo), "tree_sha": tree}, "rows": []})
+
+
+def _mutate(drive, repo, task_id, text):
+    (repo / "tracked.py").write_text(text, encoding="utf-8")
+    _edit_through_the_tool_path(drive, repo, task_id, changed=["tracked.py"])
+
+
+def _looked_at(tmp_path, *names):
+    drive, repos = _drive(tmp_path), [_git_checkout(tmp_path, name) for name in names]
+    for repo in repos:
+        _tree_look(drive, repo)
+    return drive, *repos
+
+
+def _b_then_a(tmp_path):
+    drive, a, b = _looked_at(tmp_path, "a", "b")
+    _mutate(drive, b, "task-b", "x = 2\n")
+    _mutate(drive, a, "task-a", "x = 3\n")
+    return drive, a, b
+
+
+def test_each_checkout_keeps_the_editor_that_invalidated_its_own_look(tmp_path):
+    from ouroboros.agent_task_pipeline import build_review_context
+
+    drive, a, b = _b_then_a(tmp_path)
+    for repo, editor in ((b, "task-b"), (a, "task-a")):
+        _reviewed(drive, repo)
+        status, panel = _status(drive, repo, "task-reader"), _panel(drive, repo, "task-reader")
+        assert (status["latest_advisory_status"], status["preflight"]["marked"]) == ("stale", True), repo.name
+        assert "edit_text mutated the worktree" in status["stale_reason"] and status["stale_from_edit_ts"]
+        for surface in (status, panel):
+            assert (surface["stale_task_id"], surface["stale_attribution"], surface["stale_repo_key"]) == (
+                editor, "other_task", make_repo_key(repo)), repo.name
+        assert (panel["stale_reason"], panel["stale_ts"]) == (status["stale_reason"], status["stale_from_edit_ts"])
+        context = build_review_context(types.SimpleNamespace(drive_root=drive, repo_dir=repo))
+        for text in (context, context.operative_view):
+            assert "stale_marker=" in text and f"invalidated_by=task {editor}" in text, repo.name
+
+
+def test_restored_bytes_stay_marked_while_an_unrecorded_round_trip_reads_fresh(tmp_path):
+    """Byte freshness answers for a look no recorded mutation followed; a recorded mutation
+    after the look still speaks once the bytes return. Only a new look settles it."""
+    drive, a, b = _b_then_a(tmp_path)
+    c = _git_checkout(tmp_path, "c")
+    _tree_look(drive, c)
+    (c / "tracked.py").write_text("x = 9\n", encoding="utf-8")  # moved by hand, no tool records it
+    assert _status(drive, c, "task-reader")["preflight"]["tree_moved"] is True
+    for repo in (b, c):  # both back to the reviewed bytes outside any tool
+        (repo / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+
+    restored, round_trip = _status(drive, b, "task-reader"), _status(drive, c, "task-reader")
+    assert restored["preflight"]["tree_moved"] is round_trip["preflight"]["tree_moved"] is False
+    assert (round_trip["latest_advisory_status"], round_trip["stale_task_id"]) == ("fresh", "")
+    assert (restored["latest_advisory_status"], restored["stale_task_id"]) == ("stale", "task-b")
+    _tree_look(drive, b)
+    assert _status(drive, b, "task-reader")["latest_advisory_status"] == "fresh"
+    assert _status(drive, a, "task-reader")["stale_task_id"] == "task-a"
+
+
+@pytest.mark.parametrize("settle", ["commit", "new_look"])
+def test_settling_one_checkout_leaves_the_other_checkouts_marker(tmp_path, settle):
+    drive, a, b = _b_then_a(tmp_path)
+    if settle == "commit":
+        update_state(drive, lambda state: state.on_successful_commit(repo_key=make_repo_key(a)))
+    else:
+        _tree_look(drive, a)  # a new look at A's edited tree
+
+    settled, other = _status(drive, a, "task-reader"), _status(drive, b, "task-reader")
+    assert (settled["preflight"]["marked"], settled["stale_task_id"]) == (False, "")
+    assert settled["latest_advisory_status"] == ("fresh" if settle == "new_look" else "stale")
+    assert (other["latest_advisory_status"], other["stale_task_id"]) == ("stale", "task-b")
+
+
+def test_an_ambiguous_scope_marker_neither_replaces_nor_is_erased_by_a_checkouts_own(tmp_path):
+    drive, a, b = _looked_at(tmp_path, "a", "b")
+    _mutate(drive, b, "task-b", "x = 2\n")
+    invalidate_advisory_after_mutation(drive, mutation_root=None, changed_paths=[],
+                                       source_tool="run_shell", mutating_task_id="task-shell")
+    own, unscoped = _status(drive, b, "task-reader"), _status(drive, a, "task-reader")
+    assert (own["stale_task_id"], own["stale_repo_key"]) == ("task-b", make_repo_key(b))
+    assert (unscoped["preflight"]["marked"], unscoped["stale_task_id"], unscoped["stale_repo_key"]) == (
+        True, "task-shell", "")
+    # The ambiguous mutation stays what invalidated A's look: A's own later edit is not the first.
+    _mutate(drive, a, "task-a", "x = 3\n")
+    assert _status(drive, a, "task-reader")["stale_task_id"] == "task-shell"
+    # A commit of A settles A and the unscoped marker, as it always did, never B's own marker.
+    update_state(drive, lambda state: state.on_successful_commit(repo_key=make_repo_key(a)))
+    assert _status(drive, a, "task-reader")["preflight"]["marked"] is False
+    assert _status(drive, b, "task-reader")["stale_task_id"] == "task-b"
+
+
+def test_a_checkouts_own_marker_does_not_erase_an_ambiguous_one_still_owed_elsewhere(tmp_path):
+    """A checkout looked at again after an ambiguous mutation writes its own marker; the
+    ambiguous one still stales the look it followed elsewhere, although no bytes moved there."""
+    drive, a, b = _looked_at(tmp_path, "a", "b")
+    invalidate_advisory_after_mutation(drive, mutation_root=None, changed_paths=[],
+                                       source_tool="run_shell", mutating_task_id="task-shell")
+    _tree_look(drive, a)
+    _mutate(drive, a, "task-a", "x = 3\n")
+    assert _status(drive, a, "task-reader")["stale_task_id"] == "task-a"
+    owed = _status(drive, b, "task-reader")
+    assert owed["preflight"]["tree_moved"] is False
+    assert (owed["latest_advisory_status"], owed["stale_task_id"], owed["stale_repo_key"]) == (
+        "stale", "task-shell", "")
+
+
+def test_a_single_checkout_keeps_the_legacy_file_and_a_legacy_marker_is_displaced(tmp_path):
+    drive, a, b, c = _looked_at(tmp_path, "a", "b", "c")
+    path = drive / "state" / "advisory_review.json"
+    _mutate(drive, b, "task-b", "x = 2\n")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert (raw["last_stale_repo_key"], raw["last_stale_task_id"]) == (make_repo_key(b), "task-b")
+    assert "earlier_stale_markers" not in raw, "one marker keeps the legacy file shape"
+    raw.pop("last_stale_task_id")  # as written before the writer was recorded
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    _mutate(drive, a, "task-a", "x = 3\n")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    # The newest write keeps the legacy slot; B's legacy marker is displaced, never erased.
+    assert (raw["last_stale_repo_key"], raw["last_stale_task_id"]) == (make_repo_key(a), "task-a")
+    assert list(raw["earlier_stale_markers"]) == [make_repo_key(b)]
+    legacy = _status(drive, b, "task-b")
+    assert (legacy["preflight"]["marked"], legacy["stale_task_id"], legacy["stale_attribution"]) == (
+        True, "", "unknown")
+    assert "edit_text mutated the worktree" in legacy["stale_reason"]
+
+    # A displaced marker leaves only as the slot always did: by its own checkout's commit.
+    _mutate(drive, c, "task-c", "x = 4\n")
+    assert sorted(json.loads(path.read_text(encoding="utf-8"))["earlier_stale_markers"]) == sorted(
+        [make_repo_key(a), make_repo_key(b)])
+    for repo in (b, a):
+        update_state(drive, lambda state, key=make_repo_key(repo): state.on_successful_commit(repo_key=key))
+    assert "earlier_stale_markers" not in json.loads(path.read_text(encoding="utf-8"))
+    assert _status(drive, c, "task-reader")["stale_task_id"] == "task-c"

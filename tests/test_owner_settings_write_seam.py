@@ -939,6 +939,53 @@ def test_owner_endpoint_validation_refusals_say_saved_false(monkeypatch, isolate
     assert not isolated_settings.exists()
 
 
+_KEPT = {"OPENROUTER_API_KEY": "sk-or-kept-synthetic", "CUSTOM_SERVICE_TOKEN": "kept-synthetic"}
+_DAMAGED = {"undecodable": json.dumps(_KEPT).encode()[:-1],  # a hand edit that lost its closing brace
+            "not_an_object": json.dumps(list(_KEPT)).encode(), "unreadable": json.dumps(_KEPT).encode()}
+
+
+@pytest.mark.parametrize("damage", sorted(_DAMAGED))
+def test_a_present_document_the_seam_cannot_read_is_refused_never_written_as_new(monkeypatch, isolated_settings,
+                                                                                damage):
+    """Only an ABSENT document is new. A present one that does not read as an object (cut short, another
+    JSON type, an open the OS refuses) read as ``{}``, and the generic save, an owner decision and an
+    incidental writer then wrote their own fields over it, deleting every key the owner had saved."""
+    from ouroboros.gateway import owner_settings
+    from ouroboros.gateway import settings as settings_mod
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+
+    isolated_settings.write_bytes(_DAMAGED[damage])
+    before, real_open = isolated_settings.read_bytes(), pathlib.Path.open
+    if damage == "unreadable":  # injected: chmod is not a refusal on every platform
+
+        def refused(path, *args, **kwargs):
+            if path == isolated_settings:
+                raise PermissionError(13, "injected: settings unreadable")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "open", refused)
+    monkeypatch.setattr(settings_mod, "_has_running_agent_tasks", lambda: False, raising=False)
+    generic = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": "25"})
+    decision = TestClient(_owner_app("api_owner_auto_grant", "/api/owner/auto-grant", isolated_settings)).post(
+        "/api/owner/auto-grant", json={"enabled": False})
+    for response in (generic, decision):
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "settings_unreadable" and response.json()["saved"] is False
+    with pytest.raises(owner_settings.SettingsDocumentUnreadable):
+        _owner_update_settings(fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 77}))
+    monkeypatch.setattr(pathlib.Path, "open", real_open)
+    assert isolated_settings.read_bytes() == before, "an unreadable document kept its exact bytes"
+    # The owner repairs it: a readable document keeps every saved key beside the incidental field...
+    isolated_settings.write_text(json.dumps(_KEPT), encoding="utf-8")
+    _owner_update_settings(fields_on_saved_document({"OUROBOROS_TOOL_TIMEOUT_SEC": 77}))
+    assert json.loads(isolated_settings.read_text(encoding="utf-8")) == {**_KEPT, "OUROBOROS_TOOL_TIMEOUT_SEC": 77}
+    # ...and an absent one is a first setup the generic save creates.
+    isolated_settings.unlink()
+    created = TestClient(_settings_app(monkeypatch, isolated_settings)).post("/api/settings", json={"TOTAL_BUDGET": "25"})
+    assert created.status_code == 200, created.text
+    assert json.loads(isolated_settings.read_text(encoding="utf-8"))["TOTAL_BUDGET"] == 25.0
+
+
 def test_the_capability_ack_is_not_a_settings_writer(monkeypatch, isolated_settings, tmp_path):
     """FINDING 3, decided the smaller way. `api_acknowledge_capability` wore
     `owner_write_guard` but never calls `_owner_write_settings`: it writes its own

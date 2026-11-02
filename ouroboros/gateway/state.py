@@ -431,7 +431,8 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
                                                  "options", "option_details", "stake", "assumption",
                                                  "recommended_index", "answered_index", "comment", "wait_ended_at",
                                                  "host_facts", "materials", "closed_reason", "closed_at",
-                                                 "closed_by_task_id", "closed_actor", "closed_request_id", "delivery")
+                                                 "closed_by_task_id", "closed_actor", "closed_request_id", "delivery",
+                                                 "secret_request", "secret_outcome", "secret_save")
                       if isinstance(quiz, dict) and key in quiz}}
     if len(_FINALIZING_MEMO) >= _FINALIZING_MEMO_MAX:
         _FINALIZING_MEMO.clear()

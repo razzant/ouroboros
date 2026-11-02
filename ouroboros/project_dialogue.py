@@ -118,7 +118,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
     answer and the wait facts ride with the pointer, so the browser paints the Project's own form
     from history, the live frame or the census alone; task detail only opens the original."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
-    from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection
+    from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection, secret_facts
 
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else row
     task_id, quiz_id = str(row.get("task_id") or ""), str(quiz.get("quiz_id") or "")
@@ -169,6 +169,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         **({"assumption": assumption} if assumption else {}),
         **({"host_facts": host_facts} if host_facts else {}),
         **({"recommended_index": recommended} if recommended is not None else {}),
+        **secret_facts(quiz, block),  # a secret request's copy keeps its form
         **facts,
         **({"source_status": "unavailable"} if not known else {}),
     }

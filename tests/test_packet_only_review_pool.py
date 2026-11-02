@@ -108,6 +108,40 @@ def _post(monkeypatch, body: dict, stored: dict | None = None, mode: str = "adva
     return response.status_code, json.loads(response.body), saved
 
 
+@pytest.mark.parametrize("saved, warned", [({}, True), ({"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}, False)],
+                         ids=["environment-only Blocking", "saved Advisory over environment Blocking"])
+def test_the_save_warning_judges_the_enforcement_the_real_loader_makes_effective(tmp_path, monkeypatch, saved, warned):
+    """Blocking set only in the environment warns on a save that never names it; the owner's saved Advisory wins over
+    it and does not. Real document, real ``load_settings`` and real write: the helper's own blank-enforcement branch
+    is unreachable from this caller, because the merged settings always carry the key."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    import ouroboros.config as cfg
+    import ouroboros.gateway.settings as gws
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    for attribute, value in (("SETTINGS_PATH", path), ("DATA_DIR", tmp_path), ("_BOOT_RUNTIME_MODE", None)):
+        monkeypatch.setattr(cfg, attribute, value)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(gws, "_unrecognised_review_models", lambda models: [])
+    monkeypatch.setattr(gws, "_apply_settings_to_env", lambda *a, **k: None)
+    body = {SUBAGENTS_SETTING: PACKET_ONLY["two Packet reviewers"]}
+
+    async def _receive():
+        return {"type": "http.request", "body": json.dumps(body).encode()}
+
+    request = Request({"type": "http", "method": "POST", "path": "/api/settings", "headers": [("content-type", "application/json")],
+                       "query_string": b"", "app": None}, receive=_receive)
+    response = asyncio.run(gws.api_settings_post(request))
+    answer = json.loads(response.body)
+    assert response.status_code == 200 and answer["status"] == "saved", answer
+    assert (WARNING in answer.get("warnings", [])) is warned
+
+
 @pytest.mark.parametrize("catalog", list(PACKET_ONLY.values()), ids=list(PACKET_ONLY))
 def test_a_blocking_save_of_a_pool_with_no_reading_row_warns_and_still_saves(monkeypatch, catalog):
     status, body, saved = _post(monkeypatch, {SUBAGENTS_SETTING: catalog, "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"})
