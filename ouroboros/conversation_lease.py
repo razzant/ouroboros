@@ -429,21 +429,12 @@ def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str
 
 
 def _writer_alive(pid: Any) -> bool:
+    from ouroboros.platform_layer import pid_is_alive  # never os.kill(pid, 0): CTRL_C_EVENT on Windows
+
     try:
-        pid = int(pid)
+        return pid_is_alive(int(pid))
     except (TypeError, ValueError):
         return False
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # alive, another user's
-    except OSError:
-        return False
-    return True
 
 
 def _write_intake(drive_root: Any, task_id: str, row: dict) -> None:

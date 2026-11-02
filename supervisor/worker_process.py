@@ -180,14 +180,16 @@ def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root):
     parent, child = socket.socketpair()
     try:
         parent.setblocking(False)
-        # The transport policy is the spawner's explicit fact: only a FORKED child must avoid OS
-        # proxy lookup (the fork-safety rule); a spawned or forkserver child keeps the server's.
+        # The transport policy is the spawner's explicit fact, stated to EVERY child: a forked child
+        # avoids OS proxy lookup (the fork-safety rule); a spawned or forkserver child keeps the
+        # server's own policy, so a carried conversation reaches the model as the server would. An
+        # unstated child falls back to the legacy worker default (no proxy) in ``transport_no_proxy``.
+        from ouroboros.utils import transport_no_proxy
+
         start_method = getattr(ctx, "get_start_method", None)
-        no_proxy = str(start_method() if callable(start_method) else "") == "fork"
-        # The transport policy rides only when the spawner has one to pass (a forked child): a spawned
-        # child keeps the seven-argument entry (``worker_main``'s ``transport_no_proxy`` defaults).
+        no_proxy = str(start_method() if callable(start_method) else "") == "fork" or transport_no_proxy()
         proc = ctx.Process(target=worker_main, args=(wid, in_q, out_q, str(repo_dir), str(drive_root),
-                                                   _current_custody_session_id(), child, *((True,) if no_proxy else ())))
+                                                   _current_custody_session_id(), child, no_proxy))
         proc.daemon = True
         proc.start()
     except BaseException:
@@ -340,8 +342,8 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     # ownership, lifelines, custody), and state the spawner's transport policy beside it
     # (``utils.transport_no_proxy``): a forked child avoids OS proxy resolution (the
     # fork-safety guard: no _scproxy/SCDynamicStoreCopyProxies on the child side of fork);
-    # a spawned carrier keeps the server's own policy. A spawner that said nothing keeps the
-    # legacy worker default.
+    # a spawned or forkserver carrier keeps the server's own policy (``spawn_worker_process``
+    # states it to every child). An entry called without it keeps the legacy worker default.
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
     if transport_no_proxy is not None:
         _os.environ["OUROBOROS_TRANSPORT_NO_PROXY"] = "1" if transport_no_proxy else "0"

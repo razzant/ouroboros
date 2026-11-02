@@ -38,7 +38,8 @@ PLACEHOLDER = "[Wake-up · heartbeat]"  # what the clock admits; the carrier ren
 
 
 def _lane(monkeypatch, tmp_path, *, event_q=None, sent=None):
-    """The lane's doors over a fresh pool table with one READY conversation spare (returned).
+    """The lane's doors over a fresh pool table with two READY idle conversation carriers: the first (returned)
+    carries the wake, the second is the owner's reserved spare a wake never takes (owner decision 4A).
 
     The server runs no cognition here: an actor exists only when a test hands one to ``carry``,
     which runs the dispatched task through the real worker body on this thread, as the carrier would.
@@ -68,7 +69,9 @@ def _lane(monkeypatch, tmp_path, *, event_q=None, sent=None):
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     workers.open_repo_writer_admission()
-    return install_lane_spare(workers, 90)
+    carrier = install_lane_spare(workers, 90)  # the idle carrier the wake takes
+    install_lane_spare(workers, 91)  # the owner's reserved spare: a wake never takes the last idle carrier (4A)
+    return carrier
 
 
 def _wake_facts(tmp_path, **facts):
