@@ -437,6 +437,167 @@ def test_a_crashed_test_worker_leaves_the_run_incomplete_never_a_failure_a_basel
     assert "a test worker crashed while running tests/test_crash.py::test_dies" in update_checks._incomplete(done)
 
 
+@pytest.mark.parametrize("carried", ["-x", "--maxfail=1"])
+def test_a_carried_fast_fail_option_never_ends_a_lane_before_its_cases_ran(tmp_path, carried):
+    """An installation's pytest configuration may carry ``-x`` or ``--maxfail``. Obeyed, it ends the serial lane after
+    a known failure with exit 1, a finished lane's code, so the case after it never runs yet the run reads complete,
+    and a W run sharing that known failure would make the Update ready over the unrun case; the xdist lane it ends
+    exits 2, unverified for no reason of the update's. Each lane's own ``--maxfail=0`` wins: every case runs in both
+    lanes and each failure is named."""
+    from ouroboros.test_environment import isolated_environment
+
+    cases = ("def test_a_known():\n    assert False, 'known'\n\n\n"
+             "def test_b_later():\n    assert False, 'new'\n\n\n"
+             "def test_c_fine():\n    assert True\n")
+    ws, commit = _toy_workspace(tmp_path, {
+        "pytest.ini": f"[pytest]\naddopts = {carried}\nmarkers =\n    serial: one at a time\n",
+        "tests/test_parallel.py": cases,
+        "tests/test_serial.py": "import pytest\n\npytestmark = pytest.mark.serial\n\n\n" + cases})
+    env = isolated_environment(tmp_path / "iso", ws)
+
+    done = update_checks.run_tests(ws, commit, ["tests/test_parallel.py", "tests/test_serial.py"],
+                                   tmp_path / "scratch", env)
+
+    assert done["complete"] and done["cases"] == 6, done["tail"]
+    assert [(lane["lane"], lane["returncode"], lane["cases"]) for lane in done["lanes"]] == [
+        ("parallel", 1, 3), ("serial", 1, 3)]
+    assert sorted(done["failed"]) == [f"tests/test_{lane}.py::test_{name}" for lane in ("parallel", "serial")
+                                      for name in ("a_known", "b_later")]
+
+
+@pytest.mark.parametrize("carried", ["", "--setup-show"])
+def test_every_ordinary_outcome_stays_a_complete_run_with_setup_shown_or_not(tmp_path, carried):
+    """Real lanes: a pass, a skip, an xfail, a skip in both setup and teardown, a setup error, a call failure with a
+    teardown error (two ``testcase`` elements for one case, as the JUnit schema needs) and a pass with a teardown error.
+    ``--setup-show`` still calls each case, so neither form is refused: the run is complete and names its failures."""
+    from ouroboros.test_environment import isolated_environment
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV
+
+    ws, commit = _toy_workspace(tmp_path, {
+        "pytest.ini": f"[pytest]\naddopts = {carried}\nmarkers =\n    serial: one at a time\n",
+        "tests/test_outcomes.py": (
+            "import pytest\n\n\n@pytest.fixture\ndef broken():\n    raise RuntimeError('setup')\n\n\n"
+            "@pytest.fixture\ndef torn():\n    yield\n    raise RuntimeError('teardown')\n\n\n"
+            "@pytest.fixture\ndef skipped(request):\n    request.addfinalizer(lambda: pytest.skip('teardown'))\n"
+            "    pytest.skip('setup')\n\n\n"
+            "def test_pass():\n    assert True\n\n\ndef test_skip():\n    pytest.skip('skip')\n\n\n"
+            "def test_skip_twice(skipped):\n    pass\n\n\n"
+            "@pytest.mark.xfail\ndef test_xfail():\n    assert False\n\n\ndef test_setup_error(broken):\n    pass\n\n\n"
+            "def test_call_and_teardown(torn):\n    assert False, 'call'\n\n\n"
+            "def test_pass_and_teardown(torn):\n    pass\n")})
+    env = {**isolated_environment(tmp_path / "iso", ws), NESTED_WORKERS_ENV: "1"}
+
+    done = update_checks.run_tests(ws, commit, ["tests/test_outcomes.py"], tmp_path / "scratch", env)
+
+    report = pathlib.Path(done["evidence"]) / "parallel.xml"
+    assert [case.get("name") for case in update_checks.ElementTree.parse(report).getroot().iter("testcase")
+            ].count("test_call_and_teardown") == 2
+    assert done["complete"] and done["cases"] == 7, done["tail"]
+    assert sorted(done["failed"]) == [f"tests/test_outcomes.py::test_{name}" for name in (
+        "call_and_teardown", "pass_and_teardown", "setup_error")]
+
+
+_NOT_CALLED = {"pytest.ini": "[pytest]\naddopts = {carried}\nmarkers =\n    serial: one at a time\n",
+               # Two skip outcomes on one case and a regression whose call never runs: 2 outcomes, 2 cases, no failure.
+               "tests/test_ok.py": ("import pytest\n\n\n@pytest.fixture\ndef skipped(request):\n"
+                                    "    request.addfinalizer(lambda: pytest.skip('teardown'))\n"
+                                    "    pytest.skip('setup')\n\n\n"
+                                    "def test_a_skipped(skipped):\n    pass\n\n\n"
+                                    "def test_b_regression():\n    assert False, 'new'\n")}
+
+
+@pytest.mark.parametrize("carried, conftest, addopts", [
+    ("--setup-only", "", ""), ("--setup-plan", "", ""), ("", "", "--setup-only"),
+    ("", "def pytest_configure(config):\n    config.option.setuponly = True\n", ""),
+    ("", "def pytest_configure(config):\n    config.option.maxfail = 1\n", ""), ("", "", "")],
+    ids=["setup-only", "setup-plan", "PYTEST_ADDOPTS", "set-by-conftest", "maxfail-by-conftest", "normal"])
+def test_a_configuration_that_sets_cases_up_without_calling_them_is_refused_whatever_set_it(
+        tmp_path, monkeypatch, carried, conftest, addopts):
+    """pytest's setup-only mode sets each case up and never calls it, and exits as a finished lane. No report of it can
+    say which case ran, so every lane loads the mode plugin, which reads the parsed option as pytest's runner does;
+    configured this early, at session start, it refuses the lane (exit 4) before anything is collected (a nested
+    conftest collection loads later has its own test below): unverified, nothing measured, the regression never shown
+    green, no W run. A conftest that sets ``maxfail`` again after the lane's ``--maxfail=0`` is refused the same way:
+    a failure would stop the lane with a finished lane's exit and leave later cases unrun. Without either the same
+    tree calls the regression, and a complete W failing it the same way excuses it."""
+    import json
+
+    files = {**_NOT_CALLED, "pytest.ini": _NOT_CALLED["pytest.ini"].format(carried=carried)}
+    row, _ws = _lane_row(tmp_path, monkeypatch, {**files, **({"conftest.py": conftest} if conftest else {})})
+    if addopts:
+        (_python, env), _serving = update_checks._environments()
+        env["PYTEST_ADDOPTS"] = addopts
+
+    verdict = update_checks.selected_tests(row, tmp_path / "scratch")
+
+    folder = pathlib.Path(verdict["new"]["evidence"])
+    if carried or conftest or addopts:
+        assert verdict["ok"] is False and verdict["new"]["complete"] is False and verdict["failed"] == {}
+        assert verdict["blocking"] == [] and "baseline" not in verdict
+        assert [(lane["lane"], lane["returncode"], lane["cases"]) for lane in verdict["new"]["lanes"]] == [
+            ("parallel", 4, 0), ("serial", 4, 0)]
+        assert "--setup-only or --setup-plan" in verdict["unverified"]
+        assert ("a failure would leave later cases unrun" if "maxfail" in conftest else "no test would run") in (
+            folder / "parallel.stderr.txt").read_text(encoding="utf-8")
+        assert json.loads((folder / "run.json").read_text(encoding="utf-8"))["complete"] is False
+        assert [path.name for path in (tmp_path / "scratch").glob("junit-*")] == [folder.name]  # W never ran
+    else:
+        assert verdict["ok"] is True and verdict["new"]["complete"] is True and "unverified" not in verdict
+        assert verdict["already_failing"] == ["tests/test_ok.py::test_b_regression"] == sorted(verdict["failed"])
+        assert verdict["blocking"] == [] and verdict["baseline"]["complete"] is True
+
+
+@pytest.mark.parametrize("setting, why", [("setuponly = True", "no test would run"),
+                                          ("maxfail = 1", "a failure would leave later cases unrun")])
+def test_a_nested_conftest_collection_loads_after_session_start_is_still_refused_in_both_lanes(tmp_path, setting, why):
+    """The full tier passes ``tests/``: ``tests/nested/conftest.py`` is neither an argument nor a ``test*`` child of
+    one, so pytest loads it, and runs its ``pytest_configure``, while collecting, after the session-start check.
+    Its ``maxfail`` would stop the serial lane after the known failure with exit 1 and leave the later case unrun.
+    The check after collection refuses either before any case runs: the serial lane exits 4, an xdist worker's stop
+    ends the parallel lane interrupted (2). Nothing is measured, the run is incomplete, and each lane says why."""
+    from ouroboros.test_environment import isolated_environment
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV
+
+    ws, commit = _toy_workspace(tmp_path, {
+        "pytest.ini": _NOT_CALLED["pytest.ini"].format(carried=""),
+        "tests/nested/conftest.py": f"def pytest_configure(config):\n    config.option.{setting}\n",
+        "tests/nested/test_ok.py": _NOT_CALLED["tests/test_ok.py"],
+        "tests/nested/test_serial.py": ("import pytest\n\npytestmark = pytest.mark.serial\n\n\n"
+                                        "def test_a_known():\n    assert False, 'known'\n\n\n"
+                                        "def test_b_later():\n    assert False, 'new'\n")})
+    env = {**isolated_environment(tmp_path / "iso", ws), NESTED_WORKERS_ENV: "1"}
+
+    done = update_checks.run_tests(ws, commit, ["tests"], tmp_path / "scratch", env)
+
+    folder = pathlib.Path(done["evidence"])
+    assert [(lane["lane"], lane["returncode"], lane["cases"]) for lane in done["lanes"]] == [
+        ("parallel", 2, 0), ("serial", 4, 0)], done["tail"]
+    assert done["complete"] is False and done["ok"] is False and done["failed"] == {} and done["cases"] == 0
+    for label in ("parallel", "serial"):
+        assert why in "".join(
+            (folder / f"{label}.{stream}.txt").read_text(encoding="utf-8") for stream in ("stdout", "stderr"))
+
+
+def test_a_comparison_configured_not_to_call_its_cases_neither_excuses_nor_attributes(tmp_path, monkeypatch):
+    """W' calls its cases and measures the regression; the W and T trees carry ``--setup-only``. Each of those runs is
+    refused, so the same failure on W excuses nothing and T attributes nothing: it blocks, measured, unverified."""
+    import subprocess as sp
+
+    files = {**_NOT_CALLED, "pytest.ini": _NOT_CALLED["pytest.ini"].format(carried="--setup-only")}
+    row, ws = _lane_row(tmp_path, monkeypatch, files)
+    (ws / "pytest.ini").write_text(_NOT_CALLED["pytest.ini"].format(carried=""))
+    sp.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "calls"], cwd=ws, check=True)
+    row["composition_commit"] = sp.run(["git", "rev-parse", "HEAD"], cwd=ws, capture_output=True, text=True,
+                                       check=True).stdout.strip()
+
+    verdict = update_checks.selected_tests(row, tmp_path / "scratch")
+
+    assert verdict["ok"] is False and verdict["new"]["complete"] is True
+    assert verdict["blocking"] == ["tests/test_ok.py::test_b_regression"] and verdict["already_failing"] == []
+    assert verdict["baseline"]["complete"] is False and "comparison run on W" in verdict["unverified"]
+    assert verdict["target_failing"] == [] and verdict["target_run"]["complete"] is False
+
+
 def test_a_command_cut_at_its_deadline_keeps_what_it_printed_before_it(tmp_path):
     """Through pipes, a probe's form, POSIX keeps a child's output read before the deadline on the timeout; the result
     holds it and names it ``partial``. Windows' ``communicate`` raises that timeout without it, so the same form says
@@ -520,10 +681,12 @@ def test_a_run_keeps_its_exact_argv_and_every_lanes_complete_output_beside_its_r
     assert (manifest["commit"], manifest["python"], manifest["user_base"], manifest["targets"]) == (
         commit, sys.executable, env.get("PYTHONUSERBASE"), ["tests/test_red.py"])
     assert manifest["selection"] == {"tier": "selected", "files": ["tests/test_red.py"]}
+    mode_plugin = f"ouroboros_update_lane_{folder.name.replace('-', '_')}"
     assert [lane["argv"] for lane in manifest["lanes"]] == [
         [sys.executable, "-m", "pytest", f"@{folder / 'targets.txt'}", "-q", "-o",
-         "junit_family=xunit1", f"--junitxml={folder / (label + '.xml')}", *flags]
+         "junit_family=xunit1", "--maxfail=0", "-p", mode_plugin, f"--junitxml={folder / (label + '.xml')}", *flags]
         for label, flags in update_checks._lanes(worker_budget(os.cpu_count() or 1))]
+    assert (folder / f"{mode_plugin}.py").read_text(encoding="utf-8") == update_checks._LANE_MODE_PLUGIN
     assert manifest["targets_file"] == str(folder / "targets.txt")
     assert (folder / "targets.txt").read_text(encoding="utf-8") == "tests/test_red.py\n"
     assert (manifest["complete"], manifest["failed"], manifest["returncode"]) == (True, red["failed"], 1)

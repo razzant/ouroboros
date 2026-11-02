@@ -453,6 +453,42 @@ def _node(workspace: pathlib.Path, env: Dict[str, str], root: pathlib.Path) -> D
     return {"node": node, "version": version}
 
 
+_LANE_MODE_PLUGIN = '''"""Written by the Update checks beside this run's reports; not part of the tree under test."""
+import pytest
+
+
+def refusal(config):
+    # What pytest's runner reads to skip each call (--setup-plan sets it too), and the failure count at which its own
+    # accounting stops the session (-x and --maxfail set it; the lane's --maxfail=0 resets only what was parsed).
+    if config.getoption("setuponly", False):
+        return "this configuration selects --setup-only or --setup-plan: no test would run"
+    if config.getoption("maxfail", 0):
+        return (f"this configuration sets maxfail={config.getoption('maxfail')} after the lane's --maxfail=0: "
+                "a failure would leave later cases unrun")
+    return ""
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session):
+    # Read once the command line, ini, addopts and the initial conftests have configured, before xdist starts a
+    # worker or anything is collected: exit 4.
+    why = refusal(session.config)
+    if why:
+        raise pytest.UsageError(why)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_finish(session):
+    # Read again in each process that collected, the serial lane or an xdist worker, once every conftest its
+    # collection registered has configured and before any case runs. The serial lane exits 4; a worker's stop
+    # (``shouldfail``) is what xdist hands its controller, which ends the parallel lane interrupted, exit 2.
+    why = refusal(session.config)
+    if why:
+        session.shouldfail = why
+        raise pytest.UsageError(why)
+'''
+
+
 def _lanes(workers: int) -> List[Tuple[str, List[str]]]:
     """The commit gate's two lanes (``preflight_runner``): the non-serial cases over ``workers`` xdist workers, then
     the serial ones alone, each with CI's per-test hang bound."""
@@ -481,7 +517,17 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
     cases, no test worker crashed (``crashed``) and no lane exited 1 though none of its own cases failed (its
     session failed outside its tests, so no case names that failure: ``no_failing_case`` on that lane, in ``lanes``
     and ``run.json`` only then); anything else is unverified, never a pass,
-    never "no failures" and never a failure a baseline could excuse.
+    never "no failures" and never a failure a baseline could excuse. Each pytest lane's ``--maxfail=0`` follows
+    the tested tree's ``addopts`` and disables pytest's failure-count early stop: a carried ``-x`` or ``--maxfail``
+    must not leave later selected cases unrun with a normal failure exit. Interruptions (exit 2, as ``--sw`` uses)
+    stay incomplete. A lane whose configuration selects ``--setup-only`` or ``--setup-plan`` sets its cases up
+    without calling them, in a report that cannot say which ran, and one whose conftest sets ``maxfail`` again
+    after that ``--maxfail=0`` would stop after a failure with exit 1: each lane loads ``_LANE_MODE_PLUGIN``, which
+    reads both options as pytest itself reads them, at session start (exit 4, nothing collected) and again once
+    collection, with every conftest it loaded, has finished in each collecting process, before any case runs (the
+    serial lane exits 4, the xdist lane 2), so nothing is measured. An option set later, by a fixture, a test or a
+    runtest hook, is not read, and this does not establish collection/execution parity for arbitrary custom plugin
+    stops.
     ``failed`` maps each failing node id to its failure signature (kind, exception type,
     first message line); ``lanes`` keeps each lane's exit, case count and seconds.
     ``evidence`` is the run's own folder beside its reports: ``run.json`` (commit, interpreter, user
@@ -532,13 +578,19 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
     folder = pathlib.Path(tempfile.mkdtemp(prefix="junit-", dir=str(scratch)))
     targets_file = folder / "targets.txt"
     write_text_atomic(targets_file, "".join(f"{target}\n" for target in targets))
+    # Beside the run's reports, as neither W nor T need carry it; named by this run's folder, as the gate's probe is
+    # by its nonce: ``python -m pytest`` imports from the tested tree first, whose own files cannot foresee this name.
+    mode_plugin = f"ouroboros_update_lane_{folder.name.replace('-', '_')}"
+    write_text_atomic(folder / f"{mode_plugin}.py", _LANE_MODE_PLUGIN)
+    inherited = os.environ if env is None else env
+    pytest_env = {**inherited, "PYTHONPATH": os.pathsep.join(filter(None, (str(folder), inherited.get("PYTHONPATH"))))}
     cases, lanes, tails = {}, [], []
     # The worker budget the environment admitted to its xdist and nested runners, else this process's own.
     workers = nested_workers(env) if NESTED_WORKERS_ENV in (env or {}) else worker_budget(os.cpu_count() or 1)
     suite = candidate_node_tests(workspace) if node else []
     manifest = {"commit": commit, "python": python or sys.executable, "user_base": (env or {}).get("PYTHONUSERBASE"),
                 "installation_user_base": (env or {}).get(INSTALLATION_USER_BASE_ENV),
-                "pythonpath": (env or {}).get("PYTHONPATH"), "tmpdir": (env or {}).get("TMPDIR"),
+                "pythonpath": pytest_env["PYTHONPATH"], "tmpdir": (env or {}).get("TMPDIR"),
                 "targets": list(targets), "targets_file": str(targets_file),
                 "deadline_seconds": round(deadline - started, 1),
                 "materialization": _kept(folder, "materialize", ["git", "reset", "--hard", "--quiet", commit], bound,
@@ -547,7 +599,7 @@ def run_tests(workspace: pathlib.Path, commit: str, targets: List[str], scratch:
         report, begun = folder / f"{label}.xml", time.monotonic()
         cmd, cwd, lane_env = (node_suite(workspace, node, suite, env or {}, workers) if label == "node" else (
             [python or sys.executable, "-m", "pytest", f"@{targets_file}", "-q", "-o", "junit_family=xunit1",
-             f"--junitxml={report}", *flags], workspace, env))
+             "--maxfail=0", "-p", mode_plugin, f"--junitxml={report}", *flags], workspace, pytest_env))
         streams = {stream: folder / f"{label}.{stream}.txt" for stream in ("stdout", "stderr")}
         run = (run_tracked(cmd, cwd, deadline - begun, env=lane_env, outputs=(streams["stdout"], streams["stderr"]),
                            custody=None if unproven is None else (
@@ -634,7 +686,10 @@ def _incomplete(run: Dict[str, Any], what: str = "the selected run") -> str:
             + (f"; a test worker crashed while running {', '.join(crashed[:3])}" if crashed else "")
             + (f"; its process tree was not proven gone ({unproven})" if unproven else "")
             + (f"; {outside} exited 1 though none of its cases failed" if outside else "")
-            + "); 124 is its deadline, 125 a refused start, 2 an interrupted collection, 5 nothing collected")
+            + "); 124 is its deadline, 125 a refused start, 2 an interrupted collection, 5 nothing collected, "
+              "4 a lane pytest refused, as it does one configured --setup-only or --setup-plan, which runs no test, "
+              "or with a maxfail set after the lane's --maxfail=0, which would leave cases after a failure unrun "
+              "(2 when a conftest collected in an xdist worker configured it)")
 
 
 def _target_failing(workspace: pathlib.Path, row: Dict[str, Any], failed: Dict[str, str], scratch: pathlib.Path,
