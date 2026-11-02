@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 _CONTINUE_PREFIX = "Continue: "
 # The census's execution facts for a member (gateway/state.py), never a work's identity.
-_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait"})
+_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait", "cancel_pending"})
 
 
 def _strip_continue(name: str) -> str:
@@ -261,18 +261,37 @@ def _since(row: Mapping[str, Any]) -> Optional[float]:
 
 
 def works_snapshot(drive_root: Any, owners: Iterable[Mapping[str, Any]], raw_facts: Mapping[str, Mapping[str, Any]],
-                   *, complete: bool = True) -> Dict[str, Any]:
-    """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``. Never raises."""
+                   *, complete: bool = True, bindings: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``;
+    ``bindings`` is the census's task-to-Project map (``_bound_room``). Never raises."""
     try:
-        return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete)
+        return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete, dict(bindings or {}))
     except Exception:
         log.debug("Work projection unavailable for /api/state", exc_info=True)
         return {"works": [], "rooms": {}, "work_summary": ws.roll_up_summary({}, [], complete=False),
                 "works_complete": False, "works_gaps": [{"reason": "work_projection_unavailable"}]}
 
 
+def durable_binding(row: Mapping[str, Any], task_id: Any, bindings: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """The binding that places a task: its own, then its parent's or root's durable one (the census's one rule; an
+    origin-bound row is a convert-gate fact only and re-homes nothing)."""
+    for key in (task_id, row.get("parent_task_id"), row.get("root_task_id")):
+        binding = bindings.get(str(key)) if key else None
+        if isinstance(binding, dict) and not binding.get("origin_bound"):
+            return binding
+    return None
+
+
+def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A stored row's room by ``durable_binding``. Unbound, the row's own room stands."""
+    binding = durable_binding(row, task_id, bindings)
+    if binding is None or not binding.get("chat_id"):
+        return row
+    return {**row, "chat_id": binding["chat_id"], "project_id": str(binding.get("project_id") or "")}
+
+
 def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
-              complete: bool) -> Dict[str, Any]:
+              complete: bool, bindings: Mapping[str, Any]) -> Dict[str, Any]:
     obs = _Observations(drive_root)
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
@@ -282,7 +301,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
     try:
         for row in _inflight_upkeep(drive_root, set(rows)):
             facts = obs.result(row["activity_id"]) or {}
-            row.update({key: facts[key] for key in ("chat_id", "project_id") if facts.get(key)})
+            room = _bound_room(facts, row["activity_id"], bindings)  # a moved task's upkeep runs in its Project
+            row.update({key: room[key] for key in ("chat_id", "project_id") if room.get(key)})
             row["kind"] = "direct_chat" if facts.get("_is_direct_chat", True) else "managed_task"
             rows[row["activity_id"]] = row
     except Exception:
@@ -334,7 +354,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
             stored = obs.result(episode_id) or {}
             episode = {"task_id": episode_id}
             outcome = ws.shown_outcome(stored)
-            room_row = next((item[0] for item in entry["rows"]), stored)
+            # A tail-only work (open runs, review or upkeep, no member row) lives where its binding puts it.
+            room_row = next((item[0] for item in entry["rows"]), None) or _bound_room(stored, episode_id, bindings)
             facts = raw.get(episode_id) or stored
         if not members and not entry["runs"]:
             continue

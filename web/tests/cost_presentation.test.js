@@ -344,9 +344,8 @@ test('an unavailable snapshot is sticky but never pins the card (v6.82 r2)', () 
 test('a cost-only frame never moves the card’s activity clock', () => {
     // "updated" answers "when did this task last DO something". A cost frame carries
     // no narration, so letting it move the clock would make a silent card look
-    // freshly active. Pinned at source: the card's clock (a root's stands in its head,
-    // beside the chip) reads the activity clock, and only a human/activity-bearing frame advances it.
-    const source = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+    // freshly active. The card's clock (a root's stands in its head, beside the chip) reads
+    // the activity clock; which frames advance it: progress_narration_voice.test.js.
     const priorDocument = globalThis.document;
     globalThis.document = { createElement: () => ({ textContent: '', get innerHTML() { return this.textContent; } }) };
     try {
@@ -363,7 +362,6 @@ test('a cost-only frame never moves the card’s activity clock', () => {
         assert.match(record.metaEl.innerHTML, /\$2\.00/);
         assert.doesNotMatch(record.metaEl.innerHTML, /updated/, 'the clock moved whole to the head: once, never twice');
     } finally { globalThis.document = priorDocument; }
-    assert.match(source, /if \(ts && \(summary\.human \|\| activityCandidate\)\) record\.latestActivityTs = ts/);
 });
 
 test('one precedence rule: the deprecated alias wins a diverged pair, in every reader', () => {

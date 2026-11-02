@@ -56,6 +56,10 @@ def arm_detach(ctx: Any, reason: str) -> dict:
                 "note": "This work already runs on a pooled executor; nothing changed."}
     if owner_question_pending(ctx):
         return {"ok": False, "error": "owner_question_pending", "note": "Owner-question waits stay warm."}
+    from ouroboros.native_task_wait import armed_conflict
+
+    if conflict := armed_conflict(ctx):  # an owed native task wait is never overwritten
+        return {"ok": False, "error": "task_wait_owed", "note": conflict}
     if not callable(getattr(ctx, "owner_wait_callback", None)):
         return {"ok": False, "error": "no_continuation_owner"}
     pool = pool_available()

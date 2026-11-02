@@ -226,7 +226,7 @@ def test_a_settled_drive_leaves_only_unserved_trash_for_the_maintenance_child(tm
     assert staging.exists()  # a young entry may belong to a running settlement
     task_custody.sweep_custody_leftovers(data, min_age_sec=0)
     assert not staging.exists()
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}}
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
     assert list(trash.iterdir()) == []
 
 
@@ -256,7 +256,7 @@ def test_read_only_folders_in_custody_leftovers_never_strand_them(tmp_path):
         assert staging.exists(), "a young staging entry may belong to a running settlement"
         task_custody.sweep_custody_leftovers(data, min_age_sec=0)
         assert not staging.exists()
-        assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}}
+        assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
         assert not moved.exists()
     finally:
         for objects in sealed:

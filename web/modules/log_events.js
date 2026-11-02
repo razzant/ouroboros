@@ -1249,6 +1249,14 @@ function summarizeChatLiveEventView(evt) {
 
     const delegated = delegatedActivityView(evt); // a delegated run's typed observation, root or child
     if (delegated) return Object.assign(chatView({ ...delegated, chip: executorChip(evt), model: evt.model }), { activity: delegated.activity });
+    // The model's display reasoning (typed `reasoning` on its own narration), root or child: a `Thinking` row inside
+    // Details, its preview telling one thought from the next and Expand holding the whole text. Never a title or
+    // collapsed line (`activityPreview` stays explicitly empty). Absent = ordinary speech, legacy rows included.
+    if (evt.is_progress && evt.narration === true && evt.reasoning === true) {
+        return Object.assign(chatView({ headline: progressText.full ? tr('task.progress.thinking', 'Thinking') : '',
+            body: progressText.preview, fullBody: progressText.full, visible: Boolean(progressText.full), activityPreview: '', chip: executorChip(evt),
+            model: evt.model, dedupeKey: `reasoning:${progressText.full}` }), { reasoning: true });
+    }
     if ((evt.is_progress || t === 'send_message') && isSubagentEvent(evt)) {
         const note = describeText(hostRowDisplayText({ ...evt, text: progressText.full }), 240, { markdown: true });
         const sid = subagentId(evt);

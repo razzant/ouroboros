@@ -48,7 +48,7 @@ REFUSAL_REASONS = (
     # steer (supervisor/steering.py)
     "target_unknown", "direct_chat_turn", "subagent_target",
     "cancel_pending", "target_closed", "target_finished", "acceptance_fence_sealed",
-    "mailbox_write_failed",
+    "mailbox_write_failed", "presence_author_closed", "presence_author_elsewhere", "presence_author_unreadable",
     # ensure_project_scope (worker_promotion, events_project_routing)
     "project_scope_conflict", "missing_task_or_project", "ensure_project_scope_failed",
     # the parallel receipt producer (ouroboros/server_owner_routing.py)

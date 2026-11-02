@@ -54,12 +54,11 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
 :is(.chat-page-header, .project-panel-bar) .app-page-title-row > .app-page-title {
     flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* A Project's name too long for its row takes a second line before it is cut, so similar names stay apart; then the
-   consciousness chip yields (room_work.js). One line keeps the capsule's height: only a second line grows it. */
-.project-panel-bar .app-page-title-row > .app-page-title {
-    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
-    margin-block: 2px; white-space: normal; overflow-wrap: anywhere; line-height: 1.2;
-}
+/* A Project's name keeps one line at the controls' size and weight and ends in an ellipsis, so its capsule keeps the
+   bar's height (owner 2026-11-01, A·14). The whole name is the title's hover text and accessible name, and heads the
+   room's work list the title opens (.rw-title); on a phone a name still cut leaves the consciousness chip its brain
+   and mark (room_work.js fitWord). */
+.project-panel-bar .app-page-title-row > .app-page-title { font-size: var(--type-body); font-weight: 600; }
 :is(.chat-page-header, .project-panel-bar) > .app-page-title-block { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 /* The consciousness chip follows the title block and keeps its width (consciousness.css); the commands take the bar's
    far end, so the title yields first. */
@@ -72,7 +71,6 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row > .rw-trigger {
     background: var(--chip-float); box-shadow: var(--elev-rest);
     -webkit-backdrop-filter: var(--glass); backdrop-filter: var(--glass);
 }
-.project-panel-bar .app-page-title-row { height: auto; min-height: var(--chrome-control-h); }
 html[data-layout="docked"] .chat-page-header .app-page-title-row {
     padding-inline: 2px;
 }
@@ -199,6 +197,20 @@ html[data-layout="docked"] .chat-page-header .app-page-title-row {
 .chat-panel-statusbar:not(:has(> :not([hidden]))) { display: none; }
 
 /* ---- the list and its rows ------------------------------------------------------------------------- */
+/* A Project's list starts with the room's whole name, which its one-line title may cut: a section title, wrapping as
+   far as it needs, its start edge on the rows' text edge (the list's 8px and a row's 8px). With nothing listed the
+   name is followed by the note's one quiet sentence, without the empty list's padding between them. */
+.rw-title {
+    margin: 0;
+    padding: var(--space-4) var(--space-4) var(--space-1);
+    font-size: var(--type-section);
+    font-weight: 500;
+    line-height: var(--line-title);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+.rw-title[hidden] { display: none; }
+.rw-shade[data-scope="project"] .rw-list:empty { display: none; }
 .rw-list { display: flex; flex-direction: column; gap: 2px; box-sizing: border-box; width: 100%; min-width: 0; padding: 6px var(--space-2) 10px; }
 .rw-shade .rw-list { padding: var(--space-2) var(--space-2) var(--space-3); }
 .rw-group { padding: var(--space-3) 6px var(--space-1); font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }

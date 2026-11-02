@@ -95,7 +95,7 @@ Attach file/paste/drop stage attachments without count/size rejection; Send uplo
 
 Main/Project native turns have no queue rows. `supervisor.active_activity.DirectActivityRegistry` keeps actors through preparation/delivery; Stop/Hurry/quiz/steering address them, census/typing present them. They read Preparing · start step (census `turn_phase`), then the call's word (§6). Writer drain, custody and restart census include them; owner turns never hold the own clock.
 
-`_is_direct_chat` survives result, terminal, summary, history and census, keeping Project-native replies local; managed/transferred turns stay mirror-eligible. `_emit_progress.narration` and history's `_PROGRESS_META_FIELDS` distinguish model words (titles/collapsed activity) from host notes (timeline only).
+`_is_direct_chat` survives result, terminal, summary, history and census, keeping Project-native replies local; managed/transferred turns stay mirror-eligible. `_emit_progress.narration`/`.reasoning`, replayed via `_PROGRESS_META_FIELDS`, let only model speech take titles/collapsed lines.
 
 `chat.js::blockVisible` reevaluates presence at every mutation; `blockHasWork` governs chrome (DESIGN "Conversation activity block"). `chat_activity.js::toolEvidenceView` folds successful invocations; failures keep counted rows. Compact counts are task-local and monotonic; rounds/zero alone create no evidence. `loop_llm_call` publishes accumulated `usage.rounds` through addressed logs and terminal metrics. History reads saved `loop_outcome.usage.total_rounds` or summary facts, never monetary `task.total_rounds`; absent stays unknown. Session counts are labelled Supervision.
 
@@ -103,7 +103,7 @@ Host `routing_action`/`routing_tool_calls` (`tool_capabilities.ROUTING_VERBS`) a
 
 #### Liveness census and the chat header
 
-`GET /api/state` lists `active_chat_activities` (§11.1): direct turns and physical root actors, plus distinct late work. Parked direct turns keep their ID and `kind="direct_chat"`; `pause_cause` names why, never execution authority. Census alone inserts live entries; finals/census remove them. Only complete, supervisor-ready absence clears entries; partial reads keep positives. `state_snapshots.js` serves Main's short poll, `app.js`'s longer one and Evolution, each read bounded.
+`GET /api/state` lists `active_chat_activities` (§11.1): direct turns, physical roots, inline Presence (Stop after its first durable write; Restart warns it is interrupted, not resumed), and distinct late work. Parked direct turns retain ID/kind; `pause_cause` explains, never grants execution. Only this census adds live entries; finals or complete supervisor-ready absence remove them, partial reads keep them. Bounded polls: `state_snapshots.js` (Main); `app.js` (longer, Evolution).
 
 The same body carries the work projection (§11.1; vocabulary and grouping: `gateway/work_status.py`, observations: `work_projection.py`): one status per work (a request, its Continue episodes, live members) and per room, with the controls its doors accept now at exact targets. Room surfaces word it through `work_status.js` and derive no status, mark or control (Activity takes its controls); only the socket, an unconfirmed send, readiness and the owner's own Stop press overlay it. Until a complete ready body, omitted works stay unconfirmed without controls; facts (typing, an unlisted member's card, terminal/helper/model-wait/question frames, control acknowledgements), never narration, re-read it.
 

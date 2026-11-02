@@ -1379,11 +1379,13 @@ owner's own Stop press (moving), and `Starting…` with the boot phases that ref
 (no mark). The transcript's typing bubble shows only while the room's work moves and
 no card speaks for it. The title
 ellipsizes first, and a new word never moves a neighbour or resizes the bar.
-When there is work to show, pressing the status, or ↓/↑ on it, opens that
+Pressing the status, or ↓/↑ on it, opens that
 room's work and only that room's as one floating list under the bar's capsules, the same in every
 room (an opaque sheet of its own from the status capsule to the bar's last control, Main's history note waiting behind it): one row per work, the owner's unconfirmed sends, and unfinished cards an
 incomplete read has not confirmed (shown unknown, without controls). A Project
-with nothing else keeps its latest represented root card. A row names its work (its
+with nothing else keeps its latest represented root card. Main's list opens when there is work to show; a
+Project's starts with the room's whole name, wrapped (its title in the bar keeps one line, §10), so its title
+opens it even when nothing is listed, and the list then says `Nothing running or queued.` A row names its work (its
 coined name or the request's title, never `Continue: …`, else the owner's
 message) in two lines that keyboard focus or open details show whole, with the
 state under the name and its quiet line beside it, the row's mark before it (an
@@ -1466,8 +1468,11 @@ reviews create child tasks or prove execution.
   tray. A reviewer is two lines: model (else the requested one, `requested · not
   reported`), counted or adviser, outcome; then its critical finding (or that it
   is only in the full answer), else a note, else the engine's own cause, with
-  Read. A narrow card (its own width) puts the state under the subject and wraps
-  reviewer lines to two.
+  Read. A review Ouroboros itself could not complete (owner 01.11, #2516 taken:
+  the review reaches the parent with its cause) says so in one line before its
+  reviewers, with Read of its saved note, secrets masked; a reviewer it never
+  sent, or whose outcome it lost, then adds no cause line. A narrow card (its own
+  width) puts the state under the subject and wraps reviewer lines to two.
 - Rows speak one table's words (`review_record_card.js`): `passed`, `rejected`,
   `no verdict`, `not sent`, `verdict not recorded`; a reviewer `passed it` (with
   notes), `rejected it`, `inconclusive`, `outcome unknown`, `awaiting`, `not
@@ -1496,13 +1501,14 @@ reviews create child tasks or prove execution.
   Document reading. An unavailable original is named so; normalized saved
   skill/applied detail is labelled so, read through its task's review door.
 - One Record facts per row lists the record (label, value): identities, verdict
-  tokens, pool, strictness, reason, not-reached causes, costs (measured, zero,
-  subscription or unknown; wave totals over priced seats), failure codes,
-  requested and observed models apart; PASS may have findings. It scrolls in its
-  own box; the row's foot says the panel line. One unreadable record is a local
-  `could not be read` row beside readable neighbours (Logs print it too); older
-  records have a paged Read (`may be` when a rotated index cannot say); an older
-  count alone makes no row or door. A preflight stays one informational seat.
+  tokens, pool, strictness, reason, not-reached causes, a stopped wave's code
+  and words, costs (measured, zero, subscription or unknown; wave totals over
+  priced seats), failure codes, requested and observed models apart; PASS may
+  have findings. It scrolls in its own box; the row's foot says the panel line.
+  One unreadable record is a local `could not be read` row beside readable
+  neighbours (Logs print it too); older records have a paged Read (`may be` when
+  a rotated index cannot say); an older count alone makes no row or door. A
+  preflight stays one informational seat.
 - Start progress labels the frozen model/route/profile as requested; settlement
   reports that same slot's observed execution or says it was not reported. An API
   model sent in a request is not an independently observed provider label, and
@@ -2078,10 +2084,12 @@ reload and after a reconnect.
 Narration leads; routine execution evidence stays compact; exceptions keep their
 explanation and controls. The block's title, collapsed activity line and
 timeline carry the turn's own narration (progress frames the model authored,
-marked by the typed `narration` fact the worker stamps at that one producer; a
-frame without it is legacy and read as narration) and whatever needs the owner's
-eyes: a failed or timed-out step, a wait, a review, a child. Host notes on how
-the turn runs (a checkpoint, a model fallback, a review verdict, a nudge) are
+typed `narration` at that one producer; an untyped frame is legacy narration)
+and whatever needs the owner's eyes: a failed or timed-out step, a wait, a
+review, a child. Provider reasoning, typed `reasoning`, stays whole and
+model-authored inside Details, root and child, and never reaches the title, the
+collapsed line or the census `last_line` (owner 01.11 10:53, A). Host notes on
+how the turn runs (a checkpoint, a model fallback, a review verdict, a nudge) are
 visible timeline rows that never claim the title or the collapsed line, so a
 turn with only host notes keeps its coined or task name and an empty activity
 line. An unnamed root takes its newest authored headline by that narration's
@@ -2095,9 +2103,9 @@ lifecycle.
 A task that ends with a cause states it on the collapsed line in the
 owner's words (the sentence of the durable row and the expanded body), so a
 `Done with warnings` chip never stands beside an unrelated last action; a clean
-ending keeps the last narration. Residual tool errors name the first recorded
-failure in plain words (a noun for the step and what happened, never a tool
-name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
+ending's own summary replaces the last narration (owner 01.11 10:52, A). Residual tool
+errors name the first recorded failure in plain words (a noun for the step and
+what happened, never a tool name, its result text or a path) and count the rest (`tool_error_words`). Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`
@@ -2279,7 +2287,7 @@ action changes model/account only. Closing the chat disposes view resources
 without claiming it stopped the task; continuation requires the Ouroboros
 process to keep running.
 
-A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary fills the title slot when the run has no authored name (a wake), else it is the card's line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
+A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
 While running, the server supplies Own time, the focus's cause label or the
 schedule's name in that title slot; no summary leaves the title in place, with
 no invented sentence. Model waits, controls and temporary model changes last
@@ -2943,10 +2951,13 @@ layout the row is at most 56 px: ☰, the place's name, its status, then a room'
 consciousness chip and Panic, with the page's tabs, or Files' location and its actions, under it
 (`bindPageHeader` moves those nodes); the name wins over the status word, which a short row
 drops whole after its start step, keeping its mark, and Main's title ellipsizes before its chip or Panic yields.
-A Project's name then takes a second line inside its capsule (on a desk only that capsule grows the bar); only a
-name still cut there leaves the consciousness chip its brain and mark, its accessible name keeping the whole state,
-before the name ellipsizes; Panic and × never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for
-the navigation decision).
+A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
+in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
+2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
+whole name stays reachable: it is the title's hover text and accessible name, and the room's work list, which the
+title opens even in an empty Project, starts with it, wrapped. On a phone a name still cut leaves the consciousness
+chip its brain and mark, its accessible name keeping the whole state; a desk keeps the chip's word. Panic and ×
+never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Navigation sharing a toolbar also returns below the bar when the
 content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
 own row. Files' location and actions return above the list, folder names fit and actions wrap.
@@ -2968,8 +2979,8 @@ Its word uses the viewer's zone and a short date when not today; passed explaine
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
 Running shows moving dots, never a breathing glyph; held shows pause bars without time; unknown a ring,
-failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where a
-Project's name still cut on its second line leaves the chip its brain and mark (above).
+failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except on a phone
+while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
@@ -2979,7 +2990,8 @@ and, during a campaign, `Evolution ›`
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
-(owner 21.10). A failure or approximation note hangs under the bar; a page
+(owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
+(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 **Doors and containers.** An object whose only job is to take you somewhere is a

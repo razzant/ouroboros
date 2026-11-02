@@ -122,6 +122,7 @@ projectPanel?.insertAdjacentHTML('afterbegin', renderPageHeader({
 const projectHeader = createRoomHeader({ bar: projectPanel?.querySelector('.project-panel-bar'), ws, openDashboardTab, refreshState: refreshProjectsNav });
 const projectPanelBody = document.getElementById('project-panel-body');
 const projectPanelTitle = document.getElementById('project-panel-title');
+projectPanelTitle?.setAttribute('dir', 'auto');  // its own direction: an RTL interface keeps an LTR name's start
 const navProjects = document.getElementById('nav-projects');
 const navProjectsToggle = document.getElementById('nav-projects-toggle');
 const navProjectsCount = document.getElementById('nav-projects-count');
@@ -650,7 +651,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         // The room covers Main: a document Main had open closes rather than sit over it.
         mainChat?.closeTransient?.();
         navState.activeProjectId = project.id;
-        projectPanelTitle.textContent = project.name || project.id;
+        projectPanelTitle.textContent = projectPanelTitle.title = project.name || project.id;  // whole name on hover too
         // One live panel: every OTHER project instance is destroyed (or hidden and
         // marked when it holds pending work) before the target is created/shown; the one
         // on screen, left from the open phone drawer, is retired to fade out inside the card.

@@ -197,7 +197,8 @@ def test_existing_details_narration_stays_display_only(isolated, make_client, ca
     msg, _ = _call(client, [{"role": "user", "content": "Weather?"}])
     original, emitted, trace = copy.deepcopy(msg), [], {"reasoning_notes": []}
     _emit_round_progress(msg["content"], msg, lambda text, **meta: emitted.append((text, meta)), trace)
-    assert emitted == ([("Check the weather.", {"narration": True})] if carrier == "reasoning_details" else [])
+    assert emitted == ([("Check the weather.", {"narration": True, "reasoning": True})]
+                       if carrier == "reasoning_details" else [])
     assert trace == {"reasoning_notes": []}
     assert msg == original and _visible_round_text(msg["content"]) == ""
 
