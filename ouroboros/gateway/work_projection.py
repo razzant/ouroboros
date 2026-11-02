@@ -125,6 +125,14 @@ class _Observations:
                 self.reviews[task_id] = False  # an unreadable operation proves no review
         return self.reviews[task_id]
 
+    def prime_model_handoffs(self, root_ids: Iterable[str]) -> None:
+        """Every paused tree's model recipients over ONE read of their open attempts (``trees_model_handoffs``)."""
+        wanted = sorted({root for root in root_ids if root and root not in self.models})
+        if wanted:
+            from supervisor.continuation_admission import trees_model_handoffs
+
+            self.models.update(trees_model_handoffs(self.drive_root, wanted))
+
     def model_handoffs(self, root_id: str, drive_root: Any = None) -> list:
         if root_id not in self.models:
             self.models[root_id] = tree_model_handoffs(drive_root or self.drive_root, root_id)
@@ -394,6 +402,9 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         entry["rows"].append((row, facts, root_id))
         entry["roots"].add(root_id)
         entry["name"] = entry["name"] or name
+    obs.prime_model_handoffs(root_id for entry in groups.values() for row, facts, root_id in entry["rows"]
+                             if row.get("phase") in {"budget_paused", "budget_pausing"}
+                             and not facts.get("budget_drive_root"))
     for root_id, runs in held.items():
         work_id, name = _work_of(root_id, raw, obs, memo)
         entry = group(work_id)

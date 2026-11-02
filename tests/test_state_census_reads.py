@@ -72,6 +72,20 @@ def test_the_tree_census_has_one_call_site(tmp_path, monkeypatch):
     assert seen == ["paused-root"], "one census per root per projection, through the seam"
 
 
+def test_every_paused_root_shares_one_read_of_open_attempts(tmp_path, monkeypatch):
+    from ouroboros import owner_pause
+
+    batched, single = [], []
+    monkeypatch.setattr(owner_pause, "trees_model_requests",
+                        lambda root, ids: batched.append(sorted(ids)) or {str(i): [] for i in ids})
+    monkeypatch.setattr(owner_pause, "tree_model_requests", lambda root, task_id: single.append(task_id) or [])
+    owners = [{"activity_id": f"paused-{n}", "phase": "budget_paused", "kind": "managed_task"} for n in range(3)]
+    owners.append({"activity_id": "running-1", "phase": "running", "kind": "managed_task"})
+    wp._project(tmp_path, owners, {}, True, wp._Observations(tmp_path))
+    assert batched == [["paused-0", "paused-1", "paused-2"]], "one read answers every paused root"
+    assert single == [], "no paused root reads its open attempts alone"
+
+
 def test_the_room_history_current_work_question_reads_no_task_body(tmp_path, monkeypatch):
     queue, _state, workers = _install_queue(tmp_path, monkeypatch)
     with store.open_store(tmp_path, write=True) as txn:
