@@ -300,7 +300,7 @@ def test_every_supervisor_worker_tree_kill_is_the_shared_one():
         assert "kill_worker_tree(" in source, name
         assert ("keep_services=True" in source) is keep, name
     respawn = _function_source(root / "supervisor" / "worker_pool_lifecycle.py", "respawn_worker")
-    assert "return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=old.lane)" in respawn
+    assert 'return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))' in respawn
 
 
 def test_retained_purpose_never_rescues_a_stale_identity(tmp_path, monkeypatch):
