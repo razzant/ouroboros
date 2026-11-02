@@ -167,18 +167,44 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
     }
     # The host-only fresh-identity mark rides the dispatched copy, never the published row.
     row_task = {key: value for key, value in task.items() if key != "_fresh_identity"}
-    meta: Dict[str, Any] = {
-        "task": row_task, "worker_id": None, "started_at": now, "last_heartbeat_at": now,
-        "last_progress_at": now, "budget_paused_sec": 0.0, "soft_sent": False, "attempt": 1,
-        "lane": LANE_CONVERSATION, "client_message_id": str(client_message_id or ""),
-        "reply_expected": bool(reply_expected), "fresh_identity": bool(task.get("_fresh_identity")),
-    }
+    meta = _awaiting_row(row_task, attempt=1, client_message_id=client_message_id, reply_expected=reply_expected,
+                         fresh_identity=task.get("_fresh_identity"))
     pool.RUNNING[task_id] = meta
     # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn.
     queue.publish_queue_snapshot(reason="conversation_turn_admitted")
     slot = None if hold_carrier else ready_idle_carrier(for_owner=owner_turn(task))
     if slot is not None:
         hand_to_carrier(meta, slot)
+    return meta
+
+
+def _awaiting_row(task: Dict[str, Any], *, attempt: int, client_message_id: Any, reply_expected: Any,
+                  fresh_identity: Any) -> Dict[str, Any]:
+    """The RUNNING meta of a lane turn no carrier holds yet (an admission, or a dead carrier's retry)."""
+    now = time.time()
+    return {"task": task, "worker_id": None, "started_at": now, "last_heartbeat_at": now, "last_progress_at": now,
+            "budget_paused_sec": 0.0, "soft_sent": False, "attempt": int(attempt), "lane": LANE_CONVERSATION,
+            "client_message_id": str(client_message_id or ""), "reply_expected": bool(reply_expected),
+            "fresh_identity": bool(fresh_identity)}
+
+
+def readmit_after_crash(task: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str, Any]:
+    """Under Q: a dead carrier's retry (the same id, its next attempt, saved work attached) returns to the lane.
+
+    Never PENDING: the conversation's recovery is independent of the project pool's capacity and crash
+    fuse (FINAL_PLAN §1). The row awaits a carrier again with the turn's own lane facts, published before
+    any carrier can hold it; a ready idle carrier takes it now, the disclosed degraded executor on a physical
+    fact, otherwise the lane's reconcile hands it the next carrier (the dead slot's replacement among them).
+    """
+    from supervisor import queue
+
+    task["_execution_owner"] = {**dict(task.get("_execution_owner") or {}), "lane": LANE_CONVERSATION,
+                                "executor": EXECUTOR_WORKER}
+    meta = _awaiting_row(task, attempt=int(task.get("_attempt") or 1), client_message_id=prior.get("client_message_id"),
+                         reply_expected=prior.get("reply_expected"), fresh_identity=prior.get("fresh_identity"))
+    _pool().RUNNING[str(task["id"])] = meta
+    queue.publish_queue_snapshot(reason="conversation_turn_retried")
+    dispatch_awaiting_turns()
     return meta
 
 

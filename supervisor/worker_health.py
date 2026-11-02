@@ -728,7 +728,11 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
         except Exception:
             log.debug("Crash-requeue retry reset failed for %s", task_id, exc_info=True)
-        with queue.prepared_root_billing(task), _queue_lock:  # the ledger read happens before the lock
+        from contextlib import nullcontext
+        from supervisor.conversation_lane import conversation_row, readmit_after_crash
+
+        lane_turn = conversation_row(meta)  # a carrier's turn retries on its lane, never the project queue
+        with (nullcontext() if lane_turn else queue.prepared_root_billing(task)), _queue_lock:  # ledger read off Q
             if not _dead_job_is_current(job):
                 return
             # #1183: the dead attempt's own active fence must not refuse its retry
@@ -738,7 +742,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 clear_acceptance_fence_for_attempt(task_id, task_attempt=attempt, pid=w.proc.pid)
             _pool().RUNNING.pop(task_id)
             try:
-                admitted = queue.enqueue_task(task, front=True)
+                admitted = readmit_after_crash(task, meta) if lane_turn else queue.enqueue_task(task, front=True)
             except Exception:
                 _pool().RUNNING[task_id] = meta
                 raise
