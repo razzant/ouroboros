@@ -1344,17 +1344,19 @@ def _handle_skill_owner_action(
 _REVIEW_SCHEMA = {
     "name": "skill_review",
     "description": (
-        "Run skill review by the review panel (paid; an unchanged snapshot replays free) on one external skill package "
-        "using the review pool configuration and scored against the "
+        "Run skill review by the review panel (paid; an unchanged snapshot's verdict replays free) on one "
+        "external skill package using the review pool configuration and scored against the "
         "Skill Review Checklist section in docs/CHECKLISTS.md. Persists the "
         "verdict to data/state/skills/<name>/review.json with a content "
         "hash so a later edit invalidates the review automatically. "
         "Max Review Cycles semantics: an identical request never buys a new "
-        "panel — the settled review record of the same subject REPLAYS free, "
+        "panel over a verdict — the settled verdict of the same subject REPLAYS free, "
         "keyed by the shared reuse identity (the subject's bytes and rules, the "
         "assigned seats, enforcement, the answer contract and the round: "
         "rebuttal, goal, scope), so only changed content, a changed panel or "
-        "contract, or a NEW rebuttal dispatches reviewers again. The shared "
+        "contract, or a NEW rebuttal dispatches reviewers again. After a settled "
+        "wave formed no verdict, the identical request is a new paid wave; a "
+        "running or unknown one is collected, never sent again. The shared "
         "OUROBOROS_REVIEW_MAX_CYCLES ceiling "
         "bounds PAID panel dispatches per ceiling key (root task for "
         "task-driven reviews; the current content snapshot for the manual "

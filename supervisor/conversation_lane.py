@@ -333,7 +333,9 @@ def lane_turn_rows() -> List[Dict[str, Any]]:
                 "chat_id": int(task.get("chat_id") or 0),
                 "project_id": str(task.get("project_id") or ""),
                 "client_message_id": str(meta.get("client_message_id") or metadata.get("client_message_id") or ""),
-                "kind": "direct_chat",
+                # The census's one shape (``ActiveChatActivity``): a Host-admitted Presence turn the lane carries is
+                # ``presence`` there, as the in-process author census lists one (#2566); the owner's turns stay direct.
+                "kind": "presence" if task.get("_presence_turn") else "direct_chat",
                 "phase": "working" if meta.get("worker_id") is not None else "preparing",
                 "started_at": float(meta.get("started_at") or 0.0),
                 "task_attempt": attempt,

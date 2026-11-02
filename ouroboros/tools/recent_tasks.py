@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
-from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.outcomes import normalize_outcome_axes, verification_ledger_view
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.task_status import effective_task_result
 from ouroboros.dialogue_provenance import (
@@ -155,16 +155,8 @@ def _task_record(
         focus = compact_focus(data.get("focus"))
         if focus is not None:
             record["focus"] = focus
-    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
-    if ledger:
-        # An omitted-to-artifact stub carries no entries; its summary is the
-        # count authority, and for a full ledger the two always agree.
-        ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
-        record["verification_ledger"] = {
-            "schema_version": ledger.get("schema_version"),
-            "summary": ledger_summary,
-            "entry_count": ledger_summary.get("entry_count", len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0),
-        }
+    if ledger := verification_ledger_view(data.get("verification_ledger")):
+        record["verification_ledger"] = ledger  # dated beside the current artifact_bundle
     if include_results:
         record["result"] = result
     if include_traces:

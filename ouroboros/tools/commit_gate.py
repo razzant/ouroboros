@@ -558,6 +558,7 @@ def _record_commit_attempt(
 ) -> None:
     """Record a commit attempt; supports positional or keyword commit_message/status."""
     strict = bool(legacy_kwargs.pop("_strict", False))
+    bind_owner = bool(legacy_kwargs.pop("_bind_owner", False))  # a reserved roster this process owns, paid or not
     if commit_message is not None:
         legacy_kwargs.setdefault("commit_message", commit_message)
     if status is not None:
@@ -791,7 +792,7 @@ def _record_commit_attempt(
             )
             if status != "reviewing" and "late_result_pending" not in legacy_kwargs and not review_enforcement_blocks("blocking"):
                 attempt.late_result_pending = bool(getattr(existing, "late_result_pending", False)) or _attempt_has_active_review_custody(attempt)
-            stamp_paid_review_owner(attempt, paid=bool(paid))
+            stamp_paid_review_owner(attempt, paid=bool(paid) or bind_owner)
             state.record_attempt(attempt, semantic_redirects=_obligation_redirects)
 
         update_state(dr, _mutate)

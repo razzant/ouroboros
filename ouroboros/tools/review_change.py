@@ -45,8 +45,9 @@ from ouroboros.config import (
 from ouroboros.preflight_receipts import bind_execution_exhibit
 from ouroboros.review_body_fact import body_fact, layer_for
 from ouroboros.review_ledger import (
-    PART_CHANGE, PART_RESULT, PART_SKILL, PARTS, QUESTION_NOT_PERFORMED, build_wave_record, ledger_root, load_record, new_record_id,
-    panel_facts, panel_not_reached, reduce_verdict, revise_record, row_verdict, seat_findings, write_record,
+    NOT_PERFORMED_PHRASES, PART_CHANGE, PART_RESULT, PART_SKILL, PARTS, QUESTION_NOT_PERFORMED, build_wave_record, ledger_root,
+    load_record, new_record_id, panel_facts, panel_not_reached, reduce_verdict, retain_text_source, revise_record, row_verdict,
+    seat_findings, write_record,
 )
 from ouroboros.settings_scales import EFFORT_SCALE
 from ouroboros.reviewer_slot_config import ComposedPanel, PanelCompositionError as ReviewChangeArgumentError
@@ -90,6 +91,12 @@ MAIN_SEAT = "main"
 # Wave block reasons the seat rows state themselves (findings, quorum, coupling);
 # any other block keeps a verdict recomputed over the assigned seats from PASS.
 _ROW_STATED_BLOCKS = frozenset({"", "critical_findings", "review_quorum", "coupling_not_performed", "change_unanswered"})
+# Block reasons whose cause the record states without the wave's own words: its seats' answers (findings,
+# unparseable answers, quorum, an unanswered question or open custody, ``NOT_PERFORMED_PHRASES``) or its
+# dispatch refusal. Any other block — the host's own (``infra_failure``, ``fixed_overflow``, ``preflight``)
+# or one not named here — keeps its producer's words as the record's wave failure note (#2516).
+_RECORD_STATED_BLOCKS = frozenset({"critical_findings", "parse_failure", "review_quorum", "review_wave_budget_insufficient",
+                                   *NOT_PERFORMED_PHRASES})
 _GIT_PROBE_TIMEOUT_SEC = 30
 
 
@@ -534,21 +541,49 @@ def _dispatch(ctx: ToolContext, wave: _Wave) -> Dict[str, Any]:
     arm_rejoin(ctx, wave)
     goal = goal_with_author_questions(wave.request.goal, wave.request.author_questions)
     try:
-        review_err, _coupling, block_reason, _advisory = run_parallel_review(
+        review_err, _coupling, block_reason, advisory = run_parallel_review(
             ctx, wave.label, goal=goal, scope=wave.request.scope,
             review_rebuttal=wave.request.review_rebuttal,
             review_binding_fingerprint=str(wave.frozen.diff_sha), subject=wave.frozen)
     except Exception as exc:  # the wave's own failure is a typed infra block, never a verdict
         log.warning("review_change wave failed", exc_info=True)
-        return {"blocked": True, "block_reason": "infra_failure", "crash": f"{type(exc).__name__}: {exc}",
-                "attempt": holder}
+        crash = f"{type(exc).__name__}: {exc}"
+        return {"blocked": True, "block_reason": "infra_failure", "crash": crash, "attempt": holder,
+                "failure": {"block_reason": "infra_failure", "text": crash}}
     finally:
         git_mod._reconcile_and_clear_review_roster(ctx)
     # The one wave decides once (review_ledger.reduce_verdict): a coupling FAIL is
     # a critical finding of the same verdict, never a second block.
-    if review_err:
-        return {"blocked": True, "block_reason": str(block_reason or ""), "attempt": holder}
-    return {"blocked": False, "block_reason": "", "attempt": holder}
+    outcome = ({"blocked": True, "block_reason": str(block_reason or ""), "attempt": holder} if review_err
+               else {"blocked": False, "block_reason": "", "attempt": holder})
+    # The producer's own words for a stop the record cannot otherwise state: the block it returned, or the
+    # warnings Advisory and Cyber Pro return instead for a wave no seat decided (strings: the dict items are
+    # seat findings). Pending, quorum and refusal words stay out: the record already states those causes.
+    words = ""
+    if str(block_reason or "") not in _RECORD_STATED_BLOCKS:
+        if review_err:
+            words = str(review_err)
+        elif str((getattr(ctx, "_last_review_verdict", None) or {}).get("aggregate") or "") not in ("PASS", "FAIL"):
+            words = "\n".join(item for item in advisory or () if isinstance(item, str) and item.strip())
+    return {**outcome, "failure": {"block_reason": str(block_reason or ""), "text": words}} if words else outcome
+
+
+def _reported(text: str) -> str:
+    """Producer words as a record shows them: secrets masked BEFORE the strict, disclosed bound, the one
+    policy a failed seat's ``reported_cause`` follows (``review_records.review_failure_facts``)."""
+    from ouroboros.review_records import review_failure_facts
+
+    return review_failure_facts({"status": "error", "error": str(text or "")})["reported_cause"]
+
+
+def wave_failure_note(drive: Any, record: Any, failure: Dict[str, str]) -> Dict[str, Any]:
+    """The record's note of a wave its host stopped (``verdict.wave_failures``): the producer's block reason,
+    its safe words and the complete words retained first as the panel's ``failure`` source, read whole
+    through the task's review door (``review_ledger.read_selected_source``); no reviewer seat is invented."""
+    text = str(failure.get("text") or "")
+    return {"block_reason": str(failure.get("block_reason") or ""), "reported_cause": _reported(text),
+            "source_ref": retain_text_source(drive, record.task_id, record_id=record.record_id, seat_id="panel",
+                                             role="failure", text=text)}
 
 
 def _forensic(ctx: ToolContext) -> Dict[str, Any]:
@@ -611,8 +646,8 @@ def wave_facts(ctx: ToolContext, wave: _Wave, *, outcome: Dict[str, Any], forens
     if refusal is None and forensic.get("block_reason") == "review_wave_budget_insufficient":
         refusal = {"kind": "review_wave_budget_insufficient", "message": str(structured.get("wave_refusal") or "")}
     degraded = list(forensic.get("degraded_reasons") or [])
-    if outcome.get("crash"):
-        degraded.append(f"review_change_wave_crashed: {outcome['crash']}")
+    if outcome.get("crash"):  # bounded, masked words: the hot index row carries this list
+        degraded.append(f"review_change_wave_crashed: {_reported(outcome['crash'])}")
     critical, advisory, additional = seat_findings(triad_raw, set(wave.panel.additional))
     executions = dict(forensic.get("slot_executions") or {})
     mode = ""
@@ -749,6 +784,8 @@ def _settle(ctx: ToolContext, wave: _Wave, facts: Dict[str, Any], outcome: Dict[
     drive = ledger_root(ctx)
     record = build_wave_record(facts, surface=wave.request.surface, record_id=wave.record_id, drive_root=drive)
     _finish_record(record, wave, outcome, reuse_key=str(facts.get("reuse_key") or ""), retention=retention)
+    if outcome.get("failure"):  # retained before the index row names the record
+        record.verdict = {**dict(record.verdict or {}), "wave_failures": [wave_failure_note(drive, record, outcome["failure"])]}
     # A rejoin settles the SAME record the open operation left pending: the gate's
     # rule (commit_gate: a later settlement raises ``revision``, never a second record).
     payload, durable = _write(drive, record, rejoin=wave.rejoin is not None)
@@ -792,6 +829,7 @@ def review_result(record: Dict[str, Any], *, reused: bool) -> Dict[str, Any]:
                      for name in ("critical_findings", "advisory_findings", "additional_findings")},
         "degraded_reasons": list(verdict.get("degraded_reasons") or []),
         "dispatch_refusal": record.get("dispatch_refusal"),
+        **({"wave_failures": list(verdict["wave_failures"])} if verdict.get("wave_failures") else {}),
     }
 
 
@@ -1238,9 +1276,10 @@ _DESCRIPTION = (
     "own result review composes freely. Omitted reviewers mean the whole pool. Under Auto ask when another mind's "
     "check could change what you deliver, or when your human asks for a careful check. It is unavailable when "
     "task review is Off, and it has its own paid-cycle count. The same subject, surface, panel and ask return the "
-    "settled record free (reused=true), even after a guide changed; enforcement is recorded and on another "
-    "root never locks anything. Returns JSON {record_id, aggregate, per_question, panel, rows, subject, checklist, "
-    "tests, cost, reused, findings} (+ report for subject=system)."
+    "settled verdict free (reused=true), even after a guide changed; after a settled wave formed no verdict they "
+    "buy a new wave, while a running or unknown one is collected, never resent. Enforcement is recorded and on "
+    "another root never locks anything. Returns JSON {record_id, aggregate, per_question, panel, rows, subject, "
+    "checklist, tests, cost, reused, findings} (+ report for subject=system)."
 )
 
 

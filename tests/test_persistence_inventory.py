@@ -896,7 +896,14 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 438 -> 439: ``memory/owner_mailbox/*.intake.json``, a carrier-run author's durable intake fact
 # (``conversation_lease.open_author_intake``; its section-6 row).
 # 439 -> 440: ``logs/store_sites.jsonl``, every store site of a busy minute beside its ``supervisor_load`` row.
-EXPECTED_SCAN_PATHS = 440
+# 440 -> 446 (#2586): ``state/session_scratch`` and its ``*/*.json`` notes of open session scratch, and the
+# copy of a finished task's scratch record assembled in ``state/custody_staging/*/`` (three spellings) and
+# renamed whole into ``state/custody_trash/*``.
+# 446 -> 447 (#2566): the read-only census opens the existing ``authors-census.lock`` by its literal
+# name (it may not create it through the gate's helper); the ``presence_turn_gate/*.lock`` row covers it.
+# 447 -> 448 (#2539): a child's raw ``source_handles/test-evidence`` staged per pass in
+# ``state/custody_staging/*-*/*`` before its create-only placement (the custody staging row).
+EXPECTED_SCAN_PATHS = 448
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

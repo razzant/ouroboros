@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
+from tests._socket_seal import block_network_except_socketpair
 from tests.test_live_conversation import packages as packages, VoiceWire, host_world as host_world
 
 from ouroboros import call_protocol as cp
@@ -26,7 +27,7 @@ from ouroboros.contracts.realtime import CatalogModel, RealtimeInput, RealtimeSe
 def deny_network(monkeypatch):
     def refused(*args, **kwargs):
         raise AssertionError("Focused voice QA may not open a network connection")
-    monkeypatch.setattr(socket.socket, "connect", refused)
+    block_network_except_socketpair(monkeypatch, refused)
     monkeypatch.setattr(socket, "create_connection", refused)
 
 

@@ -856,6 +856,20 @@
       "acceptance_clause": "The task outgrew its context before it could finish cleanly."
     },
     {
+      "name": "a window that cannot hold the task's context says its own sentence",
+      "record": {"status": "failed", "reason_code": "context_capacity", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "context_capacity"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "This route's window cannot hold the task's context."
+    },
+    {
+      "name": "an unreadable handbook the task itself requires says its own sentence",
+      "record": {"status": "failed", "reason_code": "required_reference_unavailable", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "required_reference_unavailable"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The handbook this task requires could not be read."
+    },
+    {
       "name": "a reaped task names its absolute ceiling in owner words",
       "record": {"status": "failed", "reason_code": "absolute_ceiling", "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "absolute_ceiling"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
       "phase": "error",

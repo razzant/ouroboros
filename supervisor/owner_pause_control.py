@@ -75,8 +75,25 @@ def _locate_root_locked(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]],
     return (dict(turn), "direct") if isinstance(turn, dict) else (None, "")
 
 
-def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
-    """``(result_row, late_work)`` of an answered root still owning late work, else ``(None, False)``.
+def _presence_pause_refusal(drive_root: Any, task_id: str, row: Optional[Dict[str, Any]]) -> str:
+    """Why Pause cannot take a turn an inline Presence runner holds, else "": nothing saves that stack yet (#2566), so
+    Pause changes nothing and says what it knows, witnessed live or liveness unknown, never "not live". ``row`` is the
+    stored row, {} while a starting turn has none, None when unreadable. A settled or other row reads no census."""
+    from ouroboros.presence_runner import presence_execution_witness
+    from supervisor.cancel_publication import live_presence_row
+
+    if row and not live_presence_row(row):
+        return ""
+    witness = presence_execution_witness(task_id, drive_root=drive_root)
+    if witness:
+        return "presence_pause_unsupported"
+    return "presence_liveness_unknown" if witness is None and row != {} else ""
+
+
+def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool, str]:
+    """``(result_row, late_work, "")`` of an answered root still owning late work, ``(None, False, "")`` when there is
+    none, or ``(None, False, refusal)`` of a turn its inline author may still run (``_presence_pause_refusal``): not an
+    answered root, whatever its tree holds.
 
     Its open or in-flight upkeep is reachable so the Pause can end it at once; a live
     review operation is reachable so its unsent preparation can wait for Resume.
@@ -88,17 +105,22 @@ def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
 
     try:
         row = load_task_result(q.DRIVE_ROOT, task_id, strict=True) or {}
+    except Exception:
+        return None, False, _presence_pause_refusal(q.DRIVE_ROOT, task_id, None)
+    try:
+        if refusal := _presence_pause_refusal(q.DRIVE_ROOT, task_id, row):
+            return None, False, refusal
         live_review = bool(row) and task_has_live_review_operation(q.DRIVE_ROOT, task_id)
     except Exception:
-        return None, False
+        return None, False, ""
     checkpoint = row.get("root_phase_checkpoint") if isinstance(row.get("root_phase_checkpoint"), dict) else {}
     with q._queue_lock:
         descendants = any(str(task.get("root_task_id") or "") == task_id and task.get("id") != task_id
                           for task in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())])
     if descendants or live_review or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id) or post_task_synthesis_is_open(
             checkpoint.get("post_task_synthesis")):
-        return {**row, "id": task_id}, live_review or descendants
-    return None, False
+        return {**row, "id": task_id}, live_review or descendants, ""
+    return None, False, ""
 
 
 def _late_work_settled(root_drive: Any, root_task_id: str) -> bool:
@@ -185,7 +207,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
 
     from supervisor import queue as q
     task_id = str(task_id or "").strip()
-    late_row, late_review = _late_work(q, task_id)  # durable reads stay outside the queue lock
+    late_row, late_review, presence_refusal = _late_work(q, task_id)  # durable reads stay outside the queue lock
     with acquisition_budget(0), q._queue_lock:
         from supervisor.workers import get_direct_chat_agent
 
@@ -198,7 +220,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
         if task is None and late_row is not None:
             task, lane = late_row, "late"
         if task is None:
-            return {"ok": False, "error": "task_not_live"}
+            return {"ok": False, "error": presence_refusal or "task_not_live"}
         lineage = resolve_task_lineage(
             task_id, metadata=task.get("metadata"), root_task_id=task.get("root_task_id"),
             parent_task_id=task.get("parent_task_id"), delegation_role=task.get("delegation_role"),

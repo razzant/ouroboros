@@ -6,7 +6,6 @@ and readiness exhaustion capture and terminalise project slots only; the carrier
 on ``execution_owner`` are additive and old rows decode as they did.
 """
 
-import queue as stdqueue
 import time
 
 import pytest
@@ -15,7 +14,7 @@ from ouroboros.task_carrier import (
     EXECUTOR_INLINE_DEGRADED, EXECUTOR_WORKER, LANE_CONVERSATION, LANE_PROJECT,
     carrier_executor, conversation_origin, execution_kind, inline_execution,
 )
-from supervisor import conversation_lane, queue, worker_chat_lane, worker_health, worker_pool_lifecycle as lifecycle, workers
+from supervisor import conversation_lane, queue, worker_chat_lane, worker_pool_lifecycle as lifecycle, workers
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
@@ -267,3 +266,37 @@ def test_a_turn_admitted_while_the_spare_boots_is_dispatched_through_a_marker_wi
     conversation_lane.reconcile_conversation_lane()
     assert meta["worker_id"] == 7 and spare.busy_task_id == meta["task"]["id"]
     assert len(pool.created) == 0  # the window forbade a spawn, as it should
+
+
+def test_the_reaper_respawns_no_carrier_in_a_marker_window(pool, monkeypatch):
+    """``worker_pool_lifecycle.respawn_worker`` (LG's stand finding): a dead carrier's replacement is not started
+    inside an assisted update's conflict-marker window — a child would import the markers — although
+    ``reconcile_conversation_lane`` already promised nothing spawns there. The refusal is typed and raised before
+    any process starts, so the reaper's refusal episode keeps the slot and retries it each tick; the same respawn
+    starts the replacement once the window ends. The degraded executor covers the lane's turns meanwhile."""
+    from supervisor import queue as q, task_reaper
+
+    # The lane's spawn-refusal fact is module state: this test's refusals stay its own (the real lane never
+    # reaches its spawn inside a window: the gate is closed there and it returns before spawning).
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", [""])
+    dead = add_slot(1, lane=LANE_CONVERSATION)
+    dead.proc.alive, dead.reaping = False, True
+    monkeypatch.setattr(worker_chat_lane, "marker_window_closed", lambda: True)
+    with pytest.raises(lifecycle.SpawnRefusedInMarkerWindow):
+        lifecycle.respawn_worker(1)
+    assert not pool.created and workers.WORKERS[1] is dead, "no child in the window; the dead slot keeps its place"
+    # The reaper's door: the refusal opens its episode and hands the slot back to the next tick.
+    monkeypatch.setattr(task_reaper, "_RESPAWN_REFUSALS", {})
+    task_reaper._respawn_after_reap(q, workers, 1, expected_worker=dead)
+    assert not pool.created and dead.reaping is False
+    assert "SpawnRefusedInMarkerWindow" in task_reaper._RESPAWN_REFUSALS[1]["cause"]
+    # Growth under demand and the pool's last member's replacement respect the same window: no child, the
+    # dead member keeps its place (a non-last member is retired, never replaced, window or not).
+    lifecycle.reconcile_worker_capacity(lambda: 3)
+    assert not pool.created
+    workers.WORKERS.pop(0)  # the dead carrier is the pool's last member now
+    assert lifecycle.retire_or_replace_worker(1, dead) == "" and workers.WORKERS[1] is dead
+    # The window ends: the same respawn starts the replacement and the episode closes.
+    monkeypatch.setattr(worker_chat_lane, "marker_window_closed", lambda: False)
+    task_reaper._respawn_after_reap(q, workers, 1, expected_worker=dead)
+    assert len(pool.created) == 1 and workers.WORKERS[1] is not dead and 1 not in task_reaper._RESPAWN_REFUSALS

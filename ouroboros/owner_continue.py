@@ -96,6 +96,10 @@ TECHNICAL_REASON_CODES = frozenset({
     # A running direct turn's accounting wait outlived its idle window (``_usage_wait``): storage, not
     # the work, ended it; Continue is its manual path, never an automatic retry.
     "accounting_wait_expired",
+    # A pooled start its own context capture refused: a known window that cannot hold it, or a handbook the task
+    # itself requires that could not be read (the producer's own cause; other authority refusals keep theirs). The
+    # successor keeps that requirement; a larger route, the Context mode or a new task without it is the caller's choice.
+    "context_capacity", "required_reference_unavailable",
 })
 # The loop's forced-finalization rails that are technical limits: an extracted
 # best-effort answer settles ``completed``, the host fallback ``failed``
@@ -605,6 +609,12 @@ def owner_sources(drive_root: Any, result: Dict[str, Any], task_id: str) -> Dict
             continue
         if kind in OWNER_SOURCE_KINDS | {"task_message"} and not isinstance(entry.get("text") or "", str):
             gaps.append("owner_mailbox_row_malformed")  # the writer stores text; never str() a body
+            continue
+        from ouroboros.owner_quiz import secret_outcome_block
+
+        if secret_outcome_block(entry) is not None:
+            # Form outcomes remain recoverable task evidence, never fabricated owner words.
+            exact_seen.add(entry["_exact_row"])
             continue
         if kind == "quiz_answer" and (entry.get("quiz_delivery") or {}).get("answer_snapshot"):
             from ouroboros.owner_quiz import late_answer_owner_text

@@ -93,7 +93,7 @@ def _dispatch_mcp_tool_result(
     try:
         from ouroboros.mcp_client import _call_mcp_tool_result as _mcp_call
 
-        result = _mcp_call(name, args or {})
+        result = _mcp_call(name, args or {}, ctx)  # the calling task owns returned images
     except Exception as exc:
         text = f"⚠️ TOOL_ERROR ({name}): {exc}"
         return ToolResult(status="error", code="TOOL_ERROR", text=text)

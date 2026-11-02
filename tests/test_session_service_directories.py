@@ -111,7 +111,11 @@ def test_a_negotiated_workspace_write_start_gets_only_its_exact_owned_directorie
     assert made == sorted(["package-downloads", "package-downloads/npm", "package-downloads/pip",
                            "package-downloads/uv", "task_drives", "task_drives/task-1",
                            "task_drives/task-1/session_scratch_owners", "task_drives/task-1/session_scratch_owners/snap-1",
-                           "task_drives/task-1/session_scratch_owners/snap-1/scratch.json"])
+                           "task_drives/task-1/session_scratch_owners/snap-1/scratch.json",
+                           "state", "state/session_scratch", "state/session_scratch/task-1",
+                           "state/session_scratch/task-1/snap-1.json"])
+    note = json.loads((data / "state/session_scratch/task-1/snap-1.json").read_text(encoding="utf-8"))
+    assert note == {"schema_version": 1, "owner": str(data / "task_drives/task-1/session_scratch_owners/snap-1")}
     (scratch / "env-marker").write_text("kept\n", encoding="utf-8")  # the same key names the same folder again
     assert _prepare(tmp_path, _Catalog(GRANTED)) == grant
     assert (scratch / "env-marker").read_text(encoding="utf-8") == "kept\n"
@@ -237,9 +241,11 @@ def test_new_start_replaces_missing_scratch_but_never_adopts_a_replacement(tmp_p
 @pytest.mark.parametrize("layout", ["direct", "headless", "nested"])
 def test_existing_drive_settlement_retires_only_its_short_scratch(tmp_path, layout):
     from ouroboros import task_custody
+    from tests._shared import retire_synthetic_retention
 
     data = tmp_path / "data"
     first = _prepare(tmp_path, _Catalog(GRANTED))
+    held = _prepare(tmp_path, _Catalog(GRANTED), key="snap-2")
     sibling = _prepare(tmp_path, _Catalog(GRANTED), task_id="task-2")
     drive = data / "task_drives" / "task-1"
     # Exercise the existing retirement decision, not a test-only cleanup entrypoint.
@@ -254,15 +260,15 @@ def test_existing_drive_settlement_retires_only_its_short_scratch(tmp_path, layo
         destination = retired / ("data" if layout == "headless" else "data/task_drives/nested")
         destination.mkdir(parents=True)
         (retired / SESSION_SCRATCH_DIRNAME).rename(destination / SESSION_SCRATCH_DIRNAME)
-    retained = pathlib.Path(first.scratch) / test_environment.RETENTION_MARKER
-    retained.write_text("producer could not prove process exit\n", encoding="utf-8")
-    assert task_custody.remove_custody_trash(data)["stuck"]
-    assert retained.is_file() and retired.is_dir()
-    retained.unlink()  # model the producer resolving its own retention
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}}
-    assert not pathlib.Path(first.scratch).exists()
+    reason = "producer could not prove process exit"
+    test_environment.retain_tree(held.scratch, reason)
+    # The producer's retention is never deleted, and no longer holds the custodied drive in the trash.
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": [held.scratch]}
+    assert not retired.exists() and not pathlib.Path(first.scratch).exists()
+    assert (pathlib.Path(held.scratch) / test_environment.RETENTION_MARKER).is_file()
     assert pathlib.Path(sibling.scratch).is_dir()
     assert all(pathlib.Path(root).is_dir() for root in first.roots[1:])  # caches have a different lifetime
+    assert retire_synthetic_retention(held.scratch, reason)
 
 
 def test_unrelated_data_link_does_not_keep_a_retired_drive(tmp_path):
@@ -275,7 +281,7 @@ def test_unrelated_data_link_does_not_keep_a_retired_drive(tmp_path):
     outside.mkdir()
     (outside / "keep.txt").write_text("untouched", encoding="utf-8")
     _symlink_or_skip(retired / "data", outside)
-    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}}
+    assert task_custody.remove_custody_trash(data) == {"removed": 1, "stuck": {}, "retained": []}
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "untouched"
 
 

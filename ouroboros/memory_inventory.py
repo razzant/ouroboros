@@ -59,9 +59,10 @@ VIEW_TRACE_KEY = "memory_view"
 
 # The row fields the room and attribution readers consult (``project_dialogue.room_membership``,
 # ``dialogue_provenance.row_author``) plus the host facts of a task row, its recorded finality and
-# authority included. Texts and bulky payloads (review projections, outcome axes, quiz cards) stay
-# in the chain, read by address. Facts stored before a field joined this list keep their old form
-# (the stored prefix is never rewritten for it): a reader shows such a field as unknown.
+# authority included. Texts and bulky payloads (review projections, outcome axes, quiz cards; a secret
+# request keeps only its attribution fact, ``row_meta``) stay in the chain, read by address. Facts
+# stored before a field joined this list keep their old form (the stored prefix is never rewritten
+# for it): a reader shows such a field as unknown.
 _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
@@ -95,6 +96,10 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
     if isinstance(contact := row.get("presence_contact") or quiz.get("presence_contact"), dict):
         meta["presence_contact"] = dict(contact)  # ``presence_owner_contact.private_main_row`` reads it
+    if quiz.get("secret_request") and isinstance(outcome := quiz.get("secret_outcome"), dict):
+        # ``row_author``'s fact: a secret request's form outcome is the host's, never the owner's words.
+        meta["quiz"] = {"secret_request": {"plugin_name": str(quiz["secret_request"].get("plugin_name") or "")},
+                        "secret_outcome": {key: outcome[key] for key in ("event", "pluginName", "fields") if key in outcome}}
     if isinstance(ref := row.get("reply_to"), dict):  # ``room_membership.reply_target_room`` reads these, a
         meta["reply_to"] = {key: ref[key] for key in _REPLY_FIELDS if key in ref}  # saved target by its address
     if str(row.get("direction") or "") == "in":

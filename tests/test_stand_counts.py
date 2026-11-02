@@ -36,7 +36,6 @@ from tests.test_cost_live_set import (
     RESTING,
     _gap,
     _gap_mark,
-    _growing,
     live_rest_breaches,
     live_set_breaches,
 )

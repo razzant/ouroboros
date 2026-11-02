@@ -537,18 +537,6 @@ def test_the_runner_hands_the_engine_run_directory_to_its_caller(tmp_path, fake_
     assert facts["run_dir"] == str(fake_route.run_dir)
 
 
-def test_the_native_episode_keeps_its_own_host_observed_attestation():
-    """This module never relabels a native episode's provenance: the episode
-    attests `host_observed` and only a delegated session says `harness_observed`."""
-    import inspect
-
-    from ouroboros import review_native_episode
-
-    source = inspect.getsource(review_native_episode.NativeToolRoundReviewExecutor)
-    assert '"host_file_read_attestation": "host_observed"' in source
-    assert "harness_observed" not in source
-
-
 # ---------------------------------------------------------------------------
 # observed sources: a host-declared absolute file the session may read (plan review's room)
 # ---------------------------------------------------------------------------

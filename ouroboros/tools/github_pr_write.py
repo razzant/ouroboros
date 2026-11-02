@@ -2,23 +2,27 @@
 
 Internal method owner: ``github_write`` dispatches these methods and publishes their shared receipt. Each call reads the
 pull request, its head commit and (when it matters) its base commit first and refuses before any effect when they
-differ from what the caller expected; then sends exactly ONE mutating ``gh`` command; then reads the pull request
-back and states, field by field, what GitHub holds. Once a mutation was sent its effect is unknown until the
-read-back shows it: a failed or lost answer is reported with gh's exit facts beside that read-back, never called a
-refusal and never resent (a nonzero exit alone does not prove GitHub rejected the request, and a request GitHub is
-still processing can land after the read). Nothing here pushes, forks or merges. ``skill_publish_github`` keeps its
+differ from what the caller expected; then sends exactly ONE mutating ``gh`` command (a field edit is one REST PATCH
+at the read pull request's own URL: ``gh pr edit`` also queries organization metadata a repo-scoped token cannot
+read); then reads the pull request back and states, field by field, what GitHub holds. Once a mutation was sent its
+effect is unknown until the read-back shows it: a failed or lost answer is reported with gh's exit facts beside that
+read-back and never resent (a nonzero exit alone does not prove GitHub rejected the request, and a request GitHub is
+still processing can land after the read). Only the PATCH's own HTTP 4xx is GitHub's refusal; GitHub documents no
+all-or-nothing edit, so it settles as not applied only while the read-back holds every sent field as the precheck
+read it. Nothing here pushes, forks or merges. ``skill_publish_github`` keeps its
 token-only HTTP flow; the two share only the pure identity predicate in ``github_pr_identity``.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from ouroboros.github_pr_identity import pull_request_fields_from_cli, same_pull_request
-from ouroboros.tools.github import GhResult, _gh_run, _refuse, _send_facts
+from ouroboros.tools.github import GhResult, _gh_run, _http_refused, _refuse, _send_facts
 from ouroboros.tools.github_checks import _gh_json, _one_line, _whole
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import utc_now_iso
@@ -240,6 +244,17 @@ def _reconcile(pr: dict, *, title: Optional[str] = None, body: Optional[str] = N
     return confirmed, differs, notes
 
 
+def _changed_since(before: dict, after: dict, sent: dict) -> List[str]:
+    """Sent fields whose read-back differs from the precheck read (a null body is empty), saying nothing of who changed them."""
+    changed = []
+    for key, field in (("title", "title"), ("body", "body"), ("base", "baseRefName")):
+        old, new = before.get(field) or "", after.get(field) or ""
+        if key in sent and old != new:
+            changed.append(f"body changed ({len(old)} chars before, {len(new)} now)" if key == "body" else
+                           f"{key} changed from {_one_line(old, 120)!r} to {_one_line(new, 120)!r}")
+    return changed
+
+
 def _readback_lines(confirmed: List[str], differs: List[str], notes: List[str]) -> List[str]:
     lines = ["Read-back: " + "; ".join(confirmed)] if confirmed else []
     if differs:
@@ -418,10 +433,16 @@ def update(write) -> str:
             and (body is None or body == (pr["body"] or ""))):
         return _ok(write, f"PR #{number} already holds the requested values; nothing was changed. {pr['url']}",
                    outcome="completed_no_effect", pr=pr)
+    # The edit and the new base's commit are addressed by the URL of the pull request just read, on its own host
+    # (as `_ref_sha` callers and the merge receipt's body edit do), never by gh's default host.
+    from ouroboros.merge_receipts import _PR_URL_RE
+
+    where = _PR_URL_RE.fullmatch(str(pr["url"]))
+    if where is None or int(where[4]) != number:
+        return _failed(write, f"⚠️ PR_PRECHECK_FAILED: the read of PR #{number} names no URL of that pull request "
+                            f"({_one_line(pr['url'], 200)!r}); nothing was changed.", no_effect=True)
+    repo_id = _Repo(where[1], where[2], where[3])
     if base_arg is not None:
-        repo_id, error = _resolve_repo(write)
-        if repo_id is None:
-            return error
         current, res = _ref_sha(ctx, repo_id, repo_id.owner, base_arg)
         if res is not None:
             return _precheck_failed(write, res, f"base {base_arg}", "nothing was changed")
@@ -429,10 +450,10 @@ def update(write) -> str:
             return _failed(write, f"⚠️ PR_PRECHECK_FAILED: base {base_arg} is at {current}, you expected {base_sha}; nothing was "
                                 "changed.", no_effect=True)
 
-    # The one mutation: gh pr edit updates title, body and base in one request.
-    args = ["pr", "edit", str(number)] + ([f"--title={title}"] if title is not None else []) + (
-        ["--body-file=-"] if body is not None else []) + ([f"--base={base_arg}"] if base_arg is not None else [])
-    sent = _gh_run(args, ctx, timeout=_WRITE_TIMEOUT, input_data=body if body is not None else None, repo=repo)
+    # The one mutation: one REST PATCH of exactly the fields to change (the held base is not resent).
+    fields = {key: value for key, value in (("title", title), ("body", body), ("base", base_arg)) if value is not None}
+    sent = _gh_run(["api", f"repos/{repo_id.owner}/{repo_id.name}/pulls/{number}", "--method", "PATCH", "--input", "-",
+                    "--hostname", repo_id.host], ctx, timeout=_WRITE_TIMEOUT, input_data=json.dumps(fields))
     requested = dict(title=title, body=body, base=requested_base)
     after, res = _view(ctx, number, repo)
     write.pr_observed = after
@@ -454,6 +475,16 @@ def update(write) -> str:
     if after is None:
         return _failed(write, prefix + f" Read-back failed too ({res.text}); read the pull request "
                                      f"(github_read(method='get', kind='pr', target={number}{_hint(repo)})) before editing again.")
+    if _http_refused(sent):  # a refusal answer; the unchanged read-back, not the status, proves no field changed
+        changed = _changed_since(pr, after, fields)
+        if not changed:
+            notes = "".join(f" Note: {note}." for note in _reconcile(after, head_sha=head_sha)[2])
+            return _failed(write, f"⚠️ GH_WRITE_NOT_APPLIED: GitHub refused the edit of PR #{number} in {_where(repo)}: the "
+                                f"request {_send_facts(sent)}. One request was sent and not retried; the read-back holds every "
+                                f"sent field as the precheck read it, so nothing was changed.{notes}", no_effect=True)
+        return _failed(write, prefix + " GitHub answered with a refusal, yet the read-back differs from the precheck in a sent "
+                       "field: " + "; ".join(changed) + ". GitHub documents no all-or-nothing edit, so the read-back cannot "
+                       "tell which request made that change; read the pull request again before any further edit.")
     confirmed, differs, _notes = _reconcile(after, **requested)
     if not confirmed:
         return _failed(write, prefix + " Read-back: none of the requested values was held at that moment (" + "; ".join(differs)

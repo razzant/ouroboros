@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ouroboros.utils import atomic_write_json
+
+log = logging.getLogger(__name__)
 
 _AUTHORS_LOCK = threading.Lock()
 _AUTHORS: dict[tuple[str, str], "PresenceTurnLease"] = {}
@@ -35,6 +38,16 @@ def _try_exclusive(fd: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _remove_witness(path: Path) -> None:
+    """Remove a stack witness nothing holds. Windows refuses the delete while a passive census reader has it open
+    (``os.open`` shares no delete); that one refusal leaves the unlocked leftover, which names no live stack, for
+    the next reclaim. Every other failure stays its caller's."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        log.debug("Presence author witness %s stays for the next census", path, exc_info=True)
 
 
 class PresenceTurnLease:
@@ -99,7 +112,7 @@ class PresenceTurnLease:
                 os.close(fd)
         finally:
             if self._live_path:
-                self._live_path.unlink(missing_ok=True)
+                _remove_witness(self._live_path)
 
     def release(self) -> None:
         resources = None
@@ -487,6 +500,82 @@ def accept_author_mail(drive_root, author: str, conversation_key: str, append: C
         return False  # an append that takes no admission check cannot be made one transaction
 
 
+def live_presence_roots(drive_root: Any) -> dict:
+    """Every live inline Presence author of ``drive_root``: a read-only projection, never an owner or registry.
+
+    ``local`` authors run in this process (their lease here and their stack in the runner's live set);
+    another process's authors are known only by their stack inode. The conversation locks are never
+    probed, so a reader cannot make an admission meet a busy conversation, and the inode census is
+    observed, never reclaimed (``_observe_live_stack_authors``). ``complete`` is False when it could not
+    be read whole. Liveness only: whether an author takes mail is ``author_intake_open``, and every door
+    rechecks both under that author's own lock. Never raises.
+    """
+    from ouroboros.presence_runner import presence_turn_is_live
+
+    root = Path(drive_root).resolve()
+    with _AUTHORS_LOCK:
+        mine = {task for (where, task) in _AUTHORS if where == str(root)}
+    try:  # no gate directory: no author ever ran here, and a read creates nothing
+        everywhere, complete = (_observe_live_stack_authors(root)
+                                if (root / "state" / "presence_turn_gate").is_dir() else (set(), True))
+    except Exception:
+        everywhere, complete = set(), False
+    local = sorted(task for task in mine if presence_turn_is_live(task, drive_root=root))
+    return {"roots": [{"task_id": task, "local": True} for task in local]
+            + [{"task_id": task, "local": False} for task in sorted(everywhere - mine)], "complete": complete}
+
+
+def resolved_presence_turns(drive_root: Any) -> dict:
+    """The one reading every Presence reader shares: ``live_presence_roots`` with each author's durable row read once.
+
+    ``state`` says what ``row`` proves: ``running`` (the unsettled row its runner owns), ``preparing`` (nothing stored
+    yet: a runner publishes its witness before it builds the agent and writes RUNNING, so absence here is a fact of a
+    starting turn, never of an ended one; ``row`` holds only the room a local one's conversation names, {} elsewhere)
+    or ``unreadable`` (``row`` {}, ``error`` names why; never called ended). A settled row's stack is only unwinding
+    and is left out. ``complete`` also says whether every row could be read. Facts only: intake and every door stay
+    the author's own. Never raises.
+    """
+    from ouroboros.presence_runner import presence_chat_id
+    from ouroboros.task_results import load_task_result
+    from supervisor.cancel_publication import live_presence_row
+
+    census = live_presence_roots(drive_root)
+    roots, complete = [], census["complete"]
+    for fact in census["roots"]:
+        task_id = fact["task_id"]
+        try:
+            row = load_task_result(drive_root, task_id, strict=True) or {}
+            if row and not live_presence_row(row):
+                continue
+        except Exception as exc:
+            roots.append({**fact, "state": "unreadable", "row": {}, "error": type(exc).__name__})
+            complete = False
+            continue
+        if row:
+            roots.append({**fact, "state": "running", "row": row})
+            continue
+        with _AUTHORS_LOCK:
+            lease = _AUTHORS.get((str(Path(drive_root).resolve()), task_id))
+        roots.append({**fact, "state": "preparing",
+                      "row": {"chat_id": presence_chat_id(lease.conversation_key)} if lease is not None else {}})
+    return {"roots": roots, "complete": complete}
+
+
+def author_intake_open(drive_root: Any, author: str) -> bool:
+    """Whether this process's live ``author`` takes owner and peer mail now, read under its admission lock.
+
+    A lent author still drains its mailbox (owner mail wakes its wait); place arrivals keep the
+    stricter ``accept_author_mail``. A closing author is live and takes nothing.
+    """
+    agent = presence_author_agent(drive_root, author)
+    lock = getattr(agent, "_owner_message_admission_lock", None)
+    if lock is None:
+        return False
+    with lock:
+        return bool(getattr(agent, "_busy", False) and getattr(agent, "_accepting_owner_messages", False)
+                    and getattr(agent, "_current_task_id", None) == author)
+
+
 def live_authors(*, drive_root: Any = None) -> list[str]:
     root = str(Path(drive_root).resolve()) if drive_root is not None else ""
     with _AUTHORS_LOCK:
@@ -508,28 +597,58 @@ def _live_stack_authors(root: Path) -> set[str]:
     """O(live stacks + crash leftovers); reclaim only unlocked unique inodes."""
     gate = PresenceTurnGate(state_root=root / "state")
     with gate._file_lock(gate._gate_file("authors-census.lock")):
-        return _scan_live_stack_authors(root)
+        return _scan_live_stack_authors(root)[0]
 
 
-def _scan_live_stack_authors(root: Path) -> set[str]:
-    found = set()
+def _observe_live_stack_authors(root: Path) -> tuple[set[str], bool]:
+    """The same census as a pure observation: it creates, reclaims and writes nothing, and ``complete`` is False
+    when a held witness cannot be read. It waits on the existing census lock as a writer does, so it never meets a
+    half-made witness; ended witnesses stay for ``live_authors`` to reclaim."""
+    from ouroboros.platform_layer import file_lock_exclusive, file_unlock
+
+    gate = root / "state" / "presence_turn_gate"
+    try:
+        fd = os.open(gate / "authors-census.lock", os.O_RDONLY)
+    except FileNotFoundError:  # the lock precedes every witness (``bind_author``): one without it is unreadable here
+        return set(), not any(gate.glob("author-*.live"))
+    try:
+        file_lock_exclusive(fd)
+        try:
+            return _scan_live_stack_authors(root, reclaim=False)
+        finally:
+            file_unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _scan_live_stack_authors(root: Path, *, reclaim: bool = True) -> tuple[set[str], bool]:
+    found, complete = set(), True
     for path in (root / "state" / "presence_turn_gate").glob("author-*.live"):
         try:
-            fd = os.open(path, os.O_RDWR)
+            fd = os.open(path, os.O_RDWR if reclaim else os.O_RDONLY)
         except FileNotFoundError:
+            continue  # its author released it during this census
+        except OSError:
+            if reclaim:
+                raise
+            complete = False
             continue
         retire = False
         try:
             if _try_exclusive(fd):
-                retire = True  # its stack ended, including a hard crash
+                retire = reclaim  # its stack ended, including a hard crash
             else:
                 row = json.loads(os.read(fd, 8192))
-                if row.get("task_id"):
-                    found.add(str(row["task_id"]))
+                task = row.get("task_id") if isinstance(row, dict) else None
+                if task:
+                    found.add(str(task))
+                else:
+                    complete = False  # a held witness this read cannot name
         except (FileNotFoundError, ValueError):
+            complete = False
             continue
         finally:
             os.close(fd)
             if retire:
-                path.unlink(missing_ok=True)  # Windows requires closing the locked handle first
-    return found
+                _remove_witness(path)  # Windows requires closing the locked handle first
+    return found, complete

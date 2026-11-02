@@ -144,7 +144,7 @@ def test_roster_keeps_available_facts_when_project_store_is_busy(tmp_path, monke
 
 
 def test_roster_discloses_both_unreadable_task_and_project_enrichment(tmp_path, monkeypatch):
-    from ouroboros import projects_registry, task_results
+    from ouroboros import projects_registry
     from ouroboros.peer_roster import independent_roots
     from ouroboros.store import StoreBusy
 

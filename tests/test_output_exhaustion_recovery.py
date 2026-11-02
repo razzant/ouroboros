@@ -131,18 +131,45 @@ def test_configured_fallbacks_are_disclosed_and_tried_once(tmp_path, monkeypatch
     text, usage, _trace = loop.run_llm_loop(**kw)
     assert text == "done" and len(sent) == 2 + len(tail)
     assert [s["model"] for s in sent] == ["primary-fixture", "primary-fixture", "fallback-fixture", "third-fixture"][:len(sent)]
-    assert len([n for n in notes if "Fallback:" in n]) == len(tail)
+    assert len([n for n in notes if "Fallback: trying" in n]) == len(tail)
+    assert [n for n in notes if "active route" in n] == [f"⚡ Fallback: openai-compatible::{sent[-1]['model']} is now the active route; it answered."]
     assert recovery.KEY not in usage
+
+
+def test_a_reply_that_spent_its_allowance_is_adopted_as_no_answer_until_the_primary_returns(
+        tmp_path, monkeypatch, isolated, endpoint):
+    """Real loop and SDK. The primary refuses; the fallback's empty length reply is adopted as the active route, but
+    no row or host fact calls it an answer and no accepted route records it. The primary then answers on its own return."""
+    client, sent = endpoint(["400", "empty", "empty", "answer"])
+    kw, notes = configured_loop(tmp_path, monkeypatch, client)
+    text, usage, _trace = loop.run_llm_loop(**kw)
+    assert text == "done" and [s["model"] for s in sent] == ["primary-fixture", "fallback-fixture", "fallback-fixture", "primary-fixture"]
+    assert [n for n in notes if "Fallback:" in n] == [
+        f'⚡ Fallback: trying {FALLBACK} after a rejected request on {PRIMARY}. The provider said: "Upstream request failed"',
+        f"⚡ Fallback: {FALLBACK} is now the active route, with no usable answer after a reply that reached its length limit "
+        "before any visible output.",
+        f"⚡ Fallback: trying {PRIMARY} (primary) after a reply that reached its length limit before any visible output on {FALLBACK}.",
+        f"⚡ Fallback: back on the primary route {PRIMARY}; it answered.",
+    ]
+    facts = [json.dumps(m["content"], ensure_ascii=False) for m in sent[2]["messages"] if "[ROUTE FACTS]" in str(m.get("content"))]
+    assert len(facts) == 1, "the adopted route's next own round carries the facts once"
+    assert "is now acting without a usable answer this round after" in facts[0]
+    assert "That route has no accepted call this round." in facts[0]
+    assert "answered this round" not in facts[0] and "That answering call" not in facts[0]
+    assert [row["to_binding"][0] for row in usage["accepted_routes"]] == [PRIMARY], "a spent reply is no accepted route"
 
 
 @pytest.mark.parametrize("exact", [True, False])
 def test_all_routes_empty_save_incomplete_without_wrapup(tmp_path, monkeypatch, isolated, endpoint, exact):
     client, sent = endpoint(["empty"] * (2 if exact else 4), fallbacks=f"{FALLBACK},openai-compatible::third-fixture")
-    kw, _notes = configured_loop(tmp_path, monkeypatch, client, exact=exact)
+    kw, notes = configured_loop(tmp_path, monkeypatch, client, exact=exact)
     kw["messages"] += [{"role": "assistant", "content": "Saved finding, not a completed answer."}]
     text, usage, trace = loop.run_llm_loop(**kw)
     assert len(sent) == (2 if exact else 4)
     assert text == "Saved finding, not a completed answer."
+    assert [n for n in notes if "the last attempt" in n] == ([] if exact else [
+        "⚡ Fallback: the last attempt, on openai-compatible::third-fixture, ended without a usable reply after a reply "
+        "that reached its length limit before any visible output."])
     assert usage["reason_code"] == recovery.REASON and usage["execution_status"] == "infra_failed"
     assert "Work is incomplete" in usage["terminal_host_notice"] and trace["output_recovery"]["stage"] == "exhausted"
     from ouroboros.outcomes import derive_loop_outcome
@@ -314,7 +341,7 @@ def test_failed_smaller_request_reaches_reserve_without_second_shrink(tmp_path, 
     text, usage, _trace = loop.run_llm_loop(**kw)
     assert [s["model"] for s in sent] == ["primary-fixture"] * 3 + ["fallback-fixture"]
     assert len(_events(tmp_path, "context_reclaim")) == 2
-    assert len([n for n in notes if "Fallback:" in n]) == 1
+    assert len([n for n in notes if "Fallback: trying" in n]) == 1
     assert text == "done" if tail == "answer" else usage["reason_code"] == recovery.REASON
 
 

@@ -2,9 +2,9 @@
 
 ``ouroboros/tools/review_change.py`` owns the request, the wave and its ledger
 record; what the shared review state (``review_state``) knows about the wave lives
-here: the write-ahead paid attempt row the per-task cycle ceiling counts, the
-delegated start token checkpointed onto its exact reserved seat, the settled row
-carrying the wave's final roster — and the rejoin. Before a rerun pays again, the
+here: the reserved attempt row the per-task cycle ceiling counts once a physical
+send stamps it paid, the delegated start token checkpointed onto its exact reserved
+seat, the settled row carrying the wave's final roster — and the rejoin. Before a rerun pays again, the
 open operation of the SAME logical round on the SAME task (identity c,
 ``review_subject.review_retry_key``) is collected through the commit gate's
 reconcile-only path (``review_custody``: settled seats replay, the exact pending
@@ -122,7 +122,8 @@ def attempt_record(wave: Any, ctx: Any, **fields: Any) -> Any:
         pre_review_fingerprint=str(wave.frozen.diff_sha), review_retry_key=wave.retry_key,
         rebuttal_sha256=wave.rebuttal_sha, review_contract_fingerprint=wave.contract_fp,
         review_record_id=wave.record_id, **fields)
-    stamp_paid_review_owner(attempt, paid=bool(getattr(attempt, "paid", False)))
+    # A reserved roster row is owned by this process before it is paid (startup reconciliation).
+    stamp_paid_review_owner(attempt, paid=bool(getattr(attempt, "paid", False)) or attempt.status == "reviewing")
     return attempt
 
 
@@ -187,41 +188,56 @@ def arm_rejoin(ctx: Any, wave: Any) -> None:
 
 
 def install_paid_stamp(ctx: Any, wave: Any) -> Dict[str, int]:
-    """The write-ahead paid fact at the wave's first physical dispatch, keyed by the
-    REVIEWED root so the shared per-task-tree ceiling of (this root, ``review_change``)
-    counts it; and the delegated start token's checkpoint onto its reserved seat
-    (``review_state_custody.checkpoint_pending_review_invocation``), so a restart
-    finds the exact invocation to rejoin. A rejoin writes onto the attempt row it
-    collects, never a second paid row; its empty reservation leaves that row's
-    roster as recorded."""
+    """The wave's attempt row, keyed by the REVIEWED root so the shared per-task-tree
+    ceiling of (this root, ``review_change``) counts it: the reservation writes the
+    roster before any worker starts, unpaid; the first physical dispatch merges the
+    write-ahead paid fact onto that row (``review_state_custody.mark_review_attempt_paid``);
+    the delegated start token is checkpointed onto its reserved seat
+    (``checkpoint_pending_review_invocation``), so a restart finds the exact invocation
+    to rejoin. A rejoin writes onto the attempt row it collects, never a second row.
+    A new wave first settles its round's completed earlier wave
+    (``settle_completed_round``): an explicit repeat after a wave without a verdict
+    is a new physical attempt, while open or unknown custody is still collected and a
+    usable verdict was already reused by the ledger (``reuse_or_none``)."""
     from ouroboros.review_dispatch import ReviewPaidStamp
-    from ouroboros.review_state import checkpoint_pending_review_invocation, make_repo_key, update_state
+    from ouroboros.review_state import (
+        checkpoint_pending_review_invocation, make_repo_key, mark_review_attempt_paid, settle_completed_round,
+        update_state,
+    )
 
     holder = {"attempt": int(getattr(getattr(wave, "rejoin", None), "attempt", 0) or 0)}
-    drive, repo_key = review_state_root(ctx), make_repo_key(wave.root)
-    task_id = str(getattr(ctx, "task_id", "") or "")
+    drive, task_id = review_state_root(ctx), str(getattr(ctx, "task_id", "") or "")
+    identity = {"repo_key": make_repo_key(wave.root), "tool_name": _tool_name(wave), "task_id": task_id}
+    if getattr(wave, "rejoin", None) is None:
+        settle_completed_round(ctx, drive, review_retry_key=wave.retry_key, **identity)
 
-    def _write() -> None:
+    def _record(*, paid: bool) -> None:
         reserved = getattr(ctx, "_review_reserved_roster", None)
         reserved = reserved if isinstance(reserved, dict) else {}
         triad = copy.deepcopy(list(reserved.get("multi_model_review") or []))
 
         def _mutate(state: Any) -> None:
-            number = holder["attempt"] or state.next_attempt_number(repo_key, _tool_name(wave), task_id)
+            number = holder["attempt"] or state.next_attempt_number(
+                identity["repo_key"], identity["tool_name"], task_id)
             state.record_attempt(attempt_record(
-                wave, ctx, status="reviewing", phase="review", paid=True, attempt=number,
-                triad_raw_results=triad))
+                wave, ctx, status="reviewing", phase="review", paid=paid, attempt=number,
+                late_result_pending=not paid, triad_raw_results=triad))
             holder["attempt"] = number
 
         update_state(drive, _mutate)
 
+    def _write() -> None:
+        if holder["attempt"]:
+            mark_review_attempt_paid(drive, attempt=holder["attempt"], review_retry_key=wave.retry_key, **identity)
+        else:  # no reservation (a caller dispatching without one): the row and its paid fact at once
+            _record(paid=True)
+
     def _checkpoint(*, surface: str, slot_id: str, operation_id: str, invocation_id: str) -> None:
         checkpoint_pending_review_invocation(
-            drive, repo_key=repo_key, tool_name=_tool_name(wave), task_id=task_id, attempt=holder["attempt"],
-            review_retry_key=wave.retry_key, surface=surface, slot_id=slot_id, operation_id=operation_id,
-            invocation_id=invocation_id)
+            drive, attempt=holder["attempt"], review_retry_key=wave.retry_key, surface=surface, slot_id=slot_id,
+            operation_id=operation_id, invocation_id=invocation_id, **identity)
 
-    ctx._review_paid_stamp = ReviewPaidStamp(_write, fail_closed=True)
+    ctx._review_paid_stamp = ReviewPaidStamp(_write, fail_closed=True, reserve=lambda: _record(paid=False))
     ctx._review_pending_invocation_checkpoint = _checkpoint
     return holder
 
@@ -231,7 +247,8 @@ def settle_attempt(ctx: Any, wave: Any, outcome: Dict[str, Any], payload: Dict[s
     """Close the attempt row this wave opened or rejoined (a review only; never a
     commit) with the wave's final roster: a seat still owed stays
     ``late_result_pending`` with its exact operation and start token, so a later
-    rerun of the round — in this process or after a restart — finds what to collect."""
+    rerun of the round — in this process or after a restart — finds what to collect.
+    The row's paid fact is its dispatch stamp's alone: a wave that sent nothing stays unpaid."""
     number = (int((outcome.get("attempt") or {}).get("attempt") or 0)
               or int(getattr(getattr(wave, "rejoin", None), "attempt", 0) or 0))
     if number <= 0:
@@ -241,9 +258,11 @@ def settle_attempt(ctx: Any, wave: Any, outcome: Dict[str, Any], payload: Dict[s
     verdict = dict(payload.get("verdict") or {})
     try:
         update_state(review_state_root(ctx), lambda state: state.record_attempt(attempt_record(
-            wave, ctx, status="reviewed", phase="review", paid=True, attempt=number,
+            wave, ctx, status="reviewed", phase="review", paid=False, attempt=number,
             late_result_pending=payload.get("state") == "pending",
             block_reason=str(outcome.get("block_reason") or ""),
+            # The record's wave failure note in its safe words; the complete note stays on the record.
+            block_details="\n".join(str(note.get("reported_cause") or "") for note in verdict.get("wave_failures") or []),
             triad_raw_results=copy.deepcopy([row for row in forensic.get("triad_raw") or [] if isinstance(row, dict)]),
             degraded_reasons=[str(item) for item in verdict.get("degraded_reasons") or []])))
         return True

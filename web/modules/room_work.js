@@ -28,6 +28,7 @@ import {
 } from './work_status.js';
 import { showToast } from './toast.js';
 import { motionMs, reducedMotion } from './motion.js';
+import { isStackLayout } from './layout.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
 const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
@@ -139,6 +140,8 @@ export function createRoomWork({
     const titleRow = bar?.querySelector('.app-page-title-row');
     if (titleRow) titleRow.appendChild(trigger);
     else badgeParent?.insertBefore(trigger, badgeNext);
+    // A Project's name in its bar: one line that may end in an ellipsis (room_work.css), whole at the list's head.
+    const name = panel && bar?.querySelector('.app-page-title');
 
     // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
     const surface = element('div', 'rw-surface rw-shade');
@@ -149,11 +152,14 @@ export function createRoomWork({
     surface.setAttribute('role', 'dialog');
     // Names are authored text: the chrome in here is translated at the producer, so the overlay never walks it.
     surface.setAttribute('data-i18n-authored', '');
+    // A Project's list starts with the room's whole name, which its title in the bar may cut (DESIGN "Shell").
+    const head = name ? element('p', 'rw-title') : null;
     const list = element('div', 'rw-list');
     const note = element('p', 'rw-note');
     note.hidden = true;
     // The commands a narrow bar keeps in its list (Main's Restart and budget: page_header.js); empty, it takes no room.
     const extras = element('div', 'rw-extras');
+    if (head) surface.append(head);
     surface.append(list, note, extras);
     // A zero-height anchor under the bar: the list follows the bar's real height at every width. Main's
     // header floats over the transcript, so its anchor is the header's own last child at its bottom edge.
@@ -686,6 +692,11 @@ export function createRoomWork({
         paintNote();
         if (!open) return;
         placeSurface();
+        if (head) {
+            const whole = clean(name.textContent);
+            if (head.textContent !== whole) head.textContent = whole;
+            head.hidden = !whole;
+        }
         const keys = new Set(rows.map((row) => row.key));
         for (const [key, view] of views) {
             if (!keys.has(key)) { view.el.remove(); views.delete(key); expanded.delete(key); }
@@ -717,10 +728,10 @@ export function createRoomWork({
     // mark stays and the control's name keeps the whole status. Measured again when the word, step, mark or available
     // width changes. Remember the capsule's width AFTER fitting, so observing its content-sized box does not feed a
     // hide/show cycle back into the ResizeObserver.
-    // A Project's name then takes a second line (room_work.css), and only a name still cut makes the consciousness chip
-    // show its brain alone (its name keeps the whole state); Panic never yields.
+    // A Project's name keeps one line (room_work.css). On a phone a name still cut there makes the consciousness chip
+    // show its brain alone (its name keeps the whole state); a desk keeps the chip's word and the name ellipsizes.
+    // Panic never yields.
     let fittedWord = null, fittedWidth = null, fitNeeded = false;
-    const name = panel && bar?.querySelector('.app-page-title');
     function fitWord() {
         if (destroyed) return;
         delete trigger.dataset.word;
@@ -730,13 +741,16 @@ export function createRoomWork({
         const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
         if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
         if (cut()) trigger.dataset.word = 'off';
-        if (chip && name.scrollHeight > name.clientHeight + 1) chip.dataset.fit = 'mark';
+        if (chip && isStackLayout({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
+            chip.dataset.fit = 'mark';
+        }
         fittedWidth = titleRow?.clientWidth;
     }
 
     function paintTrigger() {
         const text = [clean(statusBadge.textContent), clean(statusBadge.dataset.step)].filter(Boolean).join(' · ');
-        const listed = rows.length > 0 || extras.children.length > 0;
+        // A Project's list always has its head, the room's whole name, so its title opens it even with no work.
+        const listed = Boolean(head) || rows.length > 0 || extras.children.length > 0;
         // Word, tone, mark and what waits for the owner come together from the chat's producer
         // (work_status.roomStatusView via setStatus); the control paints them and never ranks row tones or reads a
         // class name for a second opinion. Before the producer's first answer the room is not online yet: an unknown
@@ -768,7 +782,9 @@ export function createRoomWork({
         const message = !connected() ? tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.')
             : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
                 : Array.isArray(latest?.works) && latest.works_complete === false
-                    ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.') : '';
+                    ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.')
+                    // A Project's list that opened on its name alone says so in Activity's words.
+                    : head && !rows.length ? tr('room_work.note.empty', 'Nothing running or queued.') : '';
         if (note.textContent !== message) note.textContent = message;
         note.hidden = !message || !open;
     }
@@ -958,6 +974,8 @@ export function createRoomWork({
 
     // ---- wiring
     listen(globalThis.window, 'ouro:language-changed', schedule);
+    // Whether a cut Project name takes the chip's word depends on the layout (fitWord), so a switch fits again.
+    if (name) listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
     // A click with detail 0 is Enter or Space on the focused control: a keyboard open lands in the list.
     listen(trigger, 'click', (event) => { if (open) close(); else openSurface(event?.detail === 0); });
     listen(trigger, 'keydown', (event) => {

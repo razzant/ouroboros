@@ -7,13 +7,13 @@ import logging
 import os
 import pathlib
 import time
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros import get_version
-from ouroboros.settings_scales import effort_range
 from ouroboros.gateway._helpers import json_exception, request_drive_root
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open, post_task_synthesis_is_terminal
 
@@ -277,7 +277,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
                                        activities_complete=activity_availability["complete"],
                                        bindings_complete=bindings_complete)
     from ouroboros.gateway.work_projection import works_snapshot
-    works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"])
+    works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
+                           bindings=task_bindings)
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
@@ -464,7 +465,8 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
                                                  "options", "option_details", "stake", "assumption",
                                                  "recommended_index", "answered_index", "comment", "wait_ended_at",
                                                  "host_facts", "materials", "closed_reason", "closed_at",
-                                                 "closed_by_task_id", "closed_actor", "closed_request_id", "delivery")
+                                                 "closed_by_task_id", "closed_actor", "closed_request_id", "delivery",
+                                                 "secret_request", "secret_outcome", "secret_save")
                       if isinstance(quiz, dict) and key in quiz}}
     if len(_FINALIZING_MEMO) >= _FINALIZING_MEMO_MAX:
         _FINALIZING_MEMO.clear()
@@ -581,6 +583,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     from supervisor.owner_pause_control import warm_paused_member
 
     direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe(availability=availability)
+    presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability)
     try:
         with queue_mod._queue_lock:
             pending_rows = [dict(task) for task in queue_mod.PENDING]
@@ -609,24 +612,33 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     owners += [(tid, row) for tid, row, _started in running_rows]
     owners += [(owner.task_id, owner.task) for owner in late_owners]
     owners += [(tid, {}) for tid in fence_rows]
+    owners += presence_rows
     requests = []
     for tid, row in owners:
         root = row.get("budget_drive_root") or drive_root
         requests.extend(((drive_root, tid), (root, tid), (root, str(row.get("root_task_id") or tid))))
-    if owners_only:  # which work is current, without the per-row control facts
+    with nullcontext() if owners_only else snapshot(requests):  # which work is current needs no per-row control facts
         return _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
-                                         running_rows, late_owners, availability, decision_owners, True,
-                                         question_details, work_facts)
-    with snapshot(requests):
-        return _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
-                                         running_rows, late_owners, availability, decision_owners, False,
-                                         question_details, work_facts)
+                                         running_rows, late_owners, availability, decision_owners, owners_only,
+                                         question_details, work_facts, presence_rows)
+
+
+def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None) -> list:
+    """``(task_id, row)`` of each live inline Presence turn (``resolved_presence_turns``): owners no queue map or direct
+    registry holds. One whose room or facts this read cannot know is a gap, never an absence."""
+    from ouroboros.conversation_lease import resolved_presence_turns
+
+    observed = resolved_presence_turns(drive_root)
+    rows = [(fact["task_id"], fact["row"]) for fact in observed["roots"] if fact["row"]]
+    if availability is not None and (not observed["complete"] or len(rows) < len(observed["roots"])):
+        availability["complete"] = False
+    return rows
 
 
 def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                               running_rows, late_owners, availability, decision_owners, owners_only,
-                              question_details=True, work_facts=None) -> list:
-    """Direct turns plus ROOT managed queue tasks as ONE activity list.
+                              question_details=True, work_facts=None, presence_rows=()) -> list:
+    """Direct turns, ROOT managed queue tasks and live inline Presence turns as ONE activity list.
 
     Additive beside ``active_direct_turns`` (kept unchanged for compatibility):
     the client hydrates managed-task visibility from the queue authority —
@@ -762,6 +774,24 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 if work_facts is not None:  # whether a settling Pause's member still executes, or waits parked warm
                     warm = {"owner_pause_warm": True} if row.get("_owner_pause_warm") else {}
                     work_facts[task_id] = {**_raw_work_facts(row), "running": not warm, **warm}
+        for task_id, row in presence_rows:
+            # A live inline Presence turn is a root no queue map or registry holds: it is listed at its own room
+            # (the binding loop below re-homes a moved one) with the one door it has, Stop (``work_status``),
+            # which only its first durable write opens: until then it is preparing and not cancelable. A recorded
+            # Stop stays pending until its runner's next stop check, however long a model round holds it: its work
+            # says so (``cancel_pending``, a work fact; the census row keeps the frozen contract's shape).
+            if task_id not in census_ids:
+                census_ids.add(task_id)
+                started = bool(row.get("execution_owner"))
+                activities.append({**_activity(task_id, row, "working" if started else "preparing",
+                                               _epoch_or_zero(row.get("started_at"))),
+                                   "kind": "presence", "cancelable": started})
+                if work_facts is not None:
+                    from ouroboros.cancel_intents import cancel_pending
+
+                    work_facts[task_id] = {**_raw_work_facts(row), "running": True,
+                                           "cancel_pending": bool(started and not owners_only
+                                                                  and cancel_pending(drive_root, task_id))}
         visible = {row["activity_id"]: row for row in activities}
         for root_id, latch in fence_rows.items():
             # An answered root under the owner's Pause whose late work is the tree's
@@ -819,12 +849,11 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
     # convert-gate fact only (#902) — that task was never bound, and its chat
     # rows are still where it was started, so moving its live card into the
     # project room would strand the card from its own history.
+    from ouroboros.gateway.work_projection import durable_binding
+
     owners_by_id = {row["activity_id"]: row for row in activities}
     for activity in activities:
-        # A child re-homes through its own, then its parent's or root's durable binding.
-        binding = next((bindings[key] for key in (activity.get("activity_id"), activity.get("parent_task_id"),
-            activity.get("root_task_id")) if isinstance(bindings.get(key), dict)
-            and not bindings[key].get("origin_bound")), None)
+        binding = durable_binding(activity, activity.get("activity_id"), bindings)
         if binding is None and not activity.get("project_id"):
             binding = next((owners_by_id[key] for key in (activity.get("parent_task_id"), activity.get("root_task_id"))
                 if key in owners_by_id and owners_by_id[key].get("project_id")), None)

@@ -1,6 +1,5 @@
 """Cause titles precede wake work; only this attempt's accepted sentence can replace them."""
 import queue
-import threading
 from types import SimpleNamespace
 
 import pytest

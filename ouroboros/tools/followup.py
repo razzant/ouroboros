@@ -706,7 +706,7 @@ def _register_followup(ctx: ToolContext, task_id: str, drive_root: Any,
         record["task"]["task_contract"] = {
             key: value for key, value in contract.items()
             if key not in {"objective", "context", "expected_output", "acceptance_claims", "success_criteria",
-                           "predecessor_authority"}}
+                           "predecessor_authority", "context_requires_development"}}
         record["task"].pop("project_id", None)
     from supervisor.queue import ScheduleRefused, ScheduleStoreUnreadable
 

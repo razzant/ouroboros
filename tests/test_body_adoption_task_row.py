@@ -17,7 +17,8 @@ import pytest
 from ouroboros import body_adoption, body_switch
 from ouroboros.task_results import load_task_result
 from supervisor import message_bus
-from tests.test_body_adoption_consumers import _switch, _task_rows, scene  # noqa: F401
+from tests.test_body_adoption_consumers import _switch, _task_rows
+from tests.test_body_adoption_consumers import scene as scene  # pytest fixture; the alias re-exports it (no F811)
 
 SEND = message_bus.send_with_budget  # the real sender: a boot double never stands in for delivery
 

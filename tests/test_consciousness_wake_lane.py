@@ -16,7 +16,6 @@ import contextlib
 import json
 import os
 import queue
-import threading
 import time
 from types import SimpleNamespace
 from unittest import mock

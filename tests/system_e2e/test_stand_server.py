@@ -569,8 +569,6 @@ def test_s43_e7_a_degraded_turn_is_disclosed(scenario, step, surface):
     assert told[surface], (surface, part)
 
 
-@_strict_gap("worker_pool_lifecycle.respawn_worker has no marker-window check: the reaper starts a dead carrier's replacement inside the window "
-             "(a child that would import the tree's conflict markers), though reconcile_conversation_lane says nothing spawns there")
 def test_s43_e7_nothing_spawns_in_a_marker_window(scenario):
     starts = [row for row in scenario["recovery"]["doors_seen"] if row["door"] == "spawn_in_marker_window"]
     assert not starts, sorted({row["caller"] for row in starts})

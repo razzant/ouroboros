@@ -46,7 +46,7 @@ DOORS: Dict[str, str | None] = {
     "_context_facts": "ouroboros/consciousness.py",  # a wake's preparation
     "run_worker_task": None, "start_inline_turn": None, "run_inline_turn": None,  # the one task body, and the inline rows' doors
     "prepare_conversation_task": None, "prepare_wake": None,  # a turn's first step in its carrier
-    "run_presence_turn": None, "carry_presence_turn": None, "start_proactive_turn": None,  # a Presence turn's body
+    "run_presence_turn": None, "carry_presence_turn": None,  # a Presence turn's body
     "_realtime_turn": None,  # a live call's native session, bound to an agent
     "_run_post_task_processing_async": None,  # paid model calls after a task, on their own thread
     "load_extension": None,  # foreign Python imported into this process
@@ -138,9 +138,6 @@ INVENTORY: Dict[Site, Row] = {
     ("ouroboros/extension_loader.py", "reconcile_extension", "load_extension"): Row(
         RESIDUAL, "pure-Python extensions import in-process (FINAL_PLAN §3.6): a separate class with its own trigger"),
     ("ouroboros/extension_process_runner.py", "_load_child_extension", "load_extension"): Row(WORKER, "the extension's own child"),
-    ("ouroboros/presence_continuation.py", "start_proactive_turn", "run_presence_turn"): Row(
-        RESIDUAL, "a body on PROACTIVE_TURNS' thread, but no runtime code calls it (tests/presence_legacy_helpers.py only, on the "
-                  "base too); its name is a door, so a caller fails by name"),
 }
 
 
