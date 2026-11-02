@@ -2,23 +2,30 @@
 //
 //   QAFixture target <title> <log.jsonl>   field "Amount", Commit, status, count:N, two "Twin" buttons
 //   QAFixture front  <title> <log.jsonl>   a text view that takes foreground typing and observes the desktop
+//   QAFixture paste  <title> <log.jsonl>   a standard Edit menu (Paste = cmd+v -> paste:), a text view that logs
+//                                          every paste action it performs, and a decoy field
 //
 // stdin, one command per line: "mark <label>" (log a state snapshot), "replace" (target: swap Commit for a
 // fresh instance), "type <interval_ms> <letters>" (front: post the letters as keystrokes while it stays the
-// active app), "quit". EOF quits too, so a fixture never outlives its test.
+// active app), "focus <paste|decoy|window>", "clear", "expect <token>" (paste: the clipboard is compared with
+// the token, never logged), "quit". EOF quits too, so a fixture never outlives its test.
 //
 // Every observation is one JSON line in the log, stamped with ProcessInfo.systemUptime (one clock for both
 // processes). Both roles log their own activation, key-window changes and every application activation the
 // workspace announces, so a focus taken and given back between two samples still shows, and every key event
 // it receives itself with its modifiers (none of the keyboard of other apps). The front role also logs mouse
 // events and the clipboard's change count, never its contents. The target's snapshots carry Commit's frame in
-// global top-left points, the space clicks are sent in.
+// global top-left points, the space clicks are sent in. The paste role also logs key-up and modifier events,
+// the characters AppKit derived for each key event, the input source in use, every action its menu sent and
+// every paste action its text view performed, so a chord that arrived but pasted nothing is told apart from
+// one that never arrived.
 
 import AppKit
+import Carbon.HIToolbox
 
 let arguments = CommandLine.arguments
-guard arguments.count == 4, ["target", "front"].contains(arguments[1]) else {
-    FileHandle.standardError.write(Data("usage: QAFixture <target|front> <title> <log.jsonl>\n".utf8))
+guard arguments.count == 4, ["target", "front", "paste"].contains(arguments[1]) else {
+    FileHandle.standardError.write(Data("usage: QAFixture <target|front|paste> <title> <log.jsonl>\n".utf8))
     exit(2)
 }
 let role = arguments[1]
@@ -43,6 +50,41 @@ func log(_ event: String, _ fields: [String: Any] = [:]) {
     }
 }
 
+/// The id of the input source in use now (`keyboard`) and of the keyboard layout under it (`layout`; the same for a
+/// plain layout, the layout an input method types through otherwise); "" when unread.
+func inputSources() -> [String: String] {
+    func identifier(_ source: TISInputSource?) -> String {
+        guard let source = source, let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return "" }
+        return Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+    }
+    return ["keyboard": identifier(TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()),
+            "layout": identifier(TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue())]
+}
+
+/// The paste role's text view: every paste action it performs is logged with who sent it, then performed.
+final class PasteView: NSTextView {
+    func logged(_ action: String, _ sender: Any?) {
+        let item = sender as? NSMenuItem
+        log("paste_action", ["action": action, "sender": item.map { "menu:" + $0.title } ?? String(describing: sender.map { type(of: $0) }),
+                             "text_before": string, "selection_before": [selectedRange().location, selectedRange().length]])
+    }
+
+    override func paste(_ sender: Any?) {
+        logged("paste:", sender)
+        super.paste(sender)
+    }
+
+    override func pasteAsPlainText(_ sender: Any?) {
+        logged("pasteAsPlainText:", sender)
+        super.pasteAsPlainText(sender)
+    }
+
+    override func pasteAsRichText(_ sender: Any?) {
+        logged("pasteAsRichText:", sender)
+        super.pasteAsRichText(sender)
+    }
+}
+
 final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate {
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
                           styleMask: [.titled], backing: .buffered, defer: false)
@@ -50,6 +92,9 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     let status = NSTextField(labelWithString: "idle")
     let counter = NSTextField(labelWithString: "count:0")
     let typed = NSTextView(frame: NSRect(x: 20, y: 20, width: 420, height: 200))
+    let pasted = PasteView(frame: NSRect(x: 20, y: 60, width: 420, height: 160))
+    let decoy = NSTextField(string: "")
+    var token: String?
     var commit: NSButton!
     var count = 0
     var pending: [Character] = []
@@ -87,6 +132,25 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             _ = button("Twin", "qa.twinA", #selector(twinPressed(_:)), NSRect(x: 20, y: 70, width: 100, height: 32))
             _ = button("Twin", "qa.twinB", #selector(twinPressed(_:)), NSRect(x: 140, y: 70, width: 100, height: 32))
             window.orderFrontRegardless()  // shown without taking the front: it is acted on in the background
+        } else if role == "paste" {
+            installEditMenu()
+            pasted.delegate = self
+            pasted.isRichText = false
+            place(pasted, "qa.paste", pasted.frame)
+            decoy.placeholderString = "Decoy"
+            decoy.delegate = self
+            place(decoy, "qa.decoy", NSRect(x: 20, y: 20, width: 200, height: 24))
+            // Every key event the app receives, key-up and modifier changes included, with what AppKit made of it.
+            let mask: NSEvent.EventTypeMask = [.keyUp, .flagsChanged]
+            if let more = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { self.key($0); return $0 }) {
+                monitors.append(more)
+            }
+            NotificationCenter.default.addObserver(forName: NSMenu.didSendActionNotification, object: nil, queue: .main) { note in
+                let item = note.userInfo?["MenuItem"] as? NSMenuItem
+                log("menu_sent_action", ["title": item?.title ?? "", "key_equivalent": item?.keyEquivalent ?? "",
+                                         "modifier_mask": Int(item?.keyEquivalentModifierMask.rawValue ?? 0),
+                                         "first_responder": self.responder()])
+            }
         } else {
             typed.delegate = self
             place(typed, "qa.typing", typed.frame)
@@ -116,9 +180,9 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             log("workspace_activated", ["activated_pid": Int(app?.processIdentifier ?? -1),
                                         "activated_bundle": app?.bundleIdentifier ?? ""])
         }
-        if role == "front" {
+        if role == "front" || role == "paste" {
             window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(typed)
+            window.makeFirstResponder(role == "front" ? typed : pasted)
             NSApp.activate(ignoringOtherApps: true)
         }
         FileHandle.standardInput.readabilityHandler = { handle in
@@ -147,6 +211,15 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
                 out["commit_frame"] = [frame.minX, primary.frame.maxY - frame.maxY, frame.width, frame.height]
                     .map { $0.rounded() }
             }
+        } else if role == "paste" {
+            out["text"] = pasted.string
+            out["selection"] = [pasted.selectedRange().location, pasted.selectedRange().length]
+            out["decoy"] = decoy.stringValue
+            out["input_source"] = inputSources()
+            out["pasteboard_change_count"] = NSPasteboard.general.changeCount
+            if let token = token {  // a comparison with the expected token: the contents are never logged
+                out["pasteboard_is_token"] = NSPasteboard.general.string(forType: .string) == token
+            }
         } else {
             out["text"] = typed.string
             out["pasteboard_change_count"] = NSPasteboard.general.changeCount  // a counter, not the contents
@@ -154,10 +227,36 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         return out
     }
 
+    /// A standard Edit menu, as an AppKit application template has it: Paste is cmd+v and sends paste: to the first
+    /// responder; Paste and Match Style is cmd+opt+shift+v; Find Next (cmd+g) stands in for an application command.
+    func installEditMenu() {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        appItem.submenu = NSMenu(title: "QAFixture")  // no Quit key: a stray chord must never end the fixture
+        main.addItem(appItem)
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Paste and Match Style", action: #selector(NSTextView.pasteAsPlainText(_:)),
+                     keyEquivalent: "v").keyEquivalentModifierMask = [.command, .option, .shift]
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(withTitle: "Find Next", action: #selector(findNext(_:)), keyEquivalent: "g").target = self
+        NSApp.mainMenu = main
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        log("find_next", ["sender": (sender as? NSMenuItem)?.title ?? "", "first_responder": responder()])
+    }
+
     func responder() -> String {
         let first = window.firstResponder
         if first === typed { return "qa.typing" }
         if field.currentEditor() != nil && first === field.currentEditor() { return "qa.field" }
+        if decoy.currentEditor() != nil && first === decoy.currentEditor() { return "qa.decoy" }
         if let view = first as? NSView, !view.accessibilityIdentifier().isEmpty { return view.accessibilityIdentifier() }
         return first.map { String(describing: type(of: $0)) } ?? "none"
     }
@@ -171,8 +270,18 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let held = [(NSEvent.ModifierFlags.command, "cmd"), (.control, "ctrl"), (.option, "alt"), (.shift, "shift")]
             .filter { flags.contains($0.0) }.map { $0.1 }
-        log("key_down", ["chars_ignoring": event.charactersIgnoringModifiers ?? "", "key_code": Int(event.keyCode),
-                         "modifiers": held])
+        if event.type == .flagsChanged {  // a modifier went down or up: it has no characters to read
+            log("flags_changed", ["key_code": Int(event.keyCode), "modifiers": held, "flags": Int(flags.rawValue),
+                                  "input_source": inputSources()])
+            return
+        }
+        var row: [String: Any] = ["chars_ignoring": event.charactersIgnoringModifiers ?? "", "key_code": Int(event.keyCode),
+                                  "modifiers": held]
+        if role == "paste" {
+            row.merge(["characters": event.characters ?? "", "flags": Int(flags.rawValue), "repeat": event.isARepeat,
+                       "input_source": inputSources(), "first_responder": responder()]) { $1 }
+        }
+        log(event.type == .keyUp ? "key_up" : "key_down", row)
     }
 
     @objc func commitPressed(_ sender: NSButton) {
@@ -190,10 +299,18 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     func controlTextDidChange(_ note: Notification) {
         // Every edit through the field editor lands here: keystrokes, and also a value set through Accessibility
         // while the field holds the field editor (seen natively); key_down rows tell keystrokes apart.
+        if (note.object as AnyObject?) === decoy {
+            log("decoy_text", ["decoy": decoy.stringValue])
+            return
+        }
         log("field_typed", ["field": field.stringValue])
     }
 
     func textDidChange(_ note: Notification) {
+        if (note.object as AnyObject?) === pasted {
+            log("paste_text", ["text": pasted.string, "selection": [pasted.selectedRange().location, pasted.selectedRange().length]])
+            return
+        }
         log("front_text", ["text": typed.string])
     }
 
@@ -222,6 +339,16 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             log("commit_replaced", ["instance": fresh.tag])
         case "type" where role == "front" && words.count == 3:
             startTyping(Int(words[1]) ?? 60, words[2])
+        case "focus" where role == "paste" && words.count == 2:
+            let views: [String: NSResponder] = ["paste": pasted, "decoy": decoy]  // "window": the window itself
+            log("focused", ["asked": words[1], "made": window.makeFirstResponder(views[words[1]]), "first_responder": responder()])
+        case "clear" where role == "paste":
+            pasted.string = ""
+            decoy.stringValue = ""
+            log("cleared", state())
+        case "expect" where role == "paste" && words.count == 2:
+            token = words[1]
+            log("expecting", ["pasteboard_is_token": NSPasteboard.general.string(forType: .string) == token])
         case "quit":
             quit()
         default:
