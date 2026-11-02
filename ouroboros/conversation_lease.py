@@ -434,36 +434,6 @@ def close_author_intake(drive_root: Any, task_id: str) -> None:
             pass
 
 
-def bind_author_intake(agent: Any, drive_root: Any, task_id: str, conversation_key: str) -> None:
-    """Open the durable intake for this turn and close it when the agent releases the turn.
-
-    The in-process flag (``_accepting_owner_messages`` under the admission lock) stays the
-    local author's own gate; the durable fact is what a Host in ANOTHER process reads
-    (``accept_author_mail``), so a carrier-run author hears arrivals too. ``_release_turn`` is
-    the agent's one end of a turn (its body's, or a preparation that ended before the body).
-    """
-    try:
-        open_author_intake(drive_root, task_id, conversation_key)
-    except Exception:
-        return  # no durable fact: a remote Host offers nothing to this author, as before
-    release = getattr(agent, "_release_turn", None)
-
-    def release_and_close() -> None:
-        try:
-            if callable(release):
-                release()
-        finally:
-            try:
-                close_author_intake(drive_root, task_id)
-            except Exception:
-                pass
-
-    try:
-        agent._release_turn = release_and_close
-    except AttributeError:
-        pass
-
-
 def accept_author_mail(drive_root, author: str, conversation_key: str, append: Callable[..., bool]) -> bool:
     """Accept an arrival for a live author while it still reads, never a census-to-append race.
 

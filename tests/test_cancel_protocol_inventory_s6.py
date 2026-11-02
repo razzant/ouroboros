@@ -69,6 +69,10 @@ TERMINAL_WRITERS = {
     # its recovered admission cannot originate a new terminal transition.
     ('supervisor/continuation_admission.py::_replay', 'stored.get("status") or "scheduled"'): 'dynamic',
     ('ouroboros/agent.py::_task_exception_terminal', 'STATUS_FAILED'): 'terminal',
+    # A conversation turn's before-start Stop (cancelled) or exhausted budget (failed) is the
+    # turn's own typed terminal, recorded in its carrier before the exception unwinds; its
+    # projector never replaces a row that is already truly terminal.
+    ('supervisor/worker_chat_lane.py::conversation_exception_terminal', 'STATUS_CANCELLED if stopped else STATUS_FAILED'): 'terminal',
     ('ouroboros/agent_task_pipeline.py::_store_task_result', 'status'): 'dynamic',
     ('ouroboros/delegate_terminal.py::record_terminal_reconciliation', 'str(existing.get("status") or STATUS_RUNNING)'): 'dynamic',
     # Foreign-root disclosure preserves CURRENT status and pointers under the

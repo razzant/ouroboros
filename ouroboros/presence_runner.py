@@ -1276,9 +1276,24 @@ def run_presence_turn(
             lease.intake_agent = agent
             # The author's intake is a durable fact beside its mailbox (``conversation_lease``):
             # a Host in another process offers an arrival to this author only while it reads.
-            from ouroboros.conversation_lease import bind_author_intake
-            bind_author_intake(agent, Path(drive_root), task_id, event.conversation_key)
-            events = agent.handle_task(task)
+            # Closed after the body returns (its wait scope already closed), never inside the
+            # agent's release: a store write there sat between the final's publication and the
+            # wait's close, where a consumer reads "no author left".
+            from ouroboros.conversation_lease import close_author_intake, open_author_intake
+            intake_open = False
+            try:
+                open_author_intake(Path(drive_root), task_id, event.conversation_key)
+                intake_open = True
+            except Exception:
+                log.debug("author intake fact not written for %s", task_id, exc_info=True)
+            try:
+                events = agent.handle_task(task)
+            finally:
+                if intake_open:
+                    try:
+                        close_author_intake(Path(drive_root), task_id)
+                    except Exception:
+                        log.debug("author intake fact not closed for %s", task_id, exc_info=True)
             # Unlike a pooled worker, this runner has no end-of-task event drain.
             # Private owner contact still uses the existing durable delivery owners
             # when there was no live queue (or its enqueue acknowledgement failed).

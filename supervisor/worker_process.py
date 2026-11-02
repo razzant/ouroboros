@@ -184,8 +184,10 @@ def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root):
         # proxy lookup (the fork-safety rule); a spawned or forkserver child keeps the server's.
         start_method = getattr(ctx, "get_start_method", None)
         no_proxy = str(start_method() if callable(start_method) else "") == "fork"
+        # The transport policy rides only when the spawner has one to pass (a forked child): a spawned
+        # child keeps the seven-argument entry (``worker_main``'s ``transport_no_proxy`` defaults).
         proc = ctx.Process(target=worker_main, args=(wid, in_q, out_q, str(repo_dir), str(drive_root),
-                                                   _current_custody_session_id(), child, no_proxy))
+                                                   _current_custody_session_id(), child, *((True,) if no_proxy else ())))
         proc.daemon = True
         proc.start()
     except BaseException:
