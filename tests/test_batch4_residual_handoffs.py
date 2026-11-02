@@ -283,7 +283,6 @@ def test_queued_retry_root_settles_paused_and_resume_releases_its_one_admitted_d
 def test_queued_retry_resume_waits_for_its_earlier_attempts_handed_work(tmp_path, monkeypatch):
     from ouroboros.owner_pause import operation_start, read_fence, tool_handoff
     from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor import owner_pause_control
     from supervisor.owner_pause_control import request_owner_pause, settle_requested_owner_pauses
 
     q, workers, row = _queued_retry_root(tmp_path, monkeypatch)

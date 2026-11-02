@@ -8,7 +8,6 @@ satisfied by a pass that stopped looking. Counting is not timing: no clock decid
 """
 from __future__ import annotations
 
-import pathlib
 import time
 
 import pytest
@@ -517,8 +516,10 @@ def test_l1_the_pass_consumes_the_look_and_a_stopped_pass_keeps_what_it_never_re
 def test_l1_a_pass_longer_than_the_cadence_is_never_followed_at_once_by_another(monkeypatch):
     """The closed loop this replaced: a pass longer than its spacing ran back to back. The cadence that
     finds a pass running owes nothing and journals the stall; only a transition may start the next at once."""
-    from ouroboros import maintenance, server_maintenance as sm
-    from supervisor import owner_pause_control as control, queue
+    from ouroboros import maintenance
+    from ouroboros import server_maintenance as sm
+    from supervisor import owner_pause_control as control
+    from supervisor import queue
 
     started = []
 
@@ -556,7 +557,7 @@ def test_l1_a_pass_longer_than_the_cadence_is_never_followed_at_once_by_another(
 
 def test_l1_an_unconfirmed_stop_keeps_its_tree_due_without_rereading_a_body(tmp_path, monkeypatch, meter):
     """The real re-check stays: an unsettled stop is read back each look, and that is all it costs."""
-    from ouroboros import budget_pause, owner_pause, task_results
+    from ouroboros import budget_pause, task_results
     from supervisor import owner_pause_control
     from tests.test_pause_observation_cas import _owner_paused_solo
 
@@ -579,7 +580,8 @@ def test_l1_an_unconfirmed_stop_keeps_its_tree_due_without_rereading_a_body(tmp_
 
 def test_l1_a_tree_held_by_an_open_writer_reaches_its_census_each_look_and_reads_no_member(tmp_path, monkeypatch, meter):
     """The look that DOES reach the census: nothing moved, so the memo answers it, and the writer's end is seen."""
-    from ouroboros import budget_pause, delegate_custody as custody, owner_pause, task_results
+    from ouroboros import budget_pause, owner_pause, task_results
+    from ouroboros import delegate_custody as custody
     from ouroboros.task_results import write_task_result
     from supervisor import owner_pause_control
 
@@ -645,8 +647,7 @@ def test_l1_a_paused_tree_whose_late_work_settles_with_no_queue_row_is_still_rel
 
 
 def test_l1_a_finishing_review_keeps_its_tree_due_until_it_ends(tmp_path, monkeypatch, meter):
-    from ouroboros import owner_pause
-    from ouroboros import review_operation
+    from ouroboros import owner_pause, review_operation
     from supervisor import owner_pause_control
 
     root, queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, "review", 1)

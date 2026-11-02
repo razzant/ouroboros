@@ -220,7 +220,6 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
 
     # With every member parked, only the assignment tick's re-check can notice the
     # member's stopped run ending; it re-reads the stop the park issued, never a new one.
-    from supervisor import owner_pause_control
     from supervisor.owner_pause_control import settle_requested_owner_pauses
 
     observed: list = []
@@ -459,7 +458,6 @@ def test_a_direct_roots_warm_park_settles_when_its_requested_stop_ends_and_resum
     from ouroboros.gateways import claudexor as gw
     from ouroboros.model_wait import TaskModelWait
     from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
-    from supervisor import owner_pause_control
     from supervisor.budget_resume import resume_warm_owner_pause_root
     from supervisor.owner_pause_control import (
         refresh_owner_pause_tree,
