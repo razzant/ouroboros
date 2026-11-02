@@ -225,7 +225,13 @@ def _census() -> str:
     for task_id, meta in _queue().RUNNING.items():
         if isinstance(meta, dict):
             task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-            rows.append((task_id, _row_facts(meta), {key: task.get(key) for key in _REPORTED_TASK_FACTS}))
+            reported = {key: task.get(key) for key in _REPORTED_TASK_FACTS}
+            # A resolved wait is history the row keeps for its readers; only a wait that waits is a live fact.
+            waits = reported.get("model_waits")
+            if isinstance(waits, dict):
+                reported["model_waits"] = {wid: row for wid, row in waits.items()
+                                           if isinstance(row, dict) and row.get("state") == "waiting"}
+            rows.append((task_id, _row_facts(meta), reported))
     return machine_json([rows, _pool_counts()])
 
 

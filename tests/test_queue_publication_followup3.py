@@ -175,3 +175,15 @@ def test_the_retry_custody_publication_repeats_only_when_the_claims_facts_change
     assert len(publications) == 3, "a claim that left and returned is a change"
 
 
+# ---- NIT: the census carries only the waits that still wait ---------------------------------------
+
+def test_the_census_prunes_resolved_model_waits(published):
+    _root, now = published
+    task = _task("r", model_waits={"w1": {"state": "resolved", "revision": 2, "task_attempt": 1}})
+    queue.RUNNING["r"] = {"task": task, "attempt": 1, "started_at": now[0]}
+    with queue._queue_lock:
+        before = queue_publication._census()
+        task["model_waits"]["w2"] = {"state": "resolved", "revision": 1, "task_attempt": 1}
+        assert queue_publication._census() == before, "a resolved wait is history, not a published change"
+        task["model_waits"]["w3"] = {"state": "waiting", "revision": 1, "task_attempt": 1}
+        assert queue_publication._census() != before, "a wait that waits is published"
