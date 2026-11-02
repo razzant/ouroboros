@@ -156,7 +156,7 @@ def test_ui_probe_waits_for_the_requested_document():
                      ("goto", "http://lane.test/onboarding"), ("ready", ".wizard-shell")]
 
 
-@pytest.mark.parametrize("problem", ["none", "missing-sheet", "stale-accent", "stale-focus", "no-commit"])
+@pytest.mark.parametrize("problem", ["none", "missing-sheet", "stale-accent", "stale-focus", "no-commit", "not-adopted"])
 def test_sm1_oracle_requires_both_effective_palettes_and_the_landed_commit(tmp_path, problem):
     calls = []
 
@@ -185,10 +185,10 @@ def test_sm1_oracle_requires_both_effective_palettes_and_the_landed_commit(tmp_p
                                 shots=tmp_path, log=lambda _: None, task_timeout=1,
                                 restart=lambda: (calls.append("restart") or server))
     ctx.check("commit_landed", problem != "no-commit")
-    scenarios.check_sm1_rendered_palette(ctx, scenarios.SM1_REQUIRED_PALETTE)
-    assert calls == ["restart", ("/", "#chat-input"), ("/onboarding", ".wizard-shell")]
+    scenarios.check_sm1_rendered_palette(ctx, scenarios.SM1_REQUIRED_PALETTE, served=problem != "not-adopted")
+    assert calls == [("/", "#chat-input"), ("/onboarding", ".wizard-shell")], "the adoption restarted the server; the stand never does"
     assert ctx.checks["ui_computed_style"] is (problem == "none")
-    assert ctx.checks["ui_app_palette"] is (problem != "no-commit")
+    assert ctx.checks["ui_app_palette"] is (problem not in {"no-commit", "not-adopted"})
     assert ctx.checks["ui_onboarding_palette"] is (problem in {"none", "stale-focus"})
     assert len(ctx.facts["palette_computed"]["app"]) == len(scenarios.SM1_REQUIRED_PALETTE)
     ctx.close_ui()

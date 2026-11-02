@@ -281,30 +281,9 @@ def test_lane_spend_reads_the_usage_store_of_a_store_era_lane(tmp_path):
     ua.reserve_attempt(ua.AttemptRequest(model="m", provider="test", drive_root=data, task_id="t",
                                          root_task_id="t", reservation_usd=99.0, global_limit_usd=1000.0))
     usage_store.forget(data)
-    assert run_live_lanes.lane_spend(data) == (1.75, 0)  # an unknown price is never stored final
-    assert run_live_lanes.lane_spend(tmp_path / "absent") == (0.0, 0)
-
-
-def test_lane_spend_of_a_journal_era_seed_is_its_journal_never_zero(tmp_path):
-    """``--seed`` may name a commit before the store: that lane writes the journal, and the run-wide budget must see
-    its spend (a zero would release the reservation and admit another paid attempt past the cap)."""
-    data = tmp_path / "data"
-    (data / "state").mkdir(parents=True)
-    rows = [{"attempt_id": "a", "state": "reserved", "cost_usd": None},
-            {"attempt_id": "a", "state": "settled", "cost_final": True, "cost_usd": 0.5},
-            {"attempt_id": "b", "state": "settled", "cost_final": True, "cost_usd": 0.25},
-            {"attempt_id": "c", "state": "settled", "cost_final": True, "cost_usd": None},
-            {"attempt_id": "d", "state": "settled", "cost_final": False, "cost_usd": 9.0}]
-    (data / "state" / "usage_attempts.jsonl").write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-    assert run_live_lanes.lane_spend(data) == (0.75, 1)
-    # Through the run-wide ledger: the settled journal-era lane's $0.75 stays spent, so a second $1 attempt under
-    # a $1 cap is refused instead of being admitted against a zero.
-    budget = run_live_lanes.RunBudget(cap_usd=1.0, per_task_usd=1.0)
-    assert budget.admit(("SW1", 1), 1, data, dispatch_index=0)[0] is True
-    budget.settle(("SW1", 1))  # the lane finished: its durable spend replaces its reservation
-    admitted, facts = budget.admit(("SW1", 2), 1, tmp_path / "next", dispatch_index=1)
-    assert admitted is False and facts["spent_usd"] == 0.75
+    assert run_live_lanes.lane_spend(data) == (100.75, 2)  # the estimate is spent, never final; no price is unknown, not absent
+    assert pytest.raises(run_live_lanes.LaneSpendAbsent, run_live_lanes.lane_spend, tmp_path / "absent")
+    # A journal-era ``--seed`` lane is read as the store would hold its history: tests/test_e2e_live_attempt_faults.py.
 
 
 def _ask(budget, job, root_tasks, root, waits: list | None = None, *, index: int = 0):
@@ -328,7 +307,7 @@ def test_run_budget_waits_on_in_flight_reservations_and_refuses_only_what_can_ne
     budget = run_live_lanes.RunBudget(20.0, 8.0, reader=lambda root: (spend.get(root.name, 0.0), 0))
     assert budget.reservation(1) == 8.0 and budget.reservation(2) == 16.0 and budget.reservation(0) == 8.0
     ok, facts = budget.admit(("SM1", 1), 1, tmp_path / "a", dispatch_index=0)
-    assert ok and facts == {"cap_usd": 20.0, "spent_usd": 0.0, "reserved_usd": 0.0, "reservation_usd": 8.0,
+    assert ok and facts == {"cap_usd": 20.0, "spent_usd": 0.0, "unknown_liability_usd": 0.0, "reserved_usd": 0.0, "reservation_usd": 8.0,
                             "unknown_cost_rows": 0, "waited_sec": 0.0}
     assert budget.ceiling(("SM1", 1)) == 8.0            # its own reservation, never the whole cap
     ok, facts = budget.admit(("SW1", 1), 1, tmp_path / "b", dispatch_index=1)
@@ -805,7 +784,8 @@ def _sm1_ui_tail(ctx: scenarios.LaneContext) -> None:
     """Exercise the production oracle, including both documents, without a paid task."""
     if "commit_landed" not in ctx.checks:
         ctx.check("commit_landed", True)
-    scenarios.check_sm1_rendered_palette(ctx, scenarios.SM1_REQUIRED_PALETTE)
+    ctx.restart()
+    scenarios.check_sm1_rendered_palette(ctx, scenarios.SM1_REQUIRED_PALETTE, served=True)
 
 
 def test_ui_client_opens_on_first_use_and_restart_reopens_against_the_new_server(tmp_path):
@@ -1119,15 +1099,15 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
     assert "both browser documents" in prompt
     assert "skip_" not in prompt.lower() and "do not bump" not in prompt.lower() and "bumped in the same diff" in prompt
     script = scenarios.sm1_stub_script(REPO_ROOT)["agent"]
-    writes = [s for s in script if s.get("tool") == "write_file"]
+    writes = [s for s in script if isinstance(s, dict) and s.get("tool") == "write_file"]
     written = [w["arguments"]["path"] for w in writes]
     assert written[0] == scenarios.SM1_CSS_PATH
     assert "web/style.css" not in written and "web/onboarding.css" not in written
-    commit = next(s for s in script if s.get("tool") == "commit_reviewed")["arguments"]
+    commit = next(s for s in script if isinstance(s, dict) and s.get("tool") == "commit_reviewed")["arguments"]
     assert commit["paths"] == written and "commit_message" in commit
     assert not any(key.startswith("skip_") for key in commit), "the stub rehearsal takes the full user path like the paid prompt"
     # Decision 3A: the preflight is the author's optional choice, never a mandatory step of the path.
-    assert "preflight_review" not in prompt and not any(s.get("tool") == "preflight_review" for s in script)
+    assert "preflight_review" not in prompt and not any(isinstance(s, dict) and s.get("tool") == "preflight_review" for s in script)
     text = writes[0]["arguments"]["content"]
     original = (REPO_ROOT / scenarios.SM1_CSS_PATH).read_text(encoding="utf-8")
     assert scenarios.accent_value(text) == scenarios.SM1_NEW_ACCENT
@@ -1149,7 +1129,7 @@ def test_sm1_stub_bumps_the_release_carriers_through_the_sync_ssot(tmp_path):
     from ouroboros.commit_admission import release_metadata_preflight
     from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
 
-    writes = [s for s in scenarios.sm1_stub_script(REPO_ROOT)["agent"] if s.get("tool") == "write_file"]
+    writes = [s for s in scenarios.sm1_stub_script(REPO_ROOT)["agent"] if isinstance(s, dict) and s.get("tool") == "write_file"]
     carriers = {w["arguments"]["path"]: w["arguments"]["content"] for w in writes
                 if w["arguments"]["path"] not in scenarios.SM1_CSS_PATHS}
     assert {"VERSION", "README.md"} <= set(carriers) <= CARRIER_SPAN_PATHS
@@ -1485,9 +1465,9 @@ def test_ui_client_prefers_the_suite_interface_when_it_has_this_surface(monkeypa
 def test_stub_sm1_end_to_end_on_a_real_isolated_server(tmp_path):
     """Real server, loopback stub model, no key: the commit lands through the review organ
     (the shared palette plus the release-carrier bump, no skip flags, through the same hermetic
-    tests preflight as the paid prompt), the durable rows and receipts exist, the
-    seed is a clean detached clone of this tree's HEAD and the manifest names the stub as
-    the model."""
+    tests preflight as the paid prompt), its real test run qualifies its adoption, the server re-execs into it and
+    serves it to a real browser, the seed is a clean detached clone of this tree's HEAD and the manifest names the stub as
+    the model. Machinery only: its critics are canned (``stub_lane.MACHINERY_ONLY``)."""
     if str(os.environ.get("OUROBOROS_E2E_DEEP") or "").strip().lower() != "mock":
         pytest.skip("set OUROBOROS_E2E_DEEP=mock to run the stub rehearsal (spawns a real isolated server)")
     out = tmp_path / "out"

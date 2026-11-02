@@ -67,7 +67,7 @@ def test_shared_palette_reaches_both_documents_and_rejects_divergence(subscripti
                                 log=lambda _: None, task_timeout=1, restart=lambda: server)
     ctx.check("commit_landed", True)  # synthetic wiring input, never model/review evidence
     names = scenarios.SM1_REQUIRED_PALETTE | scenarios.sm1_palette_tokens(shared).keys()
-    scenarios.check_sm1_rendered_palette(ctx, names)
+    scenarios.check_sm1_rendered_palette(ctx, names, served=True)
     assert ctx.checks["ui_app_palette"] is True
     assert ctx.checks["ui_onboarding_palette"] is (fault != "wizard-missing-link")
     assert ctx.checks["ui_computed_style"] is (fault == "none"), json.dumps(ctx.facts)
