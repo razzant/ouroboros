@@ -266,7 +266,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
                     "fence_id": str(fence["fence_id"]), "cause": "owner_pause",
                     "paused_at": str(fence.get("requested_at") or utc_now_iso())})
                 members = _running_members_locked(q, root_id)
-                persisted = q.persist_queue_snapshot(reason="owner_pause_requested")
+                persisted = q.publish_queue_snapshot(reason="owner_pause_requested")  # the reply's snapshot_persisted is a disk fact
         except StoreBusy as exc:
             if exc.reason != "contention":
                 return {"ok": False, "error": "pause_record_unwritable", "detail": str(exc)[:200]}

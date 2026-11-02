@@ -28,6 +28,14 @@ if TYPE_CHECKING:  # annotation-only name; lazy under future annotations, never 
 log = logging.getLogger("ouroboros.delegate_custody")
 
 
+def _mark_root_cost(drive_root: Any, custody: Any) -> None:
+    """A custody transition this process made (a run started or settled): the root's live cost
+    figure is read again at the next supervisor flush (RV_MAIN M7). In a worker the memo is idle."""
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+
+    LIVE_ROOT_COSTS.mark(drive_root, getattr(custody, "root_task_id", "") or getattr(custody, "task_id", ""))
+
+
 def _custody():
     """The parent custody module, read at call time.
 
@@ -489,6 +497,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         mode=str(body.get("mode") or ""),
         isolation=str(execution.get("isolation") or ""),
         delegated=bool(execution.get("delegated")))
+    _mark_root_cost(drive_root, custody)
     _custody().record_started(drive_root, custody, shape={
         # The stored invocation is the single source of a replay's facts — the same
         # doctrine the explicit retry path follows.
@@ -572,6 +581,7 @@ def _reconcile_collection(drive_root: Any, gateway: Any, custody: RunCustody, *,
     before = run(drive_root, custody.run_id) or custody
     if detail is not None:
         _custody().settle_run(drive_root, gateway, custody, detail)
+        _mark_root_cost(drive_root, custody)
     after = run(drive_root, custody.run_id) or before
     _custody().record_settled_unread(drive_root, after)
     result = {"run_id": after.run_id, "task_id": after.task_id,
@@ -618,6 +628,7 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
     if _custody().is_terminal(detail):
         if review_owned:
             settled = _custody().settle_run(drive_root, gateway, custody, detail)
+            _mark_root_cost(drive_root, custody)
             _custody().record_settled_unread(drive_root, custody)
             result = {"run_id": custody.run_id, "task_id": custody.task_id,
                       "action": "settle_attempted", **settled, **_custody().output_disposition(custody)}

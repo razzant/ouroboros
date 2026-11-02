@@ -61,10 +61,18 @@ _FORCED_REASONS = frozenset({"startup", "pre_restart_exit", "server_shutdown"})
 #: so an older body restores it after a rollback (the restart exit; the shutdown kill of every door).
 _EXPORT_REASONS = frozenset({"pre_restart_exit", "server_shutdown"})
 _ALIVE_NAME = "queue.alive"
+#: The RUNNING-row facts a publication carries besides the task. The capture writes exactly these and
+#: the tick's census watches exactly these, so a fact a worker report changes under Q without a mark
+#: (a silence episode, the quota clock, an owner wait) is published by the next tick, and a fact added
+#: here later is watched by construction (RV_MAIN M6).
+_ROW_FACTS = ("attempt", "worker_id", "owner_wait", "started_at", "model_wait_quota_clock",
+              "sleep_parked_at", "budget_paused_sec", "soft_sent")
+#: Task facts a worker reports without a queue transition; every other task fact changes with a mark.
+_REPORTED_TASK_FACTS = ("model_waits", "focus")
 
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last
 # capture written. Kept: the (revision, custody) at which the saved queue was last kept.
-_STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None,
+_STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "alive_heartbeats": None, "alive_written_at": 0.0}
 _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
@@ -73,7 +81,8 @@ _PUBLISH_LOCK = threading.Lock()
 def reset() -> None:
     """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher."""
     global _PUBLISHER
-    _STATE.update(revision=0, published=0, reason="", kept=None, alive_heartbeats=None, alive_written_at=0.0)
+    _STATE.update(revision=0, published=0, reason="", kept=None, census=None, alive_heartbeats=None,
+                  alive_written_at=0.0)
     _PUBLISHER = None
 
 
@@ -94,11 +103,13 @@ def queue_revision() -> int:
 def persist_queue_snapshot(reason: str = "") -> Optional[bool]:
     """Mark the queue changed: one revision bump under Q, published by the tick.
 
-    Without a live tick publisher the caller publishes synchronously (startup, shutdown,
-    tests): True when published, False when the write failed, None when the documents on
-    disk are kept (no queue in this process, or the saved queue is not in its custody).
-    With one, True: the change is recorded and the next tick publishes it. A caller whose
-    effect needs the publication first uses ``publish_queue_snapshot``.
+    True means ON DISK, nothing less. Without a live tick publisher the caller publishes
+    synchronously (startup, shutdown, tests): True when published, False when the write
+    failed, None when the documents on disk are kept (no queue in this process, or the saved
+    queue is not in its custody). With a live tick publisher the mark answers None: the change
+    is recorded and the next tick publishes it, but nothing is on disk yet, so no caller can
+    read a mark as a persisted fact. A caller whose effect or reply needs the publication
+    first uses ``publish_queue_snapshot`` (or ``barrier_of`` through its context).
     """
     if not _queue().INITIALIZED:  # a boot without a provider: state initialization reads a snapshot as history (#2412)
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
@@ -107,8 +118,16 @@ def persist_queue_snapshot(reason: str = "") -> Optional[bool]:
         _STATE["revision"] += 1
         _STATE["reason"] = reason
     if tick_publisher_alive():
-        return True
+        return None
     return _publish_now(reason)
+
+
+def barrier_of(ctx: Any):
+    """The publication barrier a handler reaches through its context: the context's own
+    ``publish_queue_snapshot`` (the server's event context), else whatever stands in for its mark
+    there (a test context's stub stands in for the barrier too), else None: the caller decides
+    what an absent persister means for its effect."""
+    return getattr(ctx, "publish_queue_snapshot", None) or getattr(ctx, "persist_queue_snapshot", None)
 
 
 def publish_queue_snapshot(reason: str = "") -> Optional[bool]:
@@ -155,13 +174,16 @@ def publish_queue_changes() -> Optional[bool]:
     direct = collect_direct_roots()
     published = _queue().QUEUE_PUBLICATION
     direct_moved = published is not None and published[1].get("direct_roots.json") != machine_json(direct)
-    if _STATE["revision"] == _STATE["published"] and not direct_moved:
-        outcome = _refresh_alive()
-    else:
-        with _queue()._queue_lock:
-            capture = _capture(_STATE["reason"] or "main_loop", direct)
-        outcome = None if capture is None else _publish(capture)
-    return outcome
+    with _queue()._queue_lock:
+        # The census: what the rows publish without a transition (worker reports mutate RUNNING in place
+        # with no mark). One small identity per tick, so a changed fact is published and an unchanged
+        # live set still captures, serializes and writes nothing.
+        census = _census()
+        moved = _STATE["revision"] != _STATE["published"] or direct_moved or census != _STATE["census"]
+        capture = _capture(_STATE["reason"] or "main_loop", direct, census=census) if moved else None
+    if not moved:
+        return _refresh_alive()
+    return None if capture is None else _publish(capture)
 
 
 def _frozen(value: Any) -> Any:
@@ -173,8 +195,37 @@ def _frozen(value: Any) -> Any:
     return value
 
 
-def _capture(reason: str, direct: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """The published facts of one RUNNING row besides its task, as the capture writes them.
+
+    Only a dated silence episode is a diagnostic's source authority (#1376): its fact, and while it
+    stays open the progress that revokes it before the recovery lane writes the result. Ordinary
+    progress rotates nothing.
+    """
+    facts = {key: meta.get(key) for key in _ROW_FACTS}
+    facts.update(started_at=float(meta.get("started_at") or 0.0),
+                 budget_paused_sec=float(meta.get("budget_paused_sec") or 0.0), soft_sent=bool(meta.get("soft_sent")))
+    silence = meta.get("silence_attention")
+    if silence:
+        facts["silence_attention"] = silence
+        if isinstance(silence, dict) and silence.get("state") == "pending_attention":
+            facts["last_progress_at"] = meta.get("last_progress_at")
+    return facts
+
+
+def _census() -> str:
+    """Under Q: one small identity of what the rows publish without a transition, and the pool counts."""
+    rows = []
+    for task_id, meta in _queue().RUNNING.items():
+        if isinstance(meta, dict):
+            task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+            rows.append((task_id, _row_facts(meta), {key: task.get(key) for key in _REPORTED_TASK_FACTS}))
+    return machine_json([rows, _pool_counts()])
+
+
+def _capture(reason: str, direct: Dict[str, Any], *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
+    _STATE["census"] = _census() if census is None else census
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
     acceptance_fences = [_frozen(row) for row in _queue().ACCEPTANCE_FENCES.values()]
@@ -203,22 +254,8 @@ def _capture(reason: str, direct: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     running_rows = []
     for task_id, meta in running_items:
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
-        # Only a dated silence episode is a diagnostic's source authority (#1376):
-        # its fact, and while it stays open the progress that revokes it before
-        # the recovery lane writes the result. Ordinary progress rotates nothing.
-        silence = _frozen(meta.get("silence_attention"))
-        running_rows.append({
-            "id": task_id, "type": task.get("type"), "priority": task.get("priority"),
-            "attempt": meta.get("attempt"), "worker_id": meta.get("worker_id"),
-            "owner_wait": _frozen(meta.get("owner_wait")), "started_at": float(meta.get("started_at") or 0.0),
-            **({"silence_attention": silence} if silence else {}),
-            **({"last_progress_at": meta.get("last_progress_at")}
-               if silence and silence.get("state") == "pending_attention" else {}),
-            "model_wait_quota_clock": _frozen(meta.get("model_wait_quota_clock")),
-            "sleep_parked_at": meta.get("sleep_parked_at"),
-            "budget_paused_sec": float(meta.get("budget_paused_sec") or 0.0),
-            "soft_sent": bool(meta.get("soft_sent")), "task": _frozen(task),
-        })
+        running_rows.append({"id": task_id, "type": task.get("type"), "priority": task.get("priority"),
+                             **_frozen(_row_facts(meta)), "task": _frozen(task)})
     from ouroboros.server_restart import _AGENT_RESTART_REPLY, agent_restart_snapshot
 
     return {
@@ -238,9 +275,16 @@ def _pool_counts() -> Dict[str, Any]:
     RUNNING but NOT assignable, so the context queue digest never falsely advertises a free slot."""
     try:
         from supervisor import workers as _workers_mod
-        from supervisor.worker_pool_lifecycle import worker_ready
+        from supervisor.worker_pool_lifecycle import is_project_slot, worker_ready
 
-        _ws = list(_workers_mod.WORKERS.values())
+        def idle(slot: Any) -> bool:
+            return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
+                    and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", ""))
+
+        # Project slots alone: they are what MAX_WORKERS bounds and the queue assigns to. The
+        # conversation lane's carriers are outside that count (owner decision 4A) and reported apart (W9).
+        _ws = [w for w in _workers_mod.WORKERS.values() if is_project_slot(w)]
+        lane = [w for w in _workers_mod.WORKERS.values() if not is_project_slot(w)]
         active = sum(1 for w in _ws if getattr(w, "active_capacity", True))
         disabled = _workers_mod._worker_pool_execution_state()["disabled_reason"]
         return {
@@ -248,14 +292,13 @@ def _pool_counts() -> Dict[str, Any]:
             "worker_total": len(_ws), "active_worker_count": active, "parked_worker_count": len(_ws) - active,
             # Absence is counted above, not an explicit disablement.
             "worker_pool_disabled_reason": "" if disabled == "no_workers" else disabled,
-            "assignable_idle_workers": sum(
-                1 for _w in _ws
-                if (getattr(_w, "busy_task_id", None) is None and worker_ready(_w)
-                    and getattr(_w, "active_capacity", True) and not getattr(_w, "resume_hold", ""))),
+            "assignable_idle_workers": sum(1 for _w in _ws if idle(_w)),
+            "lane_carrier_total": len(lane), "lane_carrier_idle": sum(1 for _w in lane if idle(_w)),
         }
     except Exception:
         return {"reaping_count": 0, "worker_total": 0, "active_worker_count": 0, "parked_worker_count": 0,
-                "worker_pool_disabled_reason": "unknown", "assignable_idle_workers": 0}
+                "worker_pool_disabled_reason": "unknown", "assignable_idle_workers": 0,
+                "lane_carrier_total": 0, "lane_carrier_idle": 0}
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -264,7 +307,9 @@ def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
     payload = {
         SCHEMA_VERSION_KEY: QUEUE_SNAPSHOT_SCHEMA_VERSION,
-        FORMAT_KEY: FORMAT_VERSION,
+        # Embedded rows are the shape format 1 named; an older body treats only 1 as current and would
+        # otherwise run its legacy conversion over this export (RV_MAIN, queue publication minor).
+        FORMAT_KEY: 1 if capture["rollback_readable"] else FORMAT_VERSION,
         "pending_count": len(capture["pending"]), "running_count": len(capture["running"]),
         **capture["pool"],
         "acceptance_fences": capture["acceptance_fences"],

@@ -887,12 +887,12 @@ def auto_resume_after_restart() -> None:
         from ouroboros.delegate_recovery import import_legacy_restart, pending_owner_restart, consume_owner_restart
         from ouroboros.installation_stop import (PANIC_RECEIPT, panic_input, panic_received,
                                                 remove_received_panic)
-        from supervisor.queue import persist_queue_snapshot
+        from supervisor.queue import publish_queue_snapshot
         root = _pool().DRIVE_ROOT
         import_legacy_restart(root)
         restart = pending_owner_restart(root)
         if restart:
-            if persist_queue_snapshot(reason="owner_restart_holds") is not True:
+            if publish_queue_snapshot(reason="owner_restart_holds") is not True:  # barrier (LB)
                 log.error("Owner restart holds are not durable; its door is kept.")
                 return
             from supervisor.queue_schedules import schedule_transaction
@@ -905,7 +905,7 @@ def auto_resume_after_restart() -> None:
             if panic_received(root, identity):
                 remove_received_panic(root, identity)
                 return
-            if persist_queue_snapshot(reason="panic_holds") is not True:
+            if publish_queue_snapshot(reason="panic_holds") is not True:  # barrier (LB)
                 log.error("Panic holds are not durable; its input is kept.")
                 return
             from ouroboros.server_control import PANIC_CONTROL_KEYS, _panic_controls

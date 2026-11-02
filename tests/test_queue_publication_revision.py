@@ -79,17 +79,22 @@ def test_marks_under_q_write_no_bytes_and_the_tick_publishes_the_last_state(publ
     writes, _fsyncs = _writes(monkeypatch)
     encodings = []
     encode = queue_publication.machine_json
-    def no_bytes_under_q(payload):
-        assert not queue._queue_lock._is_owned(), "serialization never runs under Q"
-        encodings.append(1)
-        return encode(payload)
-    monkeypatch.setattr(queue_publication, "machine_json", no_bytes_under_q)
+    def no_payload_bytes_under_q(payload):
+        encoded = encode(payload)
+        if queue._queue_lock._is_owned():
+            # The tick's census of volatile row facts is the one encoding under Q: never a task payload.
+            assert "origin_message_text" not in encoded and OWNER_TEXT[:64] not in encoded and '"text"' not in encoded, \
+                "task payload serialized under Q"
+        else:
+            encodings.append(1)
+        return encoded
+    monkeypatch.setattr(queue_publication, "machine_json", no_payload_bytes_under_q)
     queue_publication.tick_publisher_started()  # this thread is the loop
     revision = queue_publication.queue_revision()
     with queue._queue_lock:
         for step in range(5):
             queue.PENDING.append(_task(f"t{step}"))
-            assert queue.persist_queue_snapshot(f"admit-{step}") is True
+            assert queue.persist_queue_snapshot(f"admit-{step}") is None, "a mark is not a disk fact"
     assert writes == [] and encodings == [] and queue_publication.queue_revision() == revision + 5
     assert not (root / "state/queue_snapshot.json").exists()
     assert queue_publication.publish_queue_changes() is True
@@ -196,7 +201,7 @@ def test_a_barrier_publishes_at_once_while_the_tick_owns_ordinary_marks(publishe
     writes, _fsyncs = _writes(monkeypatch)
     queue_publication.tick_publisher_started()
     queue.PENDING.append(_task("marked"))
-    assert queue.persist_queue_snapshot("mark") is True and writes == []
+    assert queue.persist_queue_snapshot("mark") is None and writes == []
     queue.PENDING.append(_task("granted"))
     with queue._queue_lock:  # a Resume grant publishes before it is sent, even from under Q
         assert queue.publish_queue_snapshot("owner_wait_resumed") is True
@@ -302,7 +307,7 @@ def test_rollback_export_embeds_every_row_for_an_older_reader(published):
     assert queue_observation.SHARED_KEY in _read(root, "queue_snapshot.json")
     assert queue.publish_queue_snapshot("pre_restart_exit") is True
     exported = _read(root, "queue_snapshot.json")
-    assert queue_observation.SHARED_KEY not in exported and exported[FORMAT_KEY] == FORMAT_VERSION
+    assert queue_observation.SHARED_KEY not in exported and exported[FORMAT_KEY] == 1, "the shape an older body calls current"
     for row in exported["pending"]:  # the shape an older body restores: ``dict(row["task"])`` with the text inline
         assert isinstance(row["task"]["origin_message_text"], str) and row["task"]["origin_message_text"] == OWNER_TEXT
         assert row["task"]["metadata"]["owner_corpus"] == OWNER_TEXT

@@ -670,7 +670,7 @@ def _run_supervisor(settings: dict) -> None:
 
         from supervisor.queue import (
             enqueue_task, enforce_due_task_timeouts, enqueue_evolution_task_if_needed,
-            persist_queue_snapshot, publish_queue_changes, restore_pending_from_snapshot,
+            persist_queue_snapshot, publish_queue_changes, publish_queue_snapshot, restore_pending_from_snapshot,
             queue_deep_self_review_task, sort_pending, tick_publisher_started,
         )
         from supervisor.workers import (
@@ -770,7 +770,7 @@ def _run_supervisor(settings: dict) -> None:
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,
             enqueue_task=enqueue_task,
             queue_deep_self_review_task=queue_deep_self_review_task, persist_queue_snapshot=persist_queue_snapshot,
-            safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
+            publish_queue_snapshot=publish_queue_snapshot, safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
             handle_chat_direct=handle_chat_direct,
             request_restart=_request_restart_exit,

@@ -475,7 +475,7 @@ def _complete_exact_budget_pause_after_death(job: dict, root: pathlib.Path, task
                 queue.sort_pending()
                 hold["snapshot_persisted"] = False
                 try:
-                    hold["snapshot_persisted"] = bool(queue.persist_queue_snapshot(reason="dead_worker_budget_hold"))
+                    hold["snapshot_persisted"] = queue.publish_queue_snapshot(reason="dead_worker_budget_hold") is True  # barrier (LB)
                 except Exception:
                     log.error("Budget hold snapshot failed for %s", task_id, exc_info=True)
                 log.warning("Dead worker %s retained in nonterminal hold; snapshot persisted=%s",
