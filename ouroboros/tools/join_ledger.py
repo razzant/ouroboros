@@ -8,8 +8,10 @@ not orphaning spawned subagent children:
     shared typed task-tree decision ledger, lineage-gated to OWN children.
 
 The shared lineage/ledger helpers (_status_drive_root, _is_own_child,
-_record_child_decision_beacon) and the cancel_task handler (moved here from control.py,
-upgraded with a recorded reason + lineage gate) live here too.
+_record_child_decision_beacon), the reads that tell finalization which direct children
+still owe a disposition (_load_direct_child_results, _child_disposition_state; the loop
+re-exports both) and the cancel_task handler (moved here from control.py, upgraded with
+a recorded reason + lineage gate) live here too.
 """
 
 from __future__ import annotations
@@ -144,6 +146,54 @@ def _current_child_result_disposition(result: Dict[str, Any]) -> str:
     if disposition not in CHILD_RESULT_DISPOSITIONS or len(expected) != 64:
         return ""
     return disposition if expected == _child_result_sha256(result) else ""
+
+
+def _load_direct_child_results(
+    status_root: Path,
+    task_id: str,
+    root_task_id: str,
+) -> list[Dict[str, Any]]:
+    """Read this task's direct children (plan review spawns none)."""
+
+    from ouroboros.task_status import find_child_tasks
+
+    return [
+        row for row in find_child_tasks(
+            Path(status_root),
+            parent_task_id=task_id,
+            root_task_id=root_task_id,
+            exclude_task_id=task_id,
+            scope="direct",
+        )
+        if isinstance(row, dict)
+    ]
+
+
+def _child_disposition_state(child: Dict[str, Any]) -> str:
+    """Return cancellation, the current task-tree exact-hash disposition, or host attention."""
+
+    # Explicit cancellation wins every completion race; late scratch results are
+    # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):
+    # ``cancel_requested`` is intent, so such a child stays cancel-pending.
+    if (
+        str(child.get("parent_decision") or "").strip().lower() == "cancelled"
+        and str(child.get("status") or "").strip().lower() == "cancelled"
+    ):
+        return "cancelled"
+    try:
+        current = _current_child_result_disposition(child)
+        if current:
+            return current
+    except Exception:
+        pass
+    # A host-minted silence diagnostic is attention to this task, not work it
+    # delegated: it stays listed, accounted and readable, but owes no author
+    # disposition, pending or settled (#1376). An explicit one above still wins.
+    from ouroboros.work_diagnostics import diagnostic_ref
+
+    ref = diagnostic_ref(child)
+    minted = bool(ref) and str(child.get("task_id") or child.get("id") or "") == "silence-" + ref["episode_id"]
+    return "host_attention" if minted and str(child.get("parent_task_id") or "") == ref["task_id"] else ""
 
 
 def _record_child_result_disposition(

@@ -570,7 +570,9 @@ def test_a_family_reached_through_a_link_is_a_visible_gap_never_a_silent_success
     gap = _gaps(world)
     assert [row["path"] for row in gap] == [str(linked.parent)], "the real folder holding the link, on the drive"
     assert gap[0]["reason"].startswith("reached through a link") and gap[0]["failure_kind"] == "invalid_source"
-    assert gap[0]["reason"].endswith(f"-> {place}"), "the link text is recorded, its target never read"
+    # The fact quotes the link as the OS reports it, which need not spell the Path it was made from. Windows answers
+    # ``\\?\D:\...`` for a ``D:\...`` target (#2616), where comparing with ``place`` would accept only a respelled fact.
+    assert gap[0]["reason"].endswith(f"-> {os.readlink(linked)}"), "the link text is recorded, its target never read"
     assert gap[0]["watched_paths"] == [str(linked)]
     assert not (world.canonical / ROOT_FAMILY).exists()
     assert GAP in _execute(_reader(world, forked=True), "get_task_result", task_id=CHILD).text
@@ -586,6 +588,20 @@ def test_a_family_reached_through_a_link_is_a_visible_gap_never_a_silent_success
     assert not _gaps(world) and _settle(world)["status"] == "removed"
     arrived = world.canonical / ROOT_FAMILY / run.name / "result.json"
     assert json.loads(arrived.read_text(encoding="utf-8"))["marker"] == "exact stream"
+
+
+def test_a_relative_link_to_nothing_is_recorded_as_written(world):
+    """Absolute, a link's text and resolved target can be one string (a resolved ``tmp_path`` on POSIX). Relative and
+    dangling, only the link itself can supply this text: neither resolving it nor reading a target could."""
+    linked = world.store / ROOT_FAMILY
+    linked.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        linked.symlink_to("no-such-target", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    assert _complete(world)["status"] == "completed"
+    gap = _gaps(world)
+    assert len(gap) == 1 and gap[0]["reason"].endswith(f"{ROOT_FAMILY.as_posix()} -> no-such-target"), gap
 
 
 def test_a_linked_canonical_destination_receives_nothing_and_proves_nothing(world, tmp_path):

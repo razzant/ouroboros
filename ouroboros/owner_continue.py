@@ -96,6 +96,10 @@ TECHNICAL_REASON_CODES = frozenset({
     # A running direct turn's accounting wait outlived its idle window (``_usage_wait``): storage, not
     # the work, ended it; Continue is its manual path, never an automatic retry.
     "accounting_wait_expired",
+    # A pooled start its own context capture refused: a known window that cannot hold it, or a handbook the task
+    # itself requires that could not be read (the producer's own cause; other authority refusals keep theirs). The
+    # successor keeps that requirement; a larger route, the Context mode or a new task without it is the caller's choice.
+    "context_capacity", "required_reference_unavailable",
 })
 # The loop's forced-finalization rails that are technical limits: an extracted
 # best-effort answer settles ``completed``, the host fallback ``failed``
@@ -746,13 +750,15 @@ def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
     SHA, new timestamp), so it is an observation at that moment — never the
     task's start, the code its process imported, or the checkout now. A
     retained terminal snapshot of the same surface is a second dated
-    observation. Nothing recorded: ``{}``.
+    observation. A body candidate's row (``candidate``) is not the checkout:
+    its base may be the copy's creation, not HEAD then. Nothing recorded: ``{}``.
     """
     evidence = result.get("mutation_evidence") if isinstance(result.get("mutation_evidence"), dict) else {}
     baseline = evidence.get("baseline") if isinstance(evidence.get("baseline"), dict) else {}
     surface = next((row for row in baseline.get("surfaces") or [] if isinstance(row, dict)
                     and row.get("surface_type") == "system_repo" and isinstance(row.get("git"), dict)
-                    and row["git"].get("base_commit") and row.get("captured_at")), None)
+                    and row["git"].get("base_commit") and row.get("captured_at")
+                    and not isinstance(row.get("candidate"), dict)), None)
     if surface is None:
         return {}
     observed = {"commit": str(surface["git"]["base_commit"]), "captured_at": str(surface["captured_at"])}

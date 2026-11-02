@@ -271,8 +271,15 @@ def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
     assert "_run_reviewed_stage_cycle" in source
     assert '"reviewed"' in source
     assert '"review_only"' in source
-    assert '["git", "reset", "HEAD"]' in source
     assert '["git", "commit"' not in source
+
+
+def _staged_whole_tree(ctx, outcome):
+    """What the real stage cycle records after ``git add -A`` (paths omitted): the finally undoes it."""
+    from ouroboros.tools.git_plumbing import WHOLE_INDEX
+
+    ctx._staged_selection = WHOLE_INDEX
+    return outcome
 
 
 def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tmp_path):
@@ -287,12 +294,12 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tm
     monkeypatch.setattr(
         git_mod,
         "_run_reviewed_stage_cycle",
-        lambda *args, **kwargs: {
+        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
             "status": "passed",
             "message": "stage cycle passed",
             "pre_fingerprint": {"fingerprint": "pre"},
             "post_fingerprint": {"fingerprint": "post"},
-        },
+        }),
     )
     monkeypatch.setattr(
         git_mod,
@@ -333,11 +340,11 @@ def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_
     monkeypatch.setattr(
         git_mod,
         "_run_reviewed_stage_cycle",
-        lambda *args, **kwargs: {
+        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
             "status": "blocked",
             "message": "review blocked",
             "block_reason": "critical_findings",
-        },
+        }),
     )
     monkeypatch.setattr(
         git_mod,

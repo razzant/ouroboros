@@ -101,8 +101,8 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
     for part in governance[0][2:]:
         add(part.section_id, addressed.get(part.section_id, part.full_text),
             'operative' if part.section_id in addressed else 'orientation' if book_mode == 'low' else 'whole')
-    if governance[1]:  # Max without the whole handbook carries its chapter map here
-        add('DEVELOPMENT', governance[1], 'whole' if core.docs_need_development else 'orientation')
+    if governance[1]:  # the whole handbook (its subject's in Max, or the task's own requirement in any mode), else Max's map
+        add('DEVELOPMENT', governance[1], 'whole' if core.docs_need_development or core.development_required else 'orientation')
     for parts, fallback, label in ((core.semi_stable_sections, core.semi_stable_text, 'stable'),
                                    (core.dynamic_head_sections, core.dynamic_head_text, 'knowledge'),
                                    (core.dynamic_sections, core.dynamic_text, 'host')):
@@ -305,11 +305,12 @@ def tool_facts(registry, result, *, requested_mode, requested_count):
 
 def report(root, room, window, reserve, mode='max', snapshot=False, session_provider=None, caller='direct'):
     from devtools._context_fit_readonly import readonly_inputs, server_alive, snapshot_root
+    from ouroboros.test_environment import default_temp_parent
     root = Path(root).resolve(strict=True)
     source_root = root
-    if server_alive(root) and not snapshot:
+    if not snapshot and server_alive(root):  # --snapshot measures a private copy and never probes liveness
         raise ValueError('The data root has a live server or uncertain admission; use --snapshot')
-    with tempfile.TemporaryDirectory(prefix='context-fit-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='context-fit-', dir=default_temp_parent()) as directory:
         scratch = Path(directory)
         if snapshot:
             copied = scratch / 'data'

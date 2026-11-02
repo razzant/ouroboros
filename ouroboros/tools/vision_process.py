@@ -52,6 +52,7 @@ _CONTEXT = _object({
     "response_reserve_tokens": {"type": "integer", "minimum": 0},
     "window_witness_bound": {"type": "boolean"},
     "window_observation_fp": _STRING,
+    "required_book_tokens": {"type": "integer", "minimum": 0},
 })
 _CAPTURE = _object({
     **{key: _STRING for key in ("attempt_id", "model", "provider", "provider_code", "provider_error_type", "provider_error")},

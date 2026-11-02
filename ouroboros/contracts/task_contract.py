@@ -691,6 +691,9 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         if "input_sources" in source:
             contract["input_sources"] = normalize_input_sources(source["input_sources"])
             break
+    # The task's own direct handbook answer, from its contract alone: a legacy top-level value keeps its Max meaning.
+    if isinstance(merged.get("context_requires_development"), bool):
+        contract["context_requires_development"] = merged["context_requires_development"]
     attachment_ref = merged.get("attachment_manifest_ref", task.get("attachment_manifest_ref"))
     if attachment_ref is not None:
         if not isinstance(attachment_ref, Mapping):

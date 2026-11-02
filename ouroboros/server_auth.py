@@ -19,7 +19,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from ouroboros.browser_boundary import CROSS_ORIGIN_CODE, JSON_CONTENT_TYPE_CODE, browser_request_refused, json_body_refused
+from ouroboros.browser_boundary import CROSS_ORIGIN_CODE, browser_request_refused
 from ouroboros.config import load_settings
 from ouroboros.standalone_page import themed_page
 
@@ -394,12 +394,6 @@ class NetworkAuthGate:
                 await JSONResponse({"error": "Requests from another site's page are not accepted.",
                                     "code": CROSS_ORIGIN_CODE}, status_code=403)(scope, receive, send)
             return
-        if scope["type"] == "http":
-            refused, receive = await json_body_refused(scope, receive)
-            if refused:
-                await JSONResponse({"error": "Send a JSON body with Content-Type: application/json.",
-                                    "code": JSON_CONTENT_TYPE_CODE}, status_code=415)(scope, receive, send)
-                return
         if scope["type"] == "http" and path in {"/auth/login", "/auth/logout"}:
             # These names belong to the gate even when it is inactive: a selected
             # asset named login/logout must not become a different operation.

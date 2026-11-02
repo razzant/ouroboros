@@ -108,6 +108,8 @@ _START_TASK_DESCRIPTION = (
     "Give the separate work a short title and objective. project_name creates a named room; "
     "project_id selects an existing room. workspace_root selects its folder; "
     "workspace='none' opts out of the room's default folder. "
+    "Set context_requires_development=true only when the task itself needs the whole development handbook in every "
+    "mode, never for its subject; a route too small for it refuses the task. "
     "A durable pending intent means accepted, waiting to start; inspect its recorded "
     "outcome before explicitly retrying an uncertain admission."
 )
@@ -207,7 +209,7 @@ def get_tools() -> List[ToolEntry]:
                 "Use finish after considering the observed work, or stop with a rationale naming unfinished work. "
                 "Select exactly one of answer or a host-offered answer_sha256. Successful page, note, mark and addressed-message writes may ride in the same response; any other result is read before the finish. On a self-started run (a consciousness wake's own turn, or a schedule-born root without a Presence binding) or a root answering its place, silent=true sends no message (any answer stays your internal note), refused while your human awaits a reply. No answer is needed. The run records no message unless a host notice is owed. This grants no success, cancels no children, and retains all configured review and owner controls.",
             "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a root's owner reads it as your reply, a child's parent as your report."},
+                "action": {"type": "string", "enum": ["finish", "stop"]}, "answer": {"type": "string", "description": "The complete answer, including a short correction; a child's parent reads it as your report, a root's goes where that root answers (its owner's chat, or the conversation a Presence root answers, as your context names)."},
                 "answer_sha256": {"type": "string", "description": "Exact offered retained or whole held response hash."},
                 "rationale": {"type": "string", "description": "For stop, what remains unfinished; the owner reads it as the stop's cause on the task row. Optional for finish."}, "acceptance_subject": {"type": "object", "properties": {"owner_source_sha256": {"type": "string"},
                     "effective_criteria": {"type": "string"}, "material_tool_indices": {"type": "array", "items": {"type": "integer"}},
@@ -250,7 +252,7 @@ def get_tools() -> List[ToolEntry]:
                     "workspace_root": {"type": "string", "description": "Absolute ordinary folder or Git worktree root outside Ouroboros repo/data, validated at admission. File/process work supports ordinary folders; Git operations need a worktree. Omit for the Project's registered working_dir or, in Main, Ouroboros's own repo.", "default": ""},
                     "workspace": {"type": "string", "description": "'none' opts out of the Project's default folder; empty otherwise.", "default": ""},
                     "context_requires_self_body_docs": {"type": "boolean", "description": "True for work on Ouroboros code, including copies elsewhere: this task gets the full development handbook in Max. Low/Nano and helpers keep their usual book maps.", "default": False},
-                    "context_requires_development": {"type": "boolean", "description": "Omit unless the work's subject is clear: true keeps docs/DEVELOPMENT.md whole in Max, false gives its chapter map."},
+                    "context_requires_development": {"type": "boolean", "description": "true: all of docs/DEVELOPMENT.md in every mode; false: its chapter map."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     "reasoning_effort": _ROOT_EFFORT_PARAM,
                 },

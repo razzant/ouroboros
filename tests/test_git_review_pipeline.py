@@ -181,12 +181,20 @@ class TestReviewInCommitPipeline:
     # which additionally verifies the one wave (assembly → admission → dispatch)
     # is reached and the ``ThreadPoolExecutor`` parallelism contract holds.
 
-    def test_blocked_review_unstages(self):
-        """When review blocks, git reset HEAD must be called."""
-        from ouroboros.tools import git_review_cycle
+    def test_blocked_review_unstages(self, git_ctx, monkeypatch):
+        """A refused cycle unstages what it staged (real Git; a protected path under Advanced)."""
+        git_mod, ctx = git_ctx
+        repo = pathlib.Path(ctx.repo_dir)
+        (repo / "BIBLE.md").write_text("protected change\n", encoding="utf-8")
+        monkeypatch.setattr(git_mod, "_current_runtime_mode", lambda: "advanced")
+        git_mod._reset_commit_review_state(ctx)
 
-        source = inspect.getsource(git_review_cycle._reviewed_stage_cycle)  # the cycle body under the panel
-        assert 'git", "reset", "HEAD"' in source
+        result = git_mod._run_reviewed_stage_cycle(ctx, "protected change", 0.0, paths=["BIBLE.md"])
+
+        assert result["block_reason"] == "core_protection_blocked", result
+        staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=repo,
+                                check=True, capture_output=True, text=True).stdout
+        assert staged == ""
 
     def test_review_rebuttal_forwarded(self):
         git_mod = _get_git_module()

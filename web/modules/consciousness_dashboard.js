@@ -12,7 +12,7 @@ import { allowanceLabel } from './utils.js';
 import { tr, fmt } from './i18n.js';
 import { PLACES_CHANGED_EVENT, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { getContributions } from './contributions.js';
-import { CHECK_CHIPS, clockText, splitWakes, durationText, noteLeadText, placeStatusText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { CHECK_CHIPS, clockText, splitWakes, durationText, placeStatusText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { costPresentationDetail } from './chat_activity.js';
 import { openPlaceSheet } from './place_sheet.js';
@@ -134,7 +134,7 @@ export function wakeRowHtml(wake, { open = false } = {}) {
     const door = wake.chatId === 1 && wake.taskId ? taskReferenceHtml(wake.taskId)
         : wake.cause === 'focus' && wake.chatId ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-cx-open-room="${wake.chatId}">${escapeHtml(tr('consciousness.open_room', 'Open the conversation'))} ↗</button>` : '';
     const line = wake.summary ? `<p class="consciousness-wake-summary" data-i18n-authored>${escapeHtml(wake.summary)}</p>`
-        : wake.note ? `<p class="consciousness-wake-lead" data-i18n-authored>${escapeHtml(noteLeadText(wake.note))}</p>`
+        : wake.note ? `<p class="consciousness-wake-lead" data-i18n-authored>${escapeHtml(String(wake.note ?? '').trim())}</p>`
             : counts ? `<p class="consciousness-wake-facts is-line">${counts}</p>` : '';
     return `<li class="consciousness-wake${wake.live ? ' is-live' : ''}" data-wake="${escapeHtml(wake.taskId)}">
         <time class="consciousness-wake-time"${wake.startedAt ? ` datetime="${escapeHtml(wake.startedAt)}"` : ''}>${escapeHtml(clockText(wake.startedAt) || '—')}</time>

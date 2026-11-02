@@ -13,7 +13,8 @@
 * READ: no arguments → the free state: the current revision, every participant's open
   objections (``not_adjudicated`` flagged), who last saw which revision, the latest
   contributions and the pending asks; pending seats whose producer finished while
-  nobody listened are settled at $0 first.
+  nobody listened are settled at $0 first. Each ask names the evidence it recorded as
+  not attached in full (``omissions``: locator and reason), in the read and the ask's result.
 
 Every refusal — a schema error, an old-form call (``spec``, ``review_disposition``,
 ``author_action``, …: a typed $0 refusal naming the new form, no shim), a missing first
@@ -439,6 +440,8 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}{_room_facts(p)}")
         lines.append(f"- ask {ask['ask_id']} on {plan_record.ask_subject(ask['revision'])}"
                      + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
+        if stored.get("omissions"):  # recorded by plan_evidence when the ask was prepared; the ask's result shows it too
+            lines.append("  evidence omitted: " + "; ".join(f"{o.get('locator')} ({o.get('reason')})" for o in stored["omissions"]))
         if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold
             points = [f"{p.get('seat_id')}/{item.get('id')}: {item.get('text')}" for p in stored.get("participants") or []
                       if isinstance(p.get("reply"), dict) for item in p["reply"].get("objections") or []]

@@ -21,7 +21,8 @@ bound and unchanged), superseded review copies and earlier address records leave
 one host record names the checkpoint that holds them exactly. Owner 29.10 Q1=A:
 if that seed still exceeds the physical window, oldest whole rows of any kind may
 leave by exact address; core, assignment, notes, newest owner turn and current tail
-stay. An irreducible view, or a candidate that does not shrink, still refuses.
+stay. An irreducible view, or a candidate that does not shrink, still refuses, and so
+does an excess a directly required handbook alone causes (owner 1.11.2026).
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ import math
 from types import SimpleNamespace
 from typing import Any, Dict, List, Sequence, Tuple
 
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS, bound_host_row
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_ROW_KINDS, REQUIRED_BOOK_UNFIT_KEY, bound_host_row
 
 RENEWAL_RECORD_NAME = "ouroboros_view_renewal"
 
@@ -157,13 +158,20 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     density = usage.get("_context_measurement_density") or 1.0
     def measure(rows):
         return math.ceil(estimate_context_prompt_tokens(rows, schemas) * density)
-    seed, record = renewal_view(messages, observation=getattr(tools._ctx, "_last_context_observation", None),
-                                drive_root=root, task_id=limit_ctx.task_id, measure=measure)
     capacity = usage.get("_context_capacity_total_tokens")
     reserve = usage.get("_context_response_reserve_tokens") or 0
-    if capacity is not None and measure(seed) + reserve > capacity:
+    book = int(usage.get("_context_required_book_tokens") or 0)
+    # A required handbook is kept, never paid for: only what a view without it could not hold renews or cuts,
+    # and an excess nothing measures is not guessed onto my memory. A known window that holds that view is the
+    # task's typed incompatibility (``context_capacity``); an unknown one proves none.
+    if book and (capacity is None or measure(messages) - book + reserve <= capacity):
+        usage[REQUIRED_BOOK_UNFIT_KEY] = capacity is not None
+        return _cannot_help(limit_ctx)
+    seed, record = renewal_view(messages, observation=getattr(tools._ctx, "_last_context_observation", None),
+                                drive_root=root, task_id=limit_ctx.task_id, measure=measure)
+    if capacity is not None and measure(seed) - book + reserve > capacity:
         seed, cut = physical_window_cut(seed, drive_root=root, task_id=limit_ctx.task_id,
-                                        measure=measure, usable=capacity - reserve)
+                                        measure=lambda rows: measure(rows) - book, usable=capacity - reserve)
         if cut:
             record = {**(record or {}), "physical_cut": cut}
     if measure(seed) >= measure(messages):
