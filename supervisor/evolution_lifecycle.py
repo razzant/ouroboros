@@ -144,13 +144,13 @@ def _deliver_pending_owner_report() -> None:
 
 
 def enqueue_evolution_task_if_needed() -> None:
-    """Queue evolution only when idle, enabled and admitted by the global budget limit.
+    """Queue evolution only when idle (no conversation turn holds it), enabled and admitted by the global budget limit.
 
     Failure and repeat counts are evidence for the mind, never a stop (owner, 2026-11-02)."""
     from supervisor import queue as q
 
     q._deliver_pending_owner_report()
-    if q.PENDING or q.RUNNING:
+    if q.PENDING or q.project_running():
         return
     from supervisor.state import StateUnavailable, control_is, update_state
 
