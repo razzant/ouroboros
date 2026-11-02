@@ -10,9 +10,8 @@ GiB) is its own lane, ``OUROBOROS_E2E_DEEP=stand_full``. Linux's forkserver is t
 is this file on that runner. Windows has no runner for this file: there the counted half (tests/test_stand_counts.py) runs in the default lane, and
 every law of this file stays unmeasured.
 
-A law the tree cannot meet yet is a strict xfail naming the unit that makes it true: the conversation lane (LA). Wall-clock figures are facts
-(printed, and into ``OUROBOROS_TEST_EVIDENCE_ROOT``); a clock that decides is only ever a transport bound, so that a broken run fails instead of
-hanging.
+A law the tree cannot meet yet is a strict xfail naming what breaks it. Wall-clock figures are facts (printed, and into
+``OUROBOROS_TEST_EVIDENCE_ROOT``); a clock that decides is only ever a transport bound, so that a broken run fails instead of hanging.
 
 Named elsewhere, not repeated here: a turn's saved work across a planned restart, returned and never replayed, through the real kill, snapshot and
 boot restore (tests/test_restart_saved_work.py, tests/system_e2e/test_direct_project_turn_restart.py); ``disable_exhausted_worker_pool`` sparing a
@@ -35,14 +34,32 @@ from typing import Any, Callable, Dict, List
 import pytest
 
 from tests._stand import SHAPES
-from tests.system_e2e.harness import (LANE_MOCK, ArtifactOracle, ScriptedStubModel, clone_repo, keyless_settings, message_text,
-                                      require_lane, wait_durable_result, wait_until, write_settings_file, ws_url)
+from tests._store_shared import as_install
+from tests.system_e2e.harness import (
+    LANE_MOCK,
+    ArtifactOracle,
+    ScriptedStubModel,
+    clone_repo,
+    keyless_settings,
+    message_text,
+    require_lane,
+    wait_durable_result,
+    wait_until,
+    write_settings_file,
+    ws_url,
+)
 from tests.system_e2e.interfaces import FakeClaudexorDaemon
 from tests.system_e2e.test_ordinary_conversation_capabilities import _received_turn
-from tests.system_e2e.test_presence_resilience import (LIVE_DEFAULT_PORTS, _call, _event_body, _HookedServer, _seed_behavior,
-                                                       _seed_transport, _Turn)
+from tests.system_e2e.test_presence_resilience import (
+    LIVE_DEFAULT_PORTS,
+    _call,
+    _event_body,
+    _HookedServer,
+    _seed_behavior,
+    _seed_transport,
+    _Turn,
+)
 from tests.system_e2e.test_system_scenarios_w6 import _WsFrames
-from tests._store_shared import as_install
 from tests.test_cost_contract import _child
 
 _TIMEOUT_METHOD = "signal" if hasattr(signal, "SIGALRM") else "thread"
@@ -56,7 +73,7 @@ TURN_MARKER = "[STAND-TURN]"
 READ_WINDOW_SEC = 60.0  # a transport bound for one answer under load
 SETTLE_SEC = 300.0  # a transport bound for one turn to its end
 BOOT_SEC = 900.0  # a transport bound for the pool to take its first rows (a spawn takes up to a minute on a loaded Mac)
-LANE_REASON = "LA: no conversation lane yet; every owner turn, wake and Presence body runs on a server thread"
+QUIET_SEC = 5.0  # how long the worker ledger stays empty before no spawn in flight can still land in it
 DEGRADED = "inline_degraded"
 NO_CARRIER = ("blocked", "window")  # a refused spawn; an assisted update's conflict markers in the tree a spawn would import
 COGNITION_DOORS = {"handle_task", "build_llm_messages", "_context_facts", "render_wake_message", "observe_wake", "run_presence_turn"}
@@ -206,7 +223,8 @@ class _Run:
         return message_id
 
     def turn_of(self, message_id: str) -> Dict[str, Any]:
-        return wait_until(lambda: _received_turn(self.oracle, message_id), READ_WINDOW_SEC) or {}
+        """The turn its carrier received: a carrier may have to boot first, a minute on a loaded Mac, so this bound is a turn's."""
+        return wait_until(lambda: _received_turn(self.oracle, message_id), SETTLE_SEC) or {}
 
     def finished_turn(self, text: str) -> Dict[str, Any]:
         """One owner turn to its stored end, with the wall clock it took (a fact)."""
@@ -232,7 +250,19 @@ class _Run:
 
     def probe_door(self, path: str, method: str = "GET", payload: Any = None) -> Dict[str, Any]:
         answer = _call(self.server.port, method, path, payload, timeout=READ_WINDOW_SEC)
-        return {"status": answer["status"], "sec": answer["sec"], "error": answer["error"]}
+        return {"status": answer["status"], "sec": answer["sec"], "error": answer["error"], "reason_code": answer["body"].get("reason_code")}
+
+    def pause_door(self, task_id: str) -> Dict[str, Any]:
+        """The owner's Pause as its contract says to send it: one request id, again after a 503 (the door reads the store with no wait,
+        so that it never stalls behind it). How many answers it took is a fact; the law is that the Pause is taken."""
+        refused: List[Any] = []
+        deadline = time.monotonic() + READ_WINDOW_SEC
+        while True:
+            answer = self.probe_door(f"/api/tasks/{task_id}/pause", "POST", {"request_id": "stand-pause"})
+            if answer["status"] != 503 or time.monotonic() >= deadline:
+                return {**answer, "refused_first": refused}
+            refused.append(answer["reason_code"])
+            time.sleep(0.5)
 
     def wake_seen(self) -> bool:
         return any(row.get("door") == "_launch" for row in _doors(self.door_log))
@@ -240,9 +270,12 @@ class _Run:
     # ---- load: everything at once, the door and the controls under it ----------------------------------------------------------
     def at_work(self, count: int) -> List[str]:
         """The restored rows the pool took, each held at the model: real workers, real tasks, the rest of the queue behind them."""
-        wait_until(lambda: self.holds.arrived >= count, BOOT_SEC)
-        return [row["id"] for row in self.oracle.queue_snapshot().get("running") or []
-                if row.get("worker_id") is not None and str(row["id"]).startswith("live-")]  # a wake or a turn may be at work too
+        def rows() -> List[str]:  # a wake or a turn may be at work too, and a wake's own text may quote these rows
+            return [row["id"] for row in self.oracle.queue_snapshot().get("running") or []
+                    if row.get("worker_id") is not None and str(row["id"]).startswith("live-")]
+
+        wait_until(lambda: self.holds.arrived >= count and len(rows()) >= count, BOOT_SEC)
+        return rows()
 
     def under_load(self) -> None:
         tasks = self.at_work(self.shape.real_tasks)
@@ -256,7 +289,7 @@ class _Run:
         for turn in burst:
             turn.start()
         doors = {"health": self.probe_door("/api/health"), "contract": self.probe_door("/api/contract"), "state": self.probe_door("/api/state"),
-                 "pause": self.probe_door(f"/api/tasks/{tasks[-1]}/pause", "POST", {"request_id": "stand-pause"})}
+                 "pause": self.pause_door(tasks[-1])}
         self.facts["doors"] = doors
         beside = self.finished_turn("An owner turn beside the others: answer in one line.")
         self.facts["beside"] = {**beside, "receipt": self.receipt(beside["task_id"])}
@@ -313,13 +346,30 @@ class _Run:
         self.facts["storm"] = {**hello, "storm_row": bool(storm_row),
                                "pending_ids": [row.get("id") for row in self.oracle.queue_snapshot().get("pending") or []]}
 
+    def no_worker_left(self) -> None:
+        """Every worker killed, and the one a spawn had in flight when the fact began (a turn may rightly take a carrier that came
+        through). Quiet for ``QUIET_SEC`` of the ledger means none is coming: the fact stands, and it forbids any new one."""
+        quiet_since = None
+        deadline = time.monotonic() + READ_WINDOW_SEC
+        while time.monotonic() < deadline:
+            pids = list(_worker_pids(self.data_root).values())
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            quiet_since = None if pids else (quiet_since or time.monotonic())
+            if quiet_since and time.monotonic() - quiet_since >= QUIET_SEC:
+                return
+            time.sleep(0.2)
+
     def no_carrier_can_start(self, flag: pathlib.Path, text: str) -> Dict[str, Any]:
         """E7: the physical fact holds and no process is left to take the turn: the owner is answered all the same, and told how."""
         flag.write_text("closed", encoding="utf-8")
-        for pid in _worker_pids(self.data_root).values():
-            os.kill(pid, signal.SIGKILL)
+        self.no_worker_left()
         turn = self.finished_turn(text)
         flag.unlink()
+        wait_until(lambda: _worker_pids(self.data_root), SETTLE_SEC)  # the fact is over only when a process stands again: the next step's carrier is coming
         task_id = turn["task_id"]
         return {**turn, "disclosed_row": [row for row in self.oracle.supervisor_rows("conversation_inline_executor")
                                           if row.get("task_id") == task_id and row.get("executor") == DEGRADED],
@@ -332,15 +382,14 @@ class _Run:
     def marker_window(self) -> None:
         self.facts["window"] = self.no_carrier_can_start(self.window_flag, "Hello while an update's conflict markers are in the tree: answer in one line.")
 
-    def later_requests_name_it(self, before: int) -> None:
-        """The Runtime vitals the mind reads: one more turn, whose request carries each degraded turn. A word every request
-        carried before the first of them (a prompt's own text) would prove nothing."""
+    def later_requests_name_it(self) -> None:
+        """The Runtime vitals the mind reads: one more turn, whose request carries each degraded turn."""
         self.finished_turn("One more owner turn: answer in one line.")
-        known = any(DEGRADED in json.dumps(body) for _kind, body in self.stub.calls[:before])
         for step in NO_CARRIER:
             later = self.stub.calls[self.facts[step]["calls_when_answered"]:]
+            row = f"{DEGRADED} turn {self.facts[step]['task_id']}"  # the vitals' own line; the bare word is in every request's documents
             self.facts[step]["later_requests"] = len(later)
-            self.facts[step]["vitals"] = not known and any(DEGRADED in json.dumps(body) for _kind, body in later)
+            self.facts[step]["vitals"] = any(row in json.dumps(body) for _kind, body in later)
 
     def stop_a_turn(self) -> None:
         """E9: Stop of a held turn: the carrier by custody, its death measured."""
@@ -355,11 +404,10 @@ class _Run:
 
     def recovery(self) -> None:
         self.storm()
-        before = len(self.stub.calls)
         self.blocked_spawn()
         self.marker_window()
         self.stop_a_turn()
-        self.later_requests_name_it(before)
+        self.later_requests_name_it()
         self.facts["doors_seen"] = _doors(self.door_log)
 
     # ---- one server ---------------------------------------------------------------------------------------------------------
@@ -427,14 +475,12 @@ def _server_rows(part: Dict[str, Any]) -> List[Dict[str, Any]]:
             and row.get("caller") != "status_snapshot"]
 
 
-@_strict_gap(LANE_REASON)
 def test_s43_e1_no_server_stack_ran_cognition_under_load(scenario):
     """Normal operation: owner turns, a wake and a Presence burst, and no door of cognition in the server's process."""
     rows = _server_rows(scenario["load"])
     assert not rows, sorted({(row["door"], row["thread"].split("-")[0], row["caller"]) for row in rows})[:12]
 
 
-@_strict_gap(LANE_REASON)
 def test_s43_e1_only_the_disclosed_row_ran_in_the_server_during_recovery(scenario):
     """With no process able to start, each such turn runs on a server thread and says so; nothing else does."""
     recovery = scenario["recovery"]
@@ -467,8 +513,9 @@ def test_s43_e5_the_door_and_the_controls_answer_under_load(scenario, door):
 def test_s43_e5_the_load_was_really_there(scenario):
     load = scenario["load"]
     shape = SHAPES[load["shape"]]
-    assert len(load["held_tasks"]) == shape.real_tasks == load["arrivals"]["tasks"], load["arrivals"]
-    assert load["arrivals"]["turns"] == shape.turns and all(turn["task_id"] for turn in load["held_turns"]), load["held_turns"]
+    # A wake due meanwhile quotes what it observes, so its request may wait at a gate too: the arrivals are at least these.
+    assert len(load["held_tasks"]) == shape.real_tasks <= load["arrivals"]["tasks"], load["arrivals"]
+    assert load["arrivals"]["turns"] >= shape.turns and all(turn["task_id"] for turn in load["held_turns"]), load["held_turns"]
     assert load["arrivals"]["pending"] >= shape.live.pending, load["arrivals"]
 
 
@@ -495,9 +542,6 @@ def test_s43_e6_a_receipt_names_what_the_owner_waited(scenario, turn):
 
 # ---- E7: the recovery channel ----------------------------------------------------------------------------------------------
 
-UNWIRED_VITALS = f"{LANE_REASON}; on LA's tip inline_carrier.inline_vitals has no reader, so the Runtime vitals do not name it (owner decision 2A)"
-
-
 def test_s43_e7_after_a_worker_storm_the_next_hello_is_answered_and_never_waits_in_pending(scenario):
     recovery = scenario["recovery"]
     storm = recovery["storm"]
@@ -506,7 +550,6 @@ def test_s43_e7_after_a_worker_storm_the_next_hello_is_answered_and_never_waits_
     assert storm["task_id"] not in storm["pending_ids"], storm
 
 
-@_strict_gap(LANE_REASON)
 def test_s43_e7_the_hello_after_a_storm_was_admitted_to_the_lane(scenario):
     assert scenario["recovery"]["storm"]["execution_owner"].get("lane") == "conversation", scenario["recovery"]["storm"]
 
@@ -517,16 +560,20 @@ def test_s43_e7_with_no_carrier_able_to_start_the_owner_is_still_answered(scenar
 
 
 @pytest.mark.parametrize("step", NO_CARRIER)
-@pytest.mark.parametrize("surface", [pytest.param("receipt", marks=_strict_gap(f"{LANE_REASON}: nothing says inline_degraded")),
-                                     pytest.param("journal", marks=_strict_gap(f"{LANE_REASON}: no row names the executor")),
-                                     pytest.param("chat", marks=_strict_gap(f"{LANE_REASON}: the chat says nothing")),
-                                     pytest.param("vitals", marks=_strict_gap(UNWIRED_VITALS))])
+@pytest.mark.parametrize("surface", ["receipt", "journal", "chat", "vitals"])
 def test_s43_e7_a_degraded_turn_is_disclosed(scenario, step, surface):
     part = scenario["recovery"][step]
     told = {"receipt": part["execution_owner"].get("executor") == DEGRADED, "journal": bool(part["disclosed_row"]),
             "chat": any(frame.get("task_incident") == "conversation_degraded_executor" for frame in part["notice"]),
             "vitals": part["later_requests"] > 0 and part["vitals"]}
     assert told[surface], (surface, part)
+
+
+@_strict_gap("worker_pool_lifecycle.respawn_worker has no marker-window check: the reaper starts a dead carrier's replacement inside the window "
+             "(a child that would import the tree's conflict markers), though reconcile_conversation_lane says nothing spawns there")
+def test_s43_e7_nothing_spawns_in_a_marker_window(scenario):
+    starts = [row for row in scenario["recovery"]["doors_seen"] if row["door"] == "spawn_in_marker_window"]
+    assert not starts, sorted({row["caller"] for row in starts})
 
 
 # ---- E9: Stop and Panic ----------------------------------------------------------------------------------------------------
@@ -536,7 +583,6 @@ def test_s43_e9_stop_is_answered_while_the_turn_waits_on_its_model(scenario):
     assert 200 <= stop["answer"]["status"] < 300, stop
 
 
-@_strict_gap(f"{LANE_REASON}: there is no process to kill")
 def test_s43_e9_stop_finalizes_then_kills_the_turn_s_carrier(scenario):
     stop = scenario["recovery"]["stop"]
     assert stop["carrier"] and stop["carrier_gone"] and stop["status_at_death"] == "cancelled", stop
@@ -548,7 +594,6 @@ def test_s43_e9_panic_s_census_covers_every_worker(scenario):
     assert panic["workers"] and panic["workers_in_census"], panic
 
 
-@_strict_gap(f"{LANE_REASON}: Panic stops a turn only as a thread of the server it ends")
 def test_s43_e9_panic_kills_each_turn_s_carrier_by_measured_identity(scenario):
     panic = scenario["load"]["panic"]
     assert panic["carriers"] and all(panic["carriers"]) and panic["carriers_in_census"] and panic["carriers_gone"], panic
