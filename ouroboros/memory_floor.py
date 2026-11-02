@@ -152,15 +152,20 @@ def max_room_lost(fact: Mapping[str, Any]) -> bool:
     return fact["story"] > fact["allowance"] or fact["zero_need"] > fact["window"]
 
 
-def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], mode: str) -> Dict[str, Any]:
+def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], mode: str,
+                  required_book: int = 0) -> Dict[str, Any]:
     """The view facts with the start's settled Max room: ``held`` when Max kept whole books (``cuts``: the steps past
     F1/F1b it took); ``route`` when the books, core, assignment, reply reserve and work room alone exceed the window
     (a disclosed fact of the route); else ``crowded`` (memory or tool schemas took the room). ``headroom`` or
-    ``short`` compare the whole need with the window."""
+    ``short`` compare the whole need with the window. A held Max also counts the ``required_book`` it carries beyond
+    the measured view (calibrated tokens); the choices above were made without it."""
     if not fact:
         return dict(facts)
     steps = dict((facts.get("floor") or {}).get("steps") or {})
     cause = "held" if mode == "max" else "route" if fact["floor_need"] > fact["window"] else "crowded"
+    if mode == "max" and required_book:
+        fact = {**fact, **{key: fact[key] + required_book for key in ("floor_need", "zero_need", "need")},
+                "parts": [*fact["parts"], ["directly required handbook", required_book]]}
     gap = fact["window"] - fact["need"]
     return {**facts, "max_room": {**fact, "cause": cause, **({"headroom": gap} if gap >= 0 else {"short": -gap}),
                                   "cuts": [step for step in LADDER if cause == "held" and step not in _ORDINARY and steps.get(step)]}}
@@ -174,6 +179,7 @@ def crowded_by_memory(fact: Optional[Mapping[str, Any]]) -> bool:
             and isinstance(fact.get("window"), int) and fact["zero_need"] <= fact["window"])
 
 
+REQUIRED_BOOK_WHOLE = " (this task's directly required handbook stays whole)"
 ROUTE_FACT = ("its window cannot hold the books beside my core, assignment, reply reserve and the work's room (needs "
               "{need:,} > {window:,}: {parts}); folding memory or dropping tool schemas cannot make room here.")
 
@@ -232,6 +238,17 @@ def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]]
         return "Low with chapter maps, a disclosed fact of this route: " + ROUTE_FACT.format(
             need=fact["floor_need"], window=fact["window"], parts=floor_parts(fact))
     return f"Low with chapter maps. The host's measure of this start: {measure_text(fact, parts=True)}."
+
+
+def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], work: int) -> str:
+    """What a start says of this task's directly required handbook, appended after every ordinary choice (owner
+    1.11.2026): a Low its room lowered keeps that book whole, and a work room it leaves short is a fact, never a veto.
+    ``book_tokens`` and ``free`` are calibrated; ``free`` is None when nothing measured the start's room."""
+    lines = ["This task's directly required handbook stays whole beside these chapter maps."] if lowered else []
+    if free is not None and free < work:
+        lines.append(f"Start room is smaller than requested: this task's directly required handbook takes "
+                     f"{book_tokens:,} tokens; about {max(0, free):,} of the {work:,} requested remain.")
+    return "\n".join(lines)
 
 
 def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Optional[int]], *,

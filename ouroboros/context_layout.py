@@ -252,6 +252,11 @@ def architecture_context_section(
     return "## ARCHITECTURE.md\n\n" + text
 
 
+def whole_development_book(text: str) -> str:
+    """The composed handbook as its own context block: entrypoint and every chapter."""
+    return "## DEVELOPMENT.md\n\n" + text
+
+
 def reference_doc_sections(
     env: Any,
     *,
@@ -260,13 +265,16 @@ def reference_doc_sections(
     architecture_text: str | None = None,
     development_text: str | None = None,
     books: tuple[ReferenceBook, ...] = (),
+    required_book: bool = False,
 ) -> tuple[List[str], str]:
-    """Return common reference sections and the separate Max handbook block.
+    """Return common reference sections and the separate handbook block.
 
     Max's common sections do not depend on the caller's handbook inclusion: its
     own block holds the handbook or, without it, the handbook's chapter map.
     Compact modes orient the mind to both books and retain exact physical
-    pointers; they never turn a composed-book line into a file address.
+    pointers; they never turn a composed-book line into a file address. A task's
+    direct requirement adds the whole book as that block, its map staying in the
+    common sections so every task keeps one shared prefix.
     """
     parts: List[str] = []
     development = ""
@@ -300,8 +308,9 @@ def reference_doc_sections(
                     else generate_doc_nav_map(dev_text, title="DEVELOPMENT.md", rel_path="docs/DEVELOPMENT.md"))
         if context_mode in {"low", "nano"}:
             parts.append(chapters)
+            development = whole_development_book(dev_text) if required_book else ""
         else:  # Max: the handbook or its chapter map, in its own block, so the common sections stay shared
-            development = "## DEVELOPMENT.md\n\n" + dev_text if include_development else chapters
+            development = whole_development_book(dev_text) if include_development else chapters
 
     # README (user-facing) and CHECKLISTS (reviewers load their own copy) are not
     # inlined in the agent context in any mode.

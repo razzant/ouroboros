@@ -39,6 +39,22 @@ def test_measurement_uses_ordinary_scale_fitter_and_composition(tmp_path, monkey
     print('SCALE_COMPARISON ' + json.dumps({'before': before, 'after': result}, sort_keys=True))
 
 
+@pytest.mark.parametrize('mode', ['low', 'max'])
+def test_a_directly_required_handbook_is_reported_whole_in_every_mode(tmp_path, mode):
+    """A task's own requirement puts the whole handbook in the block Max otherwise fills with its chapter map."""
+    from dataclasses import replace
+
+    core = replace(scale.core(tmp_path), development_md='# Development\n\n## Review\n\n' + 'practice ' * 400)
+
+    def development(required):
+        result = measure_core(replace(core, development_required=required), scale.tools(), root=tmp_path,
+                              window=1_000_000, reserve=10000, mode=mode)
+        return [row['form'] for row in result['blocks'] if row['block'] == 'DEVELOPMENT']
+
+    assert development(True) == ['whole']
+    assert development(False) == (['orientation'] if mode == 'max' else [])
+
+
 @pytest.mark.parametrize('stored_tail', [False, True])
 def test_real_scale_root_read_only_report(tmp_path, monkeypatch, capsys, stored_tail):
     import socket

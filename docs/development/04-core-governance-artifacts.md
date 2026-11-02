@@ -16,7 +16,7 @@ The context-delivery registry:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
-| Main task context (`context.py`) | full tier-0 in every mode | full in Max; book navigation in Low/Nano and for a subagent child | Max: a stable block after the governance prefix for body work (`development_resident`; unknown keeps it), else the chapter map; book navigation in Low/Nano and for a subagent child |
+| Main task context (`context.py`) | full tier-0 in every mode | full in Max; navigation in Low/Nano or for a child | Max: a stable block after the governance prefix for body/unknown work (`development_resident`), else its map; else as ARCHITECTURE; a task's requirement (`development_required`) adds it anywhere |
 | Change review, Part 1 (`tools/review.py`) | full (API preamble or retrieving task) | tier 3 navigation; packet rows also get sections naming touched files within the inline share | tier 2 within the share: the review protocol and chapters naming touched files |
 | ↳ `review_change` by layer (`review_body_fact.layer_for`) | body: as Part 1; core: `not_applicable`, the preamble names no constitution (`review_prompt_text.review_preamble("core")`) | body: as Part 1; core: `not_applicable`, the navigation indexes the subject's documents (`subject_root`) | body: as Part 1; core: the universal `Change Review Checklist` alone, with an empty-by-rule required-source manifest |
 | Background consciousness wake-up (`consciousness.py` → `handle_wake_direct`) | = Main task context | = Main task context | = Main task context |

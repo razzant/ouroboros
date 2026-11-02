@@ -1,5 +1,6 @@
 """The Max room of a start: one fact beside whole books, its cause and the words that carry it."""
 import dataclasses
+import json
 import math
 
 import pytest
@@ -83,6 +84,25 @@ def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(mo
     assert "folding memory or dropping tool schemas cannot make room here." in shown and "may bring" not in shown
     line = memory_facts(plan, "low")
     assert "; Low, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here" in line
+
+
+def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(monkeypatch):
+    """The first window holding this start's Max, where the required handbook's own room note once chose Low alone
+    (Astra's counterexample): the book joins that Max with its room told after every choice, never inside one."""
+    core = dataclasses.replace(_core(), development_md="# Development\n\n## Review\n\n" + "rule " * 2_000)
+    lo, hi = 100_000, 2_000_000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        try:
+            lo, hi = (lo, mid) if _start(core, mid, monkeypatch).initial_mode == "max" else (mid + 1, hi)
+        except cf.MinimumViewUnfit:
+            lo = mid + 1
+    plain, held = (_start(dataclasses.replace(core, development_required=flag), hi, monkeypatch) for flag in (False, True))
+    assert plain.initial_mode == held.initial_mode == "max"
+    assert held.max_projection.memory_facts["floor"] == plain.max_projection.memory_facts["floor"]
+    blocks = [block["text"] for block in json.loads(held.max_projection.system_content_json)]
+    assert any(text.startswith("## DEVELOPMENT.md\n") for text in blocks)
+    assert "Start room is smaller than requested: this task's directly required handbook takes" in blocks[-1]
 
 
 def test_no_fact_without_a_known_window_or_the_owners_max(tmp_path, monkeypatch):

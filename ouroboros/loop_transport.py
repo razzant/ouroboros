@@ -899,7 +899,7 @@ def _failure_window_fact(usage, *, overflow=False):
     if not overflow and usage.get("_last_llm_error_kind") not in {"bad_request", "request_too_large", "context_overflow"}:
         return ""
     from ouroboros.capability_evidence import _parse_ctx_requested
-    from ouroboros.context_view_facts import window_projection
+    from ouroboros.context_view_facts import required_book_fact, window_projection
     from ouroboros.context_window import WindowRecord
 
     input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
@@ -910,7 +910,7 @@ def _failure_window_fact(usage, *, overflow=False):
         request = f"request input estimated {estimate:,} tokens" if estimate else "request size unknown"
     window = usage.get("_context_window") or window_projection(WindowRecord("", reserve=int(
         usage.get("_context_response_reserve_tokens") or 0)))
-    return f"\n{request}; assumed {window['text']}."
+    return f"\n{request}; assumed {window['text']}." + (required_book_fact(usage) if overflow else "")
 
 
 

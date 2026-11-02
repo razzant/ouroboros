@@ -335,11 +335,6 @@ def _run_cross_model_fallback_chain(
                 # failed before the successful candidate ever authored a turn.
                 handover_from_model=active_model,
                 handover_reason=reason or "fallback",
-                tool_calls_at_handover=len(
-                    ((getattr(tools._ctx, "_execution_trace", {})
-                      if isinstance(getattr(tools._ctx, "_execution_trace", {}), dict) else {})
-                     .get("tool_calls") or [])
-                ),
             )
             own_call = own_call_record(accumulated_usage, msg is not None, meta_before, failure_before)
             tools._ctx._route_facts_pending = "" if is_primary else route_facts_text(
@@ -793,7 +788,7 @@ def _remember_main_fit(ctx: _RoundModelCallContext, disposition: Any) -> None:
     usage["_context_target_miss"] = disposition.action == "send_target_miss"
     usage["_context_automatic_pass_used"] = disposition.automatic_pass_used
     usage["_context_predicted_capacity_miss"] = disposition.predicted_capacity_miss
-    for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window"):
+    for name in ("anchor_input_tokens", "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "window", "required_book_tokens"):
         usage[f"_context_{name}"] = getattr(measurement, name)  # the estimate's provenance and the window floor
 
 
@@ -1536,14 +1531,19 @@ def _apply_refusal_pass(ctx: _RoundModelCallContext, steps: Tuple[str, ...], fit
     no unseen body (the gradual order the owner asked for). An unknown target lets each step take its
     whole category. A just-chosen body that fits alone goes last, only in a round a provider's refusal
     started (``refused``) and only for what the late rescue's other steps could not answer: the measured
-    target left, or nothing changed against an unknown one (owner 2A).
+    target left, or nothing changed against an unknown one (owner 2A). No step pays for a directly required handbook
+    (owner 1.11): each is sized without it, and an excess it alone explains, or an unknown one beside it, stops the pass.
     """
-    changed, remaining = False, target
+    changed, remaining, charged = False, target, 0
     for step in steps:
         if remaining is not None and remaining <= 0:
             break
         if getattr(ctx.context_fit_plan, "window_record", None) is not None:
             fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit
+        if book := getattr(fit.measurement, "required_book_tokens", 0) - charged:
+            if remaining is None or remaining - (slack or 0) <= book:
+                return changed
+            remaining, charged = remaining - book, charged + book
         shed = _apply_refusal_step(ctx, step, fit, remaining, slack)
         if shed is not None:
             changed = True

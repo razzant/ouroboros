@@ -526,6 +526,8 @@ def main_context_fit_refusal(request: AttemptRequest) -> Optional[Dict[str, Any]
         physical.rendered_mode, "", request.max_completion_tokens,
         working_reserve_tokens=request.working_reserve_tokens)[1]
     reserve = max(reserve, request.working_reserve_tokens or 0)
+    if getattr(physical, "required_book_tokens", 0) and physical.rendered_mode == "nano":
+        reserve = max(reserve, int(request.max_completion_tokens or 0))  # the reply the view without the book keeps
     exact = request.prompt_tokens_exact is not None
     size = request.prompt_tokens_exact if exact else math.ceil(
         request.prompt_tokens_bounded_estimate * (physical.measurement_density or 1.0))
@@ -697,8 +699,12 @@ def bound_reply_allowance(target: Dict[str, Any], payload: Dict[str, Any]) -> Di
             {key: source[key] for key in ("system", "messages", "tools", "functions") if key in source}, 0)
         input_tokens = math.ceil(raw * float(getattr(context, "measurement_density", None) or 1.0))
     frame = dict(caller_max_tokens=int(payload[field]), nano=True, input_tokens=input_tokens, window_tokens=window)
-    candidate = {**payload, field: reply_allowance_tokens(
-        owner_nano=context.profile == "owner_nano", raw_input_tokens=raw, exact=exact, **frame)}
+    # A directly required handbook keeps the reply this candidate without it gets; the admission charges both.
+    book = int(getattr(context, "required_book_tokens", 0) or 0)
+    density = 1.0 if exact else float(getattr(context, "measurement_density", None) or 1.0)
+    candidate = {**payload, field: reply_allowance_tokens(owner_nano=context.profile == "owner_nano", exact=exact,
+                                                          **{**frame, "input_tokens": input_tokens - book},
+                                                          raw_input_tokens=raw - book / density)}
     if exact and exact_reply_shortfall(**frame):
         request = _attempt_request(target, candidate)
         error = LocalContextTooLargeError(
