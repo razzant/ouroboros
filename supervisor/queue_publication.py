@@ -276,12 +276,15 @@ def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     members = {}
     for task in [row["task"] for row in capture["pending"]] + [row["task"] for row in capture["running"]]:
         if str(task.get("root_task_id") or task.get("id") or "") in fenced:
-            member = {key: task[key] for key in ("id", "_budget_pause", "_continuation_prepared") if key in task}
+            # Rows carry every _PENDING_FIELDS key (None when unset); a member names only what is set, as the
+            # live tasks did: readers ask ``key in member`` (``queue_transitions`` reads ``_working_recovery`` so).
+            member = {key: task[key] for key in ("id", "_budget_pause", "_continuation_prepared")
+                      if task.get(key) is not None}
             for key, fields in ((BUDGET_HOLD_KEY, ("reason", "release")),
                                 ("_owner_wait_resume", ("refusal",)), ("_working_recovery", ("refusal",)),
                                 ("_resume_selection", ("fence_id", "refusal")),
                                 ("_budget_pause_resume", ("pause_id", "grant_id", "authority", "root_fence_id", "selected_by", "root_grant_id", "root_resume_generation"))):
-                if key in task:
+                if task.get(key) is not None:
                     value = task[key]
                     member[key] = {k: value[k] for k in fields if k in value} if isinstance(value, dict) else value
             members[str(task.get("id") or "")] = member
