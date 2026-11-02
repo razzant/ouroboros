@@ -64,7 +64,6 @@ GAPS: Dict[tuple, str] = {
     ("running", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.16 -> 0.21 MB)",
     ("paused", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.21 -> 4.3 MB)",
     ("pending", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (4.3 -> 7.2 MB)",
-    ("held", "custody-maintenance"): f"{UNASSIGNED}: a 600 s pass whose three audits decode every held run (decodes 94 -> 587)",
     ("held", "delegated-body"): f"{UNASSIGNED}: the body's tick decodes every held run to find the ones it owes (decodes 5 -> 504)",
 }
 REST_GAPS: Dict[str, str] = {
@@ -73,7 +72,6 @@ REST_GAPS: Dict[str, str] = {
     "heartbeat": f"{LD} L4: a root heartbeat reads custody and usage (two transactions, one usage read)",
     "state": f"{LE} L6: an unchanged revision rebuilds the answer (10 task bodies, 23 usage reads)",
     "publication": f"{LB} L5: queue.alive replaced and synced on every unchanged publication",
-    "custody-maintenance": f"{UNASSIGNED}: a 600 s pass over unchanged inputs reads 10 task bodies (delegate_terminal's refresh)",
 }
 # (pass -> counts its own work allows at rest). The duty exists to look at the open attempts: one indexed read, zero rows here.
 ALLOWED_AT_REST = {"abandoned_usage_reconciliation": {"usage_row_reads": 1}}

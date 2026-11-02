@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from copy import deepcopy
-from json import loads as json_loads
+from json import dumps as json_dumps, loads as json_loads
 from dataclasses import fields
 from typing import Any, Callable, Dict, List, Optional
 
@@ -126,9 +127,55 @@ def runs(root, where: str = "", params: tuple = ()):
 HELD_WHERE = "unlikely(state=?)"
 
 
+# The held rows' facts as this process last read them: data root -> run id -> (stamp, facts). The stamp
+# (``write_seq``, ``updated_at``) moves with every write of the row (``Txn.put_custody``; the hot-fact trigger
+# for an older writer), so the readers of the held set (the body's tick, the custody sweep's audits) list stamps
+# and fetch and decode only the rows written since. It keeps held rows only: one that left the set goes at the
+# next listing. Below the stamped schema nothing is kept and every row is read, as before.
+_HELD_SEEN: Dict[str, Dict[str, tuple]] = {}
+_HELD_LOCK = threading.Lock()
+
+
+def _held_listing(txn, root, also: str = "", params: tuple = ()):
+    """Inside a read: every held row's stamp, the ids ALSO selects among them, and the facts text of the
+    selected rows this process holds no current copy of; None below the stamped schema."""
+    from ouroboros.store_hot_facts import VERSION
+
+    if int(txn.meta("schema_version") or VERSION) < VERSION:
+        return None
+    stamps = {record["run_id"]: (record["write_seq"], record["updated_at"]) for record in txn.conn.execute(
+        f"SELECT run_id, write_seq, updated_at FROM custody_runs WHERE {HELD_WHERE}", (HELD,))}
+    selected = sorted(stamps) if not also else sorted(record["run_id"] for record in txn.conn.execute(
+        f"SELECT run_id FROM custody_runs WHERE {HELD_WHERE} AND ({also})", (HELD, *params)))
+    with _HELD_LOCK:
+        seen = _HELD_SEEN.get(str(root)) or {}
+        known = {rid: seen[rid] for rid in stamps if rid in seen and seen[rid][0] == stamps[rid]}
+    moved = [rid for rid in selected if rid in stamps and rid not in known]
+    texts = {record["run_id"]: record["facts"] for record in txn.conn.execute(
+        "SELECT run_id, facts FROM custody_runs WHERE run_id IN (SELECT value FROM json_each(?))",
+        (json_dumps(moved),))} if moved else {}
+    return stamps, selected, known, texts
+
+
+def _held_facts(root, listing) -> Dict[str, Dict[str, Any]]:
+    """After the read: the selected rows' facts (shared: decode them before any change), the moved ones parsed now."""
+    stamps, selected, known, texts = listing
+    known = {**known, **{rid: (stamps[rid], json_loads(text)) for rid, text in texts.items()}}
+    with _HELD_LOCK:
+        _HELD_SEEN[str(root)] = known
+    return {rid: known[rid][1] for rid in selected if rid in known}
+
+
 def held_runs(root, also: str = "", params: tuple = ()):
-    """The held runs, narrowed by ALSO (a predicate over the row with PARAMS)."""
-    return runs(root, f"{HELD_WHERE} AND ({also})" if also else HELD_WHERE, (HELD, *params))
+    """The held runs, narrowed by ALSO (a predicate over the row with PARAMS); a row this process read at its
+    current stamp is not fetched or parsed again (``_held_listing``)."""
+    with store.open_store(root, write=False) as txn:
+        listing = _held_listing(txn, root, also, params)
+        raw = None if listing is not None else txn.custody_raw_rows(
+            f"{HELD_WHERE} AND ({also})" if also else HELD_WHERE, (HELD, *params))
+    if listing is None:
+        return _decode_all({rid: json_loads(text) for rid, text in raw.items()})
+    return _decode_all(_held_facts(root, listing))
 
 
 # An open run (no durable settlement) is always held (``_held``), so the open runs are the held rows whose facts do
@@ -291,17 +338,18 @@ def unreadable(root) -> bool:
 
 
 def snapshot(root, closed: bool = True):
-    """One read: held runs and pending invocations, optionally including owed closing receipts."""
+    """One read: held runs (``_held_listing``) and pending invocations, optionally including owed closing receipts."""
     with store.open_store(root, write=False) as txn:
         debts = txn.set_rows("delegated_runs") if closed else {}
-        held = txn.custody_rows(HELD_WHERE, (HELD,))
+        listing = _held_listing(txn, root)
+        held = txn.custody_rows(HELD_WHERE, (HELD,)) if listing is None else None
         invocations = [facts for key, facts in txn.set_rows("custody_open").items() if key.startswith("invocation:")]
     from ouroboros.delegate_pending import current_rows
 
     state = {}
     for facts in debts.values():
         state.update({rid: _decode(raw) for rid, raw in facts.get("closed_runs", {}).items()})
-    state.update(_decode_all(held))
+    state.update(_decode_all(held if listing is None else _held_facts(root, listing)))
     return {"state": state, "pending": current_rows(root, invocations), "current": True}
 
 
