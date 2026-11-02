@@ -5,7 +5,6 @@ The writer, the owner request and the tool live in tests/test_update_description
 from __future__ import annotations
 
 import json
-import pathlib
 import subprocess
 import pytest
 

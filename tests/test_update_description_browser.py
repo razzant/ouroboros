@@ -29,7 +29,9 @@ import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_update_letter_browser import WEB
-from tests.test_update_description import BASE, TARGET, _key, _no_git_for_versions, _offer, door  # noqa: F401 — fixtures
+from tests.test_update_description import BASE, TARGET, _key, _offer
+from tests.test_update_description import _no_git_for_versions as _no_git_for_versions  # autouse pytest fixture
+from tests.test_update_description import door as door  # pytest fixture; the alias re-exports it (no F811)
 from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
