@@ -387,16 +387,17 @@ def session_candidate(host, factory, options, *, observation_fp=None):
             def measure(candidate):
                 return measure_session_wire(host, plan, candidate, host.schemas, factory, options, _room_fact=room_facts)[2]['fit']['measurement']['estimated_input_tokens']
             usable = physical_window.total_equivalent - physical_window.reserve
-            goal = max(0, measured - usable) + math.ceil(physical_window.boundary / RECLAIM_LOW_WATER_DIVISOR)
+            slack = math.ceil(physical_window.boundary / RECLAIM_LOW_WATER_DIVISOR)  # the return-after-fold eighth
+            goal = max(0, measured - usable) + slack
             before = measured
             if rung == "floor":
                 # The same memory + book walk as text, after exposed tool bodies.
-                # Each iteration must shrink the complete provider envelope.
+                # Each iteration must shrink the complete provider envelope; the slack never outlines.
                 while True:
                     rebound = plan.reproject_for_route(window_tokens=window, known_window=known, ratio=ratio,
                         output_reserve=plan.output_reserve_tokens, tool_schemas=host.schemas, start_mode=plan.initial_mode,
-                        current_messages=[*current, *extra], refused_tokens=goal, measured_input_tokens=raw,
-                        start_work=False, select_mode="low" if plan.initial_mode == "max" else None)
+                        current_messages=[*current, *extra], refused_tokens=goal - slack, slack_tokens=slack,
+                        measured_input_tokens=raw, start_work=False, select_mode="low" if plan.initial_mode == "max" else None)
                     candidate = rebound.reproject_transcript(current, rebound.initial_mode)
                     old_plan = plan
                     plan = rebound

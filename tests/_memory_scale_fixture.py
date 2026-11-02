@@ -69,8 +69,8 @@ def tools():
             for name in ('enable_tools', 'list_available_tools', 'compact_context', 'task', 'read_file')]
 
 
-def build(root, monkeypatch, *, window=92000, reserve=10000, snap=None, mode='max', reply_limit=None):
-    captured = core(root, snap)
+def build(root, monkeypatch, *, window=92000, reserve=10000, snap=None, mode='max', reply_limit=None, captured=None):
+    captured = captured or core(root, snap)
     monkeypatch.setattr(cf, '_route_calibration_ratio', lambda *a, **kw: 1.0)
     evidence = SimpleNamespace(window_tokens=window, status='confirmed', stale=False, route_fp='', source='fixture',
         response_limit={'max_output_tokens': reply_limit} if reply_limit else {},

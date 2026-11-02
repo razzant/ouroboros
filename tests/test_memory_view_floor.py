@@ -299,8 +299,8 @@ def test_short_notes_still_have_selectable_forms_and_a_saving_aggregate():
 
 def test_new_forms_do_not_inflate_a_short_notes_minimum_bound(monkeypatch):
     snap = syn.snapshot(room_facts=syn.room(notes=1))
-    after = mf.minimal_view_tokens(snap, window_tokens=92000)
+    after = tokens(snap, mf.fit_memory_view(snap, frame(0, 0)))  # the floor's own walk with no room left
     with monkeypatch.context() as before:
         before.setattr(mf, 'LADDER', tuple(step for step in mf.LADDER if step not in ('F8', 'F8a')))
-        whole = mf.minimal_view_tokens(snap, window_tokens=92000)
+        whole = tokens(snap, mf.fit_memory_view(snap, frame(0, 0)))
     assert after == whole
