@@ -29,6 +29,11 @@ _HEALTH_INCIDENTS = tuple(key[len("incident_"):] for key in _HEALTH_EN if key.st
 _SUPERVISOR_TAIL_BYTES = 256 * 1024
 
 
+def _started_processes(snap: dict) -> int:
+    """Every started worker process: the project slots (0 at idle) and the conversation lane's carriers."""
+    return int(snap.get("worker_total") or 0) + int(snap.get("lane_carrier_total") or 0)
+
+
 def _dir_size_mb(path: pathlib.Path) -> float:
     total = 0
     try:
@@ -80,7 +85,7 @@ def _collect_health(api, lang: str = "en") -> str:
     q_state = s["idle"] if (rc + pc) == 0 else s["busy"]
     out.append(f"⚙️ {s['queue']}: {q_icon} {q_state} (RUNNING {rc} · PENDING {pc})")
     if isinstance(snap.get("worker_total"), int):
-        out.append(f"👷 {s['workers']}: {snap['worker_total']}")
+        out.append(f"👷 {s['workers']}: {_started_processes(snap)}")
     inc, incidents_limited = _recent_incidents(api)
     if inc:
         parts = [f"{v} {s[f'incident_{k}']}" for k, v in inc.items()]

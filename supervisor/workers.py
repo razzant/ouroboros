@@ -1605,9 +1605,23 @@ def last_worker_exit_census() -> Optional[dict]:
     return dict(_LAST_WORKER_EXIT_CENSUS) if _LAST_WORKER_EXIT_CENSUS else None
 
 
+# The retry custody last published: {task_id: its retry marker}. The assignment pass names the same
+# unresolved claims every tick; only a change of these facts is a new publication (cost law).
+_PUBLISHED_RETRY_CUSTODY: Dict[str, Any] = {}
+
+
 def _persist_pending_terminalization_retries(task_ids: List[str]) -> None:
-    """Record retained pending-terminal rows and make their custody restart-safe."""
+    """Record retained pending-terminal rows and make their custody restart-safe, once per change."""
     if not task_ids:
+        _PUBLISHED_RETRY_CUSTODY.clear()
+        return
+    wanted = {str(tid) for tid in task_ids}
+    facts: Dict[str, Any] = {tid: None for tid in wanted}
+    for row in PENDING:
+        if isinstance(row, dict) and str(row.get("id") or "") in wanted:
+            marker = row.get(_TERMINALIZATION_RETRY_FIELD)
+            facts[str(row.get("id") or "")] = dict(marker) if isinstance(marker, dict) else marker
+    if facts == _PUBLISHED_RETRY_CUSTODY:
         return
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -1618,6 +1632,9 @@ def _persist_pending_terminalization_retries(task_ids: List[str]) -> None:
 
         if not queue.publish_queue_snapshot(reason="pending_terminal_event_retry"):  # barrier (LB): restart-safe custody
             log.warning("Failed to persist pending terminal-event retry custody")
+        else:
+            _PUBLISHED_RETRY_CUSTODY.clear()
+            _PUBLISHED_RETRY_CUSTODY.update(facts)
     except Exception:
         log.warning(
             "Failed to persist pending terminal-event retry custody",
