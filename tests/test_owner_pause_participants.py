@@ -139,8 +139,7 @@ def test_a_cold_resume_names_what_became_of_the_runs_the_pause_stopped(tmp_path,
 
     # The run obeys the stop; only the settle tick notices. The census then names nothing.
     remote.update(state="cancelled", up=True)
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-    assert owner_pause_control.settle_requested_owner_pauses(queue, now=100.0) == ["solo"]
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == ["solo"]
     settled = budget_pause.budget_pause_row(tmp_path, "solo")
     assert [run["state"] for run in settled["external_runs"]["runs"]] == ["stop_confirmed"]
     assert [(row["run_id"], row["stop_outcome"]) for row in settled["episode_runs"]] == [("run-own", "confirmed")]
@@ -184,8 +183,7 @@ def test_a_new_pause_of_the_same_task_never_inherits_the_last_ones_participants(
     assert request_owner_pause("solo", request_id="first")["ok"]
     first = _cold_park(tmp_path, monkeypatch, queue, workers)
     remote["state"] = "cancelled"
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-    owner_pause_control.settle_requested_owner_pauses(queue, now=100.0)
+    owner_pause_control.settle_requested_owner_pauses(queue)
     _resume_messages(tmp_path, monkeypatch, queue, workers)
 
     assert request_owner_pause("solo", request_id="second")["ok"]
@@ -244,14 +242,13 @@ def _park_warm_then(tmp_path, monkeypatch, remote, queue, ctx, limit, *, resume,
         if before_tick is not None:
             before_tick(box["parked"])
         remote["state"] = "cancelled"
-        box["tick"] = owner_pause_control.settle_requested_owner_pauses(queue, now=100.0)
+        box["tick"] = owner_pause_control.settle_requested_owner_pauses(queue)
         box["recorded"] = load_task_result(tmp_path, "author")["owner_wait"]
         if resume:
             box["resume"] = resume_warm_owner_pause_root("author")
             return None
         raise _Stopped()
 
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
     monkeypatch.setattr(owner_wait.time, "sleep", poll)
     try:
         box["cause"] = owner_wait.park_owner_pause_warm(limit, ctx, fence=owner_pause.read_fence(tmp_path, "author"),
@@ -492,8 +489,7 @@ def test_a_cold_pause_written_before_its_list_keeps_its_gap_while_new_facts_join
     legacy = {key: value for key, value in parked.items() if key != "episode_runs"}
     budget_pause.set_budget_pause(tmp_path, "solo", legacy, expected_pause_id=parked["pause_id"])
     remote["state"] = "cancelled"
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-    assert owner_pause_control.settle_requested_owner_pauses(queue, now=100.0) == ["solo"]
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == ["solo"]
     row = budget_pause.budget_pause_row(tmp_path, "solo")
     assert [(item["run_id"], item["stop_outcome"]) for item in row["episode_runs"]] == [("run-own", "confirmed")]
     assert row.get("episode_runs_partial") is True

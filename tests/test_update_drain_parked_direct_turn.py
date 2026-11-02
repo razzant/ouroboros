@@ -375,6 +375,39 @@ def test_update_handoff_and_boot_retention_for_all_three_parked_direct_wait_kind
     task_id = f"direct-carry-{wait_kind}"
     queue_mod, ctx, limit = _direct_turn_setup(tmp_path, monkeypatch, task_id)
     registry = get_direct_activity_registry()
+    # The direct turn owns a RUNNING conversation-lane row (here an inline executor's, on a pseudo-slot):
+    # the update's saved-work handoff and the boot restore read the turn from that row, as for any carried task.
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
+    from tests.conversation_carrier_support import lane_row
+
+    lane_row(workers, {"id": task_id, "type": "task", "chat_id": 0, "text": "carry me", "_is_direct_chat": True,
+                       "_attempt": 1, "tool_profile": "operator_control"},
+             wid=97, executor=EXECUTOR_INLINE_DEGRADED, pid=None)
+
+    def stop_preserving(*, preserve_running_task_ids=None, **_kwargs):
+        """The update's stop as ``kill_workers(preserve_running_task_ids=...)`` performs it for a row whose
+        wait the handoff stamped: the preserved row becomes its own successor on the queue (same attempt,
+        its source carried) and the inline executor's pseudo-slot ends with its thread. No process dies
+        here (``_direct_turn_setup`` stubs the kill); every other row keeps the stub's behaviour."""
+        from ouroboros.model_wait import stamp_execution_handoff
+        from supervisor import restart_retention as retention
+        from supervisor.events_budget import fold_consumed_resume
+
+        for tid in list(preserve_running_task_ids or ()):
+            meta = workers.RUNNING.get(tid)
+            if not isinstance(meta, dict) or not isinstance(meta["task"].get("_owner_wait_resume"), dict):
+                continue
+            fold_consumed_resume(meta, tmp_path)
+            successor = dict(meta["task"])
+            successor["_attempt"] = int(meta.get("attempt") or 1)  # a continuing wait keeps its attempt
+            retention.attach_preserved_successor_source(tmp_path, tid, successor, meta["task"], successor["_attempt"])
+            stamp_execution_handoff(successor, meta)
+            workers.PENDING.insert(0, successor)
+            workers.RUNNING.pop(tid, None)
+            workers.WORKERS.pop(97, None)
+        return []
+
+    monkeypatch.setattr(workers, "kill_workers_for_update", stop_preserving)
 
     if wait_kind == "owner_pause":
         assert request_owner_pause(task_id, request_id=f"pause-{task_id}").get("state") == "requested"

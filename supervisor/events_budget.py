@@ -95,6 +95,9 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     # its live frame) therefore says ``deferred``, not the outcome of that write.
     ctx.budget_projection_dirty = True
     projection_update_status = "deferred"
+    # The same flush re-reads this root's live heartbeat figure (``LIVE_ROOT_COSTS``).
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+    LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), evt.get("root_task_id") or _tid)
 
     # Server-side web-search citations ({url,title,content}, capped at 20 in
     # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see
@@ -454,6 +457,8 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     from ouroboros.budget_pause import (
         STATE_PAUSED, STATE_PAUSING, budget_pause_row, exact_pause_marker, set_budget_pause,
     )
+    from ouroboros.model_detach import detached_fields
+    from ouroboros.task_carrier import INLINE_EXECUTORS
     from supervisor import queue as queue_mod
     from supervisor.queue import _queue_lock
 
@@ -461,7 +466,10 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     # The event-loop ctx and the reaper's pool module expose the same queue
     # state; the snapshot/sort seams fall back to the queue module's own.
     sort_pending = getattr(ctx, "sort_pending", None) or queue_mod.sort_pending
-    persist_snapshot = getattr(ctx, "persist_queue_snapshot", None) or queue_mod.persist_queue_snapshot
+    from supervisor.queue_publication import barrier_of
+
+    # The park is confirmed ``paused`` only once its queue row is on disk: the barrier, never the mark.
+    persist_snapshot = barrier_of(ctx) or queue_mod.publish_queue_snapshot
     pause_id = str(checkpoint.get("pause_id") or "")
     if not task_id or not pause_id:
         raise ValueError("exact budget pause requires task_id and pause_id")
@@ -500,7 +508,12 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         fence = queue_mod.ACCEPTANCE_FENCES.get(marker["root_task_id"]) or {}
         worker = ctx.WORKERS.get(meta.get("worker_id"))
         owner = fence.get("pooled_owner")
-        parked = {"direct_owner": {"task_attempt": attempt}} if direct_turn and "pooled_owner" not in fence else None
+        # A conversation-lane turn has a row; its carrier may be an inline executor (a thread of this
+        # process on a pid-less pseudo-slot) whose fence is in-process, like the old direct turn's.
+        inline = worker is not None and getattr(worker, "executor", "worker") in INLINE_EXECUTORS
+        lane_turn = bool(task.get("_is_direct_chat")) or bool(evt.get("_is_direct_chat"))
+        parked = ({"direct_owner": {"task_attempt": attempt}}
+                  if (direct_turn or inline) and "pooled_owner" not in fence else None)
         if (not direct_turn and worker is not None and isinstance(owner, dict) and worker.busy_task_id == task_id
                 and type(owner.get("pid")) is int and owner["pid"] == worker.proc.pid
                 and type(owner.get("task_attempt")) is int and owner["task_attempt"] == attempt):
@@ -518,8 +531,11 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         ctx.RUNNING.pop(task_id, None)
         paused_task = dict(task)
         paused_task["_budget_pause"] = marker
-        if direct_turn:
-            # The direct lane never enqueued this row, so it lacks the sequence,
+        # The detach stamps ride the durable pause row (``model_detach.detached_fields``): the row's
+        # task never saw them, so a parked lane turn takes them here, as the direct turn's record did.
+        paused_task.update(detached_fields(paused_task, row))
+        if direct_turn or lane_turn:
+            # The conversation lane never enqueued this row, so it lacks the sequence,
             # priority and ``queued_at`` that ``enqueue_task`` would have given
             # it; the sort key and the census phase need them (queue lock held).
             counter = getattr(queue_mod, "QUEUE_SEQ_COUNTER_REF", None)
@@ -1227,7 +1243,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
                 detail='root_resume_generation_changed',
                 extra={'root_task_id': root_task_id, 'root_grant_id': selection['root_grant_id'],
                        'root_resume_generation': selection['root_resume_generation']})
-        return bool(q.persist_queue_snapshot(reason='budget_hold_selected'))
+        return bool(q.publish_queue_snapshot(reason='budget_hold_selected'))  # durable before the selection stands
 
     from ouroboros.owner_pause import complete_consumed_member_resume
     refused = (complete_consumed_member_resume(result_root, root_task_id, task_id, completing, publish, withdraw)

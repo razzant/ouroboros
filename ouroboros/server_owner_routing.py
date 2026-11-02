@@ -127,10 +127,13 @@ def _route_project_chat_to_running_task(
         tid = str(candidate["task_id"])
         direct_agent = None
         direct_lock = None
-        if candidate.get("direct_chat"):
+        if candidate.get("direct_chat") or candidate.get("inline_presence"):
+            from ouroboros.conversation_lease import presence_author_agent
             from supervisor.workers import get_direct_chat_agent
 
-            direct_agent = get_direct_chat_agent(tid)
+            # A moved inline Presence author takes owner words exactly as a direct turn does: its own lock.
+            direct_agent = (presence_author_agent(ctx.DRIVE_ROOT, tid) if candidate.get("inline_presence")
+                            else get_direct_chat_agent(tid))
             direct_lock = getattr(direct_agent, "_owner_message_admission_lock", None)
             if direct_lock is None:
                 return ""
@@ -627,14 +630,18 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
     if needs_decision_lane:
         task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata, roots)
 
-    def _run_direct() -> None:
-        ctx.handle_chat_direct(
-            chat_id,
-            text or image_caption,
-            image_data,
-            task_constraint=task_constraint,
-            task_metadata=task_metadata,
-            **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
-        )
-
-    threading.Thread(target=_run_direct, daemon=True).start()
+    if realtime_turn is not None:
+        # A live call keeps a thread of this process (``executor=inline_call``): its host port is process-local.
+        threading.Thread(target=ctx.handle_chat_direct, args=(chat_id, text or image_caption, image_data),
+                         kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata,
+                                 "realtime_turn": realtime_turn}, daemon=True).start()
+        return
+    # The conversation lane's admission: the RUNNING row and the start receipt here, the
+    # turn's body in a carrier process (owner decision 1A). No thread per owner turn.
+    ctx.handle_chat_direct(
+        chat_id,
+        text or image_caption,
+        image_data,
+        task_constraint=task_constraint,
+        task_metadata=task_metadata,
+    )

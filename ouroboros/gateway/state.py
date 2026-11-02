@@ -7,13 +7,13 @@ import logging
 import os
 import pathlib
 import time
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from ouroboros import get_version
-from ouroboros.settings_scales import effort_range
 from ouroboros.gateway._helpers import json_exception, request_drive_root
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open, post_task_synthesis_is_terminal
 
@@ -107,21 +107,29 @@ def _evolution_state_public(evolution_state: Dict[str, Any]) -> Dict[str, Any]:
     return {**evolution_state, "campaign": {**campaign, "history": history}}
 
 
-def _boot_document(request: Request) -> Dict[str, Any]:
-    """The ``boot`` object: this process's phases and steps (``server_liveness.BOOT``), the
-    supervisor latches the server attached to the app, the store's named-job rows."""
+def _live_boot(request: Request, jobs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The ``boot`` object without a store read: this process's phases and steps (``server_liveness.BOOT``), the
+    supervisor latches the server attached to the app, and the store's named-job rows as the state publication
+    last read them (``state_publication.published_jobs``; ``{}`` before its first production)."""
+    from ouroboros.gateway.state_publication import published_jobs
     from ouroboros.server_liveness import boot_document
 
-    return boot_document(request_drive_root(request), getattr(request.app, "state", None))
+    app_state = getattr(request.app, "state", None)
+    boot = boot_document(None, app_state, jobs=False)
+    boot["jobs"] = dict(jobs) if jobs is not None else published_jobs(app_state)
+    return boot
 
 
 async def api_health(request: Request) -> JSONResponse:
-    """Answers 200 as soon as the socket serves, during boot too; ``boot`` carries the phase."""
+    """Answers 200 as soon as the socket serves, during boot too; ``boot`` carries the phase. Liveness only: no
+    executor hop and no store read, so a busy interpreter answers it as soon as the loop runs."""
     from ouroboros.gateway.schema import GATEWAY_ABI_VERSION
 
     runtime_version = get_version()
     app_version = os.environ.get("OUROBOROS_APP_VERSION", "").strip() or runtime_version
-    boot = await asyncio.to_thread(_boot_document, request)  # one indexed store read, off the loop
+    boot = _live_boot(request)
+    from supervisor.inline_carrier import inline_executors_fact
+
     return JSONResponse({
         "status": "ok",
         # legacy field for backward compatibility
@@ -131,6 +139,9 @@ async def api_health(request: Request) -> JSONResponse:
         # The wire-contract carrier a client checks before relying on GET /api/contract.
         "abi_version": GATEWAY_ABI_VERSION,
         "boot": boot,
+        # Owner decision 2A: the turns this process ran on its own threads (a degraded carrier, a live
+        # call), in memory, additive.
+        "inline_executors": inline_executors_fact(),
     })
 
 
@@ -161,13 +172,13 @@ async def api_consciousness(request: Request) -> JSONResponse:
     return JSONResponse(await asyncio.to_thread(describe), headers={"Cache-Control": "no-store"})
 
 
-def _state_snapshot(request: Request) -> Dict[str, Any]:
-    """Collect every heavy synchronous input for the ``/api/state`` payload.
+def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[str, Any]:
+    """Collect every heavy synchronous input for the ``/api/state`` payload: the publication's production.
 
-    Runs inside ``asyncio.to_thread`` (pattern shared with gateway/history.py)
-    so state.json reads, the usage-ledger projection, the evolution snapshot,
-    and the projects/bindings reads cannot block the event loop for every
-    concurrent request.
+    Runs inside the state publication's one executor job (``state_publication.Publisher.refresh``), after
+    the revision probe, so state.json reads, the usage-ledger projection, the evolution snapshot and the
+    projects/bindings reads never run per request or on the event loop. ``direct`` is the probe's
+    ``(direct turns, complete)``, so the census starts from the rows the revision stamped.
     """
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
@@ -178,24 +189,19 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     from ouroboros.usage_accounting import usage_projection, usage_writer_snapshot
     from supervisor.queue import get_evolution_status_snapshot
     from supervisor.state import TOTAL_BUDGET_LIMIT, control_value, load_state
-    from supervisor.workers import PENDING, RUNNING, WORKERS
+    from supervisor.workers import PENDING, RUNNING
 
     st = load_state()
     bg_known, bg_value = control_value(st, "bg_consciousness_enabled")
     bg_enabled = bool(bg_value) if bg_known else None  # unknown is never shown as off (#1307)
-    alive = 0
-    total_w = 0
-    try:
-        alive = sum(1 for w in WORKERS.values() if w.proc.is_alive())
-        total_w = len(WORKERS)
-    except Exception:
-        pass
     # ``0`` is the documented unbounded budget, not a request to invent the
     # historical $10 default.  Server startup initializes the supervisor
     # value from settings; keeping zero here makes that state explicit.
     limit = max(0.0, float(TOTAL_BUDGET_LIMIT or 0.0))
     drive_root = request_drive_root(request)
-    boot = _boot_document(request)
+    from ouroboros.server_liveness import job_facts
+
+    jobs = job_facts(drive_root)  # one indexed read that never waits: the published ``boot.jobs``
     accounting_available = True
     try:
         # The writer's slim snapshot (totals, marker, OpenRouter bucket): this response
@@ -256,7 +262,11 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
     revision = bindings_revision(drive_root)  # stamped BEFORE the read: the map is never older than it
     task_bindings = _task_bindings_safe(request, availability=activity_availability)
     bindings_complete = activity_availability["complete"]
-    direct_turns = _direct_turns_snapshot_safe(availability=activity_availability)
+    if direct is None:
+        direct_turns = _direct_turns_snapshot_safe(availability=activity_availability)
+    else:
+        direct_turns = list(direct[0])
+        activity_availability["complete"] = activity_availability["complete"] and direct[1] is True
     decision_owners, work_facts = [], {}
     activities = _chat_activities_snapshot_safe(
         drive_root, task_bindings, direct_turns=direct_turns, availability=activity_availability,
@@ -267,7 +277,8 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
                                        activities_complete=activity_availability["complete"],
                                        bindings_complete=bindings_complete)
     from ouroboros.gateway.work_projection import works_snapshot
-    works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"])
+    works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
+                           bindings=task_bindings)
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
@@ -291,9 +302,10 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
         "st": st,
         # Resolved here so the checkout file reads stay on the snapshot thread.
         "runtime_identity": _runtime_repo_identity(st),
-        "workers_alive": alive,
-        "boot": boot,
-        "workers_total": total_w,
+        "jobs": jobs,
+        # Other data roots the census read (a task's ledger root): the next revision probe stamps them too.
+        "roots": sorted({str(facts["budget_drive_root"]) for facts in work_facts.values()
+                         if isinstance(facts, dict) and facts.get("budget_drive_root")}),
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
         "limit": limit,
@@ -322,13 +334,16 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
 
 
 def _direct_turns_snapshot_safe(*, availability=None) -> list:
+    """The inline executors' registered actors plus the conversation lane's RUNNING turns (one shape): an inline
+    executor's turn is both, and is listed once, as its live actor (its own phase and model wait)."""
     try:
         from supervisor.active_activity import get_direct_activity_registry
+        from supervisor.conversation_lane import lane_turn_rows
 
         registry = get_direct_activity_registry()
-        if availability is None:
-            return registry.snapshot()
-        return registry.snapshot(availability=availability)
+        rows = registry.snapshot() if availability is None else registry.snapshot(availability=availability)
+        listed = {row.get("activity_id") for row in rows}
+        return rows + [row for row in lane_turn_rows() if row.get("activity_id") not in listed]
     except Exception:
         if availability is not None:
             availability["complete"] = False
@@ -361,9 +376,33 @@ _FINALIZING_MEMO: Dict[tuple, tuple] = {}
 _FINALIZING_MEMO_MAX = 1024
 
 
-def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
-    """One signature-keyed read serves outcome, finalizing, retry and question facts.
+def _task_hot_facts(drive_root: Any, task_id: str) -> dict:
+    """What a task's hot row holds, read without its body (inside the census's batched snapshot, without a
+    transaction): ``status``, the post-task phase (``late_phase``, ``finalizing``) and the owner wait's
+    ``state``/``reason``. ``{}`` is an absent row; a read that could not answer is ``{"unavailable": True}``."""
+    from ouroboros.store_hot_facts import read
 
+    try:
+        hot = read(drive_root, task_id)
+    except Exception:
+        return {"unavailable": True}
+    if not hot:
+        return {}
+    synthesis = str(hot.get("post_task_synthesis") or "")
+    return {"status": hot.get("status"), "late_phase": synthesis, "finalizing": post_task_synthesis_is_open(synthesis),
+            "owner_wait": {key: hot[column] for key, column in (("state", "owner_wait_state"),
+                                                                ("reason", "owner_wait_reason")) if hot.get(column)}}
+
+
+def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
+    """Outcome, finalizing, retry and question facts of one census row.
+
+    The hot row answers the post-task phase (``late_phase``, ``finalizing``) and the card on every call. The
+    body is read only when the row's signature ``(write_seq, updated_at)`` moved, and only for the facts that
+    live nowhere else: ``status`` as written, ``reason_code``, ``timeout_retry_from``, ``original_task_id``,
+    ``delegated_runs_unreconciled``, ``model_waits`` (its handoff rows), ``outcome_axes``/``cancel_origin``, an
+    answered root's ``late_work`` title and answer time, the card's ``detached``, the routing row (``chat_id``,
+    ``_is_direct_chat``, ``queued_at``) and the waited quiz (its id, resume reason and display fields).
     ``{}`` is an absent document; a read that could not answer is ``{"unavailable": True}``."""
     from ouroboros.task_store import read_document
     from ouroboros.store_hot_facts import read
@@ -381,7 +420,7 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         return {}
     memo = _FINALIZING_MEMO.get(memo_id)
     if memo is not None and memo[0] == key:
-        return _with_card(memo[1], hot)
+        return _with_hot(memo[1], hot)
     try:
         data, key = read_document(drive_root, task_id, signed=True)
         if not isinstance(data, dict):
@@ -416,8 +455,7 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         # The executor's own terminal fact or nothing: generic ts is never an answer time.
         display["late_work"] = {"title": task_presentation_name(data),
                                 "answered_at": terminal_time_fact(data).get("occurred_at") or ""}
-    facts = {"finalizing": post_task_synthesis_is_open(synthesis), "late_phase": synthesis, "card": card_facts(data),
-             "display": display,
+    facts = {"card": card_facts(data), "display": display,
              # An answered root's census row carries only its own routing identity.
              "row": {key: data[key] for key in ("chat_id", "project_id", "_is_direct_chat", "queued_at")
                      if key in data},
@@ -429,29 +467,27 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
                                                  "options", "option_details", "stake", "assumption",
                                                  "recommended_index", "answered_index", "comment", "wait_ended_at",
                                                  "host_facts", "materials", "closed_reason", "closed_at",
-                                                 "closed_by_task_id", "closed_actor", "closed_request_id", "delivery")
+                                                 "closed_by_task_id", "closed_actor", "closed_request_id", "delivery",
+                                                 "secret_request", "secret_outcome", "secret_save")
                       if isinstance(quiz, dict) and key in quiz}}
     if len(_FINALIZING_MEMO) >= _FINALIZING_MEMO_MAX:
         _FINALIZING_MEMO.clear()
     _FINALIZING_MEMO[memo_id] = (key, facts)
-    return _with_card(facts, hot)
+    return _with_hot(facts, hot)
 
 
-def _with_card(facts: dict, hot: dict) -> dict:
-    """The card from the hot row this poll read, over a copy of the memoized facts: a row-only card
-    write moves no document signature, so the memo alone would show a stale card."""
+def _with_hot(facts: dict, hot: dict) -> dict:
+    """The hot row this poll read over a copy of the memoized body facts: its post-task phase, and its card (a
+    row-only card write moves no document signature, so the memo alone would show a stale card)."""
     from ouroboros.store_task_cards import row_values
 
-    return {**facts, "card": {**facts["card"], **row_values(hot)}}
+    synthesis = str(hot.get("post_task_synthesis") or "")
+    return {**facts, "finalizing": post_task_synthesis_is_open(synthesis), "late_phase": synthesis,
+            "card": {**facts["card"], **row_values(hot)}}
 
 
 def _managed_task_finalizing(drive_root: Any, task_id: str) -> bool:
-    from ouroboros.store_hot_facts import read
-
-    try:
-        return post_task_synthesis_is_open((read(drive_root, task_id) or {}).get("post_task_synthesis"))
-    except Exception:
-        return False
+    return _task_hot_facts(drive_root, task_id).get("finalizing") is True
 
 
 def _pending_resume_available(q: Any, task: dict, *, owner_paused: bool) -> bool:
@@ -549,6 +585,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     from supervisor.owner_pause_control import warm_paused_member
 
     direct_rows = direct_turns if direct_turns is not None else _direct_turns_snapshot_safe(availability=availability)
+    presence_rows = _presence_turns_snapshot_safe(drive_root, availability=availability,
+                                                  listed={row.get("activity_id") for row in direct_rows})
     try:
         with queue_mod._queue_lock:
             pending_rows = [dict(task) for task in queue_mod.PENDING]
@@ -577,24 +615,35 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
     owners += [(tid, row) for tid, row, _started in running_rows]
     owners += [(owner.task_id, owner.task) for owner in late_owners]
     owners += [(tid, {}) for tid in fence_rows]
+    owners += presence_rows
     requests = []
     for tid, row in owners:
         root = row.get("budget_drive_root") or drive_root
         requests.extend(((drive_root, tid), (root, tid), (root, str(row.get("root_task_id") or tid))))
-    if owners_only:  # which work is current, without the per-row control facts
+    with nullcontext() if owners_only else snapshot(requests):  # which work is current needs no per-row control facts
         return _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
-                                         running_rows, late_owners, availability, decision_owners, True,
-                                         question_details, work_facts)
-    with snapshot(requests):
-        return _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
-                                         running_rows, late_owners, availability, decision_owners, False,
-                                         question_details, work_facts)
+                                         running_rows, late_owners, availability, decision_owners, owners_only,
+                                         question_details, work_facts, presence_rows)
+
+
+def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None, listed=frozenset()) -> list:
+    """``(task_id, row)`` of each live inline Presence turn (``resolved_presence_turns``): owners no queue map or direct
+    registry holds. One whose room or facts this read cannot know is a gap, never an absence, unless the census
+    already lists it (``listed``: a carried turn's lane row, whose author starts in its carrier)."""
+    from ouroboros.conversation_lease import resolved_presence_turns
+
+    observed = resolved_presence_turns(drive_root)
+    rows = [(fact["task_id"], fact["row"]) for fact in observed["roots"] if fact["row"]]
+    unknown = [fact for fact in observed["roots"] if not fact["row"] and fact["task_id"] not in listed]
+    if availability is not None and (not observed["complete"] or unknown):
+        availability["complete"] = False
+    return rows
 
 
 def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                               running_rows, late_owners, availability, decision_owners, owners_only,
-                              question_details=True, work_facts=None) -> list:
-    """Direct turns plus ROOT managed queue tasks as ONE activity list.
+                              question_details=True, work_facts=None, presence_rows=()) -> list:
+    """Direct turns, ROOT managed queue tasks and live inline Presence turns as ONE activity list.
 
     Additive beside ``active_direct_turns`` (kept unchanged for compatibility):
     the client hydrates managed-task visibility from the queue authority —
@@ -707,8 +756,10 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 if work_facts is not None:
                     work_facts[task_id] = _raw_work_facts(row)
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
-        from ouroboros.review_operation import task_has_live_review_operation
+        from ouroboros.gateway.work_projection import tree_review_reads
         for task_id, row, started_at in running_rows:
+            if task_id in census_ids:
+                continue  # a conversation turn the lane carries is already its own direct row
             if task_id:
                 root = _is_root(task_id, row)
                 if root:
@@ -728,6 +779,24 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 if work_facts is not None:  # whether a settling Pause's member still executes, or waits parked warm
                     warm = {"owner_pause_warm": True} if row.get("_owner_pause_warm") else {}
                     work_facts[task_id] = {**_raw_work_facts(row), "running": not warm, **warm}
+        for task_id, row in presence_rows:
+            # A live inline Presence turn is a root no queue map or registry holds: it is listed at its own room
+            # (the binding loop below re-homes a moved one) with the one door it has, Stop (``work_status``),
+            # which only its first durable write opens: until then it is preparing and not cancelable. A recorded
+            # Stop stays pending until its runner's next stop check, however long a model round holds it: its work
+            # says so (``cancel_pending``, a work fact; the census row keeps the frozen contract's shape).
+            if task_id not in census_ids:
+                census_ids.add(task_id)
+                started = bool(row.get("execution_owner"))
+                activities.append({**_activity(task_id, row, "working" if started else "preparing",
+                                               _epoch_or_zero(row.get("started_at"))),
+                                   "kind": "presence", "cancelable": started})
+                if work_facts is not None:
+                    from ouroboros.cancel_intents import cancel_pending
+
+                    work_facts[task_id] = {**_raw_work_facts(row), "running": True,
+                                           "cancel_pending": bool(started and not owners_only
+                                                                  and cancel_pending(drive_root, task_id))}
         visible = {row["activity_id"]: row for row in activities}
         for root_id, latch in fence_rows.items():
             # An answered root under the owner's Pause whose late work is the tree's
@@ -735,26 +804,26 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             # and a review's unsent preparation waits for Resume.
             if latch.get("cause") != "owner_pause" or root_id in visible:
                 continue
-            facts = _task_activity_facts(drive_root, root_id)
+            facts = _task_hot_facts(drive_root, root_id)  # the body only for a root shown below (its row)
+            reviews = tree_review_reads(drive_root, root_id)  # the tree census's review questions, one read
             if root_id in active_roots and not (
-                    facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
-                    or task_has_live_review_operation(drive_root, root_id)):
+                    facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id) or reviews()):
                 continue  # the logical fence alone is no second actor; genuine late work stays
             # The fence's own census is the truth of "Paused": reviewers already
             # launched finish separately and never keep the tree Pausing.
             if owner_fence_state(drive_root, {"root_task_id": root_id}, root_id) == "paused":
                 phase = "budget_paused"
             elif (facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
-                  or task_has_live_review_operation(drive_root, root_id, sent_only=True)):
+                  or reviews(sent_only=True)):
                 phase = "budget_pausing"
-            elif task_has_live_review_operation(drive_root, root_id):
+            elif reviews():
                 phase = "budget_paused"  # an unsent review operation deferred until Resume
             elif any(str(item.get("root_task_id") or "") == root_id for item in pending_rows) or any(
                     str(item.get("root_task_id") or "") == root_id for _tid, item, _at in running_rows):
                 phase = "budget_paused"
             else:
                 continue
-            row = dict(facts.get("row") or {})
+            row = dict(_task_activity_facts(drive_root, root_id).get("row") or {})
             live = phase == "budget_pausing" and post_task_synthesis_in_flight(drive_root, root_id)
             visible[root_id] = _activity(root_id, row, phase, _epoch_or_zero(row.get("queued_at")), live=live)
             if work_facts is not None and live:  # its late work still runs
@@ -785,12 +854,11 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
     # convert-gate fact only (#902) — that task was never bound, and its chat
     # rows are still where it was started, so moving its live card into the
     # project room would strand the card from its own history.
+    from ouroboros.gateway.work_projection import durable_binding
+
     owners_by_id = {row["activity_id"]: row for row in activities}
     for activity in activities:
-        # A child re-homes through its own, then its parent's or root's durable binding.
-        binding = next((bindings[key] for key in (activity.get("activity_id"), activity.get("parent_task_id"),
-            activity.get("root_task_id")) if isinstance(bindings.get(key), dict)
-            and not bindings[key].get("origin_bound")), None)
+        binding = durable_binding(activity, activity.get("activity_id"), bindings)
         if binding is None and not activity.get("project_id"):
             binding = next((owners_by_id[key] for key in (activity.get("parent_task_id"), activity.get("root_task_id"))
                 if key in owners_by_id and owners_by_id[key].get("project_id")), None)
@@ -882,144 +950,35 @@ def current_work_in_room(drive_root: Any, task_bindings: Any, matches: Callable[
     in_room = [str(row["activity_id"]) for row in _chat_activities_snapshot_safe(drive_root, task_bindings, owners_only=True)
                if row.get("activity_id") and row.get("chat_id") is not None
                and matches(row["chat_id"], {**row, "task_id": row["activity_id"]})]
-    return [task_id for task_id in in_room if not _answer_stored(_task_activity_facts(drive_root, task_id).get("late_phase"))]
+    return [task_id for task_id in in_room if not _answer_stored(_task_hot_facts(drive_root, task_id).get("late_phase"))]
 
 
-async def api_state(request: Request) -> JSONResponse:
-    """``StateResponse``, never stored: an open page compares its ``sha`` to spot a new build."""
+def _production(request: Request, direct: Optional[tuple]) -> Dict[str, Any]:
+    """One production of the publication: the snapshot, its produced fields, the bindings map apart."""
+    from ouroboros.gateway.state_publication import produced_fields
+
+    snap = _state_snapshot(request, direct=direct)
+    return {"fields": produced_fields(snap), "task_bindings": snap["task_bindings"],
+            "task_bindings_revision": snap["task_bindings_revision"], "roots": snap["roots"], "jobs": snap["jobs"]}
+
+
+async def api_state(request: Request) -> Response:
+    """``StateResponse``, never stored: an open page compares its ``sha`` to spot a new build.
+
+    Served from the data root's display publication (``state_publication``): one production per revision,
+    shared by every concurrent reader and encoded once; the process facts and the bindings map the client
+    may already hold (``bindings_since``) are added per request."""
+    from ouroboros.gateway.state_publication import AGE_HEADER, GENERATION_HEADER, live_fields, publisher, response_body
+
     try:
-        from ouroboros.config import (
-            get_context_mode,
-            get_runtime_mode,
-            get_safety_mode,
-            get_skills_repo_path,
-        )
-
-        snap = await asyncio.to_thread(_state_snapshot, request)
-        st = snap["st"]
+        publication = await publisher(getattr(request.app, "state", None), request_drive_root(request)).current(
+            lambda direct: _production(request, direct))
         since = str(request.query_params.get("bindings_since") or "")  # the revision of a map the client holds
-        unchanged = bool(since) and since == snap["task_bindings_revision"]  # a failed read's "" never is
-        runtime_branch, runtime_sha = snap["runtime_identity"]
-        limit = snap["limit"]
-        accounting = snap["accounting"]
-        breakdown = snap["breakdown"]
-        accounting_available = snap["accounting_available"]
-        spent = snap["spent"]
-        evolution_state = snap["evolution_state"]
-        from supervisor.state import STATE_READ_KEY, control_value
-
-        # A read that is not current never renders its controls as known (#1307).
-        state_read = st.get(STATE_READ_KEY) if isinstance(st.get(STATE_READ_KEY), dict) else {}
-        evolution_known, evolution_enabled = control_value(st, "evolution_mode_enabled")
-        bg_known, bg_requested = control_value(st, "bg_consciousness_enabled")
-        bg_requested = bool(bg_requested) if bg_known else None
-        bg_state = snap.get("bg_state") or {}
-        supervisor_ready = _state_attr(request, "supervisor_ready_event")
-        get_supervisor_error = _state_attr(request, "get_supervisor_error")
-        app_start = float(_state_attr(request, "app_start", time.time()) or time.time())
-        response = JSONResponse({
-            "uptime": int(time.time() - app_start),
-            "workers_alive": snap["workers_alive"],
-            "workers_total": snap["workers_total"],
-            "pending_count": snap["pending_count"],
-            "running_count": snap["running_count"],
-            "spent_usd": round(spent, 4) if spent is not None else None,
-            "budget_limit": limit,
-            "budget_pct": (
-                round((spent / limit * 100) if limit > 0 else 0, 1)
-                if spent is not None else None
-            ),
-            # W2-F3: state values when the supervisor stamped them, else the
-            # actual runtime checkout (source-mode installs never stamp state).
-            # The retired bare "ouroboros" default was dead code — load_state
-            # always seeds the key (None), so the default never fired — and a
-            # guessed branch is not identity.
-            "branch": runtime_branch,
-            "sha": (runtime_sha or "")[:8],
-            "evolution_enabled": bool(evolution_enabled) if evolution_known else None,
-            "bg_consciousness_enabled": bg_requested,
-            "state_quality": {"quality": str(state_read.get("quality") or "current"),
-                              "source": str(state_read.get("source") or "primary"),
-                              "unconfirmed": list(state_read.get("unconfirmed") or [])},
-            "evolution_cycle": int(st.get("evolution_cycle") or 0),
-            "evolution_state": evolution_state,
-            "bg_consciousness_state": bg_state,
-            "spent_calls": (
-                int(breakdown.get("physical_calls") or 0) if accounting_available else None
-            ),
-            "supervisor_ready": bool(supervisor_ready.is_set()) if supervisor_ready else False,
-            "supervisor_error": get_supervisor_error() if callable(get_supervisor_error) else None,
-            "boot": snap["boot"],  # the boot phases the header paints (Starting… → chat ready → Online)
-            "runtime_mode": get_runtime_mode(),
-            "context_mode": get_context_mode(),
-            "subagents_mode": snap["subagents_mode"],
-            "subagents_availability": snap["subagents_availability"],
-            # Frozen one-window compatibility field. Persistent auto-Low is retired.
-            "context_mode_auto_low": False,
-            "effort_range": effort_range(),  # the owner's range, the tolerant read
-            "safety_mode": get_safety_mode(),
-            "skills_repo_configured": bool(get_skills_repo_path()),
-            "github_token_configured": snap["github_token_configured"],
-            "accounting": {
-                "available": accounting_available,
-                "authority": "physical_attempt_ledger",
-                "settled_usd": (
-                    float(accounting.get("settled_usd") or 0.0) if accounting_available else None
-                ),
-                "confirmed_usd": (
-                    float(accounting.get("confirmed_usd") or 0.0) if accounting_available else None
-                ),
-                "estimated_usd": (
-                    float(accounting.get("estimated_usd") or 0.0) if accounting_available else None
-                ),
-                "reserved_usd": (
-                    float(accounting.get("reserved_usd") or 0.0) if accounting_available else None
-                ),
-                "unresolved_upper_bound_usd": (
-                    float(accounting.get("unresolved_upper_bound_usd") or 0.0)
-                    if accounting_available else None
-                ),
-                "accounted_usd": (
-                    float(accounting.get("accounted_usd") or 0.0) if accounting_available else None
-                ),
-                "unknown_unmetered": (
-                    int(accounting.get("unknown_unmetered") or 0) if accounting_available else None
-                ),
-                "cost_final": bool(accounting.get("cost_final")) if accounting_available else False,
-                "integrity_degraded": (
-                    bool(accounting.get("integrity_degraded")) if accounting_available else True
-                ),
-                "attempt_counts": dict(accounting.get("attempt_counts") or {}),
-                "limit_usd": limit,
-                "remaining_known_usd": (
-                    float(accounting.get("remaining_known_usd") or 0.0)
-                    if accounting_available and limit > 0
-                    else None
-                ),
-                **({"error_code": "ledger_unavailable"} if not accounting_available else {}),
-            },
-            "projects": snap["projects"],
-            "project_chat_ids": snap["project_chat_ids"],
-            "main_visible_revision": snap.get("main_visible_revision"),
-            "task_bindings": None if unchanged else snap["task_bindings"],
-            "task_bindings_revision": snap["task_bindings_revision"],
-            "task_bindings_unchanged": unchanged,
-            "active_direct_turns": snap.get("active_direct_turns") or [],
-            "active_chat_activities": snap.get("active_chat_activities") or [],
-            "active_chat_activities_complete": snap.get("active_chat_activities_complete") is True,
-            "current_questions": snap.get("current_questions") or [],
-            "current_questions_complete": snap.get("current_questions_complete") is True,
-            "current_questions_gaps": snap.get("current_questions_gaps") or [],
-            "main_attention": snap.get("main_attention") or [],
-            "main_attention_complete": snap.get("main_attention_complete") is True,
-            "main_attention_gaps": snap.get("main_attention_gaps") or [],
-            "works": snap.get("works") or [],
-            "rooms": snap.get("rooms") or {},
-            "work_summary": snap.get("work_summary") or {},
-            "works_complete": snap.get("works_complete") is True,
-            "works_gaps": snap.get("works_gaps") or [],
-            "served_ui": _served_ui_state(request),
-        })
+        unchanged = bool(since) and since == publication.bindings_revision  # a failed read's "" never is
+        body = response_body(publication, live_fields(request, publication.jobs), bindings_unchanged=unchanged)
+        response = Response(body, media_type="application/json", headers={
+            GENERATION_HEADER: str(publication.generation),
+            AGE_HEADER: f"{max(0.0, time.time() - publication.published_at):.3f}"})
     except Exception as exc:
         response = json_exception(exc)
     response.headers["Cache-Control"] = "no-store"

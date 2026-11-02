@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
-from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.outcomes import normalize_outcome_axes, verification_ledger_view
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.task_status import effective_task_result
 from ouroboros.dialogue_provenance import (
@@ -155,16 +155,8 @@ def _task_record(
         focus = compact_focus(data.get("focus"))
         if focus is not None:
             record["focus"] = focus
-    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
-    if ledger:
-        # An omitted-to-artifact stub carries no entries; its summary is the
-        # count authority, and for a full ledger the two always agree.
-        ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
-        record["verification_ledger"] = {
-            "schema_version": ledger.get("schema_version"),
-            "summary": ledger_summary,
-            "entry_count": ledger_summary.get("entry_count", len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0),
-        }
+    if ledger := verification_ledger_view(data.get("verification_ledger")):
+        record["verification_ledger"] = ledger  # dated beside the current artifact_bundle
     if include_results:
         record["result"] = result
     if include_traces:
@@ -187,18 +179,12 @@ def _queue_snapshot(drive_root: pathlib.Path) -> tuple[Dict[str, Any], bool]:
     Never written means nothing was ever queued; a written snapshot that cannot be
     read, or lists its rows in a shape this reader cannot walk, proves no absence.
     """
-    path = drive_root / "state" / "queue_snapshot.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    from ouroboros.queue_observation import load_queue_document
+
+    data = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
+    if data.get("_snapshot_missing"):
         return {}, False
-    except (OSError, UnicodeDecodeError):
-        return {}, True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}, True
-    if not isinstance(data, dict) or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
+    if data.get("_snapshot_invalid") or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
         return {}, True
     return data, False
 
@@ -214,8 +200,7 @@ def _owner_record(row: Dict[str, Any] | None, queued: Dict[str, Any]) -> Dict[st
 
 
 def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List[Dict[str, Any]]:
-    snapshot, _error = _read_json(drive_root / "state" / "queue_snapshot.json")
-    snapshot = snapshot or {}
+    snapshot, _error = _queue_snapshot(drive_root)
     running = snapshot.get("running")
     if not isinstance(running, list):
         return []

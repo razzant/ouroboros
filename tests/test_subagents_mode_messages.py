@@ -110,8 +110,8 @@ def test_room_annotations_survive_unavailable_project(room_state, surface, monke
 @pytest.mark.parametrize("availability", ["available", "disabled", "unsaved"])
 @pytest.mark.parametrize("project", [False, True])
 def test_direct_owner_root_records_effective_admission_not_client_metadata(monkeypatch, mode, availability, project):
-    from ouroboros import agent as agent_module
     from supervisor import workers
+    from tests.conversation_carrier_support import carry
     from tests.test_native_conversation_activity import _lane
 
     values = mode_settings(mode, availability)
@@ -123,12 +123,12 @@ def test_direct_owner_root_records_effective_admission_not_client_metadata(monke
     if availability == "unsaved":
         monkeypatch.setattr(config, "load_settings", lambda: dict(values))
     assert subagents_availability(config.load_settings()) == availability
-    _lane(monkeypatch, config.DATA_DIR)
+    lane = _lane(monkeypatch, config.DATA_DIR)
     seen = []
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: SimpleNamespace(
-        handle_task=lambda task: seen.append(task) or []))
     workers.handle_chat_direct(room["chat_id"], "Work", task_metadata={
         "subagents_mode": "forged", "force_plan": True, "project_id": room["id"]})
+    # The carrier's first step records the effective admission on the task it then runs.
+    carry(workers, lane.spares[0], SimpleNamespace(handle_task=lambda task: seen.append(task) or []))
     assert len(seen) == 1
     assert seen[0]["metadata"]["subagents_mode"] == (mode if availability == "available" else "off")
     assert "subagents_mode" not in seen[0]["task_contract"]

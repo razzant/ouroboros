@@ -626,7 +626,7 @@ class _Call:
         text = ("[Partial transcript] " if data.get("incomplete") else "") + data["text"]
         if speaker == "owner":
             self.input_open = not data["final"]
-        # Queue final words before display so a send failure can still drain them at teardown.
+        self.hub.send_caption(speaker, text, data["final"], item, replace=bool(data.get("replace")))
         if data["final"]:
             heard = speaker == "owner" and (self.meeting_audio or any(
                 peer.role == cp.PEER_MEETING and peer.mic for peer in self.hub.peers()))
@@ -640,7 +640,6 @@ class _Call:
             if speaker == "owner":
                 self.meeting_audio = False
                 self.meeting_speakers.clear()
-        self.hub.send_caption(speaker, text, data["final"], item, replace=bool(data.get("replace")))
 
     async def save_rows(self):
         while True:

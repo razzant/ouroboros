@@ -57,10 +57,10 @@ def next_step(usage: dict) -> str:
     return "finish" if no_recap(usage) else "inform"
 
 
-def fallback_untried(ctx: Any) -> bool:
+def fallback_untried(usage: dict, target: Any) -> bool:
     """Eligibility only: the physical claim below consumes the binding."""
-    record = ctx.accumulated_usage.get(KEY)
-    return not record or binding(ctx) not in record["tried"]
+    record = usage.get(KEY)
+    return not record or list(target) not in record["tried"]
 
 
 def _invoke(ctx: Any, send: Any, step: str) -> Any:

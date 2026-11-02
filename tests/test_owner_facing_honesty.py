@@ -458,8 +458,11 @@ def test_native_chat_lane_has_no_ephemeral_entry_point():
     import inspect
     from supervisor import worker_chat_lane
 
+    from supervisor import inline_carrier
+
     assert not hasattr(worker_chat_lane, "handle_chat_ephemeral")
-    assert "ephemeral" not in inspect.signature(worker_chat_lane._run_chat_task).parameters
+    for door in (worker_chat_lane.handle_chat_direct, worker_chat_lane.admit_owner_turn, inline_carrier.run_inline_turn):
+        assert "ephemeral" not in inspect.signature(door).parameters, door.__name__
 
 
 def test_actor_records_carry_response_ref_end_to_end(tmp_path):

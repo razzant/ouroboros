@@ -1129,10 +1129,12 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             if (sequence !== searchPreviewSequence || !target.isConnected) return;
             // The help text already says skills, MCP and browser tools stay independent.
             const legacy = data.ignored_legacy_model ? ` Anthropic does not apply the saved model ${data.ignored_legacy_model}; edit Source or Model to change it.`
-                : data.unapplied_model ? ` No built-in search serves the saved model ${data.unapplied_model}; Auto uses provider defaults.` : '';
+                : data.unapplied_model ? ` No built-in search serves the saved model ${data.unapplied_model}; Auto uses the recommended models.` : '';
             const causes = { no_credentials: 'no API key', package_missing: 'package not installed', legacy_openai_base_url: 'OPENAI_BASE_URL is set' };
             const unavailable = (data.unavailable || []).map((leg) => `${leg.source} (${causes[leg.unavailable_reason] || 'not ready'})`).join(', ');
-            target.textContent = data.error || `Eligible routes: ${(data.legs || []).map((leg) => `${leg.source}${leg.model ? ` · ${leg.model}` : ''}`).join(' → ') || 'none'}.${unavailable ? ` Unavailable: ${unavailable}.` : ''} Uses saved account credentials.${legacy}`;
+            // provider_default names the source's recommended model (search_routes.SEARCH_MODELS), not the owner's.
+            const route = (leg) => `${leg.source}${leg.model ? ` · ${leg.model}${leg.model_source === 'provider_default' ? ' (recommended)' : ''}` : ''}`;
+            target.textContent = data.error || `Eligible routes: ${(data.legs || []).map(route).join(' → ') || 'none'}.${unavailable ? ` Unavailable: ${unavailable}.` : ''} Uses saved account credentials.${legacy}`;
         } catch (_) { if (sequence === searchPreviewSequence && target.isConnected) target.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     }
     const onSearchSelectionEdited = () => { searchSelectionEdited = true; void refreshSearchPreview(); };

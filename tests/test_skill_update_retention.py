@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import stat
 import threading
 from types import SimpleNamespace
 
@@ -502,3 +504,168 @@ def test_registry_update_uses_new_trust_and_retains_review_rollback(tmp_path, mo
         restored = read_install_record(drive, "demo")
         assert restored["release"] == previous["release"]
         assert restored["update_rejected"]["reason"] == "review_blockers"
+
+
+# --- Rollback copies keep links as links; a failed landing returns the payload, then its runtime ---
+
+_EXTENSION = ("---\nname: demo\ndescription: demo does things\nversion: 1.0.0\ntype: extension\n"
+              "entry: plugin.py\npermissions: [\"tool\"]\n---\nAbout it.\n")
+_PLUGIN = "def register(api):\n    api.register_tool('ping', lambda ctx: 'pong', description='ping', schema={})\n"
+# Unverified on native Windows: creating links needs the symlink privilege there, and junctions differ.
+_POSIX_LINKS = pytest.mark.skipif(os.name == "nt", reason="native Windows link copying is unverified")
+
+
+@pytest.fixture
+def extension_runtime(monkeypatch):
+    from tests._shared import clean_extension_runtime_state
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    clean_extension_runtime_state()
+    yield
+    clean_extension_runtime_state()
+
+
+def _installed(request, tmp_path, monkeypatch, kind, basis="trusted"):
+    """``demo`` installed from ``kind`` and the owner's Update that replaces it on ``basis``."""
+    if kind == "registry":
+        drive, _storage, registry = request.getfixturevalue("registry_release")
+        monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([{
+            "id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": basis, "confirmed": True}]))
+        registry["latest"] = "2.0.0"
+        return drive, lambda: installer.update_installed(drive, "demo", mode="replace")
+    drive, folder, row, item = request.getfixturevalue("release")
+    row.update(kind=kind, trust="trusted")
+    if kind == "builtin":
+        folder.parent.rename(tmp_path / "skills")
+        folder = tmp_path / "skills" / "demo"
+        monkeypatch.setattr("ouroboros.config.REPO_DIR", tmp_path)
+    installer.install_item(drive, item["id"])
+    row["trust"] = basis
+    manifest = folder / "SKILL.md"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("1.0.0", "2.0.0"), encoding="utf-8")
+    item.update(version="2.0.0", digest=tree_release_digest(folder))
+    return drive, lambda: installer.update_installed(drive, "demo", mode="replace", rows=[row])
+
+
+def _old_environment(skill_dir, outside, *, moved, outside_link=False):
+    """A generated environment whose absolute interpreter link names the app's former (dangling) or
+    current location, with relative aliases and package bytes, plus links the user made."""
+    outside.mkdir(parents=True, exist_ok=True)
+    venv = skill_dir / ".ouroboros_env" / "python"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "lib").mkdir()
+    (venv / "pyvenv.cfg").write_text("home = /Applications/Former.app/python/bin\nversion = 3.10.20\n", encoding="utf-8")
+    (venv / "lib" / "dep.py").write_text("VALUE = 'package bytes'\n", encoding="utf-8")
+    interpreter = outside / ("former-app" if moved else "current-app") / "python3"
+    if not moved:
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_bytes(b"interpreter bytes")
+    (venv / "bin" / "python3").symlink_to(interpreter)
+    (venv / "bin" / "python").symlink_to("python3")
+    (venv / "bin" / "python3.10").symlink_to("python3")
+    (skill_dir / "README.md").symlink_to("SKILL.md")
+    if outside_link:  # an extension may not link outside its own tree (extension_import_staging)
+        (outside / "notes.txt").write_text("the user's file", encoding="utf-8")
+        (skill_dir / "notes").symlink_to(outside / "notes.txt")
+
+
+def _tree(root):
+    """Every entry below ``root`` as it stands: a link by its text, a file by its bytes."""
+    facts = {}
+    for directory, dirs, files in os.walk(root):
+        for name in dirs + files:
+            path = pathlib.Path(directory, name)
+            mode = path.lstat().st_mode
+            facts[path.relative_to(root).as_posix()] = (
+                ("link", os.readlink(path)) if stat.S_ISLNK(mode)
+                else ("file", path.read_bytes()) if stat.S_ISREG(mode) else (stat.S_IFMT(mode),))
+    return facts
+
+
+def _extension(drive, skill_dir, *, enabled):
+    """The installed payload as a reviewed extension the owner turned on (loaded) or off."""
+    from ouroboros.config import load_settings
+    from ouroboros.extension_loader import is_extension_live, reconcile_extension
+
+    (skill_dir / "SKILL.md").write_text(_EXTENSION, encoding="utf-8")
+    (skill_dir / "plugin.py").write_text(_PLUGIN, encoding="utf-8")
+    save_review_state(drive, "demo", SkillReviewState(status="clean", content_hash=find_skill(drive, "demo").content_hash))
+    save_enabled(drive, "demo", enabled, actor="owner_ui")
+    reconcile_extension("demo", drive, load_settings)
+    assert is_extension_live("demo", drive) is enabled
+
+
+@_POSIX_LINKS
+@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
+@pytest.mark.parametrize("moved", [True, False], ids=["moved-app", "current-app"])
+def test_update_keeps_the_previous_payload_with_its_links(request, tmp_path, monkeypatch, kind, moved):
+    drive, update = _installed(request, tmp_path, monkeypatch, kind)
+    payload = find_skill(drive, "demo").skill_dir
+    _old_environment(payload, tmp_path / "outside", moved=moved, outside_link=True)
+    before = _tree(payload)
+    assert update()["ok"]
+    previous = payload.parent / ".rollback" / "demo.previous"
+    # Each link keeps its text: no target bytes copied, no dangling link refused or repaired.
+    assert _tree(previous) == before
+    assert sorted(path.name for path in previous.parent.iterdir()) == ["demo.previous"]
+
+
+@_POSIX_LINKS
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="a named pipe is what makes the copy fail here (POSIX)")
+@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
+@pytest.mark.parametrize("state", ["live", "owner_off_meanwhile", "off"])
+def test_failed_snapshot_changes_nothing_and_reloads_a_live_extension(request, tmp_path, monkeypatch, extension_runtime,
+                                                                      kind, state):
+    from ouroboros.extension_loader import is_extension_live
+    from ouroboros.marketplace import install as storage
+
+    drive, update = _installed(request, tmp_path, monkeypatch, kind)
+    payload = find_skill(drive, "demo").skill_dir
+    _old_environment(payload, tmp_path / "outside", moved=True)
+    _extension(drive, payload, enabled=state != "off")
+    os.mkfifo(payload / ".ouroboros_env" / "companion.fifo")  # copytree refuses special files
+    if state == "owner_off_meanwhile":
+        snapshot_state = storage.snapshot_lifecycle_state
+        def owner_turns_off(*args):
+            save_enabled(drive, "demo", False, actor="owner_ui")  # after the unload, before the reconcile
+            return snapshot_state(*args)
+        monkeypatch.setattr(storage, "snapshot_lifecycle_state", owner_turns_off)
+    before, record = _tree(payload), read_install_record(drive, "demo")
+    with pytest.raises((OSError, installer.SkillInstallError), match="named pipe"):
+        update()
+    assert _tree(payload) == before
+    assert not list((payload.parent / ".rollback").iterdir())  # no incomplete copy is kept
+    assert not list((payload.parent / ".staging").glob("*"))
+    assert read_install_record(drive, "demo") == record
+    assert not (skill_state_dir(drive, "demo") / "update_backup.json").exists()
+    assert load_enabled(drive, "demo") is (state == "live")
+    assert is_extension_live("demo", drive) is (state == "live")
+
+
+@_POSIX_LINKS
+@pytest.mark.parametrize("kind", ["hub", "builtin", "registry"])
+@pytest.mark.parametrize("basis", ["trusted", "review"])  # review: the retained update snapshot restores
+def test_failed_landing_restores_links_and_the_live_extension(request, tmp_path, monkeypatch, extension_runtime,
+                                                              kind, basis):
+    from ouroboros.extension_loader import is_extension_live
+    from ouroboros.skill_install_record import write_install_record
+
+    drive, update = _installed(request, tmp_path, monkeypatch, kind, basis)
+    payload = find_skill(drive, "demo").skill_dir
+    _old_environment(payload, tmp_path / "outside", moved=False)  # a dereferencing copy restores files
+    _extension(drive, payload, enabled=True)
+    before, review = _tree(payload), (skill_state_dir(drive, "demo") / "review.json").read_bytes()
+    def write(drive_root, name, record):
+        if record["release"]["version"] == "2.0.0":
+            raise OSError("injected landing failure")
+        return write_install_record(drive_root, name, record)
+    monkeypatch.setattr(installer, "write_install_record", write)
+    monkeypatch.setattr("ouroboros.skill_install_record.write_install_record", write)
+    with pytest.raises((OSError, installer.SkillInstallError), match="injected landing failure"):
+        update()
+    assert _tree(payload) == before
+    assert (skill_state_dir(drive, "demo") / "review.json").read_bytes() == review
+    assert load_enabled(drive, "demo") and is_extension_live("demo", drive)
+    assert (read_install_record(drive, "demo").get("update_rejected") or {}).get("reason") == (
+        "landing_failed" if basis == "review" else None)
+    assert not (skill_state_dir(drive, "demo") / "update_backup.json").exists()

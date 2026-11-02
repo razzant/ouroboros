@@ -765,7 +765,7 @@ def test_kill_workers_joins_outside_the_queue_lock(tmp_path, monkeypatch):
     proc = SimpleNamespace(pid=4242, is_alive=lambda: False, join=join, terminate=lambda: None)
     workers.WORKERS[0] = SimpleNamespace(wid=0, proc=proc, busy_task_id=None, reaping=False)
     monkeypatch.setattr(workers, "kill_worker_tree", lambda pid, **_k: None)
-    monkeypatch.setattr(workers, "_kill_survivors", lambda: None)
+    monkeypatch.setattr(workers, "_kill_survivors", lambda *_slots: None)
     workers.kill_workers(force=True, archive_service_logs=False, reconcile_delegate_custody=False)
     assert observed == [(True, True)], "joins run outside _queue_lock while the slot is held as reaping"
     assert workers.WORKERS == {}

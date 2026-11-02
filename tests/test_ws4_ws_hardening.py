@@ -1,6 +1,6 @@
-"""WS4 — WebSocket server-side hardening (v6.34.0): broadcast_ws sends to all
-clients concurrently (no per-client head-of-line); chat-history jsonl parsing
-runs off the event loop. Server-side only (no frontend change)."""
+"""WS4 — WebSocket server-side hardening (v6.34.0): every client is sent to by its
+own writer (no per-client head-of-line); chat-history jsonl parsing runs off the
+event loop. Server-side only (no frontend change)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import asyncio
 
 def test_broadcast_is_concurrent_not_head_of_line():
     """A slow / half-open client must NOT delay the broadcast (and the heartbeat)
-    to every other client — gather, not a sequential await loop."""
+    to every other client: one writer per socket, not a sequential await loop."""
     from ouroboros.gateway import ws as wsmod
 
     order: list = []
@@ -24,10 +24,13 @@ def test_broadcast_is_concurrent_not_head_of_line():
             order.append(self.name)
 
     async def _run():
-        slow = _Client("slow", 0.20)
-        fast = _Client("fast", 0.0)
-        wsmod._ws_clients[:] = [slow, fast]  # slow registered FIRST
+        slow = wsmod._register(_Client("slow", 0.20))  # slow registered FIRST
+        fast = wsmod._register(_Client("fast", 0.0))
         await wsmod.broadcast_ws({"type": "x"})
+        while len(order) < 2:  # each socket's own writer sends; none waits for another
+            await asyncio.sleep(0.01)
+        for connection in (slow, fast):
+            wsmod._unregister(connection)
 
     try:
         asyncio.run(_run())
@@ -53,16 +56,20 @@ def test_broadcast_drops_only_failed_clients():
             raise RuntimeError("broken pipe")
 
     async def _run():
-        good, bad = _Good(), _Bad()
-        wsmod._ws_clients[:] = [bad, good]
+        bad, good = wsmod._register(_Bad()), wsmod._register(_Good())
         await wsmod.broadcast_ws({"type": "y"})
-        return good, bad
+        await bad.writer  # retired by its failed send
+        while not received:
+            await asyncio.sleep(0.01)
+        registered = list(wsmod._ws_clients)
+        wsmod._unregister(good)
+        return good, bad, registered
 
     try:
-        good, bad = asyncio.run(_run())
+        good, bad, registered = asyncio.run(_run())
         assert received == ["good"]
         # The broken client was removed from the registry; the good one stays.
-        assert bad not in wsmod._ws_clients
-        assert good in wsmod._ws_clients
+        assert bad not in registered
+        assert good in registered
     finally:
         wsmod._ws_clients[:] = []

@@ -76,7 +76,7 @@ def test_planned_restart_stamps_consumption_lost_with_worker(host, monkeypatch, 
     process = _DeadProcess()
     workers.WORKERS[0].proc = process
     monkeypatch.setattr(workers, 'kill_worker_tree', process.kill)
-    monkeypatch.setattr(workers, '_kill_survivors', lambda: None)
+    monkeypatch.setattr(workers, '_kill_survivors', lambda *_a, **_k: None)
     assert workers.kill_workers(force=True, preserve_pending=True, preserve_running_task_ids={'held'})
     [successor] = host.pending
     assert successor['_execution_handoff_sec'] == pytest.approx(90)

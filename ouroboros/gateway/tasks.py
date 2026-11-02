@@ -296,7 +296,7 @@ def _enqueue_api_task_durably(
             admitted.update(_admission_never_admitted=True, _admission_owner_token=admission_token)
             return admitted
         try:
-            if queue.persist_queue_snapshot(reason="api_task_create") is not True:
+            if queue.publish_queue_snapshot(reason="api_task_create") is not True:  # durable before 202
                 raise RuntimeError("Queue snapshot persistence was not confirmed")
             write_task_result(drive_root, task_id, STATUS_SCHEDULED, **result_fields)
             stored = load_task_result(drive_root, task_id, strict=True) or {}
@@ -1176,10 +1176,6 @@ def _drive_stop(task_id: str, intent: Dict[str, Any], *, cascade: bool) -> JSONR
     return json_error("task not found or not active", 404, task_id=task_id)
 
 
-# Sentinel telling "the body did not parse" apart from a legitimate JSON null.
-_NO_BODY = object()
-
-
 async def _graceful_stop_acknowledgement(task_id: str, *, cascade: bool, stop_action_id: str = "") -> JSONResponse:
     """S3 graceful ingress: durable finalize intent + IMMEDIATE pending ack.
 
@@ -1269,8 +1265,8 @@ async def api_task_cancel(request: Request) -> JSONResponse:
     # non-object JSON must refuse, never silently narrow a cascade to its root.
     raw_body = (await request.body()) or b""
     if raw_body.strip():
-        body = await request_json_or(request, _NO_BODY)
-        if body is _NO_BODY or not isinstance(body, dict):
+        body = await request_json_or(request, None)
+        if not isinstance(body, dict):
             return json_error("request body must be a JSON object", 400, task_id=task_id)
     else:
         body = {}
@@ -1360,7 +1356,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
-    body = await request_json_or(request, {}) or {}
+    body = await request_json_or(request, {})
     named = body.get("accept_unknown", []) if isinstance(body, dict) else None
     if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason"}
             or not all(isinstance(value, str) for value in named)):

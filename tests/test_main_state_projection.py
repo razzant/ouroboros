@@ -548,10 +548,9 @@ def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
     written outside the store). The census answers from typed hot facts and never decodes bodies
     (task cards, PERSISTENCE), so that corruption reaches only the action's strict authority read:
     Resume refuses, writes no fence and sends nothing; it never invents a resumable member."""
-    import sqlite3
-
     from ouroboros.owner_pause import read_fence
     from supervisor import workers
+    from tests._store_shared import independent_writer
     from tests.test_project_hold_recovery import worker
     from tests.test_resume_handover import _stop_boot
 
@@ -561,7 +560,7 @@ def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
         _settle_owner_fence(host.root, ROOT)
     client = _member_http(host.root)
     assert _attention_rows(_member_state(client), CHILD), "offered while its facts read"
-    with sqlite3.connect(host.root / "state" / "current.sqlite") as conn:
+    with independent_writer(host.root / "state" / "current.sqlite") as conn:
         conn.execute("UPDATE task_bodies SET body = CAST(X'7B22FF' AS TEXT) WHERE task_id = ?", (ROOT,))
     with pytest.raises(Exception):
         load_task_result(host.root, ROOT, strict=True)
@@ -643,8 +642,7 @@ def test_a_direct_project_roots_own_warm_pause_stays_quiet_in_main(tmp_path, mon
             assert time.monotonic() < deadline and parked.is_alive(), woke
             real_sleep(0.02)
         remote["state"] = "cancelled"  # the run it sent obeyed the Pause's stop
-        monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-        assert owner_pause_control.settle_requested_owner_pauses(queue, now=100.0) == ["author"]
+        assert owner_pause_control.settle_requested_owner_pauses(queue) == ["author"]
         payload = _member_state(_member_http(tmp_path))
         [census] = [row for row in payload["active_chat_activities"] if row["activity_id"] == "author"]
         assert (census["kind"], census["phase"], census["pause_cause"], census.get("can_resume", False)) == (

@@ -4,6 +4,8 @@
  * @property {Object.<string,Object>=} model_waits
  * @property {number=} task_attempt
  * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
+ * @property {string=} executor  // where the turn runs: worker, inline_call or inline_degraded
+ * @property {string=} carrier  // a lane row: awaiting (no carrier holds it yet) or worker
  * @property {string} activity_id
  * @property {number} chat_id
  * @property {string} project_id
@@ -15,6 +17,8 @@
 /** Shared census facts from the gateway; phase and outcome are independent. */
 /**
  * @typedef {Object} ActiveChatActivity
+ * @property {string=} executor  // where the turn runs: worker, inline_call or inline_degraded
+ * @property {string=} carrier  // a lane row: awaiting (no carrier holds it yet) or worker
  * @property {string=} last_line Visible model narration; empty when not recorded.
  * @property {string=} last_line_at
  * @property {number=} tool_calls
@@ -45,8 +49,8 @@
  * @property {number} chat_id
  * @property {string} project_id
  * @property {string} client_message_id  // empty for managed queue rows
- * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; parked direct turns retain ID/kind
+ * @property {string} kind  // direct_chat | managed_task | presence — presentational label; membership in this census, not kind, decides liveness
+ * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; presence: preparing | working; parked direct turns retain ID/kind
  * @property {number} started_at
  */
 /**

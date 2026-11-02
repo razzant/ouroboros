@@ -452,14 +452,19 @@ def _repo_edit_binding(binding: ResolvedResourceBinding) -> bool:
     }
 
 
+# An exact editor named what it removes; the full-write advice (use edit_text) would send it back to itself.
+EXACT_EDIT_SHRINK_RECOVERY = (
+    "If the removal is intended, repeat the same call with force=true; this confirms shrinking every file in the call.")
+
+
 def _edit_content_block(binding: ResolvedResourceBinding, content: str, force: bool) -> str:
     """The existing shrink policy of the target's lane, before any edit write."""
     from ouroboros.tools.core import _check_data_shrink_guard
     from ouroboros.tools.git_repo_edit import _check_shrink_guard
 
     if _repo_edit_binding(binding):
-        return _check_shrink_guard(binding, content, force) or ""
-    return _check_data_shrink_guard(binding.target_path, content, force) or ""
+        return _check_shrink_guard(binding, content, force, recovery=EXACT_EDIT_SHRINK_RECOVERY) or ""
+    return _check_data_shrink_guard(binding.target_path, content, force, recovery=EXACT_EDIT_SHRINK_RECOVERY) or ""
 
 
 def edit_syntax_note(binding: ResolvedResourceBinding | None, content: str) -> str:

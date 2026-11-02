@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import working_checkpoint
 from ouroboros.config import get_context_mode
+from ouroboros.conversation_lease import follow_loop_admission
 from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
 from ouroboros.task_finalization import set_terminal_host_notice
@@ -1148,6 +1149,7 @@ def _seal_admission_before_delivery(tools: ToolRegistry, limit_ctx: Any, llm_tra
         if admission_lock is not None and admission_agent is not None:
             with admission_lock:
                 admission_agent._accepting_owner_messages = True
+                follow_loop_admission(tool_ctx, True)
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace, control="owner_revision_required")
         return False
     if not answer and not own_seal:
@@ -1352,6 +1354,7 @@ def _no_tool_final_answer(
             acquired()
             with timed_phase("admission_close"):
                 admission_agent._accepting_owner_messages = False
+                follow_loop_admission(tools._ctx, False)  # a remote Host's view closes before the drain reads
                 post_controls = _loop()._drain_incoming_messages(
                     messages, incoming_messages, limit_ctx.drive_root, limit_ctx.task_id,
                     limit_ctx.event_queue, owner_msg_seen, owner_ctx=tools._ctx, defer_content_ack=True,
@@ -1365,6 +1368,7 @@ def _no_tool_final_answer(
                     and str(getattr(admission_agent, "_current_task_id", "") or "") == limit_ctx.task_id
                 ):
                     admission_agent._accepting_owner_messages = True
+                    follow_loop_admission(tools._ctx, True)
             if sealed:
                 emit_progress("An owner follow-up reopened the sealed task; Main decides about the retained answer.")
             if isinstance(candidate, _loop().DeliveryCandidate):

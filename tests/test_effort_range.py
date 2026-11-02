@@ -783,7 +783,7 @@ def test_the_owner_endpoint_writes_the_triple_atomically_projects_it_and_audits(
     from starlette.testclient import TestClient
 
     from ouroboros import config as cfg
-    from ouroboros.gateway.state import effort_range as state_effort_range
+    from ouroboros.settings_scales import effort_range as state_effort_range  # /api/state's live_fields read
     from tests.test_owner_settings_write_seam import isolated_settings as _fixture  # noqa: F401
 
     data_dir = tmp_path / "data"

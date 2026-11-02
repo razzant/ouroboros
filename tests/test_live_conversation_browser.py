@@ -187,6 +187,7 @@ def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=Tru
     page.route("**/modules/**", lambda route: route.fulfill(status=404, body="Not served by the host")
                if urlparse(route.request.url).path.startswith("/modules/") else route.fallback())
     include_call = True
+    ui["errors"].watch(page)
     page.reload()
     page.wait_for_selector("#chat-input")
     return page, posts
@@ -358,7 +359,7 @@ def test_long_captions_read_whole_while_the_call_goes_on(subscription_ui, monkey
     assert_live(page)
     page.locator("#page-chat .call-end").click()
     assert_ended(page)
-    assert not subscription_ui["errors"]
+    assert not subscription_ui["errors"].unexpected(), subscription_ui["errors"].report()
 
 
 @pytest.mark.parametrize("reason", ["pagehide", "panic", "device_loss", "server_stop"])

@@ -582,8 +582,13 @@ async def api_skill_publish_preflight(request: Request) -> JSONResponse:
     """POST selected-skill preflight without creating a task or remote effect."""
 
     skill_name = str(request.path_params.get("skill") or "")
-    body = await request_json_or(request, {}, exceptions=(Exception,))
-    destination = body.get("destination") if isinstance(body, dict) else None
+    body = await request_json_or(request, {})
+    if not isinstance(body, dict):  # an unreadable body names no destination: never answer for the default one
+        outcome = _hard_block(skill=skill_name, repository="", reason_code="request_invalid", status_code=400,
+                              summary="The request body is not a JSON object.",
+                              repair_hint="Send {} or {\"destination\": ...}, then retry.")
+        return JSONResponse(outcome.payload, status_code=outcome.status_code)
+    destination = body.get("destination")
     outcome = await asyncio.to_thread(
         build_skill_publish_preflight,
         request_drive_root(request),

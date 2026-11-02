@@ -69,14 +69,11 @@ def _answer_late(root, monkeypatch):
 
 
 def _fresh_head(root, monkeypatch, bridge, *, running=None):
-    """The real intake starts ONE fresh head; the task its real admission hands the agent."""
-    import queue as queue_mod
-
-    import supervisor.workers as workers
+    """The real intake starts ONE fresh head; the task its real admission and its carrier's first step hand
+    the agent (``carried_turn``: the lane door, then the real worker body here)."""
+    from tests.test_attachment_staging import carried_turn
 
     [(args, kwargs)] = _intake(root, monkeypatch, bridge, running=running)
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue_mod.Queue())
 
     class _Head:
         task = None
@@ -86,8 +83,8 @@ def _fresh_head(root, monkeypatch, bridge, *, running=None):
             return []
 
     head = _Head()
-    workers._run_chat_task(head, args[0], args[1], None, task_constraint=kwargs.get("task_constraint"),
-                           task_metadata=kwargs["task_metadata"])
+    carried_turn(monkeypatch, root, head, args[0], args[1], None, task_constraint=kwargs.get("task_constraint"),
+                 task_metadata=kwargs["task_metadata"])
     assert head.task is not None
     return head.task
 

@@ -42,7 +42,7 @@ from ouroboros.effort_evidence import validated_effort_resolution, validated_pro
 from ouroboros.gateways import claudexor_metadata as metadata
 from ouroboros.gateways.claudexor_identity import validated_catalog_match
 from ouroboros.gateways.claudexor_maintenance import ClaudexorMaintenanceGateway
-from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway
+from ouroboros.gateways.claudexor_observation import ClaudexorObservationGateway, tag_absent_run_read
 from ouroboros.gateways.claudexor_uploads import ClaudexorUploadGateway
 from ouroboros.observability import timed_phase
 
@@ -95,8 +95,7 @@ DAEMON_BUSY_CODES = frozenset({"daemon_busy", "daemon_unavailable", "daemon_reco
 
 def _observation_reason(exc: BaseException) -> str:
     """The typed reason for a read-only observation hole."""
-    return (_OBSERVATION_READ_TIMEOUT if isinstance(exc, httpx.ReadTimeout)
-            else "daemon_unreachable")
+    return _OBSERVATION_READ_TIMEOUT if isinstance(exc, httpx.ReadTimeout) else "daemon_unreachable"
 
 
 def _request_timeout(timeout_sec: Optional[float]) -> Dict[str, Any]:
@@ -579,6 +578,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         if isinstance(context.get("cause"), dict):
             facts = {key: context[key] for key in ("stage", "cause", "preflight") if key in context}
             error.reported_cause = run_failure_cause({"safeMessage": json.dumps(facts, ensure_ascii=False)})
+        tag_absent_run_read(response, error)  # a 404 run read names its caller; it proves nothing about the run
         return error
 
     # -- operations ------------------------------------------------------------

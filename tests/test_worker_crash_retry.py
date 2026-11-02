@@ -1103,7 +1103,7 @@ def test_storm_honors_saved_children_before_pool_stop(tmp_path, monkeypatch):
         # Model the normal event owner's release, after validating the real frame.
         W.RUNNING.pop(done['task_id'])
     _stop_crashed_worker_pool(jobs[-1])
-    W.kill_workers.assert_called_once_with(disable_reason='worker_crash_storm')
+    W.kill_workers.assert_called_once_with(disable_reason='worker_crash_storm', lanes=frozenset({'project'}))
     W.respawn_worker.assert_not_called()
     q.enqueue_task.assert_not_called()
 
@@ -1452,3 +1452,100 @@ def test_an_unrecorded_handle_task_exception_keeps_the_single_crash_retry(tmp_pa
 
     assert [task["_attempt"] for task in retried] == [2]
     assert task_results.load_task_result(tmp_path, job["task_id"])["status"] == "interrupted"
+
+
+def test_a_dead_carriers_turn_retries_on_its_lane_never_through_pending(tmp_path, monkeypatch):
+    """Review M4: a conversation-lane turn whose carrier exited with no terminal retries once (same id, its next
+    attempt) on the LANE, whatever the project pool says: never PENDING, where only project slots are assigned
+    and the project crash fuse would hold it. Here the project pool is fenced, and the lane's idle carrier takes
+    the retry at once, with the turn's own lane facts."""
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from tests.conversation_carrier_support import dispatched_tasks, install_lane_spare
+
+    task = {**_make_task("lane-turn"), "_is_direct_chat": True,
+            "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER}}
+    carrier = _make_worker(busy_task_id=task["id"], exitcode=0)  # it exited: no signal, no terminal written
+    carrier.lane = LANE_CONVERSATION
+    W.WORKERS[0] = carrier
+    W.RUNNING[task["id"]] = {"task": task, "attempt": 1, "worker_id": 0, "lane": LANE_CONVERSATION,
+                             "client_message_id": "cm-1", "reply_expected": True, "started_at": time.time()}
+    spare = install_lane_spare(W, 90)
+    monkeypatch.setattr(W, "QUEUE_MAX_RETRIES", 1)
+    monkeypatch.setattr(W, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")  # the project fuse is down
+    monkeypatch.setattr(W, "respawn_worker", MagicMock())
+    enqueued = []
+    monkeypatch.setattr(q, "enqueue_task", lambda queued, front=False: enqueued.append(queued) or queued)
+    W.ensure_workers_healthy()
+    job = q._reap_queue.get_nowait()
+    with patch("ouroboros.headless.prepare_terminal_task_files", return_value={"error": "", "terminal_source_present": False}):
+        recover_confirmed_dead_worker(job)
+    assert enqueued == [] and W.PENDING == []
+    retry = W.RUNNING[task["id"]]
+    assert retry["lane"] == LANE_CONVERSATION and retry["attempt"] == 2 and retry["task"]["_attempt"] == 2
+    assert retry["client_message_id"] == "cm-1" and retry["reply_expected"] is True
+    assert retry["worker_id"] == spare.wid and spare.busy_task_id == task["id"]
+    assert [queued["id"] for queued in dispatched_tasks(spare)] == [task["id"]]
+
+
+def test_a_signal_killed_presence_carrier_settles_its_host_waiter_and_reads_as_a_settled_loss(tmp_path, monkeypatch):
+    """Review C2 on the crash path: a Presence carrier killed by a signal writes no terminal and sends no
+    settlement. Crash recovery records the host's terminal as a reconciled running attempt; its task_done
+    settles the Host waiter with a typed retry (the reservation returns), and the resend's replay is the retained
+    unknown-outcome refusal: a lost local stack is never projected as a completed, silent answer."""
+    import queue as stdqueue
+
+    import supervisor.queue as q
+    import supervisor.workers as W
+    from ouroboros.presence_events import PresenceTurnError
+    from ouroboros.presence_executions import PresenceTurnExecutions, PresenceTurnInterrupted
+    from ouroboros.presence_runner import presence_turn_replay
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.utils import append_jsonl
+    from supervisor import events
+    from supervisor.worker_health import recover_confirmed_dead_worker
+
+    turn_id = "presence-turn"
+    metadata = {"source": "presence", "presence": {"binding_id": "b", "event": {"source_event_id": "e1",
+                                                                                 "conversation_key": "k"}}}
+    task = {**_make_task(turn_id), "type": "presence", "_is_direct_chat": True, "_presence_turn": True,
+            "metadata": metadata, "_execution_owner": {"kind": "presence", "lane": LANE_CONVERSATION,
+                                                       "executor": EXECUTOR_WORKER}}
+    write_task_result(tmp_path, turn_id, "running", metadata=metadata, _is_direct_chat=True)  # the carrier's barrier
+    carrier = _make_worker(busy_task_id=turn_id, exitcode=-9)
+    carrier.lane = LANE_CONVERSATION
+    W.WORKERS[0] = carrier
+    W.RUNNING[turn_id] = {"task": task, "attempt": 1, "worker_id": 0, "lane": LANE_CONVERSATION,
+                          "started_at": time.time()}
+    registry, released = PresenceTurnExecutions(), []
+    waiter, _ = registry.start_or_dispatch(turn_id, reserve=lambda: True, release=lambda: released.append(1),
+                                           dispatch=lambda execution: None)
+    bus = stdqueue.Queue()
+    monkeypatch.setattr(W, "get_event_q", lambda: bus)
+    monkeypatch.setattr(W, "respawn_worker", MagicMock())
+    monkeypatch.setattr(W, "send_with_budget", lambda *a, **k: None)
+    W.ensure_workers_healthy()
+    job = q._reap_queue.get_nowait()
+    with patch("ouroboros.headless.prepare_terminal_task_files", return_value={"error": "", "terminal_source_present": False}):
+        recover_confirmed_dead_worker(job)
+    row = load_task_result(tmp_path, turn_id)
+    assert row["status"] == "failed"
+    done = []
+    while not bus.empty():
+        frame = bus.get_nowait()
+        if frame.get("type") == "task_done":
+            done.append(frame)
+    assert [frame["task_id"] for frame in done] == [turn_id] and turn_id not in W.RUNNING
+    events._handle_task_done(done[0], SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=W.RUNNING, WORKERS={},
+                                                      append_jsonl=append_jsonl,
+                                                      persist_queue_snapshot=lambda reason="": None))
+    with pytest.raises(PresenceTurnInterrupted):
+        waiter.result.result(timeout=1)
+    assert released == [1] and registry.live() == []
+    with pytest.raises(PresenceTurnError) as refused:
+        presence_turn_replay(tmp_path, turn_id, "k")
+    assert refused.value.code == "presence_attempt_outcome_unknown" and refused.value.disposition == "retained"
+    assert row.get("status_reconciled_from") == "running"  # the reconciled origin the Presence rule reads

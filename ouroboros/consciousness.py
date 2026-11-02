@@ -22,6 +22,9 @@ wake is ``last finish + interval``: the MODEL's choice (``set_next_wakeup`` pers
 [min, max]; a runner failure — or a wake the lane could not admit — doubles it up to max until a
 wake succeeds. The persisted own actor id and cause fence completion; a carrier handoff
 does not finish the logical wake, and repeated terminal callbacks do not advance it twice.
+A wake a pending Restart refuses before its start stays a refusal, like every closed door:
+no failure, no row, no owner and no observation (``handle_wake_direct``). A pooled terminal
+no dispatcher reported settles only at the tick that would start over it.
 Nothing else moves the alarm (owner 12 Oct, #1603: no accelerated wake, only the
 scheduled time): a task finishing, a project digest or an orphan-heal sweep never pulls the next
 wake earlier — they wait as observed facts for the scheduled wake (``observe_wake``), so every
@@ -56,7 +59,7 @@ from ouroboros.config import (
 )
 from ouroboros.consciousness_allowance import STATUS_EXHAUSTED, STATUS_UNKNOWN, allowance_window
 from ouroboros.consciousness_authority import is_consciousness_origin, is_own_clock_wake
-from ouroboros.consciousness_wake import bind_wake_observation, observe_wake, previous_wake_text, render_wake_message, wake_task_metadata
+from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY, wake_task_metadata
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -145,7 +148,7 @@ class BackgroundConsciousness:
             bootstrap = persisted_last_wake or self._booted_at
         self._observation_bootstrap_since = bootstrap
         self._backoff, self._allowance = 1, (0.0, {})
-        self._in_flight = ""  # the id this process bound, until its direct callback returns
+        self._in_flight = ""  # the id this process is binding, until its admission answers
         self._archive_legacy_inbox()
 
     floor = property(lambda self: int(get_bg_wakeup_min_sec()))
@@ -231,6 +234,7 @@ class BackgroundConsciousness:
         """One supervisor pass; never blocks on a wake. Returns the typed decision."""
         now = time.time() if now is None else float(now)
         wake = self.live_wake()  # never wait for Q while holding the clock lock
+        ended_live = not wake and self._enabled and now >= self._next_wake_at and self._settle_unreported_terminal()
         with self._lock:
             from supervisor.state import control_is
 
@@ -240,7 +244,7 @@ class BackgroundConsciousness:
             self._enabled = not self._stopped and control_is(self._read_state(), "bg_consciousness_enabled", True)
             if not self._enabled:
                 return "disabled"
-            if wake:
+            if wake or ended_live:
                 return "wake_live"
             if now < self._next_wake_at:
                 return "not_due"
@@ -255,6 +259,34 @@ class BackgroundConsciousness:
             if not self._owner_chat_id():
                 return self._skip("waiting_for_first_conversation", now + self.floor, now=now)
         return self._launch(now, int(self._owner_chat_id() or 0), window)
+
+    def _settle_unreported_terminal(self) -> bool:
+        """Settle its own known wake from a pooled terminal no dispatcher reported (an orphan sweep, a
+        boot restore, a lost event): one addressed row and one ownership probe, only when this tick
+        would otherwise start over it. True while that wake's effects may still live: the next one
+        waits. An unreadable, absent, unsettled or legacy in-process row (one that predates the carrier facts)
+        settles nothing and blocks nothing; a lane carrier's row settles whichever carrier ran it, the
+        disclosed degraded executor included; a cancelled one is no runner failure, and its stop door's next
+        start stands."""
+        from ouroboros.task_results import load_task_result
+        from supervisor.consciousness_carriers import pooled_terminal_ok
+        from supervisor.queue import task_settlement_liveness
+
+        task_id = "" if self._own_wake.get("finished") else str(self._own_wake.get("task_id") or "")
+        if not task_id:
+            return False
+        try:
+            row = load_task_result(self._drive_root, task_id, strict=True) or {}
+        except Exception:
+            log.debug("Own wake %s is unreadable; its terminal stays unknown", task_id, exc_info=True)
+            return False
+        ok = pooled_terminal_ok(row)
+        if ok is None or row.get("status") == "cancelled":
+            return False
+        if task_settlement_liveness(task_id) is not False:
+            return True
+        self._wake_finished(task_id, ok, pooled=True)
+        return False
 
     def _skip(self, reason: str, next_at: float, *, now: float, error: str = "") -> str:
         self._last_wake_outcome, self._last_error = f"skipped:{reason}", error
@@ -287,51 +319,54 @@ class BackgroundConsciousness:
         # identities, not this alarm's finish time. Before a verified boundary,
         # the bootstrap survives source failure, completion and restart.
         self._set_state(OBSERVATION_BOOTSTRAP_STATE_KEY, self._observation_bootstrap_since)
-        observation = observe_wake(self._drive_root, boundary=self._read_state().get(OBSERVATION_STATE_KEY),
-                                   since=self._observation_bootstrap_since, now=now, reason=reason)
-        context = self._context_facts(window)
-        previous = previous_wake_text(self._drive_root, self._last_wake_task_id, now=now)
+        # The clock decides WHEN and admits; the wake's preparation — observing the window,
+        # the context facts, the render, the bound source — is the carrier's first step
+        # (``consciousness_wake.prepare_wake``), never this thread's (owner decision 1A, L7).
+        # Only the facts that live in this process travel with the admission.
+        from supervisor.queue import live_consciousness_roots
 
-        def render(events: str) -> str:
-            return render_wake_message(
-                self._repo_dir, drive_root=self._drive_root, reason=reason, last_wake_at=self._last_wake_at, now=now, level=level,
-                disabled_tools=list(metadata.get("disabled_tools") or []), spent_usd=window.get("settled_usd"),
-                spent_is_floor=int(window.get("unknown_unmetered") or 0) > 0,
-                daily_usd=window.get("limit_usd") or 0.0, running=len(context["counted_roots"]),
-                max_tasks=get_consciousness_max_tasks(), interval=self._interval(), events=events, previous_wake=previous,
-                appointment_at=self._appointment_at, **context)
-
-        accepted_boundary = None
+        preparation = {
+            "boundary": self._read_state().get(OBSERVATION_STATE_KEY), "since": self._observation_bootstrap_since,
+            "now": now, "reason": reason, "level": level, "repo_dir": str(self._repo_dir),
+            "last_wake_at": self._last_wake_at, "last_wake_task_id": self._last_wake_task_id,
+            "disabled_tools": list(metadata.get("disabled_tools") or []),
+            "window": {key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
+            "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
+            "interval": self._interval(), "appointment_at": self._appointment_at,
+        }
+        bound_over, stopped_before_binding = None, False
 
         def bind_input(task):
-            nonlocal accepted_boundary
+            nonlocal bound_over, stopped_before_binding
             if not is_own_clock_wake(task.get("metadata")):
                 return
-            # Bind before the thread starts: even an immediate completion has an owner.
+            # Bind before the dispatch: even an immediate completion has an owner.
             with self._lock:
+                bound_over = self._own_wake, self._last_wake_task_id, self._last_wake_outcome, self._last_error
                 self._in_flight = str(task["id"])
                 self._own_wake = {"task_id": str(task["id"]), "wake_cause": metadata["wake_cause"],
                                   "initiator": metadata["initiator"], "finished": False}
                 self._set_state(OWN_WAKE_STATE_KEY, self._own_wake)
                 self._last_wake_task_id, self._last_wake_outcome, self._last_error = str(task["id"]), "running", ""
-                stopped = self._stopped
-            if stopped:  # Stop can arrive during admission, before the clock knows this id.
-                self._stop_live_wake(str(task["id"]))
-            accepted_boundary = bind_wake_observation(self._drive_root, task, observation, render)
+                stopped_before_binding = self._stopped  # a Stop that found no wake to address yet
+            task["_wake_prepare"] = dict(preparation)
 
         # The lane checks its gates under its own lock order (Q -> gate); only this tick starts own wakes.
         receipt: Dict[str, Any] = {}
         try:
-            receipt = workers.handle_wake_direct(
-                chat_id, render(observation.full_text()), metadata, on_finished=self._wake_finished,
-                bind_input=bind_input)
+            receipt = workers.handle_wake_direct(chat_id, f"[Wake-up · {reason}]", metadata, bind_input=bind_input)
         finally:
-            if not receipt.get("admitted"):
-                self._in_flight = ""  # refused or raised after binding: no callback will come
+            # The admitted row carries the wake from here (``live_wake`` reads the pool); a refused
+            # or raised admission after binding ran nothing, so this id never was its wake.
+            self._in_flight = ""
+            if not receipt.get("admitted") and bound_over is not None:
+                with self._lock:
+                    self._own_wake, self._last_wake_task_id, self._last_wake_outcome, self._last_error = bound_over
+                    self._set_state(OWN_WAKE_STATE_KEY, self._own_wake)
         if not receipt.get("admitted"):
             why = str(receipt.get("reason") or "refused")
             self._last_wake_outcome = f"rejected:{why}"
-            # A wake the lane could not admit already left an error in the chat: back off
+            # A wake the lane could not admit (its admission raised; the lane logged it) backs off
             # like a failed wake. A closed door is retried quietly — the repo-writer gate at
             # the floor, the owner's budget at the interval.
             if why == "admission_failed":
@@ -340,11 +375,16 @@ class BackgroundConsciousness:
             self._set_next_wake(now + (self.floor if transient else min(self.ceiling, self._interval() * self._backoff)))
             self._record("consciousness_wake_rejected", reason=why, wake_reason=reason)
             return f"rejected:{why}"
-        # Accepted: the running wake owns this observation, so the next one starts
-        # after it. A refused launch above consumed nothing; a crash before this
-        # write replays the same window (at-least-once, never a silent skip).
-        if accepted_boundary is not None and str(receipt["task_id"]) == self._own_wake.get("task_id"):
-            self._set_state(OBSERVATION_STATE_KEY, accepted_boundary)
+        if stopped_before_binding:
+            # That Stop found nothing to address; the admitted row exists now. The durable intent is
+            # enough: the ordinary sweep routes it to whichever carrier owns the id (a later Stop
+            # addressed the live id itself).
+            from supervisor.consciousness_carriers import stop_pooled_wake
+
+            stop_pooled_wake(str(self._last_wake_task_id))
+        # The accepted observation boundary is the carrier's to bind (its first step); it reaches
+        # this clock with the wake's terminal (``_settle_wake``), so the next wake starts after it.
+        # A wake that dies before its terminal replays the same window (at-least-once, never a silent skip).
         self._record("consciousness_wake_started", task_id=self._last_wake_task_id, wake_reason=reason,
                      level=level, root_cost_ceiling_usd=ceiling)
         return "launched"
@@ -383,6 +423,12 @@ class BackgroundConsciousness:
             owner = (row or {}).get("execution_owner") or {}
             if not pooled and owner.get("kind") == "pooled":
                 return  # durable handoff can precede queue restoration / follow the pool's terminal
+            # The carrier bound the observation this wake accepted (``prepare_wake``): the
+            # next wake starts after it. Nothing bound (a binder failure) keeps the window.
+            bound = ((row or {}).get("metadata") or {}).get(WAKE_OBSERVATION_KEY)
+            accepted = bound.get("accepted_boundary") if isinstance(bound, dict) else None
+            if isinstance(accepted, dict) and accepted.get("task_id") == task_id:
+                self._set_state(OBSERVATION_STATE_KEY, accepted)
             if ok:
                 pause = (row or {}).get("budget_pause") or {}
                 owner_pause = (row or {}).get("owner_pause") or {}

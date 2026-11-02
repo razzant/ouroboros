@@ -7,7 +7,7 @@
  * @property {string} source `openai`, `openrouter`, `anthropic` or `ddgs`.
  * @property {string} backend
  * @property {string} model The wire model; empty for ddgs.
- * @property {'selection'|'provider_default'} model_source
+ * @property {'selection'|'provider_default'} model_source `provider_default`: the source's recommended model.
  * @property {('no_credentials'|'package_missing'|'legacy_openai_base_url')=} unavailable_reason Only on an
  *   `unavailable` leg: the locally known cause, never a provider probe.
  */
@@ -18,7 +18,7 @@
  * @typedef {Object} WebSearchRoute
  * @property {'builtin_web_search'} scope
  * @property {string} source `auto` or one strict source.
- * @property {string} model The selection as saved or drafted; empty means provider defaults.
+ * @property {string} model The selection as saved or drafted; empty follows each source's recommended model.
  * @property {WebSearchLeg[]} legs Eligible, in order.
  * @property {WebSearchLeg[]} unavailable Each names its `unavailable_reason`.
  * @property {string} note

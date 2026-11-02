@@ -45,8 +45,6 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
@@ -61,9 +59,10 @@ VIEW_TRACE_KEY = "memory_view"
 
 # The row fields the room and attribution readers consult (``project_dialogue.room_membership``,
 # ``dialogue_provenance.row_author``) plus the host facts of a task row, its recorded finality and
-# authority included. Texts and bulky payloads (review projections, outcome axes, quiz cards) stay
-# in the chain, read by address. Facts stored before a field joined this list keep their old form
-# (the stored prefix is never rewritten for it): a reader shows such a field as unknown.
+# authority included. Texts and bulky payloads (review projections, outcome axes, quiz cards; a secret
+# request keeps only its attribution fact, ``row_meta``) stay in the chain, read by address. Facts
+# stored before a field joined this list keep their old form (the stored prefix is never rewritten
+# for it): a reader shows such a field as unknown.
 _META_FIELDS = ("chat_id", "ts", "type", "direction", "task_id", "parent_task_id", "root_task_id",
                 "client_message_id", "subagent_task_id", "delegation_role", "subagent_role", "initiator",
                 "summary_kind", "sender_label", "username", "author", "source", "transport",
@@ -97,6 +96,10 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else {}
     if isinstance(contact := row.get("presence_contact") or quiz.get("presence_contact"), dict):
         meta["presence_contact"] = dict(contact)  # ``presence_owner_contact.private_main_row`` reads it
+    if quiz.get("secret_request") and isinstance(outcome := quiz.get("secret_outcome"), dict):
+        # ``row_author``'s fact: a secret request's form outcome is the host's, never the owner's words.
+        meta["quiz"] = {"secret_request": {"plugin_name": str(quiz["secret_request"].get("plugin_name") or "")},
+                        "secret_outcome": {key: outcome[key] for key in ("event", "pluginName", "fields") if key in outcome}}
     if isinstance(ref := row.get("reply_to"), dict):  # ``room_membership.reply_target_room`` reads these, a
         meta["reply_to"] = {key: ref[key] for key in _REPLY_FIELDS if key in ref}  # saved target by its address
     if str(row.get("direction") or "") == "in":
@@ -108,18 +111,12 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 class MembershipFacts(NamedTuple):
-    """The registry facts room membership reads, taken once per call; ``rooms`` is
-    the room rule over the ``bindings`` snapshot the fingerprint names."""
+    """The registry facts room membership reads, taken once per call; ``rooms`` is the room rule over the same
+    ``bindings`` snapshot. The first three are compared as they are (``legacy_units``), never through a digest."""
     project_chat_ids: FrozenSet[int]
     bindings: Dict[str, int]
     projects_by_source_key: Dict[Tuple[Any, ...], FrozenSet[int]]
     rooms: Any
-
-    def fingerprint(self) -> str:
-        payload = json.dumps([sorted(self.project_chat_ids), sorted(self.bindings.items()),
-                              sorted((list(key), sorted(chats)) for key, chats in self.projects_by_source_key.items())],
-                             ensure_ascii=False, default=str)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def membership_facts(root: Any) -> MembershipFacts:
@@ -509,7 +506,7 @@ def _task_triples(entries: Iterable[Entry]) -> Tuple[_Triple, ...]:
 
 
 def _lineage_answers(facts: MembershipFacts, triples: Tuple[_Triple, ...]) -> Optional[Tuple[int, ...]]:
-    """The room rule's answer for each triple, the one membership input ``facts.fingerprint`` leaves out: a
+    """The room rule's answer for each triple, the one membership input the registry facts leave out: a
     task result admitted later, or a lineage the store could not read under contention, changes it with
     no row written. ``None`` while the store cannot answer every task: a count made then is not reused."""
     if not facts.rooms.warm({task_id for triple in triples for task_id in triple} - {""}):
@@ -545,7 +542,7 @@ def legacy_units(store: ChronicleStore, root: Any) -> List[LegacyUnit]:
     authority, facts = _authority(store), membership_facts(root)
     from ouroboros import dialogue_store as ds
     ds.require_imported(root, "chat")
-    key = (authority, facts.fingerprint())
+    key = (authority, facts[:3])  # the registry facts themselves: equal values, the same verdicts
     cached = _UNITS.get(str(root.resolve()))
     if cached is not None and cached[0] == key and cached[2] is not None \
             and _lineage_answers(facts, cached[1]) == cached[2]:

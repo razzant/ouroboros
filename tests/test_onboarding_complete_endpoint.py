@@ -493,6 +493,21 @@ def test_no_subscription_declared_never_reads_the_daemon(onboarding):
     assert json.loads(onboarding.saved()[SUBAGENTS_SETTING])["items"]
 
 
+def test_completing_onboarding_authors_no_web_search_model(onboarding):
+    """A blank search Model follows each source's recommended one (owner decision, 1 Nov 2026), so the
+    defaults-merged first document of an install keeps it blank rather than freezing a shipped id."""
+    from ouroboros import config
+    from ouroboros.search_routes import SEARCH_MODELS, resolve_web_search_route
+
+    response = onboarding.client.post("/api/onboarding/complete", json=dict(WIZARD_PAYLOAD))
+    assert response.status_code == 200, response.text
+    assert onboarding.saved().get("OUROBOROS_WEBSEARCH_MODEL", "") == ""
+    loaded = config.load_settings()
+    assert loaded["OUROBOROS_WEBSEARCH_MODEL"] == ""
+    route = resolve_web_search_route(settings=loaded)
+    assert {leg["source"]: leg["model"] for leg in route["legs"] + route["unavailable"]} == SEARCH_MODELS
+
+
 def test_api_only_preview_is_read_only_and_never_reads_claudexor(onboarding):
     response = onboarding.client.post(
         "/api/onboarding/subagents/preview", json=dict(WIZARD_PAYLOAD),

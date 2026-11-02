@@ -30,9 +30,11 @@ _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="custody spawn/reap mechanics are POSIX-only"
 )
 
-# Raw Popen exemptions: waited helpers, cleanup layers and custody hosts.
+# Raw spawn exemptions: waited helpers, cleanup layers and custody hosts.
 # Long-lived sites require spawn_supervised/record_process or an explicit justification.
-_POPEN_ALLOWLIST = {
+_SPAWN_ALLOWLIST = {
+    # The pool's one ``ctx.Process``: the pool's _record_worker_processes ledgers it by measured birth.
+    "supervisor/worker_process.py",
     "launcher.py",                        # custody host process (pre-runtime)
     # exec_source_launcher spawns the next custody host and exits. Interactive OS
     # installers keep Popen roots in launcher_bootstrap's live Panic stop list;
@@ -105,22 +107,26 @@ def _spawn_service_from_worker_process(drive_root: str, result_queue) -> None:
     result_queue.put(proc.pid)
 
 
-def test_popen_sites_are_custodied_or_allowlisted():
-    pattern = re.compile(r"subprocess\.Popen\(|[^.\w]Popen\(")
-    offenders = []
-    for base in ("ouroboros", "supervisor"):
-        for path in (REPO_ROOT / base).rglob("*.py"):
-            rel = path.relative_to(REPO_ROOT).as_posix()
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if pattern.search(text) and rel not in _POPEN_ALLOWLIST:
-                offenders.append(rel)
-    for name in ("server.py", "launcher.py"):
-        path = REPO_ROOT / name
-        if path.exists() and pattern.search(path.read_text(encoding="utf-8", errors="replace")):
-            if name not in _POPEN_ALLOWLIST:
-                offenders.append(name)
+# Both doors of a child process; ``psutil.Process(pid)`` only reads one that already exists.
+_SPAWN_PATTERN = re.compile(r"subprocess\.Popen\(|[^.\w]Popen\(|(?<!psutil)\.Process\(|[^.\w]Process\(")
+
+
+@pytest.mark.parametrize("line, spawns", [
+    ("subprocess.Popen(cmd)", True), (" Popen(cmd)", True), ("mp.Process(target=run)", True), (" Process(target=run)", True),
+    ("ctx.Process(target=run)", True), ("multiprocessing.Process(target=run)", True),
+    ("psutil.Process(pid)", False), ("ChildProcess(x)", False)])
+def test_the_spawn_pattern_catches_both_doors(line, spawns):
+    assert bool(_SPAWN_PATTERN.search(line)) is spawns
+
+
+def test_spawn_sites_are_custodied_or_allowlisted():
+    paths = [*(REPO_ROOT / "ouroboros").rglob("*.py"), *(REPO_ROOT / "supervisor").rglob("*.py"),
+             REPO_ROOT / "server.py", REPO_ROOT / "launcher.py"]
+    rels = {path.relative_to(REPO_ROOT).as_posix(): path for path in paths if path.exists()}
+    offenders = [rel for rel, path in rels.items() if rel not in _SPAWN_ALLOWLIST
+                 and _SPAWN_PATTERN.search(path.read_text(encoding="utf-8", errors="replace"))]
     assert not offenders, (
-        "New raw Popen call sites outside the custody allowlist: "
+        "New raw spawn sites (Popen or multiprocessing.Process) outside the custody allowlist: "
         f"{offenders}. Route long-lived spawns through "
         "process_custody.spawn_supervised (or record_process write-through) "
         "or extend the allowlist with a justification comment."
@@ -206,9 +212,7 @@ def test_reaper_kills_stale_session_entry(tmp_path, monkeypatch):
         monkeypatch.setattr(process_custody, "_SESSION_ID", "next-generation")
         reaped = reap_orphaned_processes(tmp_path)
         assert proc.pid in reaped
-        deadline = time.time() + 5
-        while time.time() < deadline and proc.poll() is None:
-            time.sleep(0.05)
+        _await_dead(proc)
         assert proc.poll() is not None, "stale-session process must be dead"
         events = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
         assert "process_reaped" in events
@@ -345,9 +349,8 @@ def test_reaper_companion_log_only_does_not_kill(tmp_path):
     try:
         reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"other_skill"})  # gone_skill not in the installed set
         assert proc.pid not in reaped and proc.poll() is None
-        import json as _json
         lines = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
-        wr = [_json.loads(l) for l in lines if l.strip() and '"process_would_reap"' in l]
+        wr = [json.loads(l) for l in lines if l.strip() and '"process_would_reap"' in l]
         assert wr, "expected a process_would_reap event"
         assert wr[-1]["pid"] == proc.pid
         assert wr[-1]["owner_skill"] == "gone_skill"
@@ -447,15 +450,7 @@ def test_reaper_parses_companion_owner_as_middle_segment(tmp_path, monkeypatch):
 
 @_POSIX_ONLY
 def test_task_scope_reaped_when_owner_task_gone(tmp_path):
-    proc = spawn_supervised(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        drive_root=tmp_path,
-        purpose="task-service",
-        scope="task",
-        owner_task_id="finished-task",
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    proc = _sleeper(tmp_path, "task-service", "task", owner_task_id="finished-task")
     try:
         reaped = reap_orphaned_processes(tmp_path, running_task_ids={"some-other-task"})
         assert proc.pid in reaped

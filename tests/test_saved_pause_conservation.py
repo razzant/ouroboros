@@ -67,6 +67,23 @@ def _result_gap(root, monkeypatch, kind, *, task_id="saved"):
 
             patch.setattr(task_results, "load_task_result", contended(task_results.load_task_result))
             patch.setattr(store_hot_facts, "read", contended(store_hot_facts.read))
+            real_statuses = store_hot_facts.statuses
+
+            def statuses(drive, ids):  # the same row, read in the pass's one batch
+                ids = list(ids)
+                if task_id not in map(str, ids):
+                    return real_statuses(drive, ids)
+                conn = exclusive_hold(store.store_path(root))
+                try:
+                    with store.acquisition_budget(0):
+                        answers = real_statuses(drive, ids)
+                finally:
+                    conn.execute("ROLLBACK")
+                    conn.close()
+                calls.extend(answer for answer in answers.values() if isinstance(answer, store.StoreBusy))
+                return answers
+
+            patch.setattr(store_hot_facts, "statuses", statuses)
         yield
         if kind == "busy":
             assert calls, "the consumer must actually encounter SQLite contention"

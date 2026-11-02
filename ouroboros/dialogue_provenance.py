@@ -142,9 +142,9 @@ def presence_sender_origin(ctx: Any) -> dict[str, str]:
 def presence_queue_task(drive_root: Any, task_id: str) -> dict[str, Any] | None:
     """The persisted queue row of one pending/running task, if the snapshot lists it."""
 
-    from ouroboros.utils import read_json_dict
+    from ouroboros.queue_observation import load_queue_document
 
-    snapshot = read_json_dict(Path(drive_root) / "state" / "queue_snapshot.json") or {}
+    snapshot = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
     for key in ("pending", "running"):
         for item in snapshot.get(key) or []:
             task = item.get("task") if isinstance(item, Mapping) else None
@@ -642,6 +642,8 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     """
     if _mapping(row.get("host_fact")).get("kind") == "call_open":
         return {"kind": "host", "label": "host", "type": "call_open"}
+    if row.get("type") in {"quiz_answer", "quiz_closed"} and (quiz := _mapping(row.get("quiz"))).get("secret_request") and isinstance(quiz.get("secret_outcome"), Mapping):
+        return {"kind": "host", "label": _with_transport("host", row), "type": row["type"], "via": "secret_request"}  # its form outcome, never anyone's words
     if row.get("type") == "quiz_answer" or (row.get("type") == "quiz_closed"
             and (row.get("quiz") or {}).get("closed_actor") == "owner"):
         return {"kind": "human", "label": "Owner", "via": "quiz"}

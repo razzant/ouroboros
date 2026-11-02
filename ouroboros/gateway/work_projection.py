@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import threading
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -18,9 +19,16 @@ from ouroboros.gateway import work_status as ws
 
 log = logging.getLogger(__name__)
 
+# The last projection's stored results per data root, each beside the row signature it was read at
+# (``(write_seq, updated_at)``, the key every census reader memoizes on): the next projection re-reads only a
+# document whose row moved. Replaced whole by each projection, so it keeps one projection's working set, the
+# documents that projection held anyway; the results are shared read-only.
+_RESULTS: Dict[str, Dict[str, Tuple[tuple, dict]]] = {}
+_RESULTS_LOCK = threading.Lock()
+
 _CONTINUE_PREFIX = "Continue: "
 # The census's execution facts for a member (gateway/state.py), never a work's identity.
-_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait"})
+_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait", "cancel_pending"})
 
 
 def _strip_continue(name: str) -> str:
@@ -39,12 +47,30 @@ def _first_name(*sources: Mapping[str, Any]) -> str:
     return ""
 
 
+def _root_key(drive_root: Any) -> str:
+    return str(pathlib.Path(drive_root).resolve(strict=False))
+
+
+def _signature(drive_root: Any, task_id: str) -> Optional[tuple]:
+    """The task row's signature from its hot row (no body; batched inside ``store_hot_facts.snapshot``)."""
+    from ouroboros.store_hot_facts import read
+
+    try:
+        row = read(drive_root, task_id)
+    except Exception:
+        return None
+    return (row["write_seq"], row["updated_at"]) if row else None
+
+
 class _Observations:
     """Per-snapshot memo of the few stored reads the projection needs."""
 
     def __init__(self, drive_root: Any):
         self.drive_root = drive_root
         self.results: Dict[str, Optional[dict]] = {}
+        self.signatures: Dict[str, tuple] = {}
+        with _RESULTS_LOCK:
+            self.previous = _RESULTS.get(_root_key(drive_root), {})
         self.fences: Dict[str, dict] = {}
         self.stops: Dict[str, frozenset] = {}
         self.reviews: Dict[str, bool] = {}
@@ -52,7 +78,14 @@ class _Observations:
         self.gaps: List[Dict[str, Any]] = []
 
     def result(self, task_id: str) -> Optional[dict]:
+        """The task's stored result: the last projection's when its row has not moved since, else one read."""
         if task_id not in self.results:
+            signature = _signature(self.drive_root, task_id)
+            held = self.previous.get(task_id)
+            if signature is not None and held is not None and held[0] == signature:
+                self.results[task_id] = held[1]
+                self.signatures[task_id] = signature
+                return held[1]
             try:
                 from ouroboros.task_results import load_task_result
 
@@ -61,7 +94,15 @@ class _Observations:
             except Exception:
                 log.debug("Work projection could not read %s", task_id, exc_info=True)
                 self.results[task_id] = None
+            if signature is not None and self.results[task_id] is not None:
+                self.signatures[task_id] = signature
         return self.results[task_id]
+
+    def keep(self) -> None:
+        """Hand this projection's signed results to the next one (only results read at a known signature)."""
+        held = {task_id: (signature, self.results[task_id]) for task_id, signature in self.signatures.items()}
+        with _RESULTS_LOCK:
+            _RESULTS[_root_key(self.drive_root)] = held
 
     def fence(self, root_id: str, drive_root: Any = None) -> dict:
         if root_id not in self.fences:
@@ -77,19 +118,24 @@ class _Observations:
         """Whether a review the task already sent still runs (``review_operation``), read from its stored result."""
         if task_id not in self.reviews:
             try:
-                from ouroboros.review_operation import task_has_live_review_operation
-
-                self.reviews[task_id] = bool(task_has_live_review_operation(
+                self.reviews[task_id] = bool(tree_review_operation(
                     self.drive_root, task_id, sent_only=True, result_loader=lambda tid: self.result(tid) or {}))
             except Exception:
                 log.debug("Work projection could not read the review of %s", task_id, exc_info=True)
                 self.reviews[task_id] = False  # an unreadable operation proves no review
         return self.reviews[task_id]
 
+    def prime_model_handoffs(self, root_ids: Iterable[str]) -> None:
+        """Every paused tree's model recipients over ONE read of their open attempts (``trees_model_handoffs``)."""
+        wanted = sorted({root for root in root_ids if root and root not in self.models})
+        if wanted:
+            from supervisor.continuation_admission import trees_model_handoffs
+
+            self.models.update(trees_model_handoffs(self.drive_root, wanted))
+
     def model_handoffs(self, root_id: str, drive_root: Any = None) -> list:
         if root_id not in self.models:
-            from supervisor.continuation_admission import model_handoffs
-            self.models[root_id] = model_handoffs(drive_root or self.drive_root, root_id)
+            self.models[root_id] = tree_model_handoffs(drive_root or self.drive_root, root_id)
         return self.models[root_id]
 
     def stop_unknown(self, task_id: str, drive_root: Any = None, owner: Optional[Mapping[str, Any]] = None
@@ -97,6 +143,43 @@ class _Observations:
         if task_id not in self.stops:
             self.stops[task_id] = unconfirmed_stops(drive_root or self.drive_root, task_id, owner)
         return self.stops[task_id]
+
+
+def tree_model_handoffs(drive_root: Any, root_id: str) -> list:
+    """A paused tree's unresolved model recipients: with ``tree_review_operation`` the tree census ``/api/state``
+    reads, so the owner-pause census memo (keyed by the tree's attempt/custody/fence revision) replaces it here."""
+    from supervisor.continuation_admission import model_handoffs
+
+    return model_handoffs(drive_root, root_id)
+
+
+def tree_review_operation(drive_root: Any, task_id: str, *, sent_only: bool = False, result_loader=None) -> bool:
+    """Whether a review ``task_id`` launched still runs (``sent_only``: one it already sent): the tree census's
+    review read for ``/api/state``, beside ``tree_model_handoffs``."""
+    from ouroboros import review_operation
+
+    return review_operation.task_has_live_review_operation(drive_root, task_id, sent_only=sent_only,
+                                                           result_loader=result_loader)
+
+
+def tree_review_reads(drive_root: Any, root_id: str):
+    """The review questions the census asks of one paused root (sent or not) over ONE strict stored read."""
+    from ouroboros.task_results import load_task_result
+
+    results: Dict[str, dict] = {}
+    answers: Dict[bool, bool] = {}
+
+    def load(task_id: str) -> dict:
+        if task_id not in results:
+            results[task_id] = load_task_result(drive_root, task_id, strict=True) or {}
+        return results[task_id]
+
+    def ask(sent_only: bool = False) -> bool:
+        if sent_only not in answers:
+            answers[sent_only] = tree_review_operation(drive_root, root_id, sent_only=sent_only, result_loader=load)
+        return answers[sent_only]
+
+    return ask
 
 
 def unconfirmed_stops(drive_root: Any, task_id: str, owner: Optional[Mapping[str, Any]] = None) -> frozenset:
@@ -261,19 +344,50 @@ def _since(row: Mapping[str, Any]) -> Optional[float]:
 
 
 def works_snapshot(drive_root: Any, owners: Iterable[Mapping[str, Any]], raw_facts: Mapping[str, Mapping[str, Any]],
-                   *, complete: bool = True) -> Dict[str, Any]:
-    """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``. Never raises."""
+                   *, complete: bool = True, bindings: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``;
+    ``bindings`` is the census's task-to-Project map (``_bound_room``). Never raises."""
     try:
-        return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete)
+        return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete, dict(bindings or {}))
     except Exception:
         log.debug("Work projection unavailable for /api/state", exc_info=True)
         return {"works": [], "rooms": {}, "work_summary": ws.roll_up_summary({}, [], complete=False),
                 "works_complete": False, "works_gaps": [{"reason": "work_projection_unavailable"}]}
 
 
+def durable_binding(row: Mapping[str, Any], task_id: Any, bindings: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """The binding that places a task: its own, then its parent's or root's durable one (the census's one rule; an
+    origin-bound row is a convert-gate fact only and re-homes nothing)."""
+    for key in (task_id, row.get("parent_task_id"), row.get("root_task_id")):
+        binding = bindings.get(str(key)) if key else None
+        if isinstance(binding, dict) and not binding.get("origin_bound"):
+            return binding
+    return None
+
+
+def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A stored row's room by ``durable_binding``. Unbound, the row's own room stands."""
+    binding = durable_binding(row, task_id, bindings)
+    if binding is None or not binding.get("chat_id"):
+        return row
+    return {**row, "chat_id": binding["chat_id"], "project_id": str(binding.get("project_id") or "")}
+
+
 def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
-              complete: bool) -> Dict[str, Any]:
+              complete: bool, bindings: Mapping[str, Any]) -> Dict[str, Any]:
+    from ouroboros.store_hot_facts import snapshot
+
     obs = _Observations(drive_root)
+    # The signatures of every result this projection may read, in one short transaction (the hot rows only).
+    known = {str(row.get("activity_id") or "") for row in owners} | set(raw) | set(obs.previous)
+    with snapshot([(drive_root, task_id) for task_id in known if task_id]):
+        projected = _project(drive_root, owners, raw, complete, obs, bindings)
+    obs.keep()
+    return projected
+
+
+def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
+             complete: bool, obs: _Observations, bindings: Mapping[str, Any]) -> Dict[str, Any]:
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
         task_id = str(row.get("activity_id") or "")
@@ -282,7 +396,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
     try:
         for row in _inflight_upkeep(drive_root, set(rows)):
             facts = obs.result(row["activity_id"]) or {}
-            row.update({key: facts[key] for key in ("chat_id", "project_id") if facts.get(key)})
+            room = _bound_room(facts, row["activity_id"], bindings)  # a moved task's upkeep runs in its Project
+            row.update({key: room[key] for key in ("chat_id", "project_id") if room.get(key)})
             row["kind"] = "direct_chat" if facts.get("_is_direct_chat", True) else "managed_task"
             rows[row["activity_id"]] = row
     except Exception:
@@ -307,6 +422,9 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
         entry["rows"].append((row, facts, root_id))
         entry["roots"].add(root_id)
         entry["name"] = entry["name"] or name
+    obs.prime_model_handoffs(root_id for entry in groups.values() for row, facts, root_id in entry["rows"]
+                             if row.get("phase") in {"budget_paused", "budget_pausing"}
+                             and not facts.get("budget_drive_root"))
     for root_id, runs in held.items():
         work_id, name = _work_of(root_id, raw, obs, memo)
         entry = group(work_id)
@@ -334,7 +452,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
             stored = obs.result(episode_id) or {}
             episode = {"task_id": episode_id}
             outcome = ws.shown_outcome(stored)
-            room_row = next((item[0] for item in entry["rows"]), stored)
+            # A tail-only work (open runs, review or upkeep, no member row) lives where its binding puts it.
+            room_row = next((item[0] for item in entry["rows"]), None) or _bound_room(stored, episode_id, bindings)
             facts = raw.get(episode_id) or stored
         if not members and not entry["runs"]:
             continue

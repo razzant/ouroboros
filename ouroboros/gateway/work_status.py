@@ -69,6 +69,8 @@ REASON_TEXT = {
     "turn_started": "Starting the turn",
     "turn_context_building": "Building context",
     "turn_context_built": "Context ready",
+    # A live inline turn's recorded Stop, until its next stop check (the census work fact ``cancel_pending``).
+    "stop_requested": "Stop requested: it ends at its next step",
 }
 _TURN_STEPS = ("admitted", "started", "context_building", "context_built")
 _CALL_STEPS = ("requested", "dispatched")  # its Main call started (supervisor.active_activity.CALL_PHASES)
@@ -150,8 +152,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     ``raw`` carries the queue row's hold and pause records, the declared author of the tree's Pause
     (``pause_by``, ``control_actor.pause_author``), the members that Pause already parked and the task's
     own identity facts (see ``work_projection``), ``running`` when the queue runs it, its current worker ``owner_wait``,
-    and ``sent_review`` while a
-    review it sent from a warm park still runs. Returns the member's
+    ``sent_review`` while a review it sent from a warm park still runs, and ``cancel_pending`` while a live inline
+    turn's recorded Stop waits for its next stop check. Returns the member's
     own state only; ``live`` says whether the member itself executes now: under a settling Pause only a running
     member the Pause has not parked does, never a queued one or one that already saved its place."""
     raw = raw or {}
@@ -241,6 +243,8 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         step = str(row.get("turn_phase") or "")
         if phase == "preparing" and step in _TURN_STEPS:
             state["reasons"].append(reason(f"turn_{step}"))
+        if raw.get("cancel_pending"):
+            state["reasons"].append(reason("stop_requested"))
         return state
     state["confirmed"] = False
     return state
@@ -259,7 +263,10 @@ def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Map
     earlier = [str(task_id) for task_id in earlier_live if task_id]
     roots = [str(task_id) for task_id in live_roots if task_id]
     controls: List[Dict[str, Any]] = []
-    if current is not None and current_row is not None:
+    # A live inline Presence turn's only door is Stop (#2012): Pause, Hurry and Wrap up have none for it yet, and
+    # before its first durable write (``cancelable`` False) Stop has no row to reach: that door refuses the id.
+    presence = current_row is not None and current_row.get("kind") == "presence"
+    if current is not None and current_row is not None and not presence:
         target = str(current.get("task_id") or "")
         phase = str(current_row.get("phase") or "")
         codes = {entry.get("code") for entry in current.get("reasons") or ()}
@@ -275,7 +282,8 @@ def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Map
             controls.append({"action": "pause", "target": target})
         if current["activity"] == "paused" and current.get("resumable"):
             controls.append({"action": "resume", "target": target})
-    for task_id in [*([str(current.get("task_id"))] if current is not None else []), *roots]:
+    stoppable = current is not None and not (presence and current_row.get("cancelable") is False)
+    for task_id in [*([str(current.get("task_id"))] if stoppable else []), *roots]:
         if task_id and task_id not in {entry["target"] for entry in controls if entry["action"] == "stop"}:
             controls.append({"action": "stop", "target": task_id, "scope": "cascade"})
     for task_id in earlier:

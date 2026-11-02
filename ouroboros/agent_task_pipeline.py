@@ -539,7 +539,9 @@ def _attach_host_mutation_projection(
     if task_id and task_id == root_task_id:
         try:
             if attribution_task_id(evidence_root, (task_id,)) == task_id:
-                record_terminal_mutation_candidates(evidence_root, task_id)
+                from ouroboros.body_candidate import find  # the root's own copy reads as the commit consumer reads it
+                copy = find(task_id) or {}
+                record_terminal_mutation_candidates(evidence_root, task_id, candidate_roots=[copy.get("path") or ""])
         except Exception:
             snapshot_failed = True
             log.debug("terminal mutation snapshot failed for %s", task_id, exc_info=True)
@@ -737,12 +739,22 @@ def _root_post_task_blocking(
         or bool(str(task.get("workspace_mode") or "").strip())
         or project_task
     )
-    if (is_presence_task(task) and task.get("_is_direct_chat")
-            and not in_worker_process() and not split_drive):
-        # The native adapter receives the durable result on return. Its request
-        # must not wait for synthesis; pooled/forked workers retain their custody.
+    if presence_request_waits(task) and not split_drive:
+        # A Host request waits on this turn's durable result (the admission's fact,
+        # whatever process carries the turn): it must not wait for synthesis.
+        # Pooled/forked work retains its custody.
         blocking = False
     return blocking
+
+
+def presence_request_waits(task: Dict[str, Any]) -> bool:
+    """Whether a Presence request is waiting on this turn's result: the Host's admission stamps
+    ``metadata.presence_request_waits`` on the turn it runs for a waiting connector call. A legacy
+    row carries no stamp and is read as the inline Presence turn it was."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if "presence_request_waits" in metadata:
+        return bool(metadata["presence_request_waits"])
+    return bool(is_presence_task(task) and task.get("_is_direct_chat") and not in_worker_process())
 
 
 def _deliver_answer_first(env: Any, task: Dict[str, Any], event_queue: Any, pending_events: List[Dict[str, Any]],
@@ -1433,13 +1445,13 @@ def build_review_context(env: Any) -> str:
         # the panel, tests, custody and binding, none of which this section decides.
         lines: List[str] = ["## Review Continuity", f"- repo_key={repo_key}"]
 
-        marker_current, look_unreadable = stale_marker_status(state, pathlib.Path(env.drive_root), repo_key)
-        if marker_current:
+        marker, look_unreadable = stale_marker_status(state, pathlib.Path(env.drive_root), repo_key)
+        if marker:
             lines.append(
-                f"- stale_marker={state.last_stale_from_edit_ts[:19]}: "
-                f"{_truncate_with_notice(state.last_stale_reason or 'worktree edit invalidated advisory freshness', 220)}"
+                f"- stale_marker={marker['ts'][:19]}: "
+                f"{_truncate_with_notice(marker['reason'] or 'worktree edit invalidated advisory freshness', 220)}"
             )
-            lines.append(f"  invalidated_by={state.stale_marker_attribution_note()}")
+            lines.append(f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}")
             if look_unreadable:
                 lines.append(f"  preflight_unreadable={_truncate_with_notice(look_unreadable, 220)} (marker unverified)")
 
@@ -1551,7 +1563,7 @@ def build_review_context(env: Any) -> str:
 
         from ouroboros.section_floor import HostSection
 
-        operative = '\n'.join(continuity_status_lines(state, repo_dir, (marker_current, look_unreadable)) + lines[continuation_start:]
+        operative = '\n'.join(continuity_status_lines(state, repo_dir, (marker, look_unreadable)) + lines[continuation_start:]
                               + ['Historical review ledger: review_status().'])
         history = format_status_section(state, repo_dir=repo_dir)
         if history:

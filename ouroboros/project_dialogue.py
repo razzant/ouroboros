@@ -118,7 +118,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
     answer and the wait facts ride with the pointer, so the browser paints the Project's own form
     from history, the live frame or the census alone; task detail only opens the original."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
-    from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection
+    from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection, secret_facts
 
     quiz = row.get("quiz") if isinstance(row.get("quiz"), dict) else row
     task_id, quiz_id = str(row.get("task_id") or ""), str(quiz.get("quiz_id") or "")
@@ -169,6 +169,7 @@ def project_question_pointer(row: Dict[str, Any], block: Any, project: Any,
         **({"assumption": assumption} if assumption else {}),
         **({"host_facts": host_facts} if host_facts else {}),
         **({"recommended_index": recommended} if recommended is not None else {}),
+        **secret_facts(quiz, block),  # a secret request's copy keeps its form
         **facts,
         **({"source_status": "unavailable"} if not known else {}),
     }
@@ -622,6 +623,9 @@ ROUTING_REFUSAL_CAUSES: Dict[str, str] = {
     "subagent_target": "that task is a helper of another task",
     "cancel_pending": "that task is being stopped",
     "target_closed": "that task has already finished",
+    "presence_author_closed": "that conversation turn is not taking messages now",
+    "presence_author_elsewhere": "that conversation turn runs in another process",
+    "presence_author_unreadable": "that conversation turn's state could not be read",
     "target_finished": "that task has already finished",
     "acceptance_fence_sealed": "that task has already finished",
     "mailbox_write_failed": "the message could not be saved",
@@ -672,15 +676,9 @@ def routing_refusal_cause(action: str, status: str, reason: str, options: Any = 
         return ""
     if status_text == "needs_manual_target" and isinstance(options, list) and options:
         return ""
-    action_text = str(action or "").strip()
-    if status_text == "unconfirmed":
-        prefix = "Not confirmed"
-    elif action_text == "steer_task":
-        prefix = "Not delivered"
-    elif action_text == "ensure_project_scope":
-        prefix = "Not moved"
-    else:
-        prefix = "Not started"
+    prefix = "Not confirmed" if status_text == "unconfirmed" else {
+        "steer_task": "Not delivered", "ensure_project_scope": "Not moved",
+    }.get(str(action or "").strip(), "Not started")
     reason_text = str(reason or "").strip()
     phrase = ROUTING_REFUSAL_CAUSES.get(reason_text, "")
     if phrase:
@@ -788,6 +786,8 @@ TASK_CAUSE_PHRASES = {
     "finalization_grace": "The task hit a time limit and had to wrap up before it could finish cleanly",
     "deadline_local": "The task reached its deadline before it could finish cleanly",
     "context_overflow": "The task outgrew its context before it could finish cleanly",
+    "context_capacity": "This route's window cannot hold the task's context",
+    "required_reference_unavailable": "The handbook this task requires could not be read",
     "output_recovery_exhausted": "Empty length-limited replies exhausted recovery; saved work remains available",
     "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
     # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the

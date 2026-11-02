@@ -194,8 +194,8 @@ export function renderSettingsPage() {
                             </div>
                             <div class="form-field ui-field">
                                 <label for="s-websearch-model">Model</label>
-                                <input id="s-websearch-model" placeholder="Auto: source defaults" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
-                                <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices. Empty uses source defaults.</div>
+                                <input id="s-websearch-model" placeholder="Recommended for each source" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
+                                <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices. Empty follows the model Ouroboros recommends for each source.</div>
                             </div>
                         </div>
                         <div class="ui-field-help" id="s-websearch-preview" role="status"></div>
@@ -330,9 +330,9 @@ export function renderSettingsPage() {
                                 </div>
                             </div>
                             <div class="form-field ui-field">
-                                <label for="s-evo-budget">Per-Cycle Budget Reserve (USD)</label>
+                                <label for="s-evo-budget">Post-task Start Floor (USD)</label>
                                 <input id="s-evo-budget" placeholder="0" class="ui-control" name="s-evo-budget" type="text" aria-describedby="s-evo-budget-help">
-                                <div class="settings-inline-note ui-field-help" id="s-evo-budget-help">Minimum remaining global budget required to start a post-task cycle. <code>0</code> = rely on the normal gates. Running cycles still inherit the global per-task hard cost cap and the supervisor's reserved-budget floor.</div>
+                                <div class="settings-inline-note ui-field-help" id="s-evo-budget-help">Minimum remaining global budget required to start a post-task cycle. <code>0</code> = rely on the normal gates. Running cycles still inherit the global per-task hard cost cap and the global budget limit.</div>
                             </div>
                         </div>
                         <div class="form-field ui-field">
@@ -351,8 +351,8 @@ export function renderSettingsPage() {
                         <h3>Context Mode</h3>
                         <div class="settings-section-copy">
                             Working-context size profile (separate axis from Runtime Mode and Review Enforcement).
-                            <code>Max</code> inlines ARCHITECTURE and DEVELOPMENT in full &mdash; for ~1M-context models (today's behavior).
-                            <code>Nano</code> is the compact owner window. <code>Low</code> fits ~250K / local models: ARCHITECTURE becomes a navigation map (read full sections on demand), DEVELOPMENT stays full for normal runnable tasks unless a structured non-development caller opts out, and memory compacts sooner. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
+                            <code>Max</code>, for ~1M-context models, inlines ARCHITECTURE in full and DEVELOPMENT in full unless the work is known to be about something else: a folder proven not to be Ouroboros, a helper task, or work started through the API, CLI or a schedule gets its chapter map, and work of unknown subject keeps the whole book.
+                            <code>Nano</code> is the compact owner window. <code>Low</code> aims for about 250K tokens; what actually fits depends on the model's window and what this installation holds. Both books become chapter maps (read full sections on demand), and memory compacts sooner. In every mode, a task that itself requires the whole DEVELOPMENT handbook gets it. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
                             <br><strong>Human controlled:</strong> saved via the owner endpoint; saves immediately (no restart), and lowering requires Ouroboros to be idle.
                         </div>
                         <div class="settings-effort-card">

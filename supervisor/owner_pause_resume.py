@@ -78,7 +78,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
                 # Like unstarted-root Resume, publish while launch authority is
                 # still closed. A failed/raised Q write cannot release the tree.
                 try:
-                    persisted = q.persist_queue_snapshot(reason="owner_pause_tree_resumed")
+                    persisted = q.publish_queue_snapshot(reason="owner_pause_tree_resumed")  # durable while launch authority is closed
                 except Exception:
                     persisted = False
                 if not persisted:
@@ -91,7 +91,7 @@ def resume_terminal_tree(task_id: str, *, gaps: list | None = None) -> dict | No
                                                   and (meta.get("task") or {}).get("root_task_id") == task_id])
                 except Exception:
                     rollback()
-                    q.persist_queue_snapshot(reason="owner_pause_tree_resume_held")
+                    q.publish_queue_snapshot(reason="owner_pause_tree_resume_held")
                     raise
         except Exception as exc:
             rollback()

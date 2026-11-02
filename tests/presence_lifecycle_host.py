@@ -129,6 +129,14 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
         event_bus_children = [child.pid for child in active_children()]
     patch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "1")
     binding = seed(h.data)
+    # This process serves the lane with no started pool generation: a Presence turn's body runs on the
+    # disclosed degraded executor in-process, so the lane's RUNNING rows and the executor's pseudo-slots
+    # need this process's own pool tables. The boot reconcile then judges a dead generation's row by the
+    # turn's own end fact (its controller), never by the stale lane row that generation left published.
+    from supervisor import queue as _queue, workers as _workers
+    _queue.init(h.data)
+    _workers.init(ROOT, h.data, max_workers=1)
+    patch.setattr(_workers, "_get_chat_agent", lambda: (_ for _ in ()).throw(AssertionError("no agent in the Host")))
     reconciled = reconcile_orphaned_running_tasks(h.data)
     inner_inference = loop.call_llm_with_retry
     inference_release = threading.Event()
@@ -203,14 +211,10 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     h.script = script
 
     def runner(**kwargs):
-        return run_presence_turn(repo_dir=ROOT, drive_root=h.data, agent_factory=h.factory, **kwargs)
-
-    # The proactive tool calls the module owner directly; keep its actual execution
-    # manager and admission while observing the same production agent constructor.
-    if scenario == "proactive":
-        import functools
-        patch.setattr("ouroboros.presence_runner.run_presence_turn",
-                      functools.partial(run_presence_turn, agent_factory=h.factory))
+        # The carrier's body in this process (the degraded executor: no pool generation is armed here) calls
+        # the injected runner with its own repo/drive/factory; the fixture's observed constructor wins.
+        kwargs.update(repo_dir=ROOT, drive_root=h.data, agent_factory=h.factory)
+        return run_presence_turn(**kwargs)
 
     app = create_host_service_app(h.data, presence_runner=runner)
     sock = socket.socket()

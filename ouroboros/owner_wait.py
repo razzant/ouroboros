@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.native_task_wait import cursors_json
 from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
 from ouroboros.observability import without_finalization_timing
 from ouroboros.owner_mailbox import OwnerMailboxPeek
@@ -207,6 +208,10 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
+        # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
+        # read against the beacon cursors the actor was shown.
+        "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
+        "wait_attention_cursors": cursors_json(getattr(ctx, "_wait_attention_cursors", None)),
         "held_owner_messages": dict(getattr(ctx, "_held_owner_messages", None) or {}),
         "open_relays": dict(getattr(ctx, "_open_relays", None) or {}),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
@@ -1132,6 +1137,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
+    ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
+    ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]
     ctx._held_owner_messages = dict(state.get("held_owner_messages") or {})
     ctx._open_relays = dict(state.get("open_relays") or {})

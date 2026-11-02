@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ouroboros import memory_floor as floor, memory_view as mv
 from ouroboros.chronicle_store import DELEGATED_FOCUS_ROLES
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, REQUIRED_BOOK_CHOICES, REQUIRED_BOOK_UNFIT_KEY
 from ouroboros.memory_waiting import text as waiting_text
 
 CONTEXT_FACTS_NAME = "ouroboros_context_facts"
@@ -66,8 +66,33 @@ def low_start_line(plan, mode, task_id):
     room = receipt.get("max_room")
     if receipt.get("role") in DELEGATED_FOCUS_ROLES or not floor.crowded_by_memory(room):
         return ""
-    return (f"Task {task_id} started in Low with chapter maps: its memory ({room['story'] + room['room']:,} tokens) "
+    maps = "Low with chapter maps" + (floor.REQUIRED_BOOK_WHOLE if room.get("book_required") else "")
+    return (f"Task {task_id} started in {maps}: its memory ({room['story'] + room['room']:,} tokens) "
             f"did not fit the {room['allowance']:,} tokens left beside the full books.")
+
+
+def size_refusal_cause(usage):
+    """The terminal cause of a size refusal no recovery answered: a known window that holds the view without this task's
+    directly required handbook (``context_renewal``) names that incompatibility, else a host forecast or the provider's."""
+    if usage.get(REQUIRED_BOOK_UNFIT_KEY):
+        return "context_capacity"
+    return "context_overflow" if usage.get("reason_code") == "context_overflow" else "llm_api_error"
+
+
+def required_book_fact(usage):
+    """At a size refusal: memory stayed as it was because the book is this task's own requirement; what fits without it.
+    The Continue it names is the one that terminal's cause gets (``owner_continue``), never a promise beside it."""
+    from ouroboros.owner_continue import TECHNICAL_REASON_CODES
+
+    book = int(usage.get("_context_required_book_tokens") or 0)
+    if not book:
+        return ""
+    estimate, reserve = (int(usage.get(key) or 0) for key in ("_context_prompt_estimate", "_context_response_reserve_tokens"))
+    capacity = usage.get("_context_capacity_total_tokens")
+    room = f" against {int(capacity) - reserve:,} usable" if capacity is not None else " on a window nothing measured"
+    continues = "; a Continue keeps it" if size_refusal_cause(usage) in TECHNICAL_REASON_CODES else ""
+    return (f"\nThis task directly requires the whole development handbook (~{book:,} tokens), which stayed; "
+            f"without it the input is ~{max(0, estimate - book):,}{room}. {REQUIRED_BOOK_CHOICES.format(continues)}")
 
 
 def window_projection(record):

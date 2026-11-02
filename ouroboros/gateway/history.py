@@ -112,9 +112,9 @@ _PROGRESS_META_FIELDS = (
     # the pointer on reload while its outer task_id stays empty.
     "lifecycle_pointer",
     "initiator",  # the turn's origin label (a consciousness wake-up)
-    # The frame's voice: a replayed host note must stay a host note, or a reload
-    # would hand the card title back to the very line live rendering refused it.
-    "narration", "spoken",
+    # The frame's voice: a replayed host note (or the model's display reasoning) must
+    # stay what it was, or a reload would hand the card title back to a line live refused it.
+    "narration", "reasoning", "spoken",
     "card_row", "card_row_id", "card_row_revision",
     "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
 )
@@ -865,11 +865,11 @@ def _collect_chat_rows(
                     _qid = str(quiz.get("quiz_id") or "")
                     _live = _quiz_source(_qtid)["quizzes"].get(_qid) or answered.get((_qtid, _qid))
                     if isinstance(_live, dict):
-                        from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection
+                        from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_projection
                         if delivery := question_delivery_projection(_live):
                             quiz["question_delivery"] = delivery
                         quiz["state"] = str(_live.get("state") or quiz.get("state") or "open")
-                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials"):
+                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials", *SECRET_FIELDS):
                             if key in _live:
                                 quiz[key] = _live[key]
                         if _live.get("host_facts") and not quiz.get("host_facts"):

@@ -642,8 +642,11 @@ def _provider_test_model(provider_id: str, settings: dict, connection: str = "")
     """One deterministic runtime/default model of the kind, without catalog I/O, spelled
     on the connection under test (``connection`` '' = the built-in one). A route on that
     connection wins; a fixed provider serves the same ids on every key, while another
-    compatible connection is another server with its own models (catalog discovery)."""
-    routes = [route for key in ACTIVE_MODEL_SETTING_KEYS
+    compatible connection is another server with its own models (catalog discovery). The web search
+    Model is no chat route: in its own grammar a bare id is OpenAI-native (``search_routes``)."""
+    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+
+    routes = [route for key in ACTIVE_MODEL_SETTING_KEYS if key != MODEL_ROLE_SETTINGS["websearch"]
               for route in map(parse_model_route, str(settings.get(key, "") or "").split(","))
               if route.kind == provider_id and route.valid and route.model.strip()]
     own = [route for route in routes if route.connection == connection]

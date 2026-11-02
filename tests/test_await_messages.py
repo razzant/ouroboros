@@ -304,9 +304,11 @@ def _executor_frame(sim, frame: dict) -> dict:
             drained.append(sim.events.get_nowait())
         except queue.Empty:
             break
-    [fact] = [e for e in drained if e.get("type") == "cognitive_operation"]
-    _handle_cognitive_operation(fact, sim.supervisor_ctx)
-    return fact
+    facts = [e for e in drained if e.get("type") == "cognitive_operation"]
+    assert len(facts) <= 1, facts
+    for fact in facts:
+        _handle_cognitive_operation(fact, sim.supervisor_ctx)
+    return facts[0] if facts else None
 
 
 def test_the_idle_rail_spares_a_waiting_task_through_the_executors_tool_lease_and_its_close_is_progress(tmp_path, monkeypatch):
@@ -316,7 +318,9 @@ def test_the_idle_rail_spares_a_waiting_task_through_the_executors_tool_lease_an
     round that spent 1500s in earlier tools and then waits the 1800s it asked for sits
     3300s past its last stamp — far beyond the configured silence window.
     The task survives while the executor's ``tool_call_started`` cognitive lease is
-    open; and when ``tool_call_finished`` closes it, that close IS a progress stamp
+    open; and when its settlement row (``tool_call``, published before the
+    ``tool_call_finished`` frame, which states no lifecycle change) closes it, that
+    close IS a progress stamp
     (a completed tool call is the task's own work), so the supervisor tick between
     the finished lease and the next model call spares the task and its next
     addressed turn can start. Without a new model round the ordinary idle rail then
@@ -335,9 +339,10 @@ def test_the_idle_rail_spares_a_waiting_task_through_the_executors_tool_lease_an
     assert sim.jobs == [] and sim.task_id in sim.running and "finalization_requested_at" not in sim.meta
     assert sim.meta["last_progress_at"] == now - (1500.0 + waited)  # an OPEN lease is not progress
 
-    finished = _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": waited, "is_error": False})
+    finished = _executor_frame(sim, {"type": "tool_call", "elapsed_ms": waited * 1000, "is_error": False})
     assert finished["phase"] == "finished" and "active_operation_leases" not in sim.meta
     assert now <= sim.meta["last_progress_at"] <= _time.time()  # the close stamped progress
+    assert _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": waited, "is_error": False}) is None
 
     # The supervisor tick between the finished lease and the next LLM call: spared —
     # the next addressed model turn is permitted.
@@ -367,6 +372,7 @@ def test_a_closed_tool_lease_stamps_progress_but_extends_no_hard_rail(tmp_path, 
     waited = 1800.0
     sim = _supervisor_over_one_stale_task(monkeypatch, tmp_path, now=now, stale_sec=1500.0 + waited)
     _executor_frame(sim, {"type": "tool_call_started", "timeout_sec": None, "args": {"timeout_sec": 1800}})
+    _executor_frame(sim, {"type": "tool_call", "elapsed_ms": waited * 1000, "is_error": False})
     _executor_frame(sim, {"type": "tool_call_finished", "duration_sec": waited, "is_error": False})
     assert sim.meta["last_progress_at"] >= now
     if hard_rail == "absolute_ceiling":

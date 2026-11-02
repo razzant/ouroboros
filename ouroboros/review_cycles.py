@@ -9,9 +9,11 @@ shipped default with one loud log line. It is a string on purpose:
 default would silently swallow ``"unlimited"``. ``review_max_cycles()`` returns
 ``Optional[int]`` — ``None`` means unlimited.
 
-Per-gate meaning of the ONE number — on every gate it counts PAID cycles, and
-identical material is never re-reviewed for pay unless the mind sends it with
-answers:
+Per-gate meaning of the ONE number — on every gate it counts PAID cycles; a
+usable verdict on identical material is never re-reviewed for pay unless the
+mind sends it with answers, while an explicit identical request after a settled
+wave formed no verdict is a new paid wave (running or unknown work is collected,
+never sent again):
 
 * plan asks are OUTSIDE this cap (owner batch 2, Q3=A): the planning organ
   (``tools/plan_ask``) dispatches an ask whenever the mind asks, and only its
@@ -39,7 +41,7 @@ answers:
   follow-up starts fresh), counted apart from the task's change and result waves (its own
   ``tool_name`` on the attempt rows); the manual lane (the Skills page, a Hub install) has
   no task, so its ceiling is per CONTENT VERSION of the skill (owner Q23). A byte-identical
-  skill under the same rules and panel reuses its settled record at $0 (the ledger's reuse
+  skill under the same rules and panel reuses its settled verdict at $0 (the ledger's reuse
   key); exhaustion is the same typed event with ``surface="review_skill"``.
 
 Values are read from ``os.environ`` (``config.apply_settings_to_env`` projects

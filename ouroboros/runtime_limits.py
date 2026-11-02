@@ -183,6 +183,12 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
     """
     if global_ceiling is _CURRENT_TASK_CEILING:
         global_ceiling = get_task_abs_ceiling_sec()
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if owner.get("lane") == "conversation" and owner.get("kind") in {"direct", "presence"}:
+        # An owner's or a correspondent's turn carried by the conversation lane has no
+        # project ceiling: it runs as long as its dialogue lives (#1959, "the bubble is the
+        # work"), as it did in the server process; Stop and its own deadline bound it.
+        global_ceiling = None
     bounds = [float(value) for value in (explicit_execution_timeout_sec(task), global_ceiling) if value is not None]
     return min(bounds) if bounds else None
 
@@ -308,8 +314,9 @@ def get_supervisor_liveness_deadline_sec(settings: Optional[dict] = None) -> int
 
 
 def get_post_task_evolution_budget_usd() -> float:
-    """Optional per-window USD budget for post-task evolution (0 = use the
-    existing EVOLUTION_BUDGET_RESERVE / TOTAL_BUDGET gating only)."""
+    """Start floor of a post-task promotion: below this remaining global budget (USD) a pending
+    request is dropped instead of starting its campaign. 0 (default) adds no floor beyond the
+    ordinary TOTAL_BUDGET admission; it is no per-cycle or per-window budget and caps no cycle."""
     return _clamped_number_setting("OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", low=0.0)
 
 

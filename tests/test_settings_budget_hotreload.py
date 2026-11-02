@@ -426,7 +426,7 @@ def test_auto_low_source_inventory_has_no_true_writer_or_ghost_reader():
     assert response_paths == {
         "ouroboros/settings_integrity.py",  # captured legacy provenance, not a derived UI mode
         "ouroboros/gateway/contracts.py",
-        "ouroboros/gateway/state.py",
+        "ouroboros/gateway/state_publication.py",  # the frozen compatibility field, written False
         "web/modules/api_types.js",
     }, "no UI, CLI, or health reader may infer a derived mode"
 

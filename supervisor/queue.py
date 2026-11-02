@@ -18,7 +18,7 @@ from supervisor.state import (
     load_state,
     append_jsonl,  # noqa: F401 -- queue_snapshot leaf reads it via the _queue() handle
     atomic_write_text,  # noqa: F401 -- queue_snapshot leaf reads it via the _queue() handle
-    budget_remaining, EVOLUTION_BUDGET_RESERVE,
+    budget_remaining,
     reconstruct_task_cost as reconstruct_task_cost,
 )
 from supervisor.message_bus import (
@@ -69,9 +69,6 @@ HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 FINALIZATION_GRACE_SEC: int = FINALIZATION_GRACE_DEFAULT_SEC
 SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
-# BUG3: pause a campaign whose objective fails to absorb after this many reviewed cycles.
-# Mirrors the consecutive-failures threshold; keyed on the objective fingerprint, not failures.
-OBJECTIVE_REPEAT_CAP: int = 3
 
 
 # Whether THIS process owns the supervisor's live maps (``init`` ran): a process that merely
@@ -79,7 +76,7 @@ OBJECTIVE_REPEAT_CAP: int = 3
 # OWNER_PID names that process: a child forked after ``init`` inherits INITIALIZED, not the pid.
 INITIALIZED = False
 OWNER_PID: Optional[int] = None
-QUEUE_PUBLICATION = None  # Structural documents and their successfully published generation.
+QUEUE_PUBLICATION = None  # (path, encoded documents, generation) of the last successful publication.
 
 
 def owns_live_queue(drive_root: Any) -> bool:
@@ -98,7 +95,10 @@ def owns_live_queue(drive_root: Any) -> bool:
 
 def init(drive_root: pathlib.Path) -> None:
     global DRIVE_ROOT, FINALIZATION_GRACE_SEC, INITIALIZED, OWNER_PID, QUEUE_SNAPSHOT_PATH, QUEUE_PUBLICATION
+    from supervisor.queue_publication import reset as reset_publication
+
     QUEUE_PUBLICATION = None
+    reset_publication()  # nothing marked or published by this generation, no tick publisher yet
     DRIVE_ROOT = drive_root
     INITIALIZED, OWNER_PID = True, os.getpid()
     QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
@@ -516,11 +516,11 @@ def enqueue_task(
         if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
             ADMISSION_RESERVATIONS.pop(task_id, None)
         if not restoring_snapshot and (durable or agent_restart_pending()):
-            if persist_queue_snapshot(reason="agent_restart_admission") is not True:
+            if publish_queue_snapshot(reason="agent_restart_admission") is not True:  # durable before the reply
                 # No accepted reply and no dispatch. A partial disk publication
                 # is outside the named return set and boots held for Resume.
                 PENDING[:] = [row for row in PENDING if row is not t]
-                persist_queue_snapshot(reason="agent_restart_admission_unconfirmed")
+                publish_queue_snapshot(reason="agent_restart_admission_unconfirmed")
                 return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
     return t
 
@@ -848,11 +848,13 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     try:
         # A status snapshot is a display read: without a supplied projection it rides the last validated snapshot.
-        remaining: Optional[float] = round(float(budget_remaining(st, strict=True, projection=budget_projection, allow_stale=True)), 2)
+        actual_remaining: Optional[float] = float(budget_remaining(st, strict=True, projection=budget_projection, allow_stale=True))
         accounting_available = True
     except Exception:
-        remaining = None
+        actual_remaining = None
         accounting_available = False
+    # Cents are for display; the status is classified on the amount admission itself reads.
+    remaining = None if actual_remaining is None else round(actual_remaining, 2)
     queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
     running_task = next(
         (
@@ -890,33 +892,18 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."
-    elif consecutive_failures >= 3:
-        status = "paused_failures"
-        detail = (
-            f"Paused after {consecutive_failures} consecutive failures. "
-            "Use Evolve again after investigating the failure."
-        )
     elif enabled and not owner_chat_id:
         status = "waiting_for_owner_chat"
         detail = "Waiting for the first owner chat binding before scheduling evolution."
-    elif enabled and remaining is not None and remaining < EVOLUTION_BUDGET_RESERVE:
+    elif enabled and actual_remaining is not None and actual_remaining <= 0:
         status = "budget_blocked"
-        detail = (
-            f"Budget reserve active: ${remaining:.2f} remaining, "
-            f"${EVOLUTION_BUDGET_RESERVE:.0f} reserved for conversations."
-        )
+        detail = "Global budget exhausted: no new cycle starts until the limit allows one. The campaign stays on."
     elif enabled and (PENDING or RUNNING):
         status = "waiting_for_idle"
         detail = "Waiting for active tasks to finish before the next evolution cycle."
     elif enabled:
         status = "idle_ready"
         detail = "Idle and ready to queue the next evolution cycle."
-    elif remaining is not None and remaining < EVOLUTION_BUDGET_RESERVE and str(st.get("last_evolution_task_at") or "").strip():
-        status = "budget_stopped"
-        detail = (
-            f"Evolution auto-stopped because only ${remaining:.2f} remains, "
-            f"below the ${EVOLUTION_BUDGET_RESERVE:.0f} conversation reserve."
-        )
 
     return {
         "enabled": enabled if enabled_known else None,
@@ -932,7 +919,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         # is float('inf'), which strict JSON cannot carry — surface None so
         # /api/state stays serializable on onboarding installs.
         "budget_remaining_usd": remaining if remaining is not None and math.isfinite(remaining) else None,
-        "budget_reserve_usd": float(EVOLUTION_BUDGET_RESERVE),
+        "budget_reserve_usd": 0.0,  # frozen field: Evolution keeps no reserve of its own (owner, 2026-11-02)
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
         "queued_task_id": str((queued_task or {}).get("id") or ""),
@@ -968,8 +955,13 @@ from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional publi
     _kept_service_pids,
     _retained_daemon_pids,
     parse_iso_to_ts,
-    persist_queue_snapshot,
     restore_pending_from_snapshot,
+)
+from supervisor.queue_publication import (  # noqa: E402, F401 -- intentional public re-exports
+    persist_queue_snapshot,
+    publish_queue_changes,
+    publish_queue_snapshot,
+    tick_publisher_started,
 )
 from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports
     _enforce_task_timeouts_locked,
@@ -979,5 +971,6 @@ from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional publi
     _subtree_progressing,
     _task_deadline_ts,
     _task_drive_for_task,
+    enforce_due_task_timeouts,
     enforce_task_timeouts,
 )

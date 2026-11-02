@@ -286,6 +286,10 @@ export function formatReviewProjection(projection) {
             `Review panel ${panelId}: ${String(panel.surface || 'review')} · authority=${String(panel.authority || 'unspecified')} · verdict=${verdictText} · transport=${String(panel.transport_status || 'unknown')} · parse=${String(panel.parse_status || 'unknown')} · quorum=${String(quorum.contributed ?? 0)}/${String(quorum.configured ?? 0)} (required ${String(quorum.required ?? 0)}) · enforcement=${String(panel.enforcement_impact || 'unknown')}${panel.single_reviewer_no_diversity ? ' · single-reviewer (no diversity)' : ''}${panel.dialogue && panel.dialogue.status ? ` · dialogue=${String(panel.dialogue.status)}` : ''}${panel.superseded ? ' · superseded' : ''}`,
         );
         if (panel.reason) lines.push(`Panel reason: ${String(panel.reason)}`);
+        // A wave Ouroboros itself stopped keeps its producer's reason code and words (masked, bounded) here.
+        for (const note of Array.isArray(panel.wave_failures) ? panel.wave_failures : []) {
+            if (note && typeof note === 'object') lines.push(`Wave failure: ${[text(note.block_reason), text(note.reported_cause)].filter(Boolean).join(' · ')}`);
+        }
         // A preflight seats one named row, ticked or not, and owes no reason: never a pool panel.
         const pooled = text(panel.surface) !== 'preflight' && panelPoolRecorded(panel.panel_facts);
         if (pooled) lines.push(...panelPoolLines(panel));

@@ -71,6 +71,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/tasks/{task_id}/continue",
     "POST /api/tasks/{task_id}/resume",
     "POST /api/decisions",
+    "POST /api/decisions/secret",
     "GET /api/cards/{card_id}",
     "GET /api/cards/{card_id}/app",
     "POST /api/cards/{card_id}/pin",
@@ -209,9 +210,9 @@ class Shape(NamedTuple):
     the TypedDict its items follow (``sse/TaskEvent``), or alternatives joined by ``|``.
     ``request`` uses the same body words (plus ``multipart``); ``query`` names the parameters
     the handler reads and ``headers`` the request headers it reads (a ``!`` suffix: required).
-    Gateway-wide rules cover what a row does not list: 403 ``cross_origin_request`` and 415
-    ``json_content_type_required`` from the browser boundary, 401 from the network auth gate, and 500
-    as ``ErrorResponse`` or plain text for an unexpected failure.
+    Gateway-wide rules cover what a row does not list: 403 ``cross_origin_request`` from the browser
+    boundary, 401 from the network auth gate, and 500 as ``ErrorResponse`` or plain text for an
+    unexpected failure.
     """
 
     responses: str
@@ -349,6 +350,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/decisions": Shape(
         "200,202:DecisionResponse 400,404:ErrorResponse 409:DecisionResponse|ErrorResponse 501,503:ErrorResponse",
         "DecisionRequest", note="request_id is the idempotency key; the first answer wins (a card press: unless once)"),
+    "POST /api/decisions/secret": Shape(
+        "200:SecretDecisionResponse 400,404,409,500,503:SecretDecisionResponse", "SecretDecisionRequest",
+        note="saveSecretToken, cancel, status: values reach Settings only; saved is on both sides of the commit; no-store"),
     "GET /api/cards/{card_id}": Shape("200:CardResponse 404:ErrorResponse", note="read-only; the current body and presses"),
     "GET /api/cards/{card_id}/app": Shape(
         "200:text 404:ErrorResponse", note="the app's HTML as text/plain for a sandboxed srcdoc; never served as a page"),
@@ -508,7 +512,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/local-model/install-runtime": Shape("200:StatusResponse",
                                                    note="installing or already_installing; poll status runtime_status"),
     "GET /api/mcp/status": Shape("200:McpStatusResponse"),
-    "POST /api/mcp/refresh": Shape("200:McpRefreshResponse", "McpRefreshRequest", note="safe to repeat"),
+    "POST /api/mcp/refresh": Shape("200:McpRefreshResponse 400:ErrorResponse", "McpRefreshRequest", note="safe to repeat"),
     "POST /api/mcp/test": Shape("200:McpTestResponse 400,404,409:ErrorResponse", "McpTestRequest",
                                 note="connects once and saves nothing; a failed test is 200 with ok false"),
     "POST /api/mcp/import/preview": Shape("200,400:MCPImportPreviewResponse", "MCPImportPreviewRequest",

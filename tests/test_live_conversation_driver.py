@@ -574,18 +574,32 @@ def test_final_caption_writer_failure_does_not_leave_teardown_waiting():
 
 
 @pytest.mark.parametrize('speaker', ['owner', 'ouroboros'])
-def test_final_words_are_kept_when_their_display_fails(speaker):
+def test_malformed_final_cannot_poison_valid_teardown_words(speaker):
+    from ouroboros.call_peers import LiveCallHub
+    from skills.live_conversation.driver import _Call
+
     async def scenario():
         host = Host()
-        task, session = await started(host)
-        session.emit('ready', input_rate=24000, output_rate=24000)
-        await until(lambda: host.hub.states)
-        def refused(*_args, **_kwargs): raise RuntimeError('fake display failure')
-        host.hub.send_caption = refused
-        session.emit('caption', speaker=speaker, item_id='words', text='Final words.', final=True)
-        with pytest.raises(RuntimeError, match='fake display failure'):
-            await asyncio.wait_for(task, 2)
-        assert [(row['speaker'], row['text'], row['item_id']) for row in host.captions] == [(speaker, 'Final words.', 'words')]
+        host.hub = LiveCallHub(cp.CallSpec('malformed-caption', 1, 'synthetic', 'synthetic'))
+        async def store_caption(**row):
+            # Like the dialogue store, persistence cannot carry an unpaired surrogate.
+            row['text'].encode('utf-8')
+            host.captions.append(row)
+        host.caption = store_caption
+        call, session = _Call(host), Session()
+        session.final_captions = lambda: [LiveEvent('caption', {
+            'speaker': 'ouroboros', 'item_id': 'valid', 'text': 'Valid teardown words.', 'final': True})]
+        call.last_session = session
+        call.writer = asyncio.create_task(call.save_rows())
+        try:
+            with pytest.raises(UnicodeEncodeError):
+                await call.caption({'speaker': speaker, 'item_id': 'malformed', 'text': '\ud800', 'final': True})
+            await asyncio.wait_for(call.finalize(), 2)
+            assert [(row['speaker'], row['text'], row['item_id']) for row in host.captions] == [
+                ('ouroboros', 'Valid teardown words.', 'valid')]
+        finally:
+            call.writer.cancel()
+            await asyncio.gather(call.writer, return_exceptions=True)
     asyncio.run(scenario())
 
 

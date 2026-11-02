@@ -1110,17 +1110,17 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     _started_at = parse_deadline_ts(_started_ts)
     _elapsed = lambda: None if _started_at is None else max(0, int(  # noqa: E731
         (_dt.datetime.now(tz=_dt.timezone.utc) - _started_at).total_seconds()))
-    # The idle-rail lease for THIS hold: granted before the loop, released in the
+    # The idle-rail lease for THIS window: granted before the loop, released in the
     # finally below — the supervisor's idle enforcer spares a leased task while
     # every other rail (deadline, ceiling, budget, cancel) still cuts through.
     # The grant carries a unique lease_id (F5b) and the release names the SAME
     # id, so an abandoned, executor-killed wait thread's late release can never
-    # blank a newer grant made by this task's next wait.
+    # blank a newer grant made by this task's next wait. An observation beat
+    # leases nothing: its supervising hold holds one lease (``progress.HoldLease``).
     _lease_id = uuid.uuid4().hex
-    _emit_external_wait_lease(
-        ctx, rid, _external_wait_lease_until(
-            ctx, max(window, read_window()) if observation_only else window, _started_at, _run_max_seconds),
-        lease_id=_lease_id)
+    if not observation_only:
+        _emit_external_wait_lease(ctx, rid, _external_wait_lease_until(ctx, window, _started_at, _run_max_seconds),
+                                  lease_id=_lease_id)
     try:
         if gateway is None:
             gateway = ClaudexorGateway()
@@ -1128,9 +1128,6 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             gateway.handshake(timeout_sec=progress.poll_bound(read_window()))
         step = None
         if observation_only:
-            _emit_external_wait_lease(
-                ctx, rid, _external_wait_lease_until(ctx, read_window(), _started_at, _run_max_seconds),
-                lease_id=_lease_id)
             from ouroboros import delegate_observe  # speech from the journal, attention from the engine
             step = delegate_observe.step(ctx, gateway, rid, window=window, since_seq=since_seq, read_window=read_window,
                                          elapsed_seconds=_elapsed(), max_seconds=_run_max_seconds or None)
@@ -1223,7 +1220,8 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             })
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:
-        _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
+        if not observation_only:
+            _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
         if gateway is not None and not borrowed:
             gateway.close()
 
@@ -1356,7 +1354,7 @@ def get_tools() -> List[ToolEntry]:
                     "only, never sent with retry_of; the host supplies the canonical work order."},
                 "subagent_id": {"type": "string", "description":
                     "Exact agent_session id from Available subagents, required for direct starts including continue_from. "
-                    "Omit for the configured snapshot and retry_of. Schedule API actors as recursive children instead."},
+                    "Omit for the configured snapshot and retry_of."},
                 "mode": {"type": "string", "enum": ["ask", "plan", "agent"], "description":
                     "Omit for access-derived execution. ask/plan are read-only. Plan artifacts return questions to the starter; "
                     "continue_from with mode=plan clarifies, mode=agent implements the frozen plan within its recorded ceiling."},
@@ -1390,7 +1388,7 @@ def get_tools() -> List[ToolEntry]:
                     "scope_paths; direct without scope equals omission."},
                 "scope_paths": {"type": "array", "items": {"type": "string"}, "description":
                     "Relative copy inputs or direct-work capture paths, including future outputs; ['.'] selects the "
-                    "whole folder. Copy requires nonempty scope. Read-only callers omit this and directory_strategy. "
+                    "whole folder. Copy requires nonempty scope. "
                     "Unselected large inputs stay at source. Direct work without selected/observed paths cannot "
                     "claim a complete changed-file list."},
                 "max_seconds": {"type": "integer", "description":
@@ -1407,7 +1405,7 @@ def get_tools() -> List[ToolEntry]:
                     "be empty. For resumable pool_exhausted or a limit with resetsAt, use "
                     "await_messages(wake_at=resetsAt) before continuing. Needs an observed terminal (not settled "
                     "money), not superseded, no ambiguous apply. Ordinary continuations never widen; plan implementation requires the starter's recorded ceiling. "
-                    "Select subagent_id as for a start; configured sessions omit it. Never combine with retry_of. A continuation inherits no attached documents: pass attachment_paths again."},
+                    "Never combine with retry_of."},
                 "continue_carrier": {"type": "string", "enum": ["auto", "packet"], "description":
                     "With continue_from: auto (default) reuses the session where possible; packet starts a new "
                     "session with retained evidence when the old session has gone astray. Omit for plan threads."},
@@ -1427,7 +1425,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "delegate_wait",
             "description": (
                 "Sleep on a delegated run until it ends, asks a question or needs you. Quiet progress costs "
-                "no model rounds: the host renews quiet transport windows with zero model calls, and journal "
+                "no model rounds: the host renews quiet transport windows, and journal "
                 "progress streams to the human without waking you. An unreachable daemon is the "
                 "same quiet renewal (typed reason daemon_unreachable, told to the owner once per "
                 "outage); while such a read hangs, a finalize_now/hurry control is noticed only "

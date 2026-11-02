@@ -7,7 +7,7 @@ types describe, not validate, JSON.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, TypedDict  # type: ignore[attr-defined]
@@ -47,7 +47,8 @@ class BootDocument(TypedDict):
     are answered), ``ready``, ``failed`` (the generation cannot become ready; ``error`` says why).
     ``dialogue_ready``: an owner message is accepted durably. ``tasks_ready``: pooled task starts
     are admitted. ``steps``: the boot coordinator's and the supervisor init's named steps.
-    ``jobs``: the store's named background jobs (``{}`` while the store is unpublished).
+    ``jobs``: the store's named background jobs as the last state publication read them (``{}`` while the
+    store is unpublished or before the first publication).
     """
 
     phase: Literal["starting", "serving", "ready", "failed"]
@@ -69,6 +70,9 @@ class HealthResponse(TypedDict):
     app_version: str
     abi_version: NotRequired[str]  # schema.GATEWAY_ABI_VERSION; absent on cores older than GET /api/contract
     boot: NotRequired[BootDocument]  # absent on cores older than the boot phases
+    # Owner decision 2A: turns this process ran on its own threads (the degraded carrier, a live call):
+    # {degraded_total, live: [{wid, task_id, executor}], recent: [...]}; absent on older cores.
+    inline_executors: NotRequired[Dict[str, Any]]
 
 
 __all__ = ["BootStep", "BootJob", "SupervisorLoadHeadline", "BootDocument", "HealthResponse"]
