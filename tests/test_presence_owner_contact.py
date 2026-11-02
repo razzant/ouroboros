@@ -241,10 +241,12 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
     _initialize_owner_directives(ctx, [{"role": "user", "content": model_text}])
     assert [row["content"] for row in ctx._owner_directives] == [incoming["text"]]
     assert _answer(r, tid, qid).status_code == 200 and fresh._inbox.empty()
-    # Consume the real accepted owner row through the normal supervisor/direct
-    # lane. Only the model is a double; admission rebuilds its source-work frame.
+    # Consume the real accepted owner row through the normal supervisor door and the real
+    # carrier body (the conversation lane). Only the model is a double; the carrier's first
+    # step rebuilds its source-work frame.
     import server
     from ouroboros.context import build_user_content
+    from tests.test_attachment_staging import carried_turn
     from tests.test_v6730_origin_invariant import _ImmediateThread
 
     admitted = []
@@ -258,7 +260,7 @@ def test_deferred_publication_late_answer_keeps_source_after_pause_and_restart(c
         consciousness=SimpleNamespace(inject_observation=lambda _t: None, pause=lambda: None, resume=lambda: None),
         get_chat_agent=lambda: SimpleNamespace(_busy=False), send_with_budget=lambda *_a, **_kw: None,
         handle_chat_direct=lambda chat_id, text, image_data=None, **kw:
-            workers._run_chat_task(owner_agent, chat_id, text, image_data, **kw),
+            carried_turn(monkeypatch, r.root, owner_agent, chat_id, text, image_data, **kw),
     )
     with monkeypatch.context() as scoped:
         scoped.setattr(threading, "Thread", _ImmediateThread)

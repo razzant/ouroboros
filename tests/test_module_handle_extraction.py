@@ -63,10 +63,12 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "DRIVE_ROOT", "PENDING", "RUNNING", "SCHEDULED_TASKS_FILE", "_queue_lock",
         "load_state", "persist_queue_snapshot",  # admission enqueues in schedule_occurrence
     })),
+    # The lane's doors admit only (owner decision 1A): the actor and the event bus are the
+    # carrier's (``inline_carrier`` reads them for the two inline executors), not this leaf's.
     "supervisor/worker_chat_lane.py": ("supervisor/workers.py", "_pool", frozenset({
         "DRIVE_ROOT", "REPO_DIR", "_repo_writer_gate_lock", "chat_turn_liveness",
-        "_get_chat_agent", "_origin_from_mapping", "_repo_writer_turn_allowed",
-        "_report_binding_failure", "get_event_q", "load_state",
+        "_origin_from_mapping", "_repo_writer_turn_allowed",
+        "_report_binding_failure", "load_state",
         "repo_writer_admission_closed", "send_with_budget",
     })),
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({

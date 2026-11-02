@@ -788,10 +788,7 @@ def test_inline_bytes_that_prove_no_image_are_an_ordinary_file_never_vision(tmp_
 
 
 def test_an_inline_photo_beside_files_reaches_the_model_with_them(tmp_path, monkeypatch):
-    import queue
-
-    import supervisor.workers as workers
-    from tests.test_attachment_staging import _FakeChatAgent, _drive
+    from tests.test_attachment_staging import _FakeChatAgent, _drive, carried_turn
     from tests.test_chat_inject_attachments import _skill_file
     from tests.test_host_service_api import FakeBridge
 
@@ -808,21 +805,20 @@ def test_an_inline_photo_beside_files_reaches_the_model_with_them(tmp_path, monk
     assert [spec["label"] for spec in specs] == ["photo.png", "scan.pdf"], "the photo is staged with the files"
 
     drive = _drive(tmp_path / "worker")
-    monkeypatch.setattr(workers, "DRIVE_ROOT", drive)
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue.Queue())
     agent = _FakeChatAgent()
-    workers._run_chat_task(agent, 42, "оба", (message["image_base64"], message["image_mime"]),
-                           task_metadata=message["task_metadata"])
+    carried_turn(monkeypatch, drive, agent, 42, "оба", (message["image_base64"], message["image_mime"]),
+                 task_metadata=message["task_metadata"])
     images = agent.task["attachment_images"]
     assert [row["label"] for row in images] == ["photo.png"] and images[0]["mime"] == "image/png"
-    assert "image_base64" not in agent.task, "staged once, never also injected inline"
+    assert "image_base64" not in agent.task and "image_source_ref" not in agent.task, \
+        "staged once, never also injected inline"
     # Alone, the photo uses the same original-retaining staging rail, once.
     _inject(client, text="", image_base64=base64.b64encode(png).decode("ascii"))
     alone = bridge.messages[1]
     spec, = alone["task_metadata"]["chat_attachment_uploads"]
     assert pathlib.Path(spec["path"]).read_bytes() == png
-    workers._run_chat_task(agent, 42, "", (alone["image_base64"], alone["image_mime"]),
-                           task_metadata=alone["task_metadata"])
+    carried_turn(monkeypatch, drive, agent, 42, "", (alone["image_base64"], alone["image_mime"]),
+                 task_metadata=alone["task_metadata"])
     from ouroboros.context import build_user_content
     image, = [block for block in build_user_content(agent.task) if block["type"] == "image_url"]
     assert base64.b64decode(image["image_url"]["url"].split(",", 1)[1]) == png

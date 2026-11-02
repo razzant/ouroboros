@@ -360,17 +360,19 @@ def test_refused_restart_releases_intent_without_reopening_other_doors(runtime, 
 
 
 def test_main_preparation_is_not_permission_to_begin_after_intent(runtime, monkeypatch):
-    from supervisor import worker_chat_lane as chat
+    """The lane's admission and the Restart intake are one transaction (owner decision 1A): a Main turn
+    arriving once the intent is accepted is saved on the durable queue, never admitted to a carrier."""
+    from supervisor import message_bus, worker_chat_lane as chat
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
 
-    calls, notices = [], []
-    agent = SimpleNamespace(handle_task=lambda task: calls.append(task))
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: agent)
+    notices = []
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     monkeypatch.setattr(runtime.workers, "send_with_budget", lambda *a, **k: notices.append((a, k)))
-    admitted = chat._admit_chat_task(agent, 7, "prepared Main")
-    assert admitted is not None and not calls
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    spare = install_lane_spare(runtime.workers)
     accept(runtime)
-    assert chat._execute_chat_task(admitted) is False
-    assert not calls and admitted["registry"].get(admitted["task"]["id"]) is None
+    chat.handle_chat_direct(7, "prepared Main")
+    assert not lane_rows(runtime.workers) and spare.in_q == []
     assert any(row["text"] == "prepared Main" for row in runtime.queue.PENDING)
     assert "task_terminal_status" not in notices[-1][1].get("progress_meta", {})
 
@@ -411,11 +413,18 @@ def test_no_agent_intent_leaves_other_doors_with_their_existing_policies(runtime
     runtime.queue.RETURNS_NAMED["door"] = "managed_update"
     admitted = enqueue(runtime, "existing-update-policy")
     assert admitted in runtime.queue.PENDING
-    actor = SimpleNamespace()
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: actor)
-    turn = chat._admit_chat_task(actor, 7, "ordinary conversation during update")
-    assert turn is not None, "Update's own conversation gate remains the admission authority"
-    turn["registry"].unregister(turn["task"]["id"])
+    from supervisor import message_bus
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
+
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    spare = install_lane_spare(runtime.workers)
+    chat.handle_chat_direct(7, "ordinary conversation during update")
+    [row] = lane_rows(runtime.workers).values()
+    assert row["task"]["text"] == "ordinary conversation during update", \
+        "Update's own conversation gate remains the admission authority"
+    assert row["worker_id"] == spare.wid
+    runtime.workers.RUNNING.pop(row["task"]["id"])
 
 
 @pytest.mark.parametrize("fault", ["none", "closed", "save_failed"])
@@ -670,14 +679,16 @@ def test_update_lock_open_failure_releases_only_restart_before_effects(runtime, 
     runtime.workers.assign_tasks()
     assert [row["id"] for row in delivered] == [queued["id"]]
     assert queued not in runtime.queue.PENDING
-    model_calls = []
-    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: model_calls.append(True) or SimpleNamespace())
-    turn = worker_chat_lane._admit_chat_task(None, 7, "Main after failed Restart")
-    try:
-        assert turn is not None and model_calls == [True]
-    finally:
-        if turn is not None:
-            turn["registry"].unregister(turn["task"]["id"])
+    from supervisor import message_bus
+    from tests.conversation_carrier_support import install_lane_spare, lane_rows
+
+    monkeypatch.setattr(runtime.workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(send_chat_action=lambda *a, **k: None))
+    spare = install_lane_spare(runtime.workers)
+    worker_chat_lane.handle_chat_direct(7, "Main after failed Restart")
+    [row] = [meta for meta in lane_rows(runtime.workers).values() if meta["task"]["text"] == "Main after failed Restart"]
+    assert row["worker_id"] == spare.wid  # the released intent admits Main to the lane again
+    runtime.workers.RUNNING.pop(row["task"]["id"])
 
 
 @pytest.mark.parametrize("phase", ["checkout", "teardown"])

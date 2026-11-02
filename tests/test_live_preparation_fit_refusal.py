@@ -1,6 +1,5 @@
 """An early common-fitter overflow completes the admitted call's ordinary task lifecycle."""
 import json
-import queue
 from types import SimpleNamespace
 
 import pytest
@@ -23,18 +22,21 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     from ouroboros.tools.tool_context import ToolContext
     from ouroboros.utils import append_jsonl
     from supervisor import worker_chat_lane, workers
+    from tests.conversation_carrier_support import carry, lane_rows
 
     world = direct_call
-    events, finished, errors, hosts, post_tasks = queue.Queue(), [], [], [], []
+    events, finished, errors, hosts, post_tasks = world.bus, [], [], [], []
     world.turn.catalog_model = SimpleNamespace(facts=FACTS)
     world.turn.publish = finished.append
-    monkeypatch.setattr(workers, "get_event_q", lambda: events)
     monkeypatch.setattr(worker_chat_lane, "append_jsonl", append_jsonl)
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **kw: post_tasks.append(kw))
 
     def prepare(task):
-        # The agent creates the durable running row before its ordinary context build.
+        # The agent creates the durable running row before its ordinary context build; preparation
+        # has installed its ToolContext but has not produced a fit plan yet.
         write_task_result(tmp_path, task["id"], "running", chat_id=1, _is_direct_chat=True)
+        agent.tools._ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=task["id"],
+                                      current_chat_id=1, is_direct_chat=True, task_metadata=task.get("metadata"))
         try:
             build_minimum_view(tmp_path, monkeypatch, shape, task=task)
         except MinimumViewUnfit as exc:
@@ -43,17 +45,20 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
         hosts.append(task["id"])  # only a successful preparation may reach the live host
         return []
 
-    agent = SimpleNamespace(handle_task=prepare, env=SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path),
-                            memory=None, llm=None, tools=SimpleNamespace(_ctx=None))
-    # Metadata alone does not authorize the call-only error mapping.
-    admitted = worker_chat_lane._admit_chat_task(agent, 1, "Open the call.",
-        task_metadata={"execution_transport": world.turn.request}, realtime_turn=world.turn if call else None)
-    assert admitted is not None
-    # Preparation has installed its ToolContext but has not produced a fit plan yet.
-    agent.tools._ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=admitted["task"]["id"],
-                                  current_chat_id=1, is_direct_chat=True, task_metadata=admitted["task"].get("metadata"))
-    assert worker_chat_lane._execute_chat_task(admitted) is (shape == "fit")
-    task_id = admitted["task"]["id"]
+    agent = SimpleNamespace(handle_task=prepare, memory=None, llm=None, tools=SimpleNamespace(_ctx=None),
+                            env=SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path, drive_path=lambda name: tmp_path / name))
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: agent)
+    # Metadata alone does not authorize the call-only error mapping: a live call keeps this thread
+    # (``executor=inline_call``); a text turn is admitted to the lane and carried.
+    worker_chat_lane.handle_chat_direct(1, "Open the call.", task_metadata={"execution_transport": world.turn.request},
+                                        realtime_turn=world.turn if call else None)
+    [task_id] = list(lane_rows(workers))
+    if not call:
+        if shape == "fit":
+            carry(workers, world.spare, agent)
+        else:
+            with pytest.raises(MinimumViewUnfit):
+                carry(workers, world.spare, agent)
     assert not world.other.closed
     if shape == "fit":
         assert hosts == [task_id] and not world.hub.closed
@@ -65,9 +70,17 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     rows = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()] if (
         tmp_path / "logs" / "events.jsonl").exists() else []
     if not call:
-        assert world.notices[0][0][1] == f"⚠️ Error: MinimumViewUnfit: {errors[0]}"
-        assert stored["status"] == "running"  # existing generic-path behavior; outside this fix
-        assert not world.hub.closed and not finished and not emitted and not post_tasks
+        # The generic rail: the carrier's own exception terminal and its keyed final (a system frame the
+        # supervisor delivers), no call closure, no typed fit refusal.
+        assert stored["status"] == "failed" and stored["reason_code"] == "task_exception"
+        assert f"MinimumViewUnfit: {errors[0]}" in stored["result"]
+        assert not world.hub.closed and not finished and not post_tasks
+        [(notice_args, notice_kwargs)] = world.notices  # the keyed final, delivered as the supervisor would
+        assert notice_kwargs["system_type"] == "task_error" and notice_kwargs["task_id"] == task_id
+        [final] = [row for row in emitted if row["type"] == "send_message"]
+        assert final["role"] == "system" and final["system_type"] == "task_error" and final["task_id"] == task_id
+        assert final["progress_meta"]["task_terminal_status"] == "failed" and "MinimumViewUnfit" in final["text"]
+        assert not [row for row in emitted if row["type"] not in {"send_message", "direct_turn_phase", "direct_turn_bound"}]
         assert not any(row["type"] == "call.fit_refused" for row in rows)
         return
 
@@ -97,7 +110,6 @@ def test_preparation_overflow_is_typed_only_for_an_admitted_call(direct_call, tm
     assert stored["status"] == "failed" and stored["reason_code"] == "context_capacity"
     assert stored["outcome_axes"]["execution"]["reason_code"] == "context_capacity"
     assert len(post_tasks) == 1  # same post-task policy as a refusal in the live host
-    assert admitted["activity"].reply_handed_off
 
     app = Starlette(routes=[Route("/api/tasks/{task_id}", api_task_get)])
     app.state.drive_root = tmp_path

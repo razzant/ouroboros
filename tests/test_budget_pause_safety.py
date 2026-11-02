@@ -333,10 +333,15 @@ def test_failed_finite_lifetime_read_refuses_delegation_without_reset(tmp_path, 
     assert not result.refusal_code and result.seconds == 8
 
 
-def test_direct_actor_releases_local_fence_after_parking_same_id(tmp_path, monkeypatch):
+def test_a_lane_turns_exact_pause_is_parked_by_the_supervisor_from_its_row(tmp_path, monkeypatch):
+    """A direct turn is a conversation-lane RUNNING row: its carrier's body returns the pause event, the
+    supervisor parks the SAME id (RUNNING -> PENDING) exactly as for any carried task -- one path, so no
+    duplicate park -- and the owner's Resume continues it. (The in-process park and its failure path are
+    gone with the server-thread lane: the ordinary path is the only one.)"""
     from ouroboros import budget_pause
-    from supervisor import message_bus, worker_chat_lane
+    from supervisor import message_bus, worker_process
     from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
+    from tests.conversation_carrier_support import lane_row, park_lane_pause
 
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
@@ -348,59 +353,24 @@ def test_direct_actor_releases_local_fence_after_parking_same_id(tmp_path, monke
         budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED,
                                    scope="global", reason_text="budget")
     task = {"id": "direct", "type": "task", "chat_id": 7, "text": "work",
-            "project_id": "fixture", "_is_direct_chat": True}
-    events, released = [], []
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
+            "project_id": "fixture", "_is_direct_chat": True, "_attempt": 1}
+    slot = lane_row(workers, task)
+    events = []
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _evt: None))
     agent = SimpleNamespace(handle_task=lambda _task: [budget_pause.pause_event(task, raised.value.pause)])
     assert budget_pause.dispatch_fenced("direct")
     try:
-        assert worker_chat_lane._execute_chat_task({"task": task, "agent": agent, "chat_id": 7,
-                                                    "registry": SimpleNamespace(unregister=released.append)})
-        assert released == ["direct"] and not budget_pause.dispatch_fenced("direct")
+        worker_process.run_worker_task(agent, dict(workers.RUNNING["direct"]["task"]), wid=slot.wid,
+                                       out_q=SimpleNamespace(put=events.append), repo_dir=str(tmp_path),
+                                       drive_root=str(tmp_path))
+        [event] = events  # the carrier emits the pause once, addressed by its slot
+        assert event["type"] == "budget_pause" and event["_is_direct_chat"] is True and event["worker_id"] == slot.wid
+        park_lane_pause(event)
         assert workers.PENDING[0]["id"] == "direct" and workers.PENDING[0]["_budget_pause"]
-        assert not events  # inline park consumed the pause; no duplicate supervisor event
+        assert not workers.RUNNING and slot.busy_task_id is None
         assert queue.resume_budget_paused_task("direct")["ok"]
     finally:
         budget_pause.end_dispatch_fence("direct")
-
-
-def test_direct_actor_releases_local_fence_even_when_the_inline_park_fails(tmp_path, monkeypatch):
-    """Negative twin of the inline park: when the in-process park raises, the pause
-    event takes the ordinary supervisor path (never lost) AND the turn's local
-    dispatch fence is still released — the actor has unwound, and a fence left
-    closed in the supervisor process would refuse the resumed turn's sends."""
-    from ouroboros import budget_pause
-    from supervisor import events_budget, message_bus, worker_chat_lane
-    from tests._budget_pause_exact_helpers import _fast_hold, _quiet_external
-
-    queue, state, workers = _install_queue(tmp_path, monkeypatch)
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: 5.0)
-    ctx, limit = _loop_ctx(tmp_path, "direct-fb", direct=True)
-    ctx.current_chat_id = 7
-    _fast_hold(monkeypatch, budget_pause)
-    _quiet_external(monkeypatch, budget_pause)
-    with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
-        budget_pause.request_pause(limit, rail=budget_pause.RAIL_GLOBAL_EXHAUSTED,
-                                   scope="global", reason_text="budget")
-    task = {"id": "direct-fb", "type": "task", "chat_id": 7, "text": "work",
-            "project_id": "fixture", "_is_direct_chat": True}
-    events, released = [], []
-    monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=events.append))
-    monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(push_log=lambda _evt: None))
-    monkeypatch.setattr(events_budget, "install_exact_budget_pause",
-                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("queue lock unavailable")))
-    agent = SimpleNamespace(handle_task=lambda _task: [budget_pause.pause_event(task, raised.value.pause)])
-    assert budget_pause.dispatch_fenced("direct-fb")
-    try:
-        assert worker_chat_lane._execute_chat_task({"task": task, "agent": agent, "chat_id": 7,
-                                                    "registry": SimpleNamespace(unregister=released.append)})
-        assert released == ["direct-fb"] and not budget_pause.dispatch_fenced("direct-fb")
-        # The pause was not parked here, so its event reached the ordinary path intact.
-        assert [e["type"] for e in events] == ["budget_pause"] and events[0]["_is_direct_chat"] is True
-        assert workers.PENDING == []
-    finally:
-        budget_pause.end_dispatch_fence("direct-fb")
 
 
 def _bare_loop(tmp_path, monkeypatch):

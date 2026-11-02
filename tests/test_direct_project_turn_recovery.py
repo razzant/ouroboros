@@ -8,14 +8,16 @@ restored row carried ``_project_admission``. Queued Project work carries that
 basis from admission through snapshots; the direct lane bound the room but
 recorded no basis, so restore could only ask for one that never existed.
 
-These tests drive the real seams: the direct lane's admission, the agent's
-RUNNING writer, the loop's working checkpoint, the stop's queue publication,
-the next generation's queue init and restore, the owner's Resume and the
-assigner's Project-hold revalidation. A genuinely missing basis keeps its hold.
+These tests drive the real seams: the conversation lane's admission (the RUNNING
+row in the server), the carrier's first step (the Project binding, the basis the
+turn then carries) and the agent's RUNNING writer run by the real worker body
+here, the loop's working checkpoint, the stop's queue publication, the next
+generation's queue init and restore, the owner's Resume and the assigner's
+Project-hold revalidation. A genuinely missing basis keeps its hold.
 """
 from __future__ import annotations
 
-import threading
+import json
 import time
 from types import SimpleNamespace
 
@@ -29,55 +31,78 @@ PID = "room-2547"
 
 
 def _admit_project_turn(tmp_path, monkeypatch):
-    """The real direct lane admits one owner turn in a registered Project room."""
+    """The real door admits one owner turn in a registered Project room to the conversation lane: its
+    RUNNING row and the ready lane spare's queue; nothing of the body runs in the server."""
     from ouroboros.projects_registry import create_project
+    from ouroboros.task_carrier import LANE_CONVERSATION
     from supervisor import message_bus, workers
     from supervisor import worker_chat_lane as lane
+    from tests.conversation_carrier_support import install_lane_spare
 
     project = create_project(tmp_path, PID, name="Room 2547")
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: pytest.fail("the server constructed an agent"))
     monkeypatch.setattr(message_bus, "get_bridge", lambda: SimpleNamespace(
-        send_chat_action=lambda *a, **k: None, broadcast=lambda *a, **k: None))
+        send_chat_action=lambda *a, **k: None, broadcast=lambda *a, **k: None, push_log=lambda *a, **k: None))
     workers.open_repo_writer_admission()
-    actor = SimpleNamespace(handle_task=lambda task: [], _event_queue=_CaptureQueue())
+    spare = install_lane_spare(workers, 90)
     origin = {"chat_id": project["chat_id"], "client_message_id": "msg-2547",
               "ts": "2026-10-31T12:00:00+00:00", "text_sha256": "0" * 64}
-    admitted = lane._admit_chat_task(actor, project["chat_id"], "Continue the room's work", task_metadata={
+    lane.handle_chat_direct(project["chat_id"], "Continue the room's work", task_metadata={
         "project_id": PID, "client_message_id": "msg-2547", "origin_message_ref": origin,
         "origin_message_text": "Continue the room's work"})
-    assert admitted is not None, "the direct lane admitted the Project turn"
-    return project, admitted
+    [tid] = [task_id for task_id, meta in workers.RUNNING.items() if meta.get("lane") == LANE_CONVERSATION]
+    assert spare.busy_task_id == tid, "the lane admitted the Project turn to its carrier"
+    return project, SimpleNamespace(task_id=tid, spare=spare, workers=workers, task=None)
 
 
 def _run_until_saved(tmp_path, admitted):
-    """The turn starts (the agent's RUNNING writer) and its loop saves one working round."""
+    """The carrier runs the turn: its first step binds the room (the basis the turn then carries), the
+    agent's RUNNING writer records the start and its loop saves one working round. Returns the
+    carrier's task (the seed with the first step laid onto it)."""
     from ouroboros import working_checkpoint as wc
     from ouroboros.agent import OuroborosAgent
     from tests._budget_pause_exact_helpers import _loop_ctx
+    from tests.conversation_carrier_support import carry
 
-    task = admitted["task"]
-    owner = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path),
-                            _task_started_ts=time.time())
-    OuroborosAgent._persist_running_record(owner, task)
-    _ctx, limit = _loop_ctx(tmp_path, task["id"], direct=True, attempt=0)
-    wc.save_round(limit, "pre_effect")
-    return task
+    def body(task):
+        owner = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path),
+                                _task_started_ts=time.time())
+        OuroborosAgent._persist_running_record(owner, task)
+        _ctx, limit = _loop_ctx(tmp_path, task["id"], direct=True, attempt=0)
+        wc.save_round(limit, "pre_effect")
+        admitted.task = task
+        return []
+
+    if admitted.spare.in_q:  # the dispatched turn: the carrier's first step, then this body
+        carry(admitted.workers, admitted.spare, SimpleNamespace(handle_task=body, _event_queue=None),
+              out_q=_CaptureQueue())
+    else:  # a carrier that already took its first step continues with this body
+        body(admitted.task)
+    assert admitted.task is not None and admitted.task["id"] == admitted.task_id
+    return admitted.task
 
 
 def _publish_stop(tmp_path, admitted):
-    """The stopping process publishes its queue with the live direct turn on its roster."""
+    """The stopping process publishes its queue with the live lane turn on its RUNNING roster (the one
+    roster every focus has now); then the process ends with its carriers and its table."""
     from supervisor.queue_snapshot import persist_queue_snapshot
 
-    task, actor = admitted["task"], admitted["agent"]
-    actor.__dict__.update(_busy=True, _current_task_id=task["id"], _accepting_owner_messages=True,
-                          _owner_message_admission_lock=threading.Lock(), _current_chat_id=task["chat_id"],
-                          _current_task_metadata=dict(task.get("metadata") or {}),
-                          _current_task_text=task["text"], _task_started_ts=time.time())
     assert persist_queue_snapshot(reason="pre_restart_exit") is True
-    roster = (tmp_path / "state" / "direct_roots.json").read_text(encoding="utf-8")
-    assert task["id"] in roster, "the stop named the live direct turn"
-    admitted["registry"].unregister(task["id"])  # the process ends with its actors
+    snapshot = json.loads((tmp_path / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
+    assert [row["id"] for row in snapshot["running"]] == [admitted.task_id], "the stop named the live lane turn"
+    _process_ended(admitted)
+
+
+def _process_ended(admitted):
+    """The process ends with its lane carriers and its live rows; the fixture's project pool stands for
+    the next generation's."""
+    from supervisor.worker_pool_lifecycle import is_lane_slot
+
+    admitted.workers.RUNNING.clear()
+    for wid in [wid for wid, slot in admitted.workers.WORKERS.items() if is_lane_slot(slot)]:
+        admitted.workers.WORKERS.pop(wid)
 
 
 def _restore_next_generation(tmp_path, monkeypatch, queue):
@@ -125,7 +150,7 @@ def test_a_direct_project_turn_continues_after_stop_restore_and_resume(tmp_path,
         _publish_stop(tmp_path, admitted)
         fenced = _restore_next_generation(tmp_path, monkeypatch, queue)
     else:
-        admitted["registry"].unregister(tid)
+        _process_ended(admitted)
         fenced = _crash_without_projections(tmp_path, monkeypatch, queue)
 
     assert fenced == [] and not ci.has_active_intent(tmp_path, tid, strict=True)
@@ -208,18 +233,25 @@ def test_the_owners_re_placement_readmits_a_row_without_a_recorded_basis(tmp_pat
 
 @pytest.mark.serial
 def test_a_parked_direct_project_turn_keeps_its_basis_through_the_queue_and_a_stop(tmp_path, monkeypatch):
-    """The pause branch (31 Oct: Nova, Circles): the queue parks the turn's own record,
-    which a later pooled attempt and the next restore read; its basis rides unchanged."""
-    from supervisor.direct_pause import retain_direct_hold
+    """The pause branch (31 Oct: Nova, Circles): a lane turn's exact pause takes the ordinary pooled
+    path — its ``budget_pause`` frame parks the turn's own record, RUNNING -> PENDING — which a later
+    pooled attempt and the next restore read; its basis rides unchanged."""
+    from ouroboros import budget_pause
+    from tests._budget_pause_exact_helpers import _pause
+    from tests.conversation_carrier_support import park_lane_pause
 
     queue, workers = _install(tmp_path, monkeypatch)
     _project, admitted = _admit_project_turn(tmp_path, monkeypatch)
     task = _run_until_saved(tmp_path, admitted)
     basis = task["_project_admission"]
-    retain_direct_hold(task, unsaved=True)  # parks parkable_direct_task(task) and publishes the queue
-    admitted["registry"].unregister(task["id"])
+    # The carrier's loop writes the durable pause row and raises; its frame reaches the supervisor.
+    _ctx, _limit, pause = _pause(tmp_path, monkeypatch, task_id=task["id"])
+    budget_pause.end_dispatch_fence(task["id"])
+    park_lane_pause({**budget_pause.pause_event(task, pause), "worker_id": admitted.spare.wid})
+    assert task["id"] not in workers.RUNNING
     [parked] = [row for row in workers.PENDING if row["id"] == task["id"]]
     assert parked["_project_admission"] == basis
+    _process_ended(admitted)
 
     _restore_next_generation(tmp_path, monkeypatch, queue)
 

@@ -1,10 +1,13 @@
-"""A direct turn whose start phase stops advancing is journaled with its own thread's stack.
+"""A direct turn's admission is the server's part of it: a door whose phase stops advancing is journaled
+with its own thread's stack.
 
-Each case runs the real ``handle_chat_direct`` against a stand-in actor that passes the
-start facts the chat agent emits onto its turn queue (the ``context_building_*`` live logs,
-the Main call's ``main_llm_call_state`` start) and blocks where the case says. The liveness
-watchdog is the production one: it reads the turn's execution and writes journal rows only,
-so every case also proves no owner message, no ``task_checkpoint`` row and no cancel."""
+Each case runs the real ``handle_chat_direct`` on a thread of this process. The door (``accepted`` ->
+admitted) is a registered execution the production liveness watchdog reads; it writes journal rows
+only, so every case also proves no owner message, no ``task_checkpoint`` row and no cancel. The turn's
+BODY runs in a conversation-lane carrier (owner decision 1A), here driven synchronously by a stand-in
+actor that passes the start facts the chat agent emits onto its turn queue: they leave the carrier as
+``direct_turn_phase`` frames for the census row, and no thread of this process holds them -- a stalled
+body phase is no longer a stack the server's watchdog can see (the per-turn server thread is gone)."""
 from __future__ import annotations
 
 import queue
@@ -15,6 +18,7 @@ from types import SimpleNamespace
 
 from supervisor import workers
 from supervisor.active_activity import get_direct_activity_registry
+from tests.conversation_carrier_support import carry, isolate_lane_pool, lane_rows
 
 
 class _AheadClock:
@@ -68,9 +72,8 @@ def _lane(monkeypatch, tmp_path):
 
     bridge = SimpleNamespace(send_chat_action=lambda *a, **k: None, broadcast=lambda *a, **k: None,
                              send_message=send)
-    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    [out.spare] = isolate_lane_pool(monkeypatch, tmp_path, event_q=out.bus)  # the lane's one ready carrier
     monkeypatch.setattr(workers, "REPO_DIR", tmp_path / "repo")
-    monkeypatch.setattr(workers, "get_event_q", lambda: out.bus)
     monkeypatch.setattr(workers, "send_with_budget", send)
     monkeypatch.setattr(message_bus, "send_with_budget", send)
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
@@ -132,13 +135,19 @@ def _answers_at_once(actor: _Actor, task: dict) -> list:
 
 
 def _turn(monkeypatch, behave):
-    from ouroboros import agent as agent_module
-
+    """The door on its own thread (as routing runs it); the actor is the carrier's, run by ``_carry``."""
     actor = _Actor(behave)
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: actor)
     thread = threading.Thread(target=workers.handle_chat_direct, name="owner-turn-1", args=(1, "hello"),
                               kwargs={"task_metadata": {"client_message_id": "owner-msg-1"}}, daemon=True)
     return actor, thread
+
+
+def _carry(out, actor):
+    """The admitted turn's body, in its carrier (the real worker body, on this thread)."""
+    [row] = lane_rows(workers).values()
+    assert row["worker_id"] == out.spare.wid
+    carry(workers, out.spare, actor)
+    return row["task"]["id"]
 
 
 def _stall_rows(out) -> list:
@@ -178,7 +187,7 @@ def _journal_only(out, actor: _Actor) -> list:
     return bus
 
 
-def test_a_turn_held_before_admission_journals_its_accepted_phase_and_own_stack(monkeypatch, tmp_path):
+def test_a_door_held_before_admission_journals_its_accepted_phase_and_own_stack(monkeypatch, tmp_path):
     """Blocked before its heartbeat and before admission decides it: waiting on the update gate."""
     out = _lane(monkeypatch, tmp_path)
     actor, thread = _turn(monkeypatch, _answers_at_once)
@@ -201,77 +210,77 @@ def test_a_turn_held_before_admission_journals_its_accepted_phase_and_own_stack(
     assert onset["task_id"] == "" and onset["chat_id"] == 1 and onset["client_message_id"] == "owner-msg-1"
     assert onset["heartbeat_sec"] is None
     assert "workers.py:" in onset["stack"][-1] and onset["stack"][-1].endswith("in repo_writer_admission_closed")
-    assert end["type"] == "direct_turn_stall_end" and (end["phase"], end["then"]) == ("accepted", "admitted")
-    assert end["execution_id"] == onset["execution_id"] and end["task_id"] == actor.calls[0]
+    # The door's execution ends with the admission: from the row on, the turn is its carrier's.
+    assert end["type"] == "direct_turn_stall_end" and (end["phase"], end["then"]) == ("accepted", "ended")
+    assert end["execution_id"] == onset["execution_id"] and end["task_id"] == ""
     assert end["samples"] >= 3 and end["top_frames"][0]["frame"].endswith("workers.py:repo_writer_admission_closed")
     assert end["last_stack"][-1].endswith("in repo_writer_admission_closed")
+    _carry(out, actor)
     _journal_only(out, actor)
 
 
-def test_a_turn_blocked_before_its_heartbeat_journals_its_started_phase(monkeypatch, tmp_path):
+def test_a_disabled_watchdog_watches_no_turn(monkeypatch, tmp_path):
     out = _lane(monkeypatch, tmp_path)
-    blocked, release = threading.Event(), threading.Event()
-
-    def stalls_before_its_heartbeat(actor, task):
-        blocked.set()
-        assert release.wait(10)
-        return _answers_at_once(actor, task)
-
-    actor, thread = _turn(monkeypatch, stalls_before_its_heartbeat)
+    monkeypatch.setenv("OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC", "0")
+    actor, thread = _turn(monkeypatch, _answers_at_once)
+    gate = workers._repo_writer_gate_lock
+    gate.acquire()  # the door stands on the gate while the (disabled) watchdog would look
+    stop = None
     try:
         thread.start()
-        assert blocked.wait(10)
-        onset, end = _observe_stall(monkeypatch, out, release.set, thread)
+        assert _wait_until(lambda: _on_stack(thread, "repo_writer_admission_closed"))
+        stop = _start_watchdog(monkeypatch, _AheadClock(ahead=20.0))
+        assert not [t for t in threading.enumerate() if t.name == "supervisor-liveness-watchdog"]
     finally:
-        release.set()
-    assert onset["phase"] == "started" and onset["thread"] == "owner-turn-1"
-    assert onset["task_id"] == actor.calls[0] and onset["heartbeat_sec"] is None
-    assert any(frame.endswith("in stalls_before_its_heartbeat") for frame in onset["stack"])
-    assert (end["phase"], end["then"]) == ("started", "context_building") and end["samples"] >= 3
-    assert end["top_frames"][0]["frame"].endswith(":stalls_before_its_heartbeat")
+        gate.release()
+        thread.join(timeout=10)
+        if stop is not None:
+            _stop_watchdog(stop)
+    assert _stall_rows(out) == []
+    _carry(out, actor)
     _journal_only(out, actor)
 
 
-def test_a_turn_blocked_under_a_live_heartbeat_journals_its_phase_all_the_same(monkeypatch, tmp_path):
+def test_an_ordinary_turn_reaches_its_model_and_answer_once_and_journals_nothing(monkeypatch, tmp_path):
+    from supervisor import conversation_lane
+
     out = _lane(monkeypatch, tmp_path)
-    blocked, release = threading.Event(), threading.Event()
+    clock = _AheadClock(ahead=0.0)
     census: list = []
 
-    def stalls_while_its_heartbeat_beats(actor, task):
-        beating = threading.Event()
+    def answers(actor, task):
+        _pass(actor, task, "context_building_started", "context_building_finished", "main_llm_call_state")
+        # The carrier's start facts reach the census row as the frames the supervisor handles.
+        for frame in list(out.bus.queue):
+            if frame.get("type") == "direct_turn_phase":
+                conversation_lane.handle_direct_turn_phase(frame, SimpleNamespace(RUNNING=workers.RUNNING))
+        census.extend(conversation_lane.lane_turn_rows())
+        # The call's own time, before its dispatch is seen as well: however long it stands, it is no start stall.
+        clock.ahead = 60.0
+        seen = clock.ticks
+        assert _wait_until(lambda: clock.ticks >= seen + 3)
+        return _answer(task)
 
-        def beat() -> None:
-            while not beating.is_set():
-                actor._last_activity_ts = time.monotonic()
-                time.sleep(0.01)
-
-        actor._busy, actor._last_activity_ts = True, time.monotonic()
-        threading.Thread(target=beat, daemon=True).start()
-        try:
-            _pass(actor, task, "context_building_started")
-            census.extend(get_direct_activity_registry().snapshot())
-            blocked.set()
-            assert release.wait(10)
-            _pass(actor, task, "context_building_finished", "main_llm_call_state")
-            return _answer(task)
-        finally:
-            beating.set()
-            actor._busy = False
-
-    actor, thread = _turn(monkeypatch, stalls_while_its_heartbeat_beats)
+    actor, thread = _turn(monkeypatch, answers)
+    stop = _start_watchdog(monkeypatch, clock)
     try:
         thread.start()
-        assert blocked.wait(10)
-        onset, end = _observe_stall(monkeypatch, out, release.set, thread)
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        _carry(out, actor)
     finally:
-        release.set()
-    assert [row["turn_phase"] for row in census] == ["context_building"]
-    assert onset["phase"] == "context_building" and onset["thread"] == "owner-turn-1"
-    # The heartbeat is live (fresh against the 90 s deadline) and decides nothing.
-    assert onset["heartbeat_sec"] is not None and 0 <= onset["heartbeat_sec"] < 90
-    assert any(frame.endswith("in stalls_while_its_heartbeat_beats") for frame in onset["stack"])
-    assert (end["phase"], end["then"]) == ("context_building", "context_built") and end["samples"] >= 3
-    _journal_only(out, actor)
+        _stop_watchdog(stop)
+    assert _stall_rows(out) == []
+    assert [row["turn_phase"] for row in census] == ["requested"]
+    bus = _journal_only(out, actor)
+    assert len([item for item in bus if item.get("type") == "main_llm_call_state"]) == 1
+
+
+# Retired with the per-turn server thread (owner decision 1A): a body phase that stops advancing (before
+# its heartbeat, under a live heartbeat, across watchdog generations) stood on a thread of the server
+# this watchdog could sample; the body now runs in a conversation-lane carrier whose start facts reach
+# the census as ``direct_turn_phase`` frames (tests/test_conversation_lane_admission.py), so there is no
+# stack of this process to journal for it.
 
 
 def test_a_reused_thread_opens_a_new_episode_under_its_new_execution(monkeypatch):
@@ -293,61 +302,6 @@ def test_a_reused_thread_opens_a_new_episode_under_its_new_execution(monkeypatch
     assert rows[1]["then"] == "ended" and rows[2]["client_message_id"] == "m-2"
     watch.tick(second.marks[-1][1] + 21, {})
     assert len(rows) == 3  # an open episode only folds samples until it closes
-
-
-def test_a_disabled_watchdog_watches_no_turn(monkeypatch, tmp_path):
-    out = _lane(monkeypatch, tmp_path)
-    monkeypatch.setenv("OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC", "0")
-    blocked, release = threading.Event(), threading.Event()
-
-    def stalls(actor, task):
-        blocked.set()
-        assert release.wait(10)
-        return _answers_at_once(actor, task)
-
-    actor, thread = _turn(monkeypatch, stalls)
-    stop = None
-    try:
-        thread.start()
-        assert blocked.wait(10)
-        stop = _start_watchdog(monkeypatch, _AheadClock(ahead=20.0))
-        assert not [t for t in threading.enumerate() if t.name == "supervisor-liveness-watchdog"]
-        release.set()
-        thread.join(timeout=10)
-    finally:
-        release.set()
-        if stop is not None:
-            _stop_watchdog(stop)
-    assert _stall_rows(out) == []
-    _journal_only(out, actor)
-
-
-def test_an_ordinary_turn_reaches_its_model_and_answer_once_and_journals_nothing(monkeypatch, tmp_path):
-    out = _lane(monkeypatch, tmp_path)
-    clock = _AheadClock(ahead=0.0)
-    census: list = []
-
-    def answers(actor, task):
-        _pass(actor, task, "context_building_started", "context_building_finished", "main_llm_call_state")
-        census.extend(get_direct_activity_registry().snapshot())
-        # The call's own time, before its dispatch is seen as well: however long it stands, it is no start stall.
-        clock.ahead = 60.0
-        seen = clock.ticks
-        assert _wait_until(lambda: clock.ticks >= seen + 3)
-        return _answer(task)
-
-    actor, thread = _turn(monkeypatch, answers)
-    stop = _start_watchdog(monkeypatch, clock)
-    try:
-        thread.start()
-        thread.join(timeout=10)
-        assert not thread.is_alive()
-    finally:
-        _stop_watchdog(stop)
-    assert _stall_rows(out) == []
-    assert [row["turn_phase"] for row in census] == ["requested"]
-    bus = _journal_only(out, actor)
-    assert len([item for item in bus if item.get("type") == "main_llm_call_state"]) == 1
 
 
 def test_a_turn_ending_in_its_stalled_phase_stood_until_its_end_and_a_cut_stack_says_so(monkeypatch):
@@ -384,41 +338,3 @@ def test_a_turn_ending_in_its_stalled_phase_stood_until_its_end_and_a_cut_stack_
         thread.join(timeout=10)
     assert rows[-1]["type"] == "direct_turn_stall" and "stack_truncated" not in rows[-1]
     registry.end_execution(shallow[0])
-
-
-def test_each_watchdog_generation_closes_the_episodes_it_opened(monkeypatch, tmp_path):
-    """The supervisor loop's next generation starts its own watchdog while the turn's thread runs on."""
-    out = _lane(monkeypatch, tmp_path)
-    blocked, release = threading.Event(), threading.Event()
-
-    def stalls(actor, task):
-        blocked.set()
-        assert release.wait(10)
-        return _answers_at_once(actor, task)
-
-    actor, thread = _turn(monkeypatch, stalls)
-    clock, stop = _AheadClock(ahead=20.0), None
-    try:
-        thread.start()
-        assert blocked.wait(10)
-        stop = _start_watchdog(monkeypatch, clock)
-        assert _wait_until(lambda: _stall_rows(out))
-        _stop_watchdog(stop)
-        assert [(row["type"], row.get("then")) for row in _stall_rows(out)] == [
-            ("direct_turn_stall", None), ("direct_turn_stall_end", "unwatched")]
-        stop = _start_watchdog(monkeypatch, clock)
-        assert _wait_until(lambda: len(_stall_rows(out)) == 3)
-        clock.ahead = 0.0
-        release.set()
-        thread.join(timeout=10)
-        assert _wait_until(lambda: len(_stall_rows(out)) == 4)
-    finally:
-        release.set()
-        if stop is not None:
-            _stop_watchdog(stop)
-    rows = _stall_rows(out)
-    assert [(row["type"], row["phase"], row.get("then")) for row in rows] == [
-        ("direct_turn_stall", "started", None), ("direct_turn_stall_end", "started", "unwatched"),
-        ("direct_turn_stall", "started", None), ("direct_turn_stall_end", "started", "context_building")]
-    assert len({row["execution_id"] for row in rows}) == 1 and rows[2]["stood_sec"] >= rows[1]["stood_sec"]
-    _journal_only(out, actor)
