@@ -646,7 +646,9 @@ def conversation_exception_terminal(agent: Any, task: Dict[str, Any], exc: BaseE
         return
     if quiet:  # a wake's failure is the clock's and the supervisor's to report, never a chat final
         return
-    progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed", **origin}
+    progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
+    if "origin_message_ref" in correlation:  # an explicit key: the outbound contract scan vouches for the set
+        progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
     if metadata.get("initiator"):
         progress_meta["initiator"] = str(metadata["initiator"])
     try:  # the owner reads the failure once, keyed to the turn: the carrier's frame, the supervisor's send
