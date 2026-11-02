@@ -152,7 +152,8 @@ def admit_turn(task: Dict[str, Any], *, chat_id: int, client_message_id: str = "
         "reply_expected": bool(reply_expected), "fresh_identity": bool(task.get("_fresh_identity")),
     }
     pool.RUNNING[task_id] = meta
-    queue.persist_queue_snapshot(reason="conversation_turn_admitted")
+    # The admission barrier, not a mark: the row is on disk before any carrier can hold the turn.
+    queue.publish_queue_snapshot(reason="conversation_turn_admitted")
     slot = None if hold_carrier else ready_idle_carrier()
     if slot is not None:
         hand_to_carrier(meta, slot)
