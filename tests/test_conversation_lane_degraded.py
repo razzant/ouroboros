@@ -42,6 +42,7 @@ def degraded(pool, monkeypatch):
                                                                  broadcast=lambda m: None, push_log=lambda *a, **k: None))
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: sent.append((a, k)))
     monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", id(workers.WORKERS))
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", [""])  # a fresh generation records no refusal
     actor = Actor()
     monkeypatch.setattr(workers, "_get_chat_agent", lambda: actor)
     monkeypatch.setattr(inline_carrier, "_INLINE", type(inline_carrier._INLINE)(maxlen=50))

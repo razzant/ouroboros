@@ -276,6 +276,9 @@ def test_the_reaper_respawns_no_carrier_in_a_marker_window(pool, monkeypatch):
     starts the replacement once the window ends. The degraded executor covers the lane's turns meanwhile."""
     from supervisor import queue as q, task_reaper
 
+    # The lane's spawn-refusal fact is module state: this test's refusals stay its own (the real lane never
+    # reaches its spawn inside a window: the gate is closed there and it returns before spawning).
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", [""])
     dead = add_slot(1, lane=LANE_CONVERSATION)
     dead.proc.alive, dead.reaping = False, True
     monkeypatch.setattr(worker_chat_lane, "marker_window_closed", lambda: True)
