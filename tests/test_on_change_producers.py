@@ -20,8 +20,6 @@ import queue as stdqueue
 import time
 from types import SimpleNamespace
 
-import pytest
-
 from ouroboros import delegate_progress, delegate_supervision
 from tests._delegated_transport_shared import _delegating_ctx
 

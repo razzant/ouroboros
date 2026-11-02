@@ -12,6 +12,7 @@ import logging
 import pathlib
 import time
 from typing import Any, Dict
+from ouroboros.cost_projection import LIVE_ROOT_COSTS
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.outcomes import normalize_outcome_axes
 from supervisor.events_chat_delivery import _bound_project_chat_id
@@ -20,7 +21,6 @@ log = logging.getLogger(__name__)
 
 
 from supervisor.log_addressing import address_ctx_event as _address_ctx
-from ouroboros.cost_projection import LIVE_ROOT_COSTS
 
 
 def _heartbeat_source_time(evt: Dict[str, Any], meta: Dict[str, Any]) -> float | None:

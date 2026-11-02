@@ -71,13 +71,13 @@ class _Reads:
 
 
 def test_root_heartbeats_read_no_store_and_the_flush_reads_only_a_changed_root(data_root, monkeypatch):
-    from ouroboros import delegate_custody as custody, usage_store
+    from ouroboros import delegate_custody as custody
+    from ouroboros import usage_store
+    from ouroboros.projects_registry import project_chat_for_task_tree
     from ouroboros.server_liveness import flush_budget_projection
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from supervisor.events_budget import _handle_llm_usage
     from supervisor.events_worker_reports import _handle_task_heartbeat
-
-    from ouroboros.projects_registry import project_chat_for_task_tree
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
 
     usage_store.migrate_from_journal(data_root)
     money._settle(data_root, cost=1.25, cost_final=True, task_id="root", root_task_id="root")
