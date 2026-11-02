@@ -895,7 +895,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # task_drives/*/session_scratch_owners and task_trees/*.
 # 438 -> 439: ``memory/owner_mailbox/*.intake.json``, a carrier-run author's durable intake fact
 # (``conversation_lease.open_author_intake``; its section-6 row).
-EXPECTED_SCAN_PATHS = 439
+# 439 -> 440: ``logs/store_sites.jsonl``, every store site of a busy minute beside its ``supervisor_load`` row.
+EXPECTED_SCAN_PATHS = 440
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
