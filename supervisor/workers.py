@@ -2282,7 +2282,6 @@ from supervisor.worker_assignment import (  # noqa: E402, F401 -- intentional pu
 )
 from supervisor.worker_chat_lane import (  # noqa: E402, F401 -- intentional public re-exports
     _broadcast_task_named,
-    _run_chat_task,
     auto_resume_after_restart,
     handle_chat_direct,
     handle_wake_direct,

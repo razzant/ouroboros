@@ -305,6 +305,7 @@ from supervisor.queue_transitions import (  # noqa: E402, F401 -- intentional pu
 )
 from supervisor.worker_owner_wait import handle_owner_wait  # noqa: E402
 from supervisor.worker_pool_lifecycle import handle_worker_quiescent  # noqa: E402
+from supervisor.conversation_lane import handle_direct_turn_phase, handle_task_named  # noqa: E402
 
 from supervisor.events_mind_controls import handle_mind_task_control
 
@@ -313,6 +314,9 @@ EVENT_HANDLERS = {
     "external_wait_lease": _handle_external_wait_lease,
     "owner_wait": handle_owner_wait,
     "worker_quiescent": handle_worker_quiescent,
+    # A conversation carrier's frames: its start phases for the census, its coined title.
+    "direct_turn_phase": handle_direct_turn_phase,
+    "task_named": handle_task_named,
     **_CEH,
     **_MWH,
     **_CDE,

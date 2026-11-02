@@ -322,13 +322,14 @@ def _state_snapshot(request: Request) -> Dict[str, Any]:
 
 
 def _direct_turns_snapshot_safe(*, availability=None) -> list:
+    """The inline executors' registered actors plus the conversation lane's RUNNING turns (one shape)."""
     try:
         from supervisor.active_activity import get_direct_activity_registry
+        from supervisor.conversation_lane import lane_turn_rows
 
         registry = get_direct_activity_registry()
-        if availability is None:
-            return registry.snapshot()
-        return registry.snapshot(availability=availability)
+        rows = registry.snapshot() if availability is None else registry.snapshot(availability=availability)
+        return rows + lane_turn_rows()
     except Exception:
         if availability is not None:
             availability["complete"] = False
@@ -709,6 +710,8 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
         from ouroboros.review_operation import task_has_live_review_operation
         for task_id, row, started_at in running_rows:
+            if task_id in census_ids:
+                continue  # a conversation turn the lane carries is already its own direct row
             if task_id:
                 root = _is_root(task_id, row)
                 if root:

@@ -19,7 +19,7 @@ from ouroboros.owner_wait import set_owner_wait
 from ouroboros.store import acquisition_budget
 from supervisor.queue import _queue_lock
 from supervisor.worker_pool_lifecycle import (
-    _serialized_worker_lifecycle, is_project_slot, project_slots, request_worker_quiescence,
+    _serialized_worker_lifecycle, is_project_slot, is_worker_slot, project_slots, request_worker_quiescence,
     retire_or_replace_worker, retire_quiescent_worker, retire_worker, worker_ready,
 )
 
@@ -104,7 +104,8 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
         worker = ctx.WORKERS.get(wid)
         if (not wait_id or not isinstance(meta, dict) or worker is None
                 or meta.get("worker_id") != wid or meta.get("attempt") != attempt
-                or worker.busy_task_id != task_id or worker.proc.pid != pid
+                or worker.busy_task_id != task_id
+                or (worker.proc.pid != pid and is_worker_slot(worker))  # an inline carrier has no pid of its own
                 or getattr(worker, "reaping", False)):
             return
         current = meta.get("owner_wait") or {}

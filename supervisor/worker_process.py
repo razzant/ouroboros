@@ -180,8 +180,12 @@ def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root):
     parent, child = socket.socketpair()
     try:
         parent.setblocking(False)
+        # The transport policy is the spawner's explicit fact: only a FORKED child must avoid OS
+        # proxy lookup (the fork-safety rule); a spawned or forkserver child keeps the server's.
+        start_method = getattr(ctx, "get_start_method", None)
+        no_proxy = str(start_method() if callable(start_method) else "") == "fork"
         proc = ctx.Process(target=worker_main, args=(wid, in_q, out_q, str(repo_dir), str(drive_root),
-                                                   _current_custody_session_id(), child))
+                                                   _current_custody_session_id(), child, no_proxy))
         proc.daemon = True
         proc.start()
     except BaseException:
@@ -328,14 +332,17 @@ def _configure_worker_logging() -> None:
 
 
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
-                custody_session_id: str = "", stop_socket=None) -> None:
+                custody_session_id: str = "", stop_socket=None, transport_no_proxy: Any = None) -> None:
     import os as _os
-    # Mark this process as a worker BEFORE importing the agent/LLM stack so the
-    # central network-transport policy disables system proxy resolution
-    # (trust_env=False) for every HTTP client created here. This is the
-    # fork-safety guard (no _scproxy/SCDynamicStoreCopyProxies on the child side
-    # of fork) and a clean default for spawned workers too.
+    # Mark this process as a worker BEFORE importing the agent/LLM stack (a process fact:
+    # ownership, lifelines, custody), and state the spawner's transport policy beside it
+    # (``utils.transport_no_proxy``): a forked child avoids OS proxy resolution (the
+    # fork-safety guard: no _scproxy/SCDynamicStoreCopyProxies on the child side of fork);
+    # a spawned carrier keeps the server's own policy. A spawner that said nothing keeps the
+    # legacy worker default.
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
+    if transport_no_proxy is not None:
+        _os.environ["OUROBOROS_TRANSPORT_NO_PROXY"] = "1" if transport_no_proxy else "0"
     write_bytecode_to_prefix_only(drive_root)  # before the agent's import graph
     # Pin the executing source before this process loads the agent, and so before
     # worker_ready lets an assisted update land another generation (preflight_receipts).
@@ -408,6 +415,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                            log_label="worker log")
 
         set_log_sink(_worker_log_sink)
+    except Exception:
+        pass
+    try:
+        from supervisor.worker_chat_lane import bind_worker_bus
+
+        bind_worker_bus(out_q)  # a carrier's title broadcasts travel as frames of this bus
     except Exception:
         pass
     import sys as _sys
@@ -532,59 +545,99 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                                "retained_rows": _retained_rows_after_drain()})
                 continue
             probe = None
-            task_drive_root = str(task.get("drive_root") or drive_root)
             if extensions_owned:
                 _adopt_published_extensions(drive_root)
-            runner = agent
-            if task_drive_root != str(drive_root):
-                runner = make_agent(
-                    repo_dir=repo_dir,
-                    drive_root=task_drive_root,
-                    event_queue=out_q,
-                    budget_drive_root=str(task.get("budget_drive_root") or drive_root),
-                )
-                runner.owner_wait_callback = agent.owner_wait_callback
-            # The task's own endpoint (the direct lane's TurnEventQueue shape): every
-            # telemetry frame this task emits — live, or from a callback that
-            # outlives it — carries its chat and lineage by value, so the
-            # supervisor can handle it after task_done without a RUNNING row.
-            task_queue = task_event_queue(out_q, task)
-            pool_queue = getattr(runner, "_event_queue", None)
-            runner._event_queue = task_queue
-            try:
-                events = runner.handle_task(task)
-            except Exception as task_error:
-                _record_task_exception(runner, task, task_error, drive_root)
-                raise
-            finally:
-                runner._event_queue = pool_queue
-            for e in events:
-                e2 = dict(e)
-                e2["worker_id"] = wid
-                if (
-                    e2.get("type") == "task_done"
-                    and e2.get("task_id") == task.get("id")
-                    and not task.get("_is_direct_chat")
-                ):
-                    # Earlier frames (including the answer) keep their order.
-                    # Do not release this slot until its first save attempt ends.
-                    try:
-                        from ouroboros.headless import prepare_terminal_task_files
-
-                        prepared = prepare_terminal_task_files(_drive, task)
-                        if prepared.get("error"):
-                            log.warning("Terminal file preparation for %s: %s", task.get("id"), prepared["error"])
-                    except Exception:
-                        # File publication must not enter the model's crash-retry rail.
-                        log.exception("Terminal file preparation failed for %s", task.get("id"))
-                    e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
-                task_queue.put(stamp_finalization_enqueue(e2))
-            _drain_dialogue_retry()
-            if task_drive_root != str(drive_root):
-                _release_drive_stores(task_drive_root)
+            run_worker_task(agent, task, wid=wid, out_q=out_q, repo_dir=repo_dir, drive_root=drive_root)
         except Exception as _e:
             _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
             return
+
+
+def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: str, drive_root: str,
+                    on_failure: Any = None) -> None:
+    """One task's body, in whichever process carries it: a conversation turn's first step
+    (``worker_chat_lane.prepare_conversation_task``), the agent's ``handle_task`` and the returned
+    frames. The inline executors run this same body on a thread of the server process;
+    ``on_failure(runner, error)`` may claim a failure (a live call's own close and refusal) by
+    returning True before the ordinary exception terminal is recorded."""
+    from ouroboros import store_timing
+    from ouroboros.agent import make_agent
+
+    _drive = pathlib.Path(drive_root)
+    task_drive_root = str(task.get("drive_root") or drive_root)
+    runner = agent
+    if task_drive_root != str(drive_root):
+        runner = make_agent(
+            repo_dir=repo_dir,
+            drive_root=task_drive_root,
+            event_queue=out_q,
+            budget_drive_root=str(task.get("budget_drive_root") or drive_root),
+        )
+        runner.owner_wait_callback = agent.owner_wait_callback
+    # A conversation turn's execution facts: its receipt, its endpoint hooks (the Stop
+    # marker, the namer, the phase observer) and this thread's store meter.
+    carrier_turn = None
+    if task.get("_conversation_prepare"):
+        from supervisor.worker_chat_lane import CarrierTurn
+
+        carrier_turn = CarrierTurn(task, task_drive_root, out_q)
+    # The task's own endpoint (the direct lane's TurnEventQueue shape): every
+    # telemetry frame this task emits — live, or from a callback that
+    # outlives it — carries its chat and lineage by value, so the
+    # supervisor can handle it after task_done without a RUNNING row.
+    task_queue = task_event_queue(out_q, task, **(carrier_turn.hooks() if carrier_turn else {}))
+    pool_queue = getattr(runner, "_event_queue", None)
+    runner._event_queue = task_queue
+    try:
+        with store_timing.metered() as meter:
+            if carrier_turn is not None:
+                carrier_turn.execution.meter = meter
+            events = _run_task_body(runner, task, task_drive_root, task_queue)
+    except Exception as task_error:
+        if on_failure is not None and on_failure(runner, task_error):
+            return
+        _record_task_exception(runner, task, task_error, drive_root)
+        raise
+    finally:
+        runner._event_queue = pool_queue
+        if carrier_turn is not None:
+            carrier_turn.ended()
+    for e in events:
+        e2 = dict(e)
+        e2["worker_id"] = wid
+        if (
+            e2.get("type") == "task_done"
+            and e2.get("task_id") == task.get("id")
+            and not task.get("_is_direct_chat")
+        ):
+            # Earlier frames (including the answer) keep their order.
+            # Do not release this slot until its first save attempt ends.
+            try:
+                from ouroboros.headless import prepare_terminal_task_files
+
+                prepared = prepare_terminal_task_files(_drive, task)
+                if prepared.get("error"):
+                    log.warning("Terminal file preparation for %s: %s", task.get("id"), prepared["error"])
+            except Exception:
+                # File publication must not enter the model's crash-retry rail.
+                log.exception("Terminal file preparation failed for %s", task.get("id"))
+            e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
+        task_queue.put(stamp_finalization_enqueue(e2))
+    _drain_dialogue_retry()
+    if task_drive_root != str(drive_root):
+        _release_drive_stores(task_drive_root)
+
+
+def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: Any) -> list:
+    """The carrier's first step for a conversation turn, then the agent's loop; a refusal is the turn's own terminal."""
+    if task.get("_conversation_prepare"):
+        from supervisor.worker_chat_lane import ConversationRefusal, prepare_conversation_task, refusal_terminal
+
+        try:
+            prepare_conversation_task(runner, task, task_drive_root, broadcast=lambda msg: task_queue.put(dict(msg)))
+        except ConversationRefusal as refusal:
+            return refusal_terminal(runner, task, refusal, task_queue)
+    return runner.handle_task(task)
 
 
 def _drain_dialogue_retry() -> None:

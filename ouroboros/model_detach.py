@@ -47,11 +47,19 @@ def preserve_owner_question(ctx: Any, messages: list) -> None:
 
 
 def arm_detach(ctx: Any, reason: str) -> dict:
+    """Arm the handoff: the same work and id continue on the project pool after this tool batch.
+
+    The fact is the carrier's lane, never the process: a turn carried by the conversation
+    lane (a worker or an inline executor) holds the owner's foreground; a pooled attempt
+    already runs in the background. Detaching sets ``detached_at/by`` and releases the
+    foreground reply through the cold-sleep continuation owner (``model_sleep``).
+    """
     from ouroboros.model_sleep import MODE_COLD, ColdSleepBlocked, request_sleep
-    from ouroboros.utils import in_worker_process, utc_now_iso
+    from ouroboros.task_carrier import LANE_PROJECT
+    from ouroboros.utils import utc_now_iso
 
     owner = (getattr(ctx, "task_metadata", None) or {}).get("_execution_owner") or {}
-    if in_worker_process() or owner.get("kind") == "pooled":
+    if owner.get("kind") == "pooled" or owner.get("lane") == LANE_PROJECT:
         return {"ok": True, "status": "already_in_background", "task_id": ctx.task_id,
                 "note": "This work already runs on a pooled executor; nothing changed."}
     if owner_question_pending(ctx):

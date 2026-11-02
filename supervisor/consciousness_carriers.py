@@ -60,11 +60,11 @@ def pooled_terminal_ok(result: dict):
     (``interrupted`` stays with its restore owner, an inline carrier with its own callback).
     An early ``completed`` keeps its sticky lifecycle beside the fault's ``infra_failed`` axis."""
     from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes
-    from ouroboros.task_carrier import execution_kind
+    from ouroboros.task_carrier import inline_execution
     from ouroboros.task_status import SETTLED_STATUSES
 
     status = result.get("status")
-    if status not in SETTLED_STATUSES or execution_kind(result) != "pooled":
+    if status not in SETTLED_STATUSES or inline_execution(result):  # an inline carrier calls the clock back itself
         return None
     return status == "completed" and normalize_outcome_axes(result)["execution"]["status"] != EXECUTION_INFRA_FAILED
 
