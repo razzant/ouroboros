@@ -251,3 +251,21 @@ def test_a_dead_carriers_intake_accepts_nothing_and_the_rows_end_closes_it(tmp_p
                                  SimpleNamespace(RUNNING={}, WORKERS={}, DRIVE_ROOT=root))
     assert not author_intake_accepting(root, "author-live", "key")
     assert not (root / "memory" / "owner_mailbox" / "author-live.intake.json").exists()
+
+
+def test_the_intake_writers_liveness_is_the_platform_layers_probe(tmp_path, monkeypatch):
+    """Review C3: the writer's liveness is ``platform_layer.pid_is_alive`` (OpenProcess on Windows), never a raw
+    ``os.kill(pid, 0)``, which on Windows delivers CTRL_C_EVENT to the pid's console group and proves nothing."""
+    import os
+
+    from ouroboros import platform_layer
+    from ouroboros.conversation_lease import author_intake_accepting, open_author_intake
+
+    (tmp_path / "memory" / "owner_mailbox").mkdir(parents=True)
+    open_author_intake(tmp_path, "author", "key")  # written by this (live) process
+    probed = []
+    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda pid: probed.append(pid) or False)
+    assert not author_intake_accepting(tmp_path, "author", "key")
+    assert probed == [os.getpid()]
+    monkeypatch.setattr(platform_layer, "pid_is_alive", lambda pid: True)
+    assert author_intake_accepting(tmp_path, "author", "key")
