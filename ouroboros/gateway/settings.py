@@ -27,6 +27,7 @@ from ouroboros.gateway._helpers import json_error, json_exception, request_drive
 from ouroboros.gateway.owner_settings import (
     CommitBoundary,
     SettingsDocumentBusy,
+    SettingsDocumentUnreadable,
     SettingsLockUnavailable,
     _CONTEXT_MODE_KEYS,
     _owner_audit,
@@ -1408,4 +1409,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             return unsaved_error(str(e), 503, code="settings_locked")
         if isinstance(e, SettingsDocumentBusy):
             return unsaved_error(str(e), 503, code="settings_busy")
+        if isinstance(e, SettingsDocumentUnreadable):
+            return unsaved_error(str(e), 409, code="settings_unreadable")
         return unsaved_error(str(e), 400)

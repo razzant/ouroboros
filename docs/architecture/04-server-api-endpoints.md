@@ -144,6 +144,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/tasks/{task_id}/resume` | |
 | POST | `/api/call/open` | admits a live call as an ordinary room turn when Calls (beta) is on (§13 Live Conversation) |
 | POST | `/api/decisions` | |
+| POST | `/api/decisions/secret` | |
 | GET | `/api/cards/{card_id}` | a living card's current body and presses |
 | GET | `/api/cards/{card_id}/app` | app HTML as `text/plain`, `nosniff`, `no-store` |
 | POST | `/api/cards/{card_id}/pin` | keep a component card on Widgets |

@@ -959,6 +959,8 @@ class LocalChatBridge:
         materials = list(block.get("materials") or [])
         if block.get("presence_contact"):
             lifecycle["presence_contact"] = block["presence_contact"]
+        if isinstance(block.get("secret_request"), dict):  # metadata only: its form is the app's own
+            lifecycle["secret_request"] = dict(block["secret_request"])
         ts = utc_now_iso()
         msg = {
             "type": "quiz",
@@ -1022,13 +1024,16 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         quiz_transport = self.chat_transport(chat_id)
+        from ouroboros.secret_requests import transport_hint
+
         publish_event(CHAT_QUIZ, {
             "chat_id": int(chat_id or 0),
             "transport": quiz_transport,
             "wait_for_answer": bool(wait_for_answer),
             "quiz_id": qid,
             "task_id": str(task_id or ""),
-            "question": payload["question"],
+            # A secret request reaches a transport as where to enter it, never as a card it could answer.
+            "question": transport_hint(lifecycle["secret_request"]) if "secret_request" in lifecycle else payload["question"],
             "options": payload["options"],
             "stake": payload["stake"],
             "assumption": payload["assumption"],
@@ -1059,7 +1064,8 @@ class LocalChatBridge:
                     # The complete pointer row (ChatOutbound mirrors): present only when known.
                     for key in ("question", "options", "option_details", "stake", "assumption", "recommended_index",
                                 "answered_index", "comment", "wait_for_answer", "wait_ended_at",
-                                "owner_wait_resume_reason", "host_facts", "materials", "closed_reason", "question_delivery"):
+                                "owner_wait_resume_reason", "host_facts", "materials", "closed_reason", "question_delivery",
+                                "secret_request", "secret_outcome", "secret_save"):
                         if key in pointer:
                             frame[key] = pointer[key]
                     frame.update(projection_fields(stored))
@@ -1085,6 +1091,7 @@ class LocalChatBridge:
         closed_request_id: Optional[str] = None,
         closed_by_task_id: Optional[str] = None,
         question_delivery: Optional[Dict[str, str]] = None,
+        secret_outcome: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Broadcast a quiz lifecycle update to already-rendered cards.
 
@@ -1115,6 +1122,8 @@ class LocalChatBridge:
             msg["closed_by_task_id"] = str(closed_by_task_id)
         if question_delivery:
             msg["question_delivery"] = dict(question_delivery)
+        if isinstance(secret_outcome, dict) and secret_outcome:
+            msg["secret_outcome"] = dict(secret_outcome)  # metadata only: no value exists here
         if answered_index is not None:
             msg["answered_index"] = int(answered_index)
         if str(comment or ""):

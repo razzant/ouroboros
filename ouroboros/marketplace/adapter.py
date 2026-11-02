@@ -90,6 +90,7 @@ def _manifest_frontmatter_dict(manifest: SkillManifest) -> Dict[str, Any]:
         "runtime": manifest.runtime,
         "timeout_sec": manifest.timeout_sec,
         "env_from_settings": list(manifest.env_from_settings),
+        **({"secret_fields": dict(manifest.secret_fields)} if manifest.secret_fields else {}),
         "scripts": [dict(s) for s in manifest.scripts],
         "entry": manifest.entry,
         "permissions": list(manifest.permissions),

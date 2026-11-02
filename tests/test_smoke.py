@@ -100,7 +100,7 @@ def test_tool_set_matches(registry):
 
 EXPECTED_TOOLS = [
     "continue_in_background", "pause_task", "resume_task", "continue_task",
-    "browse_page", "browser_action",
+    "browse_page", "browser_action", "showSecretHitl",
     "preflight_review", "review_change", "review_status",
     "compact_context", "set_tool_timeout", "request_restart", "prepare_self_change",
     "inspect_harness", "maintain_harness", "inspect_subagent",
