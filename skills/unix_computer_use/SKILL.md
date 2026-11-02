@@ -325,7 +325,8 @@ Backend matrix (honest limitations):
   combos the base key is tapped while modifiers are held (`cmd+s` = hold cmd,
   tap s). On a local or SSH Mac and on X11 a letter's case under a modifier adds
   no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
-  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`) and
+  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
+  UTF-8 and told so whatever locale the process inherited, as over SSH) and
   pastes with Command and the key that gives `v` under Command in the active
   keyboard layout, with exactly the Command flag (an `osascript` JavaScript
   program, the same over SSH, posting under the Accessibility grant cliclick

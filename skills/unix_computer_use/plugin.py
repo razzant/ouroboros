@@ -43,7 +43,7 @@ from typing import Any
 from .place import PlaceMixin
 from .remote import (  # noqa: F401 - re-exported names the tests and the key/hold_key remote branches use
     _MAX_REMOTE_SHOT_BYTES, _OSWORLD_PKGS_PREFIX, _PYAUTOGUI_BASE_ALIASES, _PYAUTOGUI_MODS, PASTE_CHORD_ARGV,
-    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys,
+    RemoteBackends, _osworld_result_ok, cliclick_point, cliclick_keys, PBCOPY_LOCALE,
 )
 
 _TIMEOUT_SEC = 10
@@ -128,8 +128,10 @@ def _helper_python() -> str:
 
 
 def _pipe(cmd: list[str], text: str, *, timeout: int = _TIMEOUT_SEC) -> tuple[int, str, str]:
-    """Run a command with ``text`` on its stdin (the clipboard writer)."""
-    proc = subprocess.run(cmd, input=text, text=True, capture_output=True, timeout=timeout)
+    """Run the clipboard writer with ``text`` on its stdin as UTF-8 bytes, told so by LC_ALL as over SSH: pbcopy decodes
+    with the locale it inherits, so a start with LC_ALL=C or a legacy locale would store other characters (#2589)."""
+    proc = subprocess.run(cmd, input=text, encoding="utf-8", capture_output=True, timeout=timeout,
+                          env={**os.environ, "LC_ALL": PBCOPY_LOCALE})
     return int(proc.returncode), proc.stdout or "", proc.stderr or ""
 
 

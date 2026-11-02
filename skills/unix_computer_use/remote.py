@@ -175,6 +175,9 @@ _MARKER_LINE = re.compile(r"^__(FRONT_BEFORE|FRONT_AFTER|TARGET_LOST|FRONT_UNREA
 # over SSH its source through the Mac's own osascript (nothing installed there; no Automation grant).
 _PASTE_CHORD_JS = pathlib.Path(__file__).with_name("paste_chord.js")
 PASTE_CHORD_ARGV = ("osascript", "-l", "JavaScript", str(_PASTE_CHORD_JS))
+# pbcopy decodes stdin with the locale it inherits (setlocale + nl_langinfo, the C encoding without one), so the text
+# always goes as UTF-8 bytes and pbcopy is told so with LC_ALL, locally (plugin._pipe) and over SSH alike.
+PBCOPY_LOCALE = "en_US.UTF-8"
 
 
 def ssh_paste_command(text: str) -> str:
@@ -183,7 +186,7 @@ def ssh_paste_command(text: str) -> str:
     session's locale, which ssh forwards only when both ends agree to (measured: with none, "Привет" was pasted as
     "–ü—Ä–∏–≤–µ—Ç" under an ok receipt)."""
     chord = shlex.join(["osascript", "-l", "JavaScript", "-e", _PASTE_CHORD_JS.read_text(encoding="utf-8")])
-    return f"printf %s {shlex.quote(text)} | LC_ALL=en_US.UTF-8 pbcopy && echo __CLIPBOARD_WRITTEN__ && {chord}"
+    return f"printf %s {shlex.quote(text)} | LC_ALL={PBCOPY_LOCALE} pbcopy && echo __CLIPBOARD_WRITTEN__ && {chord}"
 
 
 def cliclick_point(x: int, y: int) -> str:

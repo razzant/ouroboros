@@ -147,3 +147,50 @@ def test_ssh_paste_hands_the_exact_text_and_chord_program_through_a_real_shell(t
     assert (out_dir / "clipboard").read_bytes() == text.encode("utf-8") and (out_dir / "locale").read_text() == "en_US.UTF-8"
     argv = (out_dir / "argv").read_bytes().split(b"\0")[:-1]
     assert [a.decode() for a in argv] == ["-l", "JavaScript", "-e", CHORD.read_text(encoding="utf-8")], "the program, unchanged"
+
+
+LOCALE = Path("/usr/bin/locale")
+PASTED = "Привет, мир — “q” ✓ 🐍 'x' $HOME"
+# A fresh interpreter runs the plugin's clipboard writer (plugin._pipe, what type_text via=paste calls) and prints its
+# own text encoding, the charmap a pbcopy it started would have inherited untold (`locale charmap` makes pbcopy's own
+# setlocale(LC_ALL, "") + nl_langinfo(CODESET)) and the writer's exit code. The text is an ASCII literal in the program.
+WRITER = ("import importlib.util, locale, subprocess, sys\n"
+          "spec = importlib.util.spec_from_file_location('ucu_writer', sys.argv[1] + '/plugin.py',"
+          " submodule_search_locations=[sys.argv[1]])\n"
+          "module = importlib.util.module_from_spec(spec)\n"
+          "sys.modules[spec.name] = module\n"
+          "spec.loader.exec_module(module)\n"
+          "untold = subprocess.run(['/usr/bin/locale', 'charmap'], capture_output=True, text=True).stdout.strip()\n"
+          f"print(locale.getpreferredencoding(False), untold, module._pipe(['pbcopy'], {ascii(PASTED)})[0])\n")
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not LOCALE.exists(),
+                    reason="pbcopy decodes with the macOS C library's locale")
+def test_the_local_clipboard_write_is_utf8_and_tells_pbcopy_so_whatever_locale_the_process_inherited(tmp_path):
+    """pbcopy decodes stdin with the locale it inherits, the C encoding without one. A Finder or launchd start has none
+    and was already safe (PEP 538 coerces LC_CTYPE=C.UTF-8 for Python and its children), but a shell or headless start
+    can hand down LC_ALL=C, no locale with coercion off (both read UTF-8 as US-ASCII) or a legacy locale (Python then
+    writes KOI8-R, which has no ✓). The writer runs in a fresh interpreter per start against a recorder pbcopy: what
+    it read and the charmap it would decode with. No pasteboard is touched."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "pbcopy").write_text('#!/bin/sh\n/usr/bin/locale charmap > "$OUT/charmap"\n'
+                                    'exec cat > "$OUT/clipboard"\n', encoding="utf-8", newline="\n")
+    (bin_dir / "pbcopy").chmod(0o755)
+    starts = {"finder": [], "lc_all_c": ["LC_ALL=C", "LANG=C"], "coercion_off": ["PYTHONCOERCECLOCALE=0"],
+              "koi8_r": ["LANG=ru_RU.KOI8-R"]}
+    untold = {}
+    for name, start in starts.items():
+        out = tmp_path / name
+        out.mkdir()
+        # `env -u` makes each start's locale exactly the named one: tests/conftest.py fills a child's missing LC_ALL
+        # and LANG with C (the hermetic test environment), which would turn every start into lc_all_c.
+        done = run_in_group(["/usr/bin/env", "-u", "LC_ALL", "-u", "LANG", *start, sys.executable, "-S", "-B", "-c",
+                             WRITER, str(CHORD.parent)], timeout=60,
+                            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "OUT": str(out)})
+        assert done.returncode == 0, (name, done.stdout, done.stderr)
+        encoding, untold[name], rc = done.stdout.split()
+        assert rc == "0" and (out / "charmap").read_text().strip() == "UTF-8", (name, done.stdout)
+        assert (out / "clipboard").read_bytes() == PASTED.encode("utf-8"), (name, encoding)
+    # The controls: what a pbcopy that was not told would have decoded with. Only the Finder/launchd start was safe.
+    assert untold == {"finder": "UTF-8", "lc_all_c": "US-ASCII", "coercion_off": "US-ASCII", "koi8_r": "KOI8-R"}, untold

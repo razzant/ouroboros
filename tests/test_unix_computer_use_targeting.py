@@ -140,6 +140,7 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""
             return subprocess.CompletedProcess(argv, rc, out, err)
         if argv[0] == "pbcopy":
             state["clipboard"] = k.get("input")
+            state["clipboard_contract"] = (k.get("encoding"), (k.get("env") or {}).get("LC_ALL"))
             return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[:3] == ["osascript", "-l", "JavaScript"]:
             state["chords"].append(argv)
@@ -403,6 +404,7 @@ def test_type_text_via_paste_writes_the_clipboard_after_the_target_is_verified(t
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
     # #2589: the chord is the Command-plane key of the active layout, posted by the chord program, never cliclick t:v.
     assert state["clipboard"].startswith("Привет") and inputs(state) == [] and state["chords"] == [list(module.PASTE_CHORD_ARGV)]
+    assert state["clipboard_contract"] == ("utf-8", "en_US.UTF-8"), "UTF-8 bytes, pbcopy told so whatever it inherited"
     assert out["cmd"] == list(module.PASTE_CHORD_ARGV) and out["cmd"][-1].endswith("paste_chord.js"), "the receipt names what ran"
     assert out["helper_stderr"] == CHORD_POSTED.strip() and out["delivered_to"]["app"] == "Keynote"
     activate_at = next(i for i, argv in enumerate(state["calls"]) if any(p.endswith("macos_native.py") for p in argv))
