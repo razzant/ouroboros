@@ -342,3 +342,30 @@ def test_a_damaged_cancel_intent_projection_holds_only_what_it_cannot_read(lane)
     assert quarantined in _dispatched_once_carriers_are_ready()  # an unreadable projection holds nothing
     trail = (queue.DRIVE_ROOT / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
     assert '"op": "active_intents"' in trail and '"op": "active_intents_row"' in trail  # both disclosed
+
+
+def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_same_id(lane, monkeypatch):
+    """Review N7: custody keeps the running row through kill and persist and pops it at its publication. A resend
+    admitted under the same id meanwhile (another carrier's row) is another attempt's, as worker health and the
+    reaper read a row: custody settles its own attempt, leaves that row in RUNNING and emits no terminal for it."""
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import write_task_result
+    from supervisor import queue, task_lifecycle, worker_pool_lifecycle
+    from tests.conversation_carrier_support import lane_row
+
+    task = {"id": "turn-n7", "type": "task", "chat_id": 1, "text": "hello", "_is_direct_chat": True}
+    old = lane_row(workers, dict(task), wid=97)
+    write_task_result(queue.DRIVE_ROOT, "turn-n7", "running", chat_id=1, _is_direct_chat=True)
+    emitted, resend = [], {}
+
+    def kill(pid, **_kw):  # the old carrier dies; a resend is admitted under the same id before the publication
+        old.proc.is_alive = lambda: False
+        lane_row(workers, dict(task), wid=98)
+        resend["row"] = workers.RUNNING["turn-n7"]
+
+    monkeypatch.setattr(worker_pool_lifecycle, "kill_worker_tree", kill)
+    monkeypatch.setattr(queue, "_emit_cancel_task_done", lambda _t, tid, **_k: emitted.append(tid))
+    request_cancel(queue.DRIVE_ROOT, "turn-n7", reason="owner stop", source="owner", requested_by="owner")
+    task_lifecycle.cancel_task_custody("turn-n7")
+    assert workers.RUNNING.get("turn-n7") is resend["row"] and resend["row"]["worker_id"] == 98
+    assert emitted == []  # no terminal of the old attempt for the row the resend owns
