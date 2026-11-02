@@ -176,10 +176,9 @@ def _owner_wait_fact(ctx: Any) -> str:
     message was accepted and how much later this request comes, so far, with the slowest phase; once
     the first dispatch was observed, when it went out and on which basis. Elapsed only, never a
     dispatch that has not happened; "" for a turn nobody awaits or a process that serves none."""
-    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.active_activity import turn_execution
 
-    entry = get_direct_activity_registry().get(str(getattr(ctx, "task_id", "") or ""))
-    execution = getattr(entry, "execution", None)
+    execution = turn_execution(str(getattr(ctx, "task_id", "") or ""))  # inline (registry) or carried
     if execution is None or not execution.owner_turn:
         return ""
     receipt = execution.receipt()

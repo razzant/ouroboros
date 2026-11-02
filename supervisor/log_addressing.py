@@ -286,6 +286,13 @@ class TurnEventQueue:
     def task_id(self) -> str:
         return self._task_id
 
+    def end_turn(self) -> None:
+        """The task's body ended in this process: drop its hooks (the namer's closure holds the whole task,
+        the frame observer its execution). The small immutable late-event address stays, so a late row of
+        this task is still stamped with its own chat and lineage."""
+        self._on_first_work = None
+        self._on_frame = None
+
     def stamp_payload(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Stamp one of this task's own task-scoped payloads in place (lineage, chat, lane fact)."""
         for key, value in self._lineage.items():

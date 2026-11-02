@@ -703,6 +703,9 @@ class CarrierTurn:
             self.execution.entered_at = admitted_at
             self.execution.marks = [("accepted", then), ("admitted", then)]
         self.execution.advance("started")
+        from supervisor.active_activity import carry_turn_execution
+
+        carry_turn_execution(self.task_id, self.execution)  # the turn's own wait fact reads it in this carrier
         self.quiet = bool(facts.get("quiet"))
         self.initiator = str(metadata.get("initiator") or "")
         self._namer = None
@@ -728,8 +731,10 @@ class CarrierTurn:
 
     def ended(self) -> None:
         """The turn left this carrier: an owner turn that never dispatched records its receipt here."""
-        from supervisor.active_activity import record_direct_turn
+        from supervisor.active_activity import carry_turn_execution, record_direct_turn
 
+        carry_turn_execution(self.task_id, None)
+        self._namer = None  # the namer's closure holds the whole task: nothing of the turn's input stays reachable
         self.execution.ended_at = time.monotonic()
         if self.execution.owner_turn and self.execution.phase != "dispatched":
             try:

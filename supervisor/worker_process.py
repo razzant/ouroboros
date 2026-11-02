@@ -593,47 +593,51 @@ def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: s
     pool_queue = getattr(runner, "_event_queue", None)
     runner._event_queue = task_queue
     try:
-        with store_timing.metered() as meter:
+        try:
+            with store_timing.metered() as meter:
+                if carrier_turn is not None:
+                    carrier_turn.execution.meter = meter
+                events = _run_task_body(runner, task, task_drive_root, task_queue, repo_dir)
+        except Exception as task_error:
+            if on_failure is not None and on_failure(runner, task_error):
+                return
+            if carrier_turn is not None and not task.get("_presence_run"):
+                # A conversation turn's failure is its own terminal, with the owner's keyed final (the old
+                # lane's words); a saved pause or unreadable evidence is left to recovery, as below.
+                from supervisor.worker_chat_lane import conversation_exception_terminal
+
+                conversation_exception_terminal(runner, task, task_error, task_queue, drive_root,
+                                                quiet=carrier_turn.quiet)
+            else:
+                _record_task_exception(runner, task, task_error, drive_root)
+            raise
+        finally:
+            runner._event_queue = pool_queue
             if carrier_turn is not None:
-                carrier_turn.execution.meter = meter
-            events = _run_task_body(runner, task, task_drive_root, task_queue, repo_dir)
-    except Exception as task_error:
-        if on_failure is not None and on_failure(runner, task_error):
-            return
-        if carrier_turn is not None and not task.get("_presence_run"):
-            # A conversation turn's failure is its own terminal, with the owner's keyed final (the old
-            # lane's words); a saved pause or unreadable evidence is left to recovery, as below.
-            from supervisor.worker_chat_lane import conversation_exception_terminal
+                carrier_turn.ended()
+        for e in events:
+            e2 = dict(e)
+            e2["worker_id"] = wid
+            if (
+                e2.get("type") == "task_done"
+                and e2.get("task_id") == task.get("id")
+                and not task.get("_is_direct_chat")
+            ):
+                # Earlier frames (including the answer) keep their order.
+                # Do not release this slot until its first save attempt ends.
+                try:
+                    from ouroboros.headless import prepare_terminal_task_files
 
-            conversation_exception_terminal(runner, task, task_error, task_queue, drive_root, quiet=carrier_turn.quiet)
-        else:
-            _record_task_exception(runner, task, task_error, drive_root)
-        raise
+                    prepared = prepare_terminal_task_files(_drive, task)
+                    if prepared.get("error"):
+                        log.warning("Terminal file preparation for %s: %s", task.get("id"), prepared["error"])
+                except Exception:
+                    # File publication must not enter the model's crash-retry rail.
+                    log.exception("Terminal file preparation failed for %s", task.get("id"))
+                e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
+            task_queue.put(stamp_finalization_enqueue(e2))
     finally:
-        runner._event_queue = pool_queue
-        if carrier_turn is not None:
-            carrier_turn.ended()
-    for e in events:
-        e2 = dict(e)
-        e2["worker_id"] = wid
-        if (
-            e2.get("type") == "task_done"
-            and e2.get("task_id") == task.get("id")
-            and not task.get("_is_direct_chat")
-        ):
-            # Earlier frames (including the answer) keep their order.
-            # Do not release this slot until its first save attempt ends.
-            try:
-                from ouroboros.headless import prepare_terminal_task_files
-
-                prepared = prepare_terminal_task_files(_drive, task)
-                if prepared.get("error"):
-                    log.warning("Terminal file preparation for %s: %s", task.get("id"), prepared["error"])
-            except Exception:
-                # File publication must not enter the model's crash-retry rail.
-                log.exception("Terminal file preparation failed for %s", task.get("id"))
-            e2["_files_prepared_attempt"] = int(task.get("_attempt") or 1)
-        task_queue.put(stamp_finalization_enqueue(e2))
+        task_queue.end_turn()  # after its returned events are stamped: late rows keep the address, the hooks go
     _drain_dialogue_retry()
     if task_drive_root != str(drive_root):
         _release_drive_stores(task_drive_root)
