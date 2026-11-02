@@ -896,7 +896,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 438 -> 444 (#2586): ``state/session_scratch`` and its ``*/*.json`` notes of open session scratch, and the
 # copy of a finished task's scratch record assembled in ``state/custody_staging/*/`` (three spellings) and
 # renamed whole into ``state/custody_trash/*``.
-EXPECTED_SCAN_PATHS = 444
+# 444 -> 445 (#2566): the read-only census opens the existing ``authors-census.lock`` by its literal
+# name (it may not create it through the gate's helper); the ``presence_turn_gate/*.lock`` row covers it.
+EXPECTED_SCAN_PATHS = 445
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
