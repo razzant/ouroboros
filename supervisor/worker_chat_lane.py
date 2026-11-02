@@ -792,13 +792,20 @@ def _announce_turn_start(admitted: Dict[str, Any]) -> None:
 
 
 def _defer_chat_for_restart(task: dict, chat_id: int, metadata: Optional[dict]) -> None:
-    """Use the ordinary durable queue, carrying the same input and attachment sources."""
+    """Use the ordinary durable queue, carrying the same input and attachment sources.
+
+    The seed carries the turn's preparation obligation (``PREPARE_KEY``, kept by the saved queue across the
+    Restart): the worker that runs it after Restart takes the conversation's first step (attachments, Project
+    binding, contract) as a carrier would, never the server."""
     from supervisor import queue
+    from supervisor.active_activity import reply_expected
     from supervisor.conversation_lane import PREPARE_KEY
 
     if task.get("image_base64"):
         _store_inline_image(task, (task.pop("image_base64"), task.get("image_mime") or "image/jpeg"))
-    task.pop(PREPARE_KEY, None)
+    task[PREPARE_KEY] = {"admitted_at": time.time(), "quiet": False, "census": {},
+                         "reply_expected": reply_expected({"metadata": metadata or {}}),
+                         "client_message_id": str((metadata or {}).get("client_message_id") or "")}
     task["drive_root"] = str(_pool().DRIVE_ROOT)
     task["root_task_id"] = str(task["id"])
     admitted = queue.enqueue_with_admission_receipt(task, durable=True)
