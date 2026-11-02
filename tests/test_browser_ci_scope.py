@@ -62,11 +62,9 @@ def test_one_complete_browser_lane_serves_manual_runs_and_release_tags():
     ci, ci_triggers = _workflow("ci.yml")
     caller = ci["jobs"]["ui-smoke"]
     assert caller["uses"] == "./.github/workflows/ui-browser.yml"
-    assert "github.event_name == 'pull_request'" in caller["if"]
-    assert "github.event_name == 'workflow_dispatch'" in caller["if"]
-    assert "startsWith(github.ref, 'refs/tags/v')" in caller["if"]
-    # Dormant PR predicates do not admit PR events; only manual/tag triggers remain.
-    assert "push" not in caller["if"] and "schedule" not in caller["if"]
+    assert caller["if"] == "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
+    # Only manual/tag triggers remain; the run's shard plan is published first.
+    assert caller["needs"] == "shard-plan"
     assert "schedule" not in ci_triggers  # owner, 2026-10-05: no nightly run nobody reads
 
     assert list(push_triggers) == ["workflow_dispatch"]
@@ -76,6 +74,23 @@ def test_one_complete_browser_lane_serves_manual_runs_and_release_tags():
     # Both callers hand the lane nothing: it has no input to select a part of it with.
     assert "with" not in caller and "with" not in push["jobs"]["ui-smoke"]
     assert triggers["workflow_call"] is None
+
+
+def test_every_caller_grants_what_the_shared_lane_requests():
+    """A called workflow cannot raise its caller's token: the manual wrapper once granted only
+    `contents: read`, so its full lane could not read the run's shard plan."""
+    order = ["none", "read", "write"]
+    shared, _ = _workflow("ui-browser.yml")
+    requested = {}
+    for job in shared["jobs"].values():
+        for scope, level in (job.get("permissions") or {}).items():
+            requested[scope] = max(requested.get(scope, "none"), level, key=order.index)
+    assert requested.get("actions") == "read", requested  # the lane reads the run's shard plan
+    for name in ("ci.yml", "ui-browser-push.yml"):
+        granted = _workflow(name)[0]["jobs"]["ui-smoke"].get("permissions") or {}
+        short = {scope: level for scope, level in requested.items()
+                 if order.index(granted.get(scope, "none")) < order.index(level)}
+        assert short == {}, (name, granted)
 
 
 def test_requested_browser_runs_cannot_replace_each_other():
@@ -472,7 +487,12 @@ def test_real_shards_partition_the_lane_and_reconcile_against_the_unsharded_mani
     assert proven.returncode == 0, proven.stdout + proven.stderr
     assert "UI_BROWSER_RECONCILE complete" in proven.stdout and "GAP" not in summary
 
+    # A session killed before its export left the lane its journal recorded at collection: without a
+    # passing retry verdict (scripts/ci_retry.py) that is a red session, never a proof.
     (tmp_path / "shards" / "ui-shard-2" / "host" / "results.json").unlink()
+    killed, summary = _reconcile(tmp_path, manifest, tmp_path / "shards", 3)
+    assert killed.returncode == 1 and "GAP shard 2/3: its session ended before its final export" in killed.stdout
+    (tmp_path / "shards" / "ui-shard-2" / "host" / "events.jsonl").unlink()
     silent, summary = _reconcile(tmp_path, manifest, tmp_path / "shards", 3)
     assert silent.returncode == 1 and "shard 2/3: no proof" in silent.stdout
     for node in slices[1]:  # The nodes no shard proved are named, the proven ones are not.

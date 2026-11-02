@@ -325,6 +325,8 @@ def test_both_server_sweeps_preserve_legacy_daemon_records(tmp_path, monkeypatch
     calls, threads = [], []
     monkeypatch.setattr(server_maintenance, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server_maintenance, "_installed_skill_names", lambda: None)
+    # Not this fixture's duty: the real child's own thread would outlive the test (it has its own tests).
+    monkeypatch.setattr(server_maintenance, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(server_maintenance, "_reconcile_delegated_runs", lambda *a, **kw: None)
     monkeypatch.setattr(server_maintenance, "_cursor_refresh_settled_terminals", lambda *a, **kw: None)
     monkeypatch.setattr(server_maintenance, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])

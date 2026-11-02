@@ -705,7 +705,8 @@ def test_a_terminal_drain_yields_to_the_owners_stop_between_reads(tmp_path, monk
     assert records[0]["source"]["ref"], "bytes read before Stop remain retained"
     assert len([r for r in daemon.requests if r[1].endswith("/events")]) == 1
     (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "panic_stop.flag").write_text("panic")
+    from tests._work_stop_helpers import live_restart
+    live_restart(tmp_path, monkeypatch)
     flaky = _gateway(Daemon([[_harness(1, "message", text="hi")]]))
     flaky._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(
         lambda request: httpx.Response(503, json={"code": "busy"}) if request.url.path.endswith("/events")
@@ -715,5 +716,5 @@ def test_a_terminal_drain_yields_to_the_owners_stop_between_reads(tmp_path, monk
     before = len(daemon.requests)
     other = SimpleNamespace(task_id="other", task_attempt=0, drive_root=tmp_path, task_metadata={})
     record, = _records(other, flaky, 1, drain=30)
-    assert len(daemon.requests) == before, "Panic admits no catalog or stream request"
-    assert record["gaps"][0]["reason"] == "owner_panic"
+    assert len(daemon.requests) == before, "Restart admits no catalog or stream request"
+    assert record["gaps"][0]["reason"] == "owner_owner_restart"

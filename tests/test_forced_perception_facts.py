@@ -43,7 +43,7 @@ def _held(ctx, *, content="answer"):
 
     trace = {"reasoning_notes": []}
     messages: list = []
-    held = loop_mod._enforce_swarm_actions(content, messages, SimpleNamespace(_ctx=ctx), trace, lambda _m: None)
+    held = loop_mod._enforce_plan_gate(content, messages, SimpleNamespace(_ctx=ctx), trace, lambda _m: None)
     return held, messages, trace
 
 
@@ -65,7 +65,7 @@ def test_an_open_advisory_gate_costs_no_extra_round_on_first_sight(tmp_path, mon
     ctx.task_metadata = {"force_plan": True}
     held, messages, trace = _held(ctx)
     assert held is False and messages == []
-    assert trace["force_plan_decision"]["allow"] is True
+    assert trace["plan_gate"]["allow"] is True
     assert not hasattr(ctx, "_plan_gate_told_identity")
 
 
@@ -124,8 +124,8 @@ def _round_limit_prompt(tmp_path, monkeypatch, decision, *, deferred_child):
     captured = []
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda _llm, messages, *_a, **_k: (
         captured.append([dict(m) for m in messages]) or {"content": "Forced answer."}, 0.0))
-    monkeypatch.setattr(loop, "_force_plan_decision", lambda *_a, **_k: dict(decision))
-    monkeypatch.setattr(loop, "_force_plan_disclosure",
+    monkeypatch.setattr(loop, "_plan_gate_decision", lambda *_a, **_k: dict(decision))
+    monkeypatch.setattr(loop, "_plan_gate_disclosure",
                         lambda *_a, **_k: OWNER_NOTICE if decision.get("open_objections") else "")
     text, usage, _returned = loop._handle_round_limit(limit_ctx)
     assert text == "Forced answer." and len(captured) == 1

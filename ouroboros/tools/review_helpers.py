@@ -14,7 +14,6 @@ import logging
 import os
 import pathlib
 import subprocess
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -28,7 +27,7 @@ from ouroboros.tools.review_checklist import (  # noqa: F401 -- intentional publ
     load_checklist_layers,
     load_checklist_section,
 )
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact as _truncate_review_artifact, utc_now_iso  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
+from ouroboros.utils import truncate_review_artifact as _truncate_review_artifact, utc_now_iso
 
 if TYPE_CHECKING:
     # Avoid runtime registry import; this module stays tool-module independent.
@@ -90,22 +89,17 @@ def calibrated_input_token_limit(
         # intact. Zero is absence of evidence, not a zero-token provider limit.
         return int(budget_cap)
     from ouroboros.capability_evidence import resolve_review_token_density
+    from ouroboros.reviewer_window import reviewer_input_limit
 
     density, _ = resolve_review_token_density(
         drive_root if drive_root is not None else review_drive_root(None), model_id
     )
+    usable = reviewer_input_limit(context_window, output_reserve)
     return min(
         budget_cap,
-        int((context_window - output_reserve) / max(1.0, density)),
-        context_window - output_reserve - tokenizer_margin,
+        int(usable / max(1.0, density)),
+        usable - tokenizer_margin,
     )
-
-
-SKILL_HOST_CONTEXT_FILES = (
-    ("docs/CREATING_SKILLS.md", "markdown"),
-    ("ouroboros/contracts/plugin_api.py", "python"),
-    ("ouroboros/extension_ui_validation.py", "python"),
-)
 
 
 def review_drive_root(ctx: Any) -> pathlib.Path:
@@ -141,6 +135,32 @@ def emit_review_event(ctx: Any, event: dict) -> None:
         logger.debug("emit_review_event failed (non-critical)", exc_info=True)
 
 
+def _publish_server_usage(ctx: Any, event: dict) -> bool:
+    """Hand a queue-less SERVER carrier's usage row to the attached server bus when it is emitted.
+
+    Only a carrier declaring ``server_usage_bus`` (the Skills-page and install review contexts) with no
+    task queue takes this path; the supervisor's ordinary ``llm_usage`` handler then writes and streams
+    the row. Its wave may outlive the request, so nothing waits to drain it. A missing inner ``chat_id``
+    takes the carrier's own address (0, the panel; never Main). Best effort like every telemetry row:
+    without an attached bus (another process, shutdown) the row stays undelivered on ``pending_events``
+    and the ledger alone keeps the money.
+    """
+    if getattr(ctx, "event_queue", None) is not None or not getattr(ctx, "server_usage_bus", False):
+        return False
+    try:
+        from supervisor.workers import get_event_q
+
+        bus = get_event_q(create=False)  # the established bus only, never a child-local one nobody drains
+        payload = {"ts": utc_now_iso(), **dict(event)}
+        if payload.get("chat_id") is None:
+            payload["chat_id"] = int(getattr(ctx, "current_chat_id", 0) or 0)
+        bus.put(payload)
+        return True
+    except Exception:
+        logger.debug("review usage kept on pending_events: no attached server bus", exc_info=True)
+        return False
+
+
 def emit_review_usage(
     ctx: Any,
     *,
@@ -162,9 +182,12 @@ def emit_review_usage(
     """
     try:
         from ouroboros.event_usage import event_token_counts
+        from ouroboros._usage_response import _normalized_input_token_usage
         from ouroboros.pricing import infer_api_key_type, infer_model_category, infer_provider_from_model
 
         usage_data = dict(usage or {})
+        split = _normalized_input_token_usage(usage_data.get("input_token_usage"))
+        session = isinstance(usage_data.get("claudexor"), dict) and usage_data["claudexor"].get("run_id")
         prompt_cache_ttl = str(usage_data.get("prompt_cache_ttl") or "")
         ledger_attempt_ids = [str(value) for value in (usage_data.get("ledger_attempt_ids") or []) if value]
         routed_provider = provider or str(usage_data.get("provider") or "") or infer_provider_from_model(model)
@@ -193,11 +216,12 @@ def emit_review_usage(
             "task_id": getattr(ctx, "task_id", "") or "",
             "root_task_id": root_task_id,
             "parent_task_id": parent_task_id,
-            "model": model,
+            "model": "" if session and split is not None else model,
             "api_key_type": infer_api_key_type(model, routed_provider),
             "model_category": infer_model_category(model),
             "usage": {
                 **event_token_counts(usage_data),
+                **({"input_token_usage": split} if split is not None else {}),
                 "prompt_cache_ttl": prompt_cache_ttl,
                 "cost": cost,
                 "cost_known": cost is not None,
@@ -218,7 +242,8 @@ def emit_review_usage(
             event["prompt_chars"] = int(prompt_chars)
         if extra:
             event.update(dict(extra))
-        emit_review_event(ctx, event)
+        if not _publish_server_usage(ctx, event):
+            emit_review_event(ctx, event)
     except Exception:
         logger.debug("emit_review_usage failed (non-critical)", exc_info=True)
 
@@ -362,22 +387,6 @@ def cached_prompt_blocks(stable_text: str, dynamic_text: str = "", *, ttl: str |
     return blocks
 
 
-def build_skill_host_context(repo_dir: Path | None = None) -> str:
-    """Return compact host-side skill/widget contract context for reviewers."""
-    root = Path(repo_dir) if repo_dir is not None else REPO_ROOT
-    parts = [
-        "## Host skill/widget contract context\n",
-        (
-            "These files are host-side contracts and guidelines used to judge the "
-            "skill payload. They are not part of the reviewed skill package.\n"
-        ),
-    ]
-    for rel_path, language in SKILL_HOST_CONTEXT_FILES:
-        text = load_governance_doc(root, rel_path, on_missing="explicit")
-        parts.append(f"### {rel_path}\n\n{format_prompt_code_block(text, language)}")
-    return "\n\n".join(parts)
-
-
 # The canonical governance corpus a packed review surface owes IN FULL. Two of
 # the five are reference-book entrypoints, so their chapters are canonical too:
 # `is_canonical_governance_path` is the one predicate that answers for both
@@ -450,12 +459,17 @@ def load_governance_doc(
     except Exception as exc:
         if on_missing in ("silent", "placeholder"):
             return fallback
-        return f"[⚠️ OMISSION: {rel_path} could not be loaded ({path}): {exc}]"
+        return GOVERNANCE_OMISSION["unloadable"].format(rel_path=rel_path, path=path, error=exc)
     if on_missing == "silent":
         return fallback
     if on_missing == "placeholder":
-        return fallback if fallback else f"({rel_path} not found)"
-    return f"[⚠️ OMISSION: {rel_path} not found at {path}]"
+        return fallback if fallback else GOVERNANCE_OMISSION["placeholder"].format(rel_path=rel_path)
+    return GOVERNANCE_OMISSION["missing"].format(rel_path=rel_path, path=path)
+
+
+# What a brief says in place of a governance document it could not load.
+GOVERNANCE_OMISSION = {"unloadable": "[⚠️ OMISSION: {rel_path} could not be loaded ({path}): {error}]",
+                       "missing": "[⚠️ OMISSION: {rel_path} not found at {path}]", "placeholder": "({rel_path} not found)"}
 # File-classification constants shared by legacy pack helpers and generated atlases.
 
 
@@ -474,19 +488,14 @@ def build_blocking_findings_json_section(
     if not open_obligations and not blocking_history:
         return ""
 
-    def _sanitize_text(value: str, limit: int = 0) -> str:
-        """Redact secrets; ignore legacy ``limit`` to avoid silent truncation."""
-        text, _ = redact_prompt_secrets(str(value or ""))
-        return text
-
     payload = {"open_obligations": [
         {
             "obligation_id": getattr(ob, "obligation_id", ""),
             "item": getattr(ob, "item", ""),
             "severity": getattr(ob, "severity", ""),
-            "reason": _sanitize_text(getattr(ob, "reason", "")),
+            "reason": str(getattr(ob, "reason", "") or ""),
             "source_attempt_ts": getattr(ob, "source_attempt_ts", ""),
-            "source_attempt_msg": _sanitize_text(getattr(ob, "source_attempt_msg", ""), limit=200),
+            "source_attempt_msg": str(getattr(ob, "source_attempt_msg", "") or ""),
         }
         for ob in open_obligations
     ], "recent_blocking_attempts": []}
@@ -494,14 +503,14 @@ def build_blocking_findings_json_section(
     # Include all blocking attempts and all critical findings.
     for attempt in reversed(list(blocking_history or [])):
         critical_findings = [
-            {key: _sanitize_text(value) if isinstance(value, str) else value for key, value in finding.items()}
+            dict(finding)
             for finding in list(getattr(attempt, "critical_findings", []) or [])
             if isinstance(finding, dict)
         ]
         payload["recent_blocking_attempts"].append({
             "ts": getattr(attempt, "ts", ""),
             "tool_name": getattr(attempt, "tool_name", ""),
-            "commit_message": _sanitize_text(getattr(attempt, "commit_message", ""), limit=200),
+            "commit_message": str(getattr(attempt, "commit_message", "") or ""),
             "block_reason": getattr(attempt, "block_reason", ""),
             "critical_findings": critical_findings,
         })
@@ -627,6 +636,15 @@ def review_history_with_obligations(history: Any, *, drive_root: Any, repo_root:
     return render_history_with_obligations(history, drive_root=drive_root, repo_root=repo_root, task_id=task_id)
 
 
+def intent_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the intent and scope sections
+    over fixed placeholders, once per source of the intent (goal with a narrative commit body, scope, commit
+    subject, fallback). The author's words and the exhibits it carries are data."""
+    return [build_goal_section("⟨goal⟩", "", "⟨subject⟩\n\n⟨body⟩", "⟨owner words⟩", "⟨execution⟩", "⟨pulse⟩"),
+            build_goal_section("", "⟨scope⟩"), build_goal_section("", "", "⟨subject⟩"), build_goal_section(),
+            build_scope_section("⟨scope⟩")]
+
+
 def build_scope_section(scope: str = "") -> str:
     """Format the 'Scope of this change' section. Empty string if no scope."""
     if not scope.strip():
@@ -640,25 +658,13 @@ def build_scope_section(scope: str = "") -> str:
     )
 
 
-def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
-                                     touched_paths: list) -> dict:
-    """Best-effort advisory dispatch diagnostics; never raises. (The retired
-    Claude-SDK/CLI version probes died with that transport.)"""
-    return {
-        "model": model,
-        "prompt_chars": prompt_chars,
-        "prompt_tokens_approx": max(1, prompt_chars // 4),
-        "touched_paths": touched_paths,
-        "python": sys.executable,
-    }
-
-
 def check_worktree_readiness(
     repo_dir: "Path",
     paths: "list[str] | None" = None,
     *, information: "list[str] | None" = None,
 ) -> "list[str]":
     """Run cheap deterministic pre-advisory checks; never crash."""
+    from ouroboros.git_observation import host_git_env
     repo_dir = Path(repo_dir)
     warnings: list = []
 
@@ -668,7 +674,7 @@ def check_worktree_readiness(
         path_args = (["--"] + list(paths)) if paths else []
         status_result = subprocess.run(
             ["git", "status", "--porcelain"] + path_args,
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=10,
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=10, env=host_git_env(),
         )
         if status_result.returncode != 0:
             stderr_text = (status_result.stderr or "").strip()
@@ -689,26 +695,7 @@ def check_worktree_readiness(
     except Exception:
         pass
 
-    # 3. Core Python changes without test changes (reuses the check-1 git status).
-    try:
-        if status_result is not None and status_result.returncode == 0:
-            has_py_in_core = False
-            has_test_change = False
-            for fpath in parse_changed_paths_from_porcelain(status_result.stdout or ""):
-                if fpath.endswith(".py") and (
-                    fpath.startswith("ouroboros/") or fpath.startswith("supervisor/")
-                ):
-                    has_py_in_core = True
-                if fpath.startswith("tests/"):
-                    has_test_change = True
-            if has_py_in_core and not has_test_change:
-                warnings.append(
-                    "Python files in ouroboros/supervisor modified without corresponding test changes."
-                )
-    except Exception:
-        pass
-
-    # 4. Size-ratchet findings. Never blocking here: the official repository's
+    # 3. Size-ratchet findings. Never blocking here: the official repository's
     # CI ``size_ratchet`` lane is the enforcing surface; this warning lets the
     # agent regenerate the manifest or shrink the debt before the official
     # line rejects the same finding. Cheap since the history replay retired
@@ -769,27 +756,6 @@ def _run_review_preflight_tests(ctx: "Any", timeout: Optional[int] = None, *, fo
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR", text=(f"⚠️ Unexpected error running tests: {exc}")))
 
 
-def format_advisory_error(prefix: str, result_error: str, stderr_tail: str,
-                          session_id: str, diag: dict) -> str:
-    """Format advisory delivery diagnostics with the ADVISORY_ERROR sentinel."""
-    lines = [
-        f"⚠️ ADVISORY_ERROR: {prefix}",
-        f"  error          : {result_error}",
-        f"  model          : {diag.get('model', '?')}",
-        f"  python         : {diag.get('python', '?')}",
-        f"  prompt_chars   : {diag.get('prompt_chars', '?')}",
-        f"  prompt_tokens  : ~{diag.get('prompt_tokens_approx', '?')}",
-        f"  touched_paths  : {diag.get('touched_paths', [])}",
-    ]
-    if session_id:
-        lines.append(f"  session_id     : {session_id}")
-    if stderr_tail:
-        lines.append("  stderr_tail    :")
-        for ln in stderr_tail.strip().splitlines()[-30:]:
-            lines.append(f"    {ln}")
-    return "\n".join(lines)
-
-
 # v7next F2.3a (D06): moved spans live in their owner leaves; re-exported
 # here so this facade stays the single import surface for callers and tests.
 from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentional public re-exports
@@ -805,9 +771,7 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     _ANTI_THRASHING_RULE_VERDICT,
     _CONVERGENCE_RULE_TEXT,
     _HISTORY_VERIFICATION_ONLY_RULE,
-    _JSON_SECRET_RE,
     _OBLIGATION_SUFFIX_RE,
-    _SECRET_LINE_RE,
     _make_fence,
     anti_pattern_lock_guard,
     author_questions_block,
@@ -823,7 +787,6 @@ from ouroboros.tools.review_prompt_text import (  # noqa: E402, F401 -- intentio
     normalize_reviewer_item,
     normalize_reviewer_items,
     normalize_reviewer_obligation_id,
-    redact_prompt_secrets,
     review_preamble,
     single_line,
     strip_obligation_suffix,
@@ -849,6 +812,7 @@ from ouroboros.tools.review_file_pack import (  # noqa: E402, F401 -- intentiona
     list_changed_paths_from_git_status,
     list_git_tracked_paths,
     pack_exclusion_note,
+    pack_omission_note,
     parse_changed_paths_from_porcelain,
     parse_changed_paths_from_porcelain_z,
     parse_git_name_status,

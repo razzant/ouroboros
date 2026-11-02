@@ -49,6 +49,17 @@ CASES = {
               owner_wait={"quiz_id": "q1", "owner_wait_state": "waiting", "quiz_state": "open"})],
         {}, {}, {},
     ),
+    # A direct turn still preparing says the start step it stands at beside Preparing.
+    "direct_preparing": (
+        [_row("dp", "preparing", kind="direct_chat", chat_id=1, client_message_id="cm-prep",
+              turn_phase="context_building")],
+        {}, {}, {},
+    ),
+    # Its own Main call started before its census phase moved: the word that move gives (Working), no start step.
+    "direct_requested": (
+        [_row("dr", "preparing", kind="direct_chat", chat_id=1, client_message_id="cm-call", turn_phase="requested")],
+        {}, {}, {},
+    ),
     "paused_by_owner": (
         [_row("o", "budget_paused", pause_cause="owner", can_resume=False)],
         {"o": {"_budget_pause": {"reason": "owner", "paused_at": "2026-10-17T15:00:00Z"}}}, {}, {},
@@ -99,6 +110,16 @@ CASES = {
         [_row("sl", "budget_paused", pause_cause="sleep")],
         {"sl": {"_budget_pause": {"reason": "sleep"}}}, {}, {},
     ),
+    # After a root-only Resume the root sleeps warm on the helper it chose, which still awaits its own selection:
+    # the root keeps its word and controls; its line names that helper and who resumes it. No owner's turn.
+    "sleeping_on_paused_helper": (
+        [_row("sw", suggested_name="Repair the release notes"),
+         _row("sw-c", "budget_paused", pause_cause="unknown", can_resume=False, parent_task_id="sw", root_task_id="sw")],
+        {"sw": {**_RUNNING, "owner_wait": {"state": "waiting", "reason": "sleep", "task_attempt": 1,
+                                            "sleep": {"mode": "warm", "tasks": ["sw-c"], "senders": ["sw-c"]}}},
+         "sw-c": {"_budget_pause": {"reason": "owner", "exact_continuation": True}}},
+        {}, {},
+    ),
     "unknown": ([_row("u", "unknown")], {}, {}, {}),
     "ended_with_runs": ([], {}, {"r": {"task_id": "r", "status": "done", "chat_id": 42}}, {"r": ["run-1", "run-2"]}),
     # The parent finished while its helper still works: its episode is not live, its tree's Stop still stands.
@@ -120,6 +141,9 @@ CASES = {
     "paused_unattributed": (
         [_row("n", "budget_paused", pause_cause="owner", can_resume=False)], {}, {}, {},
     ),
+    "paused_model_handoff": (
+        [_row("mh", "budget_pausing", pause_cause="owner", live=False)], {}, {}, {},
+    ),
 }
 
 # The owner fence records who declared the Pause: the owner's own press, or Ouroboros with its sentence (here a
@@ -132,7 +156,7 @@ FENCES = {"o": {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested
           "rv": {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested_at": _PRESSED},
           "n": {"requested_by": "owner", "requested_at": _PRESSED},
           **{task: {"by": {"actor": "owner", "text": "", "at": _PRESSED}, "requested_at": _PRESSED}
-             for task in ("pr", "wa", "so")}}
+             for task in ("pr", "wa", "so", "mh")}}
 # The runs whose stop a task's live Pause could not confirm (its pause row's ``external_runs``).
 STOPS = {"so": ["run-s"]}
 
@@ -140,7 +164,8 @@ STOPS = {"so": ["run-s"]}
 def project(name):
     """The ``/api/state`` work fields the server builds for one case."""
     owners, raw, stored, held = CASES[name]
-    return work_fields(owners, raw, results=stored, fences=FENCES, held=held, stops=STOPS)
+    return work_fields(owners, raw, results=stored, fences={k: {"state": "paused", **v} for k, v in FENCES.items()},
+                       held=held, stops=STOPS, models={"mh": [{"kind": "model_handoff", "attempt_id": "attempt-mh"}]})
 
 
 def reason_sentences():
@@ -160,11 +185,13 @@ def test_the_web_fixture_is_the_servers_projection():
 
 
 @pytest.mark.parametrize("name, activity", [
-    ("held_continue", "working"), ("direct_question", "waiting"), ("paused_by_owner", "paused"),
+    ("held_continue", "working"), ("direct_question", "waiting"), ("direct_preparing", "working"),
+    ("direct_requested", "working"), ("paused_by_owner", "paused"),
     ("spending_limit", "paused"), ("queued_and_pausing", "working"), ("unknown", "unknown"),
     ("helper_after_parent", "working"), ("paused_review_finishing", "paused"), ("unconfirmed_run", "unknown"),
     ("paused_unattributed", "paused"), ("pausing_with_queued_helper", "working"), ("two_works_one_pausing", "working"),
     ("working_with_review", "working"), ("paused_stop_unknown", "paused"),
+    ("paused_model_handoff", "paused"), ("sleeping_on_paused_helper", "waiting"),
 ])
 def test_each_fixture_room_is_the_state_its_name_says(name, activity):
     """The fixture is meaningful, not merely equal: each room is the case the web tests read it as."""

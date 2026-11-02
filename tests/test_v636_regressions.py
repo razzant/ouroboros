@@ -353,18 +353,25 @@ def test_entrypoints_set_dont_write_bytecode_before_project_imports():
 
 
 # --- WA3 review-round: single-reviewer degraded mode is durable across surfaces -
-def test_skill_review_history_persists_single_reviewer_marker(tmp_path):
+
+
+def test_single_reviewer_review_records_its_lost_diversity_durably():
     """v6.36.0 review finding (Bible P3): a one-slot skill TRUST-gate review records
-    single_reviewer_no_diversity DURABLY in review history, not just a log line."""
-    import json as _json
-    from ouroboros.skill_review import _append_skill_review_history, _review_history_path
-    _append_skill_review_history(
-        tmp_path, "demo",
-        status="clean", content_hash="abc", findings=[],
-        single_reviewer_no_diversity=True,
-    )
-    rec = _json.loads(_review_history_path(tmp_path, "demo").read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert rec.get("single_reviewer_no_diversity") is True
+    single_reviewer_no_diversity DURABLY — read off the wave's ledger record (its panel facts)
+    into the outcome the review.json projection persists, never only a log line."""
+    from types import SimpleNamespace
+
+    from ouroboros.skill_review import _outcome_from_result
+
+    result = {"state": "settled", "aggregate": "PASS", "record_id": "rl-one-seat", "reused": False,
+              "panel": {"seats": 1, "single_model_panel": True}, "findings": {}, "cost": {"usd": 0.0},
+              "rows": [{"seat_id": "s1", "observed_model": "openai/gpt-x", "status": "responded",
+                        "requested": {"model": "openai/gpt-x", "route": "api_chat"},
+                        "answers": {"skill": {"status": "responded", "verdict": "PASS", "findings": []}}}]}
+    outcome = _outcome_from_result(SimpleNamespace(name="demo"), SimpleNamespace(tree_sha="abc", delivery={}),
+                                   result, rebuttal_sha="")
+    assert outcome.single_reviewer_no_diversity is True and outcome.record_id == "rl-one-seat"
+    assert outcome.status == "clean" and outcome.reviewer_models == ["openai/gpt-x [s1]"]
 
 
 def test_vlm_allowed_roots_derive_from_policy_matrix(tmp_path, monkeypatch):

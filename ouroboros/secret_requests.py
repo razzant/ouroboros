@@ -4,33 +4,37 @@ One request is one owner question (``owner_quiz``) whose block carries typed, me
 facts beside the ordinary lifecycle, so publication, waiting, history, recovery and the Main
 mirror stay the existing question machinery:
 
-    "secret_request": {"plugin_name", "fields": [{"id", "setting_key"}], "content_hash"},
-    "secret_save"?:   {"request_id", "state": writing|saved, "started_at", "saved_at"?},
-    "secret_outcome"?: {"event": secret_filled|secret_cancelled, "pluginName", "fields",
-                        "at", "settings_keys", "grant_missing"?, "grant_unknown"?,
-                        "interrupted_save"?}
+    "secret_request": {"plugin_name", "fields": [{"id", "setting_key"}]},
+    "secret_save"?:   {"request_id", "state": writing|saved, "started_at", "saved_at"?,
+                       "unconfirmed_request_ids"?},
+    "secret_outcome"?: {"event": secret_filled|secret_replaced|secret_cancelled, "pluginName",
+                        "fields", "at", "settings_keys", "replaced_fields"?,
+                        "consumers"?|"consumers_unknown"?, "late"?, "interrupted_save"?}
 
 A value travels exactly once: browser password control -> ``POST /api/decisions/secret`` ->
-the existing Settings writer (``settings.json``). It never enters a tool argument or result, a
-quiz comment, a mailbox frame, a history row, an event, a log line, an error or a response;
-the model learns ``secret_filled {pluginName, fields}`` and nothing else.
+the existing owner Settings writer (``settings.json``). It never enters a tool argument or
+result, a quiz comment, a mailbox frame, a history row, an event, a log line, an error or a
+response; the model learns the event, the plugin and the field ids.
 
 Which Settings key a field writes is the skill's reviewed declaration, never the request's:
-the canonical ``SkillManifest.secret_fields`` maps public field ids to keys the manifest
-already lists in ``env_from_settings`` (``secret_fields: {botToken: TELEGRAM_BOT_TOKEN}``).
-Such a key may be an ordinary setting, so the host admits only an owner-defined custom
-secret key: no plugin name can front a provider, network or core credential. The ask
-binds the skill's content hash; a changed, removed or broken skill makes the pending request
-stale and nothing is written. Saving grants nothing, enables nothing, reloads nothing and
-contacts no provider: the outcome says what the skill's current grant covers.
+``SkillManifest.secret_fields`` maps public field ids to keys the manifest already lists in
+``env_from_settings`` (``secret_fields: {botToken: TELEGRAM_BOT_TOKEN}``). Such a key may name
+an ordinary setting, so the host admits only an owner-defined custom secret key. The ask
+records the mapping it was given; a save writes only while the installed skill still maps the
+same ids to the same keys, so an old request never gains a target from a changed skill.
+
+Saving grants nothing, enables nothing, reloads nothing and contacts no provider; the outcome
+reports what the skills that read the key can read after it (``key_consumers``), or that this
+could not be read (``consumers_unknown``). The form
+stays usable after the asking task ends, until it is saved or explicitly cancelled; a late
+save is recorded on the card and in history, never as the owner's words or new work.
 
 First winner: every save and cancel of a request runs under the one in-process settings
-document lock, and a save claims the block (``secret_save.state == writing``) before its
-write, so a closure from any other path is refused while a write may be in flight. Under that
-lock a ``writing`` claim not held by the caller is an interrupted attempt of an earlier
-process: its result is unknown and never reported as saved. Recovery is status first: the
-same request is never repeated over it (it may already have written), and only a NEW owner
-request saves again, replacing whatever the interrupted attempt may have stored.
+document lock, and a save claims the block (``secret_save.state == writing``) before its write,
+so a closure from any other path is refused while a write may be in flight. Under that lock a
+``writing`` claim is an attempt whose result is unknown and is never reported as saved: its
+request, and every earlier unknown attempt the block lists in ``unconfirmed_request_ids``, is
+refused, and only a NEW owner request (a deliberate save again) takes it over.
 """
 
 from __future__ import annotations
@@ -43,10 +47,12 @@ from ouroboros.utils import utc_now_iso
 
 MAX_SECRET_VALUE_CHARS = 4096
 EVENT_FILLED = "secret_filled"
+EVENT_REPLACED = "secret_replaced"
 EVENT_CANCELLED = "secret_cancelled"
+SAVED_EVENTS = (EVENT_FILLED, EVENT_REPLACED)
 SAVE_WRITING = "writing"
 SAVE_SAVED = "saved"
-CANCEL_REASON = "The owner cancelled the secret request; nothing was saved."
+CANCEL_REASON = "The owner cancelled the secret request; this request saved nothing."
 CANCEL_REASON_INTERRUPTED = ("The owner cancelled the secret request; an earlier save attempt was never "
                              "confirmed, so whether its value reached Settings is unknown.")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -87,21 +93,21 @@ def declared_secret_fields(manifest: Any) -> Dict[str, str]:
     return fields
 
 
-def _find_skill(drive_root: Any, plugin_name: str) -> Any:
+def _repo_path() -> Optional[str]:
     from ouroboros.config import get_skills_repo_path
-    from ouroboros.skill_loader import find_skill
 
-    return find_skill(drive_root, plugin_name, repo_path=get_skills_repo_path() or None)
+    return get_skills_repo_path() or None
 
 
 def resolve_secret_request(drive_root: Any, plugin_name: Any, fields: Any) -> Dict[str, Any]:
     """The request's typed metadata for ``plugin_name``'s declared ``fields``, or a refusal."""
     from ouroboros.contracts.skill_manifest import MAX_SECRET_FIELDS
+    from ouroboros.skill_loader import find_skill
 
     name = str(plugin_name or "").strip()
     if not name:
         raise SecretRequestError("SECRET_PLUGIN_REQUIRED", "pluginName must name an installed skill.")
-    skill = _find_skill(drive_root, name)
+    skill = find_skill(drive_root, name, repo_path=_repo_path())
     if skill is None or getattr(skill, "identity_collision", False):
         raise SecretRequestError("SECRET_PLUGIN_UNKNOWN", f"no single installed skill is named {name!r}.")
     if skill.load_error:
@@ -121,25 +127,20 @@ def resolve_secret_request(drive_root: Any, plugin_name: Any, fields: Any) -> Di
         if field_id in requested:
             raise SecretRequestError("SECRET_FIELDS_INVALID", f"field {field_id} is listed twice.")
         requested.append(field_id)
-    return {"plugin_name": skill.name, "content_hash": str(skill.content_hash or ""),
+    return {"plugin_name": skill.name,
             "fields": [{"id": field_id, "setting_key": declared[field_id]} for field_id in requested]}
 
 
-def stale_reason(drive_root: Any, request: Dict[str, Any]) -> str:
-    """Why the asked mapping no longer holds (``""`` while it does): the skill is gone or
-    broken, its reviewed content changed, or a field now names another key."""
+def binding_refusal(drive_root: Any, request: Dict[str, Any]) -> str:
+    """Why the asked mapping no longer holds (``""`` while it does): the skill is gone or broken,
+    or a field now names another key. A skill update that keeps the mapping keeps the request."""
     try:
-        current = resolve_secret_request(drive_root, request.get("plugin_name"),
-                                         [row.get("id") for row in request.get("fields") or []])
+        current = resolve_secret_request(drive_root, request.get("plugin_name"), field_ids(request))
     except SecretRequestError as exc:
         return exc.code.lower()
     except Exception as exc:  # an unreadable skill tree is not a current mapping
         return f"skill_unreadable:{type(exc).__name__}"
-    if current["content_hash"] != str(request.get("content_hash") or ""):
-        return "skill_changed"
-    if current["fields"] != request.get("fields"):
-        return "mapping_changed"
-    return ""
+    return "" if current["fields"] == request.get("fields") else "mapping_changed"
 
 
 def secret_request_of(block: Any) -> Optional[Dict[str, Any]]:
@@ -155,8 +156,46 @@ def settings_keys(request: Dict[str, Any]) -> List[str]:
     return [str(row.get("setting_key") or "") for row in request.get("fields") or []]
 
 
+def configured_fields(document: Dict[str, Any], request: Dict[str, Any]) -> Dict[str, bool]:
+    """``{field_id: True}`` where the field's key holds a non-empty value in the settings document.
+    A boolean only: no value, prefix or length ever leaves here."""
+    return {str(row["id"]): bool(str(document.get(str(row["setting_key"])) or "").strip())
+            for row in request.get("fields") or []}
+
+
+def key_consumers(drive_root: Any, keys: List[str]) -> List[Dict[str, Any]]:
+    """Installed skills that read any of ``keys`` (their ``env_from_settings``), with what their
+    CURRENT grant covers: read-only facts for the form and the outcome, never a grant. A skills
+    directory that cannot be listed raises (the callers record the readers as unknown): an empty
+    list always means that nothing readable reads the key."""
+    from ouroboros.skill_loader import discover_skills, grant_status_for_skill
+
+    wanted = [str(key).upper() for key in keys]
+    rows: List[Dict[str, Any]] = []
+    for skill in discover_skills(drive_root, repo_path=_repo_path(), strict=True):
+        if getattr(skill, "identity_collision", False) or skill.load_error:
+            continue
+        declared = {str(key or "").strip().upper() for key in skill.manifest.env_from_settings or []}
+        reads = [key for key in wanted if key in declared]
+        if not reads:
+            continue
+        row: Dict[str, Any] = {"name": skill.name, "enabled": bool(skill.enabled), "reads": reads}
+        try:
+            status = grant_status_for_skill(drive_root, skill)
+        except Exception:
+            status = None
+        if not isinstance(status, dict):
+            row["grant_unknown"] = True
+        elif status.get("unsupported_for_skill_type"):
+            row["unsupported"] = True  # an instruction skill receives no Settings key at all
+        else:
+            row["granted"] = [key for key in reads if key in set(status.get("granted_keys") or [])]
+        rows.append(row)
+    return sorted(rows, key=lambda item: item["name"])
+
+
 def public_event(block: Dict[str, Any]) -> Dict[str, Any]:
-    """The screenshot's event: its name, ``pluginName`` and the field ids — no value."""
+    """The outcome's public event: its name, ``pluginName`` and the field ids, no value."""
     outcome = block.get("secret_outcome") if isinstance(block.get("secret_outcome"), dict) else {}
     request = secret_request_of(block) or {}
     return {"event": str(outcome.get("event") or ""), "pluginName": str(request.get("plugin_name") or ""),
@@ -164,9 +203,14 @@ def public_event(block: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def question_text(request: Dict[str, Any]) -> str:
-    """The card's host-authored question: what is asked, never how it is used beyond saving."""
-    return (f"Secret required: {request['plugin_name']} — {', '.join(field_ids(request))}. "
-            "Enter it in the protected form; it is saved to Settings without reaching the model.")
+    """The card's host-authored question."""
+    return f"Secret needed for {request['plugin_name']}: {', '.join(field_ids(request))}."
+
+
+def transport_hint(request: Dict[str, Any]) -> str:
+    """What a chat transport shows instead of an answerable card: where to enter it, no link."""
+    return (f"{question_text(request)} Enter it in the protected form in the Ouroboros app on the web or "
+            "desktop; do not send it in this chat.")
 
 
 def validate_values(request: Dict[str, Any], values: Any) -> Dict[str, str]:
@@ -197,6 +241,19 @@ def validate_values(request: Dict[str, Any], values: Any) -> Dict[str, str]:
     return changes
 
 
+def validate_observed(request: Dict[str, Any], observed: Any) -> Dict[str, bool]:
+    """Which asked keys the form showed as already set, ``{field_id: bool}`` for every field.
+
+    The save writes only while Settings still says exactly this, so a form that showed an empty
+    key never silently replaces a value saved since, and Replace is always an explicit choice."""
+    ids = field_ids(request)
+    if (not isinstance(observed, dict) or set(observed) != set(ids)
+            or not all(isinstance(value, bool) for value in observed.values())):
+        raise SecretRequestError("observed_required", "observed must state, for every requested field, whether "
+                                 "the form showed its key as set (read status first).")
+    return {field_id: observed[field_id] for field_id in ids}
+
+
 def _projection():
     from ouroboros.owner_quiz import _KEEP, _delivery_debt, _mutate_projection
 
@@ -206,10 +263,14 @@ def _projection():
 def claim_save(drive_root: Any, task_id: str, quiz_id: str, request_id: str) -> Dict[str, Any]:
     """Claim the block for one save (caller holds the settings document lock).
 
-    ``duplicate`` replays a recorded success without writing again. A ``writing`` claim is
-    an attempt whose outcome is unknown (the lock proves nobody here still holds it): the SAME
-    request is refused (``secret_save_unconfirmed``) rather than repeated blind over a write
-    that may have landed; a NEW request is the owner's explicit save-again and takes it over."""
+    ``duplicate`` replays a recorded success without writing again. A ``writing`` claim is an
+    attempt whose outcome is unknown (the lock proves nobody here still holds it): the SAME
+    request is refused (``secret_save_unconfirmed``) rather than repeated blind over a write that
+    may have landed; a NEW request is the owner's explicit save-again and takes it over, adding the
+    taken-over id to this block's ``unconfirmed_request_ids``, so no earlier unknown attempt is ever
+    accepted again either. A release before the write restores the previous claim, so a request
+    refused before it wrote stays retryable. An unanswered question stays saveable after its task
+    ended (``expired_terminal``)."""
     keep, _debt, mutate_projection = _projection()
     outcome: Dict[str, Any] = {}
 
@@ -222,22 +283,23 @@ def claim_save(drive_root: Any, task_id: str, quiz_id: str, request_id: str) -> 
             outcome.update(error="not_a_secret_request")
             return keep
         state = str(block.get("state") or "open")
-        if (state == "answered" and (block.get("secret_outcome") or {}).get("event") == EVENT_FILLED
+        if (state == "answered" and (block.get("secret_outcome") or {}).get("event") in SAVED_EVENTS
                 and block.get("request_id") == request_id):
             outcome.update(ok=True, duplicate=True, block=dict(block))
             return keep
-        if state != "open":
-            outcome.update(error="secret_request_inactive" if state == "expired_terminal" else "secret_request_settled",
-                           block=dict(block))
+        if state not in ("open", "expired_terminal"):
+            outcome.update(error="secret_request_settled", block=dict(block))
             return keep
         claim = dict(block.get("secret_save") or {})
         outcome["previous_claim"] = claim
-        if claim.get("state") == SAVE_WRITING and claim.get("request_id") == request_id:
+        unconfirmed = [str(rid) for rid in claim.get("unconfirmed_request_ids") or []]
+        if claim.get("state") == SAVE_WRITING:
+            unconfirmed.append(str(claim.get("request_id") or ""))
+        if request_id in unconfirmed:
             outcome.update(error="secret_save_unconfirmed", block=dict(block))
             return keep
         block["secret_save"] = {"request_id": request_id, "state": SAVE_WRITING, "started_at": utc_now_iso(),
-                                **({"interrupted_request_id": str(claim.get("request_id") or "")}
-                                   if claim.get("state") == SAVE_WRITING else {})}
+                                **({"unconfirmed_request_ids": unconfirmed} if unconfirmed else {})}
         outcome.update(ok=True, block=dict(block))
         return True
 
@@ -267,8 +329,10 @@ def finalize_save(drive_root: Any, task_id: str, quiz_id: str, request_id: str,
                   outcome_facts: Dict[str, Any]) -> Dict[str, Any]:
     """The value is in Settings: record the host's typed completion as the block's answer.
 
-    Never a comment and never an option: ``secret_outcome`` is the answer, and the answer
-    delivery debt is the same one an ordinary answer owes."""
+    Never a comment and never an option: ``secret_outcome`` is the answer, and its delivery debt
+    is the one an ordinary answer owes. ``outcome_facts`` carries ``replaced_fields`` (keys that
+    held a value just before this write) and ``consumers`` (what readers can read after it); facts
+    without a ``consumers`` list record ``consumers_unknown``, never an empty list of readers."""
     keep, delivery_debt, mutate_projection = _projection()
     result: Dict[str, Any] = {}
 
@@ -282,12 +346,18 @@ def finalize_save(drive_root: Any, task_id: str, quiz_id: str, request_id: str,
         stamp = utc_now_iso()
         request = secret_request_of(block) or {}
         late = block.get("state") == "expired_terminal"
+        replaced = [field for field in field_ids(request) if field in set(outcome_facts.get("replaced_fields") or [])]
+        consumers = outcome_facts.get("consumers")
         block.update(state="answered", answered_at=stamp, request_id=request_id, answer_source="web",
                      delivery=delivery_debt(task_id, quiz_id, "answer"),
                      secret_save={**claim, "state": SAVE_SAVED, "saved_at": stamp},
-                     secret_outcome={"event": EVENT_FILLED, "pluginName": request.get("plugin_name", ""),
-                                     "fields": field_ids(request), "at": stamp,
-                                     "settings_keys": settings_keys(request), **outcome_facts},
+                     secret_outcome={"event": EVENT_REPLACED if replaced else EVENT_FILLED,
+                                     "pluginName": request.get("plugin_name", ""), "fields": field_ids(request),
+                                     "at": stamp, "settings_keys": settings_keys(request),
+                                     **({"replaced_fields": replaced} if replaced else {}),
+                                     **({"consumers": list(consumers)} if isinstance(consumers, list)
+                                        else {"consumers_unknown": True}),
+                                     **({"late": True} if late else {})},
                      **({"answered_after_terminal": True} if late else {}))
         result.update(ok=True, block=dict(block))
         return True
@@ -305,54 +375,57 @@ def cancel_outcome(block: Dict[str, Any]) -> Dict[str, Any]:
             **({"interrupted_save": True} if claim.get("state") == SAVE_WRITING else {})}
 
 
-def grant_facts(drive_root: Any, request: Dict[str, Any]) -> Dict[str, Any]:
-    """What the skill's CURRENT grant lets it read of the saved keys (read-only, never a grant)."""
-    try:
-        from ouroboros.skill_loader import grant_status_for_skill
-
-        skill = _find_skill(drive_root, str(request.get("plugin_name") or ""))
-        status = grant_status_for_skill(drive_root, skill) if skill is not None else None
-    except Exception:
-        status = None
-    if not isinstance(status, dict):
-        return {"grant_unknown": True}
-    if status.get("unsupported_for_skill_type"):
-        return {"grant_missing": settings_keys(request), "grant_unsupported": True}
-    missing = set(status.get("missing_keys") or [])
-    return {"grant_missing": [key for key in settings_keys(request) if key in missing]}
-
-
 def _event_line(block: Dict[str, Any]) -> str:
     event = public_event(block)
     return f"{event['event']}: " + json.dumps({"pluginName": event["pluginName"], "fields": event["fields"]},
                                              ensure_ascii=False)
 
 
-def filled_frame(block: Dict[str, Any]) -> str:
-    """The model's ``secret_filled`` message: plugin and field names, never a value."""
+def _consumer_line(outcome: Dict[str, Any]) -> str:
+    """What each skill that reads the key can read now, from the facts recorded after the save."""
+    consumers = outcome.get("consumers")
+    if outcome.get("consumers_unknown") or not isinstance(consumers, list):
+        return ("Which installed skills read these keys could not be read; check each skill's grant and status "
+                "before relying on it.")
+    if not consumers:
+        return "No installed skill reads these keys."
+    parts = []
+    for row in consumers:
+        state = "enabled" if row.get("enabled") else "disabled"
+        if row.get("grant_unknown"):
+            grant = "its grant could not be read"
+        elif row.get("unsupported"):
+            grant = "this skill type receives no Settings keys"
+        else:
+            missing = [key for key in row.get("reads") or [] if key not in set(row.get("granted") or [])]
+            grant = f"needs the owner's grant for {', '.join(missing)} in Skills" if missing else "its grant covers it"
+            if missing and row.get("enabled"):
+                grant += "; after saving, this enabled skill cannot run until the keys are granted"
+        parts.append(f"{row.get('name')} ({state}; {grant})")
+    return "Skills that read them: " + "; ".join(parts) + "."
+
+
+def answer_frame(block: Dict[str, Any]) -> str:
+    """The model's ``secret_filled``/``secret_replaced`` message: names and facts, never a value."""
     outcome = block.get("secret_outcome") or {}
     request = secret_request_of(block) or {}
     keys = ", ".join(settings_keys(request))
-    missing = list(outcome.get("grant_missing") or [])
-    if outcome.get("grant_unknown"):
-        grant = "Whether the skill may read the saved key now could not be read."
-    elif outcome.get("grant_unsupported"):
-        grant = "This skill type cannot receive Settings keys at all."
-    elif missing:
-        grant = (f"The skill cannot read {', '.join(missing)} until the owner grants it in Skills; "
-                 "this save granted nothing.")
-    else:
-        grant = "The skill's current grant covers the saved key."
-    return "\n".join([
+    replaced = outcome.get("event") == EVENT_REPLACED
+    lines = [
         f"[Owner secret request] quiz {block.get('quiz_id')} — asked {block.get('asked_at')}, "
         f"saved {block.get('answered_at')}.",
         _event_line(block),
-        f"Secret filled: {request.get('plugin_name')}, {', '.join(field_ids(request))}. The owner entered "
-        f"the value in a protected form and the host saved it to Settings ({keys}); it is not shown to you "
-        "and is not in this conversation, so do not ask for it again.",
-        f"Saved is not connected: {grant} Nothing was enabled, reloaded or contacted by this save; "
-        "continue the setup and check the integration's own status.",
-    ])
+        (f"The owner {'replaced the existing value' if replaced else 'entered the value'} in the protected form "
+         f"and the host saved it to Settings ({keys}). The value is not in this conversation; do not ask for it here."),
+        ("Saving is not a connection: nothing was granted, enabled, reloaded or contacted. "
+         + _consumer_line(outcome)),
+    ]
+    if replaced:
+        lines.append("Enabled skills that read a replaced key may use the new value on their next call; some keep "
+                     "the old one until the owner disables and re-enables them, or reconnects them.")
+    if block.get("answered_after_terminal") or block.get("delivery_after_terminal"):
+        lines.append("The task that asked had already finished; this save resumed nothing.")
+    return "\n".join(lines)
 
 
 def cancelled_frame(block: Dict[str, Any]) -> str:
@@ -364,8 +437,8 @@ def cancelled_frame(block: Dict[str, Any]) -> str:
                  "nothing, but an earlier save attempt was interrupted before it was confirmed, so whether "
                  f"its value reached Settings ({keys}) is unknown; do not assume it is there or absent.")
     else:
-        saved = (f"The owner cancelled; nothing was saved for {request.get('plugin_name')}: {names} "
-                 f"({keys} unchanged by this request).")
+        saved = (f"The owner cancelled; this request saved nothing for {request.get('plugin_name')}: {names} "
+                 f"({keys} unchanged by it).")
     return "\n".join([
         f"[Owner secret request cancelled] quiz {block.get('quiz_id')} — closed {block.get('closed_at')}.",
         _event_line(block), saved,
@@ -375,9 +448,10 @@ def cancelled_frame(block: Dict[str, Any]) -> str:
 
 
 __all__ = [
-    "CANCEL_REASON", "CANCEL_REASON_INTERRUPTED", "EVENT_CANCELLED", "EVENT_FILLED", "MAX_SECRET_VALUE_CHARS",
-    "SecretRequestError", "cancel_outcome", "cancelled_frame", "claim_save",
-    "declared_secret_fields", "field_ids", "filled_frame", "finalize_save", "grant_facts", "public_event",
-    "question_text", "release_save", "resolve_secret_request", "secret_request_of", "settings_keys",
-    "stale_reason", "validate_values",
+    "CANCEL_REASON", "CANCEL_REASON_INTERRUPTED", "EVENT_CANCELLED", "EVENT_FILLED", "EVENT_REPLACED",
+    "MAX_SECRET_VALUE_CHARS", "SAVED_EVENTS", "SecretRequestError", "answer_frame", "binding_refusal",
+    "cancel_outcome", "cancelled_frame", "claim_save", "configured_fields", "declared_secret_fields",
+    "field_ids", "finalize_save", "key_consumers", "public_event", "question_text", "release_save",
+    "resolve_secret_request", "secret_request_of", "settings_keys", "transport_hint", "validate_observed",
+    "validate_values",
 ]

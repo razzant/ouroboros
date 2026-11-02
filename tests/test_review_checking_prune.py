@@ -1,9 +1,8 @@
 """The prune retires review checking copies only on positive evidence that their run ended.
 
 Custody is a stub (``task_snapshot`` answers which runs executed in which copy); copies,
-receipts, locks and deletions are real. A run that registers after a pass began, a seat a
-worker holds and a view a new wave reuses are all kept; finished copies, failed captures
-past the retention period and leftovers of a crashed process go.
+receipts, locks and deletions are real. Runs with unknown execution, failed captures and
+their frozen views stay past retention; complete captures release their copies.
 """
 from __future__ import annotations
 
@@ -31,9 +30,9 @@ LATER = 400 * 86400  # past any retention period
 def _custody(monkeypatch, *, running=(), settled=(), pending=(), unreadable=False, calls=None, started=None):
     """Runs that executed in ``running`` (not settled) or ``settled`` copies (started now, or at
     ``started``), and invocations pending for ``pending`` copies, whatever the task id."""
-    runs = {f"run-{index}": SimpleNamespace(execution_root=str(path), settled=False, started_ts="")
+    runs = {f"run-{index}": SimpleNamespace(execution_root=str(path), settled=False, terminal_state="", started_ts="")
             for index, path in enumerate(running)}
-    runs.update({f"done-{index}": SimpleNamespace(execution_root=str(path), settled=True,
+    runs.update({f"done-{index}": SimpleNamespace(execution_root=str(path), settled=True, terminal_state="succeeded",
                                                   started_ts=started or utc_now_iso())
                  for index, path in enumerate(settled)})
 
@@ -59,7 +58,7 @@ def test_only_positive_evidence_releases_a_copy(tmp_path, monkeypatch):
     assert receipt["status"] == "retained"
     assert (Path(receipt["evidence_dir"]) / "files" / "check.py").read_bytes() == EDIT
     rp.prune_review_checkouts(root, set(), now=time.time() + LATER)  # a run that never started
-    assert not unknown.exists() and running.is_dir() and pending.is_dir() and skill.is_dir()
+    assert unknown.is_dir() and running.is_dir() and pending.is_dir() and skill.is_dir()
 
 
 def test_custody_is_read_again_for_each_seat(tmp_path, monkeypatch):
@@ -104,16 +103,24 @@ def test_a_copy_an_older_host_kept_after_its_receipt_is_released(tmp_path, monke
     assert json.loads((evidence / "summary.json").read_text(encoding="utf-8")) == older
 
 
-def test_a_failed_capture_is_kept_for_the_retention_period(tmp_path, monkeypatch):
+def test_a_failed_capture_retries_and_keeps_unique_work_beyond_retention(tmp_path, monkeypatch):
     root, source = _frozen(tmp_path)
     area = _seat(root, source, "op-failed")
+    (area / rc.EVIDENCE_DIRNAME / "summary.json").write_bytes(b'{"test": "failed"}')
     _custody(monkeypatch, settled=[area])
+    compare = rc._directory_delta
     monkeypatch.setattr(rc, "_directory_delta", _boom)
     assert rp.prune_review_checkouts(root, set())["capture_failed"] == 1 and area.is_dir()
     assert rp.prune_review_checkouts(root, set(), retention_days=7)["capture_failed"] == 1
     later = rp.prune_review_checkouts(root, set(), retention_days=7, now=time.time() + 8 * 86400)
-    assert later["removed"] == 1 and not area.exists()
+    assert later["removed"] == 0 and area.is_dir()
     assert rc._receipt(root, TASK, "op-failed")["status"] == "capture_failed"
+    assert len(list(area.parent.glob("evidence*"))) == 1, "identical failures reuse their retained generation"
+    monkeypatch.setattr(rc, "_directory_delta", compare)
+    assert rp.prune_review_checkouts(root, set())["released"] == 1
+    receipt = rc._receipt(root, TASK, "op-failed")
+    assert receipt["status"] == "retained" and not area.exists()
+    assert (Path(receipt["evidence_dir"]) / "files" / "check.py").read_bytes() == EDIT
 
 
 def test_leftovers_without_a_marker_expire_and_older_staging_goes_at_once(tmp_path, monkeypatch):
@@ -142,10 +149,10 @@ def test_a_marker_that_cannot_be_read_keeps_the_copy_and_every_view(tmp_path, mo
     report = rp.prune_review_checkouts(root, set(), views_since=time.time() + 1)
     assert area.is_dir() and report["errors"] and "views_done" not in report
     assert Path(source["view"]).is_dir()
-    # A marker unreadable for longer than the retention period no longer holds every view back.
+    # Unknown original sources stay recoverable even after the retention period.
     later = rp.prune_review_checkouts(root, set(), views_since=time.time() + 1, now=time.time() + LATER)
-    assert later["views_done"] is True and area.is_dir() and not Path(source["view"]).exists()
-    assert later["errors"] and rp.prune_review_checkouts(root, set(), now=time.time() + LATER)["errors"] == []
+    assert "views_done" not in later and area.is_dir() and Path(source["view"]).exists()
+    assert later["errors"] and rp.prune_review_checkouts(root, set(), now=time.time() + LATER)["errors"]
 
 
 def test_a_thread_copy_lives_while_its_task_is_live(tmp_path, monkeypatch):
@@ -312,7 +319,7 @@ def test_a_reused_failed_copy_is_not_released_on_its_previous_run(tmp_path, monk
     assert (area / "check.py").read_bytes() == EDIT
 
 
-def test_a_failed_capture_expires_after_the_data_root_moves(tmp_path, monkeypatch):
+def test_a_failed_capture_stays_recoverable_after_the_data_root_moves(tmp_path, monkeypatch):
     root, source = _frozen(tmp_path)
     area = _seat(root, source, "op-failed")
     monkeypatch.setattr(rc, "_directory_delta", _boom)
@@ -321,11 +328,12 @@ def test_a_failed_capture_expires_after_the_data_root_moves(tmp_path, monkeypatc
     root.rename(moved)  # the receipt's stored evidence_dir now names nothing
     area = moved / area.relative_to(root)
     _custody(monkeypatch, settled=[area])
-    assert rp.prune_review_checkouts(moved, set(), now=time.time() + LATER)["removed"] == 1 and not area.exists()
+    assert rp.prune_review_checkouts(moved, set(), now=time.time() + LATER)["removed"] == 0 and area.is_dir()
+    assert (area / "check.py").read_bytes() == EDIT
 
 
-def test_a_failed_capture_is_kept_for_the_retention_period_from_the_failure(tmp_path, monkeypatch):
-    """An old copy whose capture fails now keeps its bytes for a whole retention period."""
+def test_an_old_copy_whose_capture_fails_keeps_its_unique_bytes(tmp_path, monkeypatch):
+    """Neither the materialization age nor the failure's age expires uncaptured work."""
     root, source = _frozen(tmp_path)
     area = _seat(root, source, "op-old")
     _custody(monkeypatch, settled=[area])
@@ -334,7 +342,7 @@ def test_a_failed_capture_is_kept_for_the_retention_period_from_the_failure(tmp_
     monkeypatch.setattr(rc, "_directory_delta", _boom)
     assert rp.prune_review_checkouts(root, set(), retention_days=7)["capture_failed"] == 1 and area.is_dir()
     rp.prune_review_checkouts(root, set(), retention_days=7, now=time.time() + 8 * 86400)
-    assert not area.exists()
+    assert (area / "check.py").read_bytes() == EDIT
 
 
 def test_a_failing_ownership_read_keeps_every_view_its_seat_names(tmp_path, monkeypatch):

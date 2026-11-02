@@ -304,7 +304,8 @@ def test_an_owner_restart_never_replaces_a_panic_flag_still_owed_its_controls(ro
     monkeypatch.setattr(restart, "_stop_owned_work", lambda ctx: [])
     monkeypatch.setattr(restart, "_request_restart_exit", lambda owner=False: None)
     assert restart._perform_owner_restart(SimpleNamespace(safe_restart=None)) == (True, "")
-    assert flag.read_text() == "panic" and (root / "state" / "owner_restart_no_resume.flag").exists()
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert flag.read_text() == "panic" and active_restart_transaction(root)["door"] == "owner_restart"
     monkeypatch.setattr(worker_chat_lane, "_pool", lambda: SimpleNamespace(DRIVE_ROOT=root, load_state=state.load_state))
     state.save_state(_prior())
     worker_chat_lane.auto_resume_after_restart()  # the owner-restart boot still settles the Panic debt
@@ -634,7 +635,7 @@ def test_panic_flag_blocks_constructor_tick_and_public_wake_after_failed_disable
     clock = BackgroundConsciousness(root, root, lambda: 7, now=0)
     assert not clock.enabled
     assert clock.tick(now=99999) == 'panic_stop'
-    monkeypatch.setattr(worker_chat_lane, 'wake_gate_open', lambda: True)
+    monkeypatch.setattr(worker_chat_lane, 'wake_gate_refusal', lambda: '')
     assert worker_chat_lane.handle_wake_direct(7, 'wake', {})['reason'] == 'consciousness_disabled_or_unknown'
     assert (root / 'state/panic_stop.flag').exists()
 

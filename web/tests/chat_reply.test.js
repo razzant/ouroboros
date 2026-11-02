@@ -15,7 +15,9 @@ function fixture({ actions = undefined } = {}) {
     const feed = el('div', { className: 'chat-messages' });
     const input = el('textarea', { attrs: { id: 'chat-input' } });
     const textRow = el('div', { className: 'chat-text-row' }, input);
-    const wrap = el('div', { className: 'chat-input-wrap' }, textRow);
+    // The composer's markup: the field holds the text row, and a staged strip becomes its first line.
+    const field = el('div', { className: 'chat-field' }, textRow);
+    const wrap = el('div', { className: 'chat-input-wrap' }, field);
     doc.body.append(feed, wrap);
     const positions = [];
     const replies = createChatReplies({ chatId: 1, feed, input, key: 'ouro_chat_reply', actions,
@@ -29,8 +31,11 @@ function fixture({ actions = undefined } = {}) {
         return node;
     };
     const quote = (node) => node.children.find((child) => child.classList.contains('chat-quote')) || null;
-    const strip = () => wrap.children.find((child) => child.classList.contains('chat-quote--composer')) || null;
-    return { ...env, feed, input, textRow, wrap, replies, bubble, quote, strip, positions,
+    // The strip the owner sees; one that is closing (shut) has already left and goes once its motion has run.
+    const strips = () => field.children.filter((child) => child.classList.contains('chat-quote--composer'));
+    const strip = () => strips().find((child) => child.dataset.motion !== 'shut') || null;
+    const leaving = () => strips().filter((child) => child.dataset.motion === 'shut');
+    return { ...env, feed, input, textRow, field, wrap, replies, bubble, quote, strip, leaving, positions,
         close() { replies.destroy(); env.restore(); } };
 }
 
@@ -63,6 +68,22 @@ test('an explicit quote landing replaces the old-width anchor before reflow; lat
     frames.splice(0).forEach(callback => callback());
     feed.clientWidth = 360; reading.reflow();
     assert.equal(feed.scrollTop, 408, 'a later resize preserves the reader’s gesture, not the quote landing');
+});
+
+test('a drawn row is a destination app needs no read for; a portal or a row not drawn is not', t => {
+    const env = installDomDouble();
+    t.after(() => env.restore());
+    const feed = env.el('div'), input = env.el('textarea');
+    env.doc.body.append(feed, input);
+    const card = env.el('div', { dataset: { rowAddress: 'task:c0ffee42' } });
+    const portal = env.el('div', { dataset: { rowAddress: 'task:d3adb33f', portal: '1' } });
+    const drawn = new Map([[card.dataset.rowAddress, card], [portal.dataset.rowAddress, portal]]);
+    const replies = createChatReplies({ feed, input, reading: () => ({}),
+        history: () => ({ exact: (address) => drawn.get(address) || null }) });
+    t.after(() => replies.destroy());
+    assert.equal(replies.draws('task:c0ffee42'), true);
+    assert.equal(replies.draws('task:d3adb33f'), false, 'its work lives in another room, which the read names');
+    assert.equal(replies.draws('task:0badf00d'), false);
 });
 
 test('a reveal that moves nothing hands a following reader the live edge back; a gesture, newer reveal or exit decides instead', async t => {
@@ -188,7 +209,7 @@ test('a saved row gets Reply beside Copy; a row without an address (an unsaved e
     } finally { f.close(); }
 });
 
-test('Reply stages the strip and the next frame carries only the address; Esc or × cancels; a send clears it', () => {
+test('Reply stages the strip and the next frame carries only the address; Esc or × cancels; a send clears it', async () => {
     const f = fixture();
     try {
         const saved = f.bubble('assistant', 'The audit found three stale projects.');
@@ -196,15 +217,18 @@ test('Reply stages the strip and the next frame carries only the address; Esc or
         f.replies.decorate(saved, { row_address: 'row:1@b#2', role: 'assistant' });
         saved.querySelector('.chat-message-reply').click();
         const strip = f.strip();
-        assert.ok(strip, 'the strip stands above the field');
-        assert.equal(f.wrap.children.indexOf(strip) < f.wrap.children.indexOf(f.textRow), true);
+        assert.ok(strip, 'the strip is staged');
+        assert.equal(f.field.children.indexOf(strip), 0, 'the field\'s first line, inside the field');
+        assert.equal(f.field.children.indexOf(f.textRow), 1, 'right before its text row');
         assert.equal(f.doc.activeElement, f.input, 'the field takes focus');
         assert.match(f.input.getAttribute('aria-describedby'), /reply$/);
         assert.deepEqual(f.replies.frameField(), { reply_to: 'row:1@b#2' }, 'the host makes the snippet');
         assert.equal(f.replies.echoRow().reply_to.address, 'row:1@b#2', 'the local echo draws the same quote');
         assert.equal(JSON.parse(f.storage.get('ouro_chat_reply')).address, 'row:1@b#2', 'kept for a reload');
+        assert.equal(strip.dataset.motion, 'open', 'it opens from no height (style.css runs it like the fold)');
         f.textRow.emit('keydown', { key: 'Escape' });
         assert.equal(f.strip(), null, 'Esc cancels');
+        assert.deepEqual(f.leaving().map((node) => node.inert), [true], 'it closes before it goes, taking no press');
         assert.deepEqual(f.replies.frameField(), {});
         assert.equal(f.storage.has('ouro_chat_reply'), false);
         saved.querySelector('.chat-message-reply').click();
@@ -214,7 +238,34 @@ test('Reply stages the strip and the next frame carries only the address; Esc or
         f.replies.clear();
         assert.equal(f.strip(), null, 'a send clears it');
         assert.equal(f.replies.echoRow(), null);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assert.equal(f.leaving().length, 0, 'a closed strip goes once its motion has run');
     } finally { f.close(); }
+});
+
+test('a staged strip is held shut through the first frame after staging and opens from the next', async () => {
+    const frames = [], prior = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (callback) => frames.push(callback);
+    const f = fixture();
+    try {
+        const saved = f.bubble('assistant', 'The audit found three stale projects.');
+        f.feed.append(saved);
+        f.replies.decorate(saved, { row_address: 'row:1@b#2', role: 'assistant' });
+        saved.querySelector('.chat-message-reply').click();
+        const strip = f.strip();
+        assert.deepEqual([strip.dataset.motion, 'hold' in strip.dataset], ['open', true],
+            'staging focuses the field and lays it out: the strip waits that frame out shut');
+        frames.splice(0).forEach((callback) => callback());
+        await Promise.resolve();
+        assert.deepEqual([strip.dataset.motion, 'hold' in strip.dataset], ['open', true],
+            'the first frame lays the focused field out (the long one): still held');
+        frames.splice(0).forEach((callback) => callback());
+        await Promise.resolve();  // the frame's callback settles before that frame's style is worked out
+        assert.deepEqual([strip.dataset.motion, 'hold' in strip.dataset], ['open', false], 'then it opens');
+    } finally {
+        f.close();
+        globalThis.requestAnimationFrame = prior;
+    }
 });
 
 test('a reply to a still-open question card answers in the card\'s own field, never a second path', () => {

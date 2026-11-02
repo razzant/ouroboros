@@ -127,6 +127,14 @@ def density_probe_before_size_refusal(ctx: Any, model: str, sample: str, *, surf
     return outcome
 
 
+def triad_fit_note(touched_paths: Sequence[str]) -> str:
+    """What a packet says in place of the full snapshots it dropped to fit the strictest reviewer."""
+    return ("TRIAD FIT NOTE: Full post-change snapshots were omitted because they duplicate the complete staged diff "
+            "and would exceed the strictest configured reviewer's input limit. Every touched path is listed below; "
+            "all added/deleted lines remain in the staged diff.\n\n"
+            + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)"))
+
+
 def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
                      diff_text: str, changed: str, target_repo, ctx=None,
                      subject=None, slots: Optional[list] = None, compact_diff=None) -> tuple:
@@ -210,13 +218,7 @@ def fit_triad_prompt(api_models: list, assemble, current_files_section: str,
             input_limit = _rv._quorum_input_token_limit(keys, slot_limits)
     if input_limit and estimate_tokens(prompt) > input_limit:
         touched_paths = [line.strip() for line in changed.splitlines() if line.strip()]
-        fit_note = (
-            "TRIAD FIT NOTE: Full post-change snapshots were omitted because they "
-            "duplicate the complete staged diff and would exceed the strictest "
-            "configured reviewer's input limit. Every touched path is listed below; "
-            "all added/deleted lines remain in the staged diff.\n\n"
-            + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)")
-        )
+        fit_note = triad_fit_note(touched_paths)
         prompt, stable_prefix_len = assemble(fit_note, diff_text)
         if input_limit and estimate_tokens(prompt) > input_limit:
             from ouroboros.tools.review_binary_context import StagedDiffUnavailable
@@ -435,6 +437,81 @@ def assemble_packet_prompt(*, layer: str, checklist_section: str, governance: An
         diff_text=diff_text, changed_files=changed_files, task_evidence_section=task_evidence_section,
     )
     return stable + "\n" + dynamic, len(stable) + 1
+
+
+def change_brief_words(layer: str, *, packet: bool = True, retrieving: bool = True) -> Tuple[list, list, list]:
+    """``(every seat, packet, retrieving)``: what the review contract (``commit_gate.commit_review_contract_fingerprint``)
+    counts of the change brief on ``layer``, a delivery's part built only when ``packet`` / ``retrieving`` seats sit:
+    each owner's seat-visible text rendered over fixed placeholder data in its branches, a round-dependent section in
+    every round, and on the body the diff pulse's judgment question and growth rule. The subject, the author's words,
+    host records (the pulse's counts and paths too) and guide bodies are data; the session and native wrappers are
+    their owners' (``seat_brief_material``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.owner_words import reviewer_words_material
+    from ouroboros.preflight_receipts import execution_material
+    from ouroboros.reference_books import BOOK_GROWTH_RULE
+    from ouroboros.review import DIFF_PULSE_QUESTION
+    from ouroboros.review_evidence import evidence_material
+    from ouroboros.review_history import history_material
+    from ouroboros.tools.review_brief_coupling import retrieving_material
+    from ouroboros.tools.review_change import wave_label_material
+    from ouroboros.tools.review_file_pack import pack_exclusion_note, pack_omission_note
+    from ouroboros.tools.review_helpers import intent_material
+    from ouroboros.tools.review_multi_model import packet_head_material
+    from ouroboros.tools.review_prompt_text import round_material
+    from ouroboros.tools.review_subject import managed_material
+
+    every = [*intent_material(), *wave_label_material(), *round_material(), *history_material(),
+             *reviewer_words_material(), *execution_material(), *managed_material((True,)),
+             *((DIFF_PULSE_QUESTION, BOOK_GROWTH_RULE) if layer == "body" else ())]
+    if not packet:
+        return every, [], [*retrieving_material(layer), *evidence_material(("session", "native")),
+                           *managed_material((False,))] if retrieving else []
+    governance = SimpleNamespace(stable_inline="⟨governance⟩", selected_inline="⟨governance⟩", navigation="⟨navigation⟩")
+    prompt, _stable = assemble_packet_prompt(
+        layer=layer, checklist_section="⟨checklist⟩", governance=governance, goal_section="⟨goal⟩", scope_section="⟨scope⟩",
+        files_section="⟨files⟩", diff_text="⟨diff⟩", changed_files="⟨paths⟩", rebuttal_section="⟨rebuttal⟩",
+        review_history_section="⟨history⟩", task_evidence_section="⟨evidence⟩")
+    packet_words = [prompt, *packet_head_material(layer), triad_fit_note(["⟨path⟩"]), triad_fit_note([]),
+                    pack_omission_note(["⟨path⟩"]), pack_exclusion_note(["⟨path⟩"], ["⟨path⟩"]),
+                    *evidence_material(("packet",))]
+    return every, packet_words, [*retrieving_material(layer), *evidence_material(("session", "native")),
+                                 *managed_material((False,))] if retrieving else []
+
+
+def seat_brief_material(row_plan: dict, *, layer: str, surface: str, shape: str, own: Sequence[str] = (),
+                        packet: Optional[Sequence[str]] = None, retrieving: Sequence[str] = ()) -> list:
+    """The seats' requests as the review contract counts them: the surface's own words (``own`` every seat,
+    ``packet`` / ``retrieving`` only while a seat of that delivery sits; no ``packet``: the change brief), the
+    layer's governance navigation, and the wrapper of each seated delivery with the answer contract of ``shape``
+    (``triad_review.default_output_contract``): an agent session per access, a native episode."""
+    from ouroboros.review_execution import review_session_output_schema
+    from ouroboros.review_native_episode import native_material
+    from ouroboros.review_session_preparation import session_material
+    from ouroboros.reviewer_slot_config import row_plan_retrieves
+    from ouroboros.tools.governance_context import PACKET_DELIVERY, RETRIEVING_DELIVERY, navigation_material
+    from ouroboros.tools.review_multi_model import TRIAD_ROLE_HINT
+    from ouroboros.triad_review import default_output_contract
+
+    count = len(row_plan.get("models") or [])
+    routes = [str(getattr(route, "value", route) or "") for route in row_plan.get("routes") or []]
+    accesses = [str(access or "readonly") for access in [*(row_plan.get("session_accesses") or []), *[""] * count]]
+    retrieves = [row_plan_retrieves(row_plan, index) for index in range(count)]
+    sessions = [accesses[index] for index in range(count) if retrieves[index] and routes[index] == "agent_session"]
+    if packet is None:  # the change brief, its seated deliveries' parts only
+        every, packet, triad_retrieving = change_brief_words(layer, packet=not all(retrieves), retrieving=any(retrieves))
+        own, retrieving = [*own, *every], [*retrieving, *triad_retrieving]
+    contract, brief = default_output_contract(shape), list(own)
+    if not all(retrieves):
+        brief += [*packet, *navigation_material(layer, PACKET_DELIVERY)]
+    if any(retrieves):
+        brief += [TRIAD_ROLE_HINT, *retrieving, *navigation_material(layer, RETRIEVING_DELIVERY)]
+    if sessions:
+        brief += session_material(surface, contract, review_session_output_schema(surface, shape), sessions)
+    if len(sessions) < sum(retrieves):
+        brief += native_material(surface, contract)
+    return brief
 
 
 def source_root_for(ctx: Any, task_evidence: dict) -> str:
@@ -679,7 +756,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
         return {"system": text, "user": TRIAD_USER_TURN, "parts": list(parts), "sha": manifest["sha"],
                 "delivery": "retrieving", "manifest": manifest, "stable_prefix_len": 0}
     # A packet seat: the assembled change evidence, fit to the seat's window.
-    from ouroboros.tools.review_file_pack import build_touched_file_pack, triad_pack_exclusions
+    from ouroboros.tools.review_file_pack import build_touched_file_pack, pack_omission_note, triad_pack_exclusions
 
     touched_paths = [path for _status, path in frozen_subject.name_status] if frozen_subject.name_status else [
         p.strip() for p in str(_rv.run_cmd(["git", "diff", "--cached", "--name-only"], cwd=review_root) or "").splitlines() if p.strip()]
@@ -696,7 +773,7 @@ def build_two_part_brief(frozen_subject: Any, seat: Any, *, layer: Optional[str]
         m0_tree=getattr(managed, "m0_tree", "") or "", staged_tree=getattr(managed, "staged_tree", "") or "",
         exclude_paths=exclude_paths)
     if omitted:
-        files_section += f"\n\n⚠️ OMISSION NOTE: {len(omitted)} file(s) omitted from direct context: {', '.join(omitted)}"
+        files_section += f"\n\n{pack_omission_note(omitted)}"
     if exclusion_note:
         files_section += f"\n\n{exclusion_note}"
     changed = "\n".join(touched_paths)

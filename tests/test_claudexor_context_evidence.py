@@ -36,7 +36,6 @@ def catalog(monkeypatch):
         return copy.deepcopy(current["value"])
 
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(fetch), raising=False)
-    monkeypatch.setattr(ce, "_generative_probe_window", lambda *_a, **_k: pytest.fail("generation probe"))
     return current
 
 
@@ -79,7 +78,6 @@ def test_auto_uses_largest_advertised_capacity_and_retains_provenance(tmp_path, 
     assert evidence.provenance == catalog["value"]["provenance"]
     assert evidence.ts == catalog["value"]["observedAt"]
     assert catalog["calls"] == [("test-source", None, "exact-model")]
-    assert not ce.confirms_at_least(evidence)
 
 
 def test_auto_capacity_uses_model_compatible_account_and_keeps_exact_binding(tmp_path, monkeypatch):
@@ -142,10 +140,9 @@ def test_mismatched_catalog_cannot_supply_requested_account_capacity(tmp_path, c
 ])
 def test_missing_capacity_or_binding_remains_unknown_without_generation(tmp_path, catalog, change):
     catalog["value"].update(change)
-    evidence = _probe(tmp_path, allow_generative=True)
+    evidence = _probe(tmp_path)
     assert evidence.window_tokens == 0
     assert not ce.is_known(evidence, require_fresh=True)
-    assert not ce.confirms_at_least(evidence)
 
 
 def test_catalog_observation_time_is_not_refreshed_by_local_cache(tmp_path, catalog):
@@ -185,7 +182,6 @@ def test_role_manual_window_above_catalog_is_asserted_not_scope_ack(tmp_path, mo
     assert main.window_tokens == 1_200_000 and main.status == "asserted"
     assert main.source == "user_setting"
     assert ce.is_known(main)  # sizing assertion, not governance proof
-    assert not ce.confirms_at_least(main)
     assert main_route["options"]["credential_profile_id"] == "account-a"
     assert ce.list_owner_acks(tmp_path) == []
     catalog["value"] = _catalog("account-b", "identity-b", 500_000)
@@ -206,7 +202,7 @@ def test_manual_reviewer_sizing_does_not_change_scope_authority(tmp_path, monkey
     monkeypatch.setenv("OUROBOROS_MODEL_CONTEXT_WINDOWS", json.dumps({"deep_review": 1_200_000}))
     monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", json.dumps({"deep_review": "account-a"}))
     window = resolve_reviewer_window(MODEL, model_role="deep_review", use_local=False)
-    assert window.window_tokens == 872_000
+    assert window.window_tokens == 1_200_000 and window.window_record.contradicted_by.tokens == 872_000
     assert window.sizing_window() == 1_200_000
     assert window.sizing_source == "user_setting"
     assert window.model_route["credentialProfileId"] == "account-a"
@@ -231,7 +227,7 @@ def test_main_input_reserve_and_account_capacity_remain_distinct(tmp_path, monke
     assert measured.target_total_tokens is None
 
 
-def test_unknown_subscription_reviewer_keeps_existing_input_budget(tmp_path, monkeypatch, catalog):
+def test_unknown_subscription_reviewer_keeps_the_assembler_input_budget(tmp_path, monkeypatch, catalog):
     from ouroboros import config
     from ouroboros.reviewer_window import resolve_reviewer_window, window_scaled_reserves
     from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET, calibrated_input_token_limit
@@ -242,8 +238,9 @@ def test_unknown_subscription_reviewer_keeps_existing_input_budget(tmp_path, mon
     window = resolve_reviewer_window(MODEL, use_local=False)
     assert window.window_tokens == 0
     assert window.sizing_window() == 0
+    assert window.window_record.usable is None and not ce.is_known(window)
     assert window_scaled_reserves(0, output_reserve=65_536, tokenizer_margin=50_000) == (65_536, 50_000)
-    assert calibrated_input_token_limit(MODEL, context_window=0, output_reserve=65_536,
+    assert calibrated_input_token_limit(MODEL, context_window=window.sizing_window(), output_reserve=65_536,
                                          tokenizer_margin=50_000, budget_cap=456_789) == 456_789
     caps = per_slot_input_token_limits([MODEL], output_reserve=65_536, tokenizer_margin=50_000)
     assert caps == {MODEL: REVIEW_PROMPT_TOKEN_BUDGET}
@@ -289,7 +286,6 @@ def test_model_only_ack_and_cache_cannot_certify_subscription_account(tmp_path, 
     assert cold.window_tokens == 0
     actual = _probe(tmp_path)
     assert actual.window_tokens == 872_000
-    assert not ce.confirms_at_least(actual)
 
 
 def test_exact_account_ack_retains_its_binding_and_expires_on_account_change(tmp_path, catalog):
@@ -298,10 +294,8 @@ def test_exact_account_ack_retains_its_binding_and_expires_on_account_change(tmp
     ce.record_owner_ack(tmp_path, provider="claudexor", model=MODEL,
                         window_tokens=1_200_000, options=options)
     acknowledged = _probe(tmp_path, options=options, allow_fetch=False)
-    assert ce.confirms_at_least(acknowledged)
     assert acknowledged.credential_profile_id == "account-a"
     assert acknowledged.account_fingerprint == "identity-a"
     replaced_account = _probe(tmp_path, options={**options, "account_fingerprint": "identity-b"},
                               allow_fetch=False)
     assert replaced_account.window_tokens == 0
-    assert not ce.confirms_at_least(replaced_account)

@@ -72,7 +72,7 @@ def test_a_writable_seat_runs_in_its_own_copy_and_leaves_evidence(repo, tmp_path
     facts = run_delegated_review_session(prompt="review", root=str(repo), custody_drive=drive,
                                          invocation=_invocation(access="full", checking_source=source))
     body = FakeGateway.instances[-1].start_requests[0]
-    area = review_checking.seat_dir(drive, "task-1", "op-1") / "area"
+    area = review_checking.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     assert body["mode"] == "agent" and body["access"] == "full" and body["scope"]["root"] == str(repo)
     assert body["execution"] == {"isolation": "live", "delegated": True, "workspaceRoot": str(area)}
     assert "CHECKING COPY" in body["instructions"] and source["tree"] in body["instructions"]

@@ -411,7 +411,7 @@ def test_a_thousand_unprojectable_owners_cost_one_presence_query_and_no_repeated
     for name in counts:
         counts[name] = 0
     reconcile_abandoned_usage(env.root)
-    assert counts["fence"] == 0 and counts["loads"] <= 3 * present and counts["presence"] == 1
+    assert counts["fence"] == counts["loads"] == counts["presence"] == 0
     assert sink.stat().st_size == size and duty_records(caplog) == []
     assert usage.usage_projection(env.root) == summary
 

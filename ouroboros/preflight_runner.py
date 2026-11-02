@@ -35,15 +35,19 @@ LANE_EXCLUSION_EXPR = (
     "and not portable_detail and not skill_smoke and not size_ratchet"
 )
 
-# Shared flags for ci.yml `quick-test`/`full-test-runs`, including hang timeout.
-# Windows appends `--default-suite-shard`; the local full run is unsharded.
+# Shared flags for ci.yml `quick-test`/`full-test-runs`, including the hang timeout.
+# CI appends `--default-suite-shard` on every OS; the local full run is unsharded.
+# No `--timeout-method`: pytest-timeout's default is SIGALRM where the platform has
+# it, which fails only the hung test, and its thread method elsewhere (Windows),
+# which stops the worker.
 PARALLEL_PASS_FLAGS = [
     "-n", "auto",
     "--dist", "loadscope",
     "--max-worker-restart=0",
     "--timeout=300",
-    "--timeout-method=thread",
 ]
+# The serial pass carries the same per-test hang bound and none of the xdist flags.
+SERIAL_PASS_FLAGS = ["--timeout=300"]
 
 # Verifying the INTERPRETER (see `_verify_preflight_plugins`) proves the plugins
 # are installed; it does not prove the candidate's own pytest configuration lets
@@ -66,6 +70,8 @@ PARALLEL_PASS_FLAGS = [
 # compared token-for-token against ci.yml, where the environment is provisioned
 # and no candidate configuration is in play.
 _FORCED_PLUGIN_FLAGS = ["-p", "xdist", "-p", "timeout"]
+# The serial pass carries `--timeout` too, so it forces the timeout plugin the same way.
+_FORCED_SERIAL_PLUGIN_FLAGS = ["-p", "timeout"]
 
 # Option NAMES that only a parallel pass carries, derived from the SSOT above so
 # the classifier can never disagree with the flags actually passed. Compared as
@@ -149,30 +155,18 @@ _WORKER_CRASH_PATTERNS = (
     re.compile(r"^maximum crashed workers reached: \d+", re.IGNORECASE),
 )
 
-# pytest-timeout's own banner. `--timeout-method=thread` does NOT fail the test:
-# it dumps stacks and `os._exit(1)`s the whole worker, which xdist then reports
-# with the crash phrasing above. So a plain hang is indistinguishable from a real
-# crash by exit code alone, and the generic "mark it @pytest.mark.serial"
-# remediation would be actively harmful — the serial pass carries no per-test
-# timeout, so obeying it relocates the hang into the pass that has no defence
-# against it. These patterns split the two cases apart.
-#   * thread method (pytest_timeout.timeout_timer -> write_title("Timeout", sep="+"))
-#     prints a "+++++ Timeout +++++" rule; the fill width follows the terminal, and
-#     xdist may prefix the forwarded line, so neither end is anchored. This is the
-#     banner the configured `--timeout-method=thread` actually emits, and only
-#     pytest-timeout emits it.
-#   * signal method raises Failed("Timeout >300.0s") — kept so the diagnosis is
-#     right if the method is ever changed. The bare phrase alone is NOT enough:
-#     `Timeout >30s` is ordinary text a test can print or assert on, and matching
-#     it against the whole pass output would INVERT the remediation for a genuine
-#     crash that happens to run alongside such a test. So the phrase only counts
-#     as pytest's own `Failed:` exception line, which is how both `--tb=line`
-#     ("path:5: Failed: Timeout >300.0s") and `--tb=short` ("E   Failed: Timeout
-#     >300.0s") render the signal method's exception.
-_TIMEOUT_BANNER_PATTERNS = (
-    re.compile(r"\+{3,} Timeout \+{3,}"),
-    re.compile(r"\bFailed:\s*Timeout >\d+(?:\.\d+)?s"),
-)
+# Why a worker died. pytest-timeout's thread method (the default where SIGALRM does
+# not exist, i.e. Windows) does NOT fail the test: it dumps stacks and `os._exit(1)`s
+# the whole worker, which xdist reports with the crash phrasing above, and the serial
+# mark would only move that hang (the serial pass carries the same per-test timeout).
+# Its banner and stacks go to the worker's stdout, which execnet discards (#1949); a
+# signal-method `Failed: Timeout` fails its test while the worker lives on. So the cause
+# comes from this pass's own results.json (tests/ci_evidence.py), which the probe in this
+# pass's controller locates: a crash row names its worker and, only when the controller
+# matched the record that worker's callback left for exactly that test of this run, the
+# timeout. Printed text is no authority, since any test can print it; this pattern keeps
+# the controller's readable copy of such a row in the display only.
+_TIMEOUT_CALLBACK_LINE = re.compile(r"^\[gw\d+\] pytest-timeout callback invoked\b")
 
 
 class PreflightPass(NamedTuple):
@@ -262,7 +256,8 @@ def _preflight_pass_specs(
         ),
         _make_pass(
             "serial",
-            [target, "-m", f"serial and {LANE_EXCLUSION_EXPR}", *output_flags],
+            [target, "-m", f"serial and {LANE_EXCLUSION_EXPR}", *SERIAL_PASS_FLAGS,
+             *_FORCED_SERIAL_PLUGIN_FLAGS, *output_flags],
         ),
     ]
 
@@ -434,9 +429,9 @@ def _apply_diff(worktree: pathlib.Path, diff_text: "str | bytes") -> None:
         # end-of-line conversion either. On a Windows runner (`core.autocrlf=true`
         # by default) an LF payload applied against a CRLF-converted checkout
         # otherwise mangles every line ending, breaking the byte-faithful
-        # guarantee this whole capture exists to hold. No `.gitattributes text`
-        # directive governs the affected paths, so the config override is
-        # authoritative.
+        # guarantee this whole capture exists to hold. Where `.gitattributes`
+        # names a line ending (this repository's `* text=auto eol=lf`), the
+        # attribute decides and agrees; elsewhere this override is authoritative.
         ["-c", "core.autocrlf=false", "-c", "core.eol=lf",
          "apply", "--whitespace=nowarn", "--binary", "--unidiff-zero"],
         input_text=diff_text,
@@ -519,6 +514,7 @@ import os
 import pathlib
 
 _LOG = pathlib.Path(__WORKER_LOG__)
+_RESULTS = pathlib.Path(__RESULTS_POINTER__)
 
 
 def pytest_configure(config):
@@ -526,6 +522,13 @@ def pytest_configure(config):
     # report, so the file count IS the worker count.
     worker = os.environ.get("PYTEST_XDIST_WORKER")
     if not worker:
+        # This pass's own controller: where its evidence plugin writes results.json.
+        directory = getattr(config.option, "ci_evidence_dir", None)
+        try:
+            if directory:
+                _RESULTS.write_text(str(pathlib.Path(directory).resolve()), encoding="utf-8")
+        except OSError:
+            pass
         return
     try:
         _LOG.mkdir(parents=True, exist_ok=True)
@@ -543,6 +546,20 @@ def _worker_log_dir(temp_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(temp_root) / "workers"
 
 
+def _results_pointer(temp_root: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(temp_root) / "ci-evidence-dir"
+
+
+def _recorded_session(temp_root: pathlib.Path) -> Optional[dict]:
+    """This pass's own results.json, as its controller located it; None when absent or unreadable."""
+    try:
+        directory = _results_pointer(temp_root).read_text(encoding="utf-8")
+        recorded = json.loads((pathlib.Path(directory) / "results.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return recorded if isinstance(recorded, dict) else None
+
+
 def _install_worker_probe(temp_root: pathlib.Path) -> str:
     """Write the worker-count plugin and return the nonce module name to load.
 
@@ -554,7 +571,8 @@ def _install_worker_probe(temp_root: pathlib.Path) -> str:
     probe.mkdir(parents=True, exist_ok=True)
     (probe / "admitted-workers").write_text(str(_preflight_worker_count()), encoding="utf-8")
     (probe / f"{module}.py").write_text(
-        _WORKER_PROBE_SOURCE.replace("__WORKER_LOG__", repr(str(_worker_log_dir(temp_root)))),
+        _WORKER_PROBE_SOURCE.replace("__WORKER_LOG__", repr(str(_worker_log_dir(temp_root))))
+        .replace("__RESULTS_POINTER__", repr(str(_results_pointer(temp_root)))),
         encoding="utf-8",
     )
     return module
@@ -800,8 +818,8 @@ def _partial_stream_text(chunk) -> str:
 
 
 def _controller_diagnostics(output_root) -> str:
-    """Keep xdist/timeout classification independent of a long display preview."""
-    patterns = (*_WORKER_CRASH_PATTERNS, *_TIMEOUT_BANNER_PATTERNS)
+    """Keep the xdist crash label and the timeout line's display independent of a long preview."""
+    patterns = (*_WORKER_CRASH_PATTERNS, _TIMEOUT_CALLBACK_LINE)
     found = {}
     for name in ("stdout.bin", "stderr.bin"):
         with (pathlib.Path(output_root) / name).open("rb") as stream:
@@ -831,9 +849,9 @@ def _execute_pytest_pass(
     Returns ``(returncode, combined_output, containment_error)``.
     ``returncode is None`` means the pass exhausted its slice of the budget and
     its whole process tree was reaped. The output of a timed-out pass is whatever
-    the child had flushed before the kill — pass 2 carries no per-test timeout,
-    so a serial hang is exactly the case with no other evidence of WHICH test
-    hung.
+    the child had flushed before the kill. Both passes carry the same 300 s
+    per-test timeout; a kill of the whole pass budget leaves that flushed output
+    as the only evidence of WHICH test was running.
 
     A NON-EMPTY ``containment_error`` is a hard block the caller must not accept
     as green, whatever the return code says: the container's post-pass SCAN found
@@ -845,12 +863,12 @@ def _execute_pytest_pass(
     """
     from ouroboros.process_containment import ProcessContainer
 
+    from ouroboros.preflight_inventory import note_lane_process
     from ouroboros.test_evidence import CapturedPass, FileOutput
 
     container = ProcessContainer(lifeline=True, overload=True)
     output = FileOutput(temp_root, "pytest")
     proc = None
-    reap_error = "lane did not finish"
     try:
         proc = container.spawn(
             [agent_python, "-m", "pytest", *args], cwd=str(worktree),
@@ -876,6 +894,11 @@ def _execute_pytest_pass(
         except OSError as exc:
             output.failed("controller diagnostics", exc)
         return CapturedPass(returncode, preview, reap_error, output.errors)
+    except BaseException as exc:
+        if proc is not None and proc.poll() is None:
+            _terminate_preflight_tree(proc, temp_root)
+        note_lane_process(exc, container, proc)
+        raise
     finally:
         if proc is not None and proc.poll() is None:
             _terminate_preflight_tree(proc, temp_root)
@@ -930,9 +953,10 @@ _TIMEOUT_EXCERPT_HEADER = (
 def _with_timeout_excerpt(message: str, output: str, max_output: int) -> str:
     """Append what the killed pass had already flushed to its timeout message.
 
-    A timed-out pass produces no exit code to classify, and pass 2 carries no
-    per-test timeout, so without this the operator is told only that "the serial
-    pass timed out" — with nothing naming the test that hung. The TAIL is kept
+    A pass killed at its budget produces no exit code to classify, and the 300 s
+    per-test timeout both passes carry did not end its hang first, so without this
+    the operator is told only which pass timed out — with nothing naming the test
+    that hung. The TAIL is kept
     (progress output ends at the test that never finished) and the whole result
     stays inside the caller's declared ``max_output`` — unconditionally, exactly
     as ``_diagnosis`` does, including when the message alone already fills the
@@ -970,29 +994,34 @@ def _rejected_parallel_flags(output: str) -> list[str]:
     return rejected
 
 
-def _crash_remediation(output: str) -> str:
+def _crash_remediation(recorded: Optional[dict] = None) -> str:
     """The instruction line for a dead worker — it depends on WHY it died.
 
-    A worker killed by ``--timeout=300 --timeout-method=thread`` reaches the
-    controller with the same crash phrasing as a genuine crash, but the fix is
-    the opposite one: the serial pass runs flag-free (no per-test timeout), so
-    marking a merely-slow test ``@pytest.mark.serial`` moves the hang into the
-    pass that cannot bound it, where it burns the whole remaining total budget
-    and resurfaces as a pass-2 timeout. The label and the hard block are
-    identical either way; only this line changes.
+    The label and the hard block are identical either way; only this line changes.
+    ``recorded`` is this pass's own results.json (``_recorded_session``). The timeout
+    instruction needs the worker the session recorded dead among its crash rows and
+    every crash row naming its worker and a matched timeout; anything less, a missing
+    or unreadable record included, is diagnosed before any fix is chosen.
     """
-    if any(pattern.search(output) for pattern in _TIMEOUT_BANNER_PATTERNS):
+    record = recorded if isinstance(recorded, dict) else {}
+    dead = record.get("worker_crash")
+    reports = record.get("reports")
+    rows = [row for row in reports if isinstance(row, dict) and row.get("phase") == "crash"] if isinstance(reports, list) else []
+    timed = [row["worker"] for row in rows
+             if isinstance(row.get("worker"), str) and type(row.get("timeout_callback_seconds")) in (int, float)]
+    if rows and len(timed) == len(rows) and isinstance(dead, dict) and dead.get("worker") in timed:
         return (
-            "A test exceeded the 300s per-test limit and pytest-timeout killed its worker "
-            "(--timeout-method=thread terminates the process instead of failing the test). "
-            "Make that test faster or split it. Do NOT mark it @pytest.mark.serial: the "
-            "serial pass carries no per-test timeout, so the hang would simply move there "
-            "and consume the rest of the total budget."
+            "pytest-timeout's callback was invoked for the test its worker was running: the per-test "
+            "timer fired before that test finished, and the worker was lost afterwards. Make that test "
+            "faster or split it. Do NOT mark it @pytest.mark.serial: the serial pass carries the same "
+            "per-test timeout."
         )
     return (
-        "A pytest-xdist worker DIED instead of reporting a failure. Find the test that "
-        "spawns a real process, binds a real port, or mutates a module global and "
-        "mark it @pytest.mark.serial; never a flake/retry."
+        "A pytest-xdist worker DIED instead of reporting a failure, and nothing recorded why: a native "
+        "crash, an OS kill, an os._exit in a test and a timeout that left no callback record look alike. "
+        "Rerun the test it was running on its own and read that output before choosing a fix; mark it "
+        "@pytest.mark.serial only once it proves to own a real process, port or module global it cannot "
+        "isolate; never a flake/retry."
     )
 
 
@@ -1005,12 +1034,15 @@ def _classify_pass_result(
     parallel: bool,
     agent_python: str = "python3",
     elapsed: float = 0.0,
+    recorded: Optional[dict] = None,
 ) -> Optional[str]:
     """Turn one pass's exit code + output into ``None`` or a bounded diagnosis.
 
     Pure function: no process, no filesystem. Exit 0 and exit 5
     (nothing collected for this lane) are green here; the orchestrator alone
-    decides that ALL passes being empty is a block.
+    decides that ALL passes being empty is a block. ``recorded`` (this pass's
+    own results.json, when its controller left one) only selects a dead
+    worker's remediation.
     """
     if returncode in (0, _PYTEST_EXIT_NO_TESTS):
         return None
@@ -1041,7 +1073,7 @@ def _classify_pass_result(
             # budget in `_diagnosis` trims the tail, not the highlight.
             return _diagnosis(
                 f"⚠️ PRE_PUSH_TEST_ERROR: PARALLEL_WORKER_CRASH (hard block): {head}",
-                _crash_remediation(output),
+                _crash_remediation(recorded),
                 "\n".join(matched) + "\n\n" + output, max_output,
             )
 
@@ -1152,10 +1184,11 @@ def _release_hermetic_tree(repo, temp_root, worktree, worktree_added: bool, unpr
     """Delete the disposable tree, unless a contained lane left its teardown unproven.
 
     ``unproven`` is armed before each contained lane starts and cleared only by
-    that lane's own proven reap, so a lane that RAISED keeps the tree exactly
-    like one whose container reported a live or undeterminable leftover: a
-    surviving process never loses the worktree it runs in, and the source
-    repository keeps the registration for whoever proves those processes gone.
+    that lane's own proven reap, returned or carried by its exception, so a lane
+    that RAISED without proof keeps the tree exactly like one whose container
+    reported a live or undeterminable leftover: a surviving process never loses
+    the worktree it runs in, and the source repository keeps the registration
+    for whoever proves those processes gone.
     The marker is the enclosing layers' retention protocol; this decision does
     not depend on the marker write succeeding."""
     from ouroboros.test_environment import retention_markers
@@ -1229,9 +1262,9 @@ def _run_hermetic_pytest(
 ) -> Optional[str]:
     """Run Node and both pytest lanes in one disposable candidate checkout.
 
-    A full run is the default; reviewed ordinary commits request ``selected``.
-    Selection uses the assembled candidate, HEAD before commit or HEAD~1 after,
-    plus authored widening. Only complete full runs may mint durable receipts.
+    A full run is the default; reviewed ordinary commits request ``selected`` against
+    ``base`` (default HEAD before commit, HEAD~1 after) plus authored widening. Green
+    runs mint receipts: full ones as full, selected ones only of an exact commit.
     Skip/no suite returns None without proof; failures return bounded diagnostics.
     OUROBOROS_PREFLIGHT_TIMEOUT_SEC owns the shared total lane budget.
 
@@ -1291,8 +1324,7 @@ def _run_hermetic_pytest(
     source_index_tree, source_index_error = _capture_source_index_tree(repo, max_output)
     if source_index_error is not None:
         return source_index_error
-    temp_root_path = tempfile.mkdtemp(prefix="ouroboros-preflight-", dir=default_temp_parent())
-    temp_root = pathlib.Path(temp_root_path).resolve(strict=False)
+    temp_root = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-preflight-", dir=default_temp_parent())).resolve()
     worktree = temp_root / "repo"
     worktree_added = False
     unproven_teardown = ""
@@ -1353,8 +1385,8 @@ def _run_hermetic_pytest(
             PreflightTestProof, capture_preflight_test_subject, log_preflight_test_proof,
             preflight_test_workload_unchanged, selected_workload_unchanged,
         )
-        from ouroboros.preflight_receipts import FullGateReceipt
-        from ouroboros.preflight_inventory import selection_passes, read_inventory, inventory_problem
+        from ouroboros.preflight_receipts import GateReceipt
+        from ouroboros.preflight_inventory import launching, selection_passes, read_inventory, inventory_problem
         if selected:
             from ouroboros.test_selection import select_tests
             selection = select_tests(worktree, base=base or ("HEAD" if phase == PRE_COMMIT_PHASE else "HEAD~1"),
@@ -1371,7 +1403,7 @@ def _run_hermetic_pytest(
         if selection is not None and ctx is not None and subject is None:
             raise ValueError("selected test subject could not be bound")
         can_reuse = isinstance(previous_proof, PreflightTestProof) and previous_proof.covers(subject)
-        receipt = None if can_reuse else FullGateReceipt.prepare(ctx, subject, passes, probe_module, agent_python, temp_root, worktree)
+        receipt = None if can_reuse else GateReceipt.prepare(ctx, subject, passes, probe_module, agent_python, temp_root, worktree)
         if can_reuse or receipt.covered():
             evidence.update(reuse="process_proof" if can_reuse else "receipt", reused_from=getattr(
                 ctx, "_preflight_previous_evidence", None) if can_reuse else receipt.evidence)
@@ -1383,7 +1415,8 @@ def _run_hermetic_pytest(
             return None
         started = time.monotonic()
         unproven_teardown = "the node lane did not return, so its teardown is unconfirmed"
-        node_result = run_node_tests(worktree, temp_root, timeout, max_output)
+        with launching(evidence):
+            node_result = run_node_tests(worktree, temp_root, timeout, max_output)
         evidence["execution"] = (node_result or {}).get("execution", "not_run")
         unproven_teardown = (node_result or {}).get("reap_error") or ""
         if node_result is not None:
@@ -1403,14 +1436,13 @@ def _run_hermetic_pytest(
             # Headers report this pass, not cumulative shared-budget time.
             pass_started = time.monotonic()
             unproven_teardown = f"the {spec.label} pass did not return, so its teardown is unconfirmed"
-            evidence["execution"] = "attempted"
-            lane_result = _execute_pytest_pass(
-                agent_python, worktree, temp_root, spec.args, remaining
-            )
+            with launching(evidence):
+                lane_result = _execute_pytest_pass(
+                    agent_python, worktree, temp_root, spec.args, remaining
+                )
             returncode, output, reap_error = lane_result
             _record_lane(evidence, "pytest", lane_result, returncode=returncode, containment_error=reap_error, **{"pass": spec.label})
             unproven_teardown = reap_error
-            evidence["execution"] = "executed"
             inventory_error = ""
             if selection is not None:  # the full native inventory is run evidence; ledgers stay compact
                 inventory[spec.label], inventory_error = read_inventory(evidence["path"], spec.label)
@@ -1475,11 +1507,11 @@ def _run_hermetic_pytest(
                 # only decides how it reads. Gating the return on the diagnosis
                 # being truthy made a budget too small to render one turn a red
                 # pass into a green gate.
-                failure = _classify_pass_result(
+                return _classify_pass_result(
                     spec.label, returncode, output, max_output,
                     parallel=spec.parallel, agent_python=agent_python, elapsed=elapsed,
-                )
-                return failure or (
+                    recorded=_recorded_session(temp_root) if probe_module in spec.args else None,
+                ) or (
                     f"⚠️ PRE_PUSH_TEST_ERROR: {spec.label} pass, exit {returncode}, {elapsed:.0f}s"
                 )
         if len(empty_passes) == len(passes):
@@ -1512,9 +1544,10 @@ def _run_hermetic_pytest(
     except Exception as exc:
         failure = f"⚠️ PRE_PUSH_TEST_ERROR: hermetic preflight failed: {exc}"
     finally:
+        unproven_teardown = evidence.pop("lane_teardown", unproven_teardown)
         evidence["cleanup"] = (repo, temp_root, worktree, worktree_added, unproven_teardown)
         from ouroboros.preflight_inventory import record_failed_attempt
-        record_failed_attempt(ctx, selection, subject, inventory)
+        record_failed_attempt(ctx, selection, subject, inventory, evidence)
     return _with_retention_notice(failure, unproven_teardown, worktree, max_output)
 
 

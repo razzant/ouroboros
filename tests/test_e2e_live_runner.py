@@ -466,10 +466,10 @@ def test_submit_injects_no_budget_profile_into_the_stand_roots(monkeypatch):
     bodies: list = []
     monkeypatch.setattr(scenarios, "_api", lambda base, method, path, payload=None, timeout=0:
                         bodies.append((method, path, payload)) or {"task_id": "t-1"})
-    assert _ctx().submit("do it", metadata={"force_plan": True, "force_plan_source": "swarm"}) == "t-1"
+    assert _ctx().submit("do it", metadata={"purpose": "probe"}) == "t-1"
     (method, path, body), = bodies
     assert (method, path) == ("POST", "/api/tasks") and body["timeout_sec"] == 1
-    assert body["metadata"] == {"source": "e2e_live", "delegation_role": "root", "force_plan": True, "force_plan_source": "swarm"}
+    assert body["metadata"] == {"source": "e2e_live", "delegation_role": "root", "purpose": "probe"}
     assert not hasattr(scenarios, "STAND_BUDGET_PROFILE") and "budget_profile" not in json.dumps(body)
 
 
@@ -861,12 +861,20 @@ class _NoopServer:
     __init__ = start = stop = lambda self, *a, **k: None
 
 
+_STOP_UNCONFIRMED = ["restart successor 4242: process group 4242 still has live members, not signalled"]
+
+
+class _UnconfirmedStopServer(_NoopServer):
+    """``IsolatedServer.stop`` returns every exit it could not prove."""
+    stop = lambda self: list(_STOP_UNCONFIRMED)  # noqa: E731
+
+
 def _attempt_row(tmp_path, monkeypatch, sid: str, acceptance=lambda ctx: ctx.check("scenario_ok", True), *,
-                 flags: str = "") -> dict:
-    """One ``run_attempt`` of ``sid`` under ``<tmp_path>/<sid>``: a fresh git seed, the real template, the no-op
-    server, ``acceptance`` in the scenario's place (default: one passing check); ``<sid>/out`` keeps the artifacts."""
+                 flags: str = "", server=_NoopServer) -> dict:
+    """One ``run_attempt`` of ``sid`` under ``<tmp_path>/<sid>``: a fresh git seed, the real template, the ``server``
+    double, ``acceptance`` in the scenario's place (default: one passing check); ``<sid>/out`` keeps the artifacts."""
     _short_tmp(monkeypatch)
-    monkeypatch.setattr(run_live_lanes, "IsolatedServer", _NoopServer)
+    monkeypatch.setattr(run_live_lanes, "IsolatedServer", server)
     monkeypatch.setitem(run_live_lanes.SCENARIOS, sid, dataclasses.replace(scenarios.SCENARIOS[sid], acceptance=acceptance))
     root = tmp_path / sid
     root.mkdir()
@@ -1509,6 +1517,10 @@ def test_orphan_after_stop_fails_a_passing_lane_with_a_typed_reason(tmp_path):
     run_live_lanes._apply_orphan_scan(absent, None)   # no procfs (macOS, Windows): a typed fact, no check
     assert absent["status"] == "pass" and absent["orphan_scan"] == "unavailable:no_procfs"
     assert absent["no_orphans_after_stop"] is None and "no_orphans_after_stop" not in absent["checks"]
+    stuck = row()   # an exit the server stop could not prove fails it alike, with or without procfs
+    run_live_lanes._apply_orphan_scan(stuck, None, _STOP_UNCONFIRMED)
+    assert (stuck["status"], stuck["reason_code"], stuck["server_stop_unconfirmed"]) == ("fail", "checks_failed", _STOP_UNCONFIRMED)
+    assert stuck["checks"] == {"fake": True, "server_stop_confirmed": False} and "server_stop_unconfirmed" not in clean
     dirty = row()
     run_live_lanes._apply_orphan_scan(dirty, [os.getpid()])
     assert dirty["status"] == "fail" and dirty["reason_code"] == "checks_failed"
@@ -1530,3 +1542,57 @@ def test_orphan_after_stop_fails_a_passing_lane_with_a_typed_reason(tmp_path):
     assert recorded["status"] == "fail" and recorded["reason_code"] == "checks_failed"
     index = [json.loads(ln) for ln in (out / "result_index.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert [(r["instance_id"], r["status"], r["reason_code"]) for r in index] == [("SM1_a1", "fail", "checks_failed")]
+
+
+def test_prune_clones_keeps_the_clone_while_the_lane_stop_is_unconfirmed(tmp_path, monkeypatch):
+    """``--prune-clones`` deletes a lane's clone only after a confirmed server stop and a clean or unavailable
+    ``/proc`` scan: a successor that may still run from the clone keeps its source, and the row names why."""
+    monkeypatch.setattr(run_live_lanes, "PROCFS_AVAILABLE", False)
+
+    def clone_after(name: str, server=_NoopServer) -> tuple[dict, pathlib.Path]:
+        (tmp_path / name).mkdir()
+        row = _attempt_row(tmp_path / name, monkeypatch, "SK1", flags="--prune-clones", server=server)
+        return row, tmp_path / name / "SK1" / "out" / "lanes" / "SK1_a1" / "clone"
+
+    row, clone = clone_after("confirmed")
+    assert row["status"] == "pass" and "server_stop_unconfirmed" not in row and not clone.exists()
+    row, clone = clone_after("unconfirmed", _UnconfirmedStopServer)
+    assert row["server_stop_unconfirmed"] == _STOP_UNCONFIRMED and row["status"] == "fail" and (clone / "VERSION").is_file()
+    from tests.system_e2e import harness   # the lane's own /proc oracle: one survivor carries its data root
+    monkeypatch.setattr(run_live_lanes, "PROCFS_AVAILABLE", True)
+    monkeypatch.setattr(harness, "wait_until", lambda predicate, timeout, interval=0.5: False)
+    monkeypatch.setattr(harness, "pids_with_env_value", lambda value: [os.getpid()])
+    row, clone = clone_after("orphaned")
+    assert row["checks"]["no_orphans_after_stop"] is False and (clone / "VERSION").is_file()
+
+
+def test_a_restart_after_an_unconfirmed_stop_starts_no_second_server(tmp_path, monkeypatch):
+    """A non-self-mod restart stops the lane server first; while that stop is unconfirmed no second server starts on
+    the same clone and data root: a typed refusal, the final stop's diagnostics, the clone kept under prune."""
+    started: list = []
+
+    class _Stuck(_UnconfirmedStopServer):
+        start = lambda self, **_k: started.append(self)  # noqa: E731
+
+    row = _attempt_row(tmp_path, monkeypatch, "SK1", lambda ctx: ctx.restart(), flags="--prune-clones", server=_Stuck)
+    assert len(started) == 1, "no second server on a data root whose server may still run"
+    assert row["status"] == "infra_error" and row["refusal"]["type"] == "RuntimeError"
+    assert _STOP_UNCONFIRMED[0] in row["refusal"]["message"] and row["server_stop_unconfirmed"] == _STOP_UNCONFIRMED
+    assert (tmp_path / "SK1" / "out" / "lanes" / "SK1_a1" / "clone" / "VERSION").is_file()
+
+
+def test_sw1_api_fallback_saves_room_mode_without_one_shot_metadata(monkeypatch):
+    from types import SimpleNamespace
+    from devtools.e2e_live import scenarios
+
+    calls, submitted = [], []
+    def api(base, method, path, body, **kwargs):
+        calls.append((method, path, body))
+        return {"ok": True, "subagents_mode": "swarm"}
+    monkeypatch.setattr(scenarios, "_api", api)
+    ctx = SimpleNamespace(ui=None, ui_reason="no browser", server=SimpleNamespace(base_url="http://localhost"),
+                          submit=lambda *args, **kwargs: submitted.append(kwargs) or "",
+                          check=lambda *args, **kwargs: None)
+    scenarios.run_sw1(ctx)
+    assert calls == [("POST", "/api/owner/subagents-mode", {"mode": "swarm"})]
+    assert submitted == [{}]

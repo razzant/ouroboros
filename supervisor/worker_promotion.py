@@ -8,14 +8,13 @@ rather than leaving a half-admitted row in the queue.
 
 from __future__ import annotations
 
+import copy
 import logging
 import uuid
 from typing import Any, Optional
 from supervisor.state import append_jsonl
 from ouroboros.utils import utc_now_iso
 from supervisor.queue import _queue_lock
-
-
 
 
 log = logging.getLogger(__name__)
@@ -176,13 +175,6 @@ def _promote_duplicate_reason(task_id: str, ctx: Any, *, admission_token: str) -
     return "duplicate_task_id" if live_duplicate or stored_duplicate else ""
 
 
-def _promoted_force_plan_metadata(evt: dict) -> dict:
-    if evt.get("force_plan") is not True:
-        return {}
-    source = str(evt.get("force_plan_source") or "operator").strip() or "operator"
-    return {"metadata": {"force_plan": True, "force_plan_source": source}}
-
-
 def _presence_promotion(evt: dict) -> bool:
     """A promote carrying Presence authority: a speaker's, or a delegated descendant's binding."""
     from ouroboros.dialogue_provenance import presence_root_carrier
@@ -318,68 +310,6 @@ def _admit_project_scope(
     return None
 
 
-def bind_retry_to_origin_project(
-    drive_root: Any, task: dict, task_id: str, retry_task_id: str,
-) -> str:
-    """Carry a timed-out root's Project onto the retry that replaces it.
-
-    A retry is the SAME work under a new physical id, so it belongs to the room
-    the work already has (DEVELOPMENT "the captured reference is the identity of
-    the work"). Before this, the new id copied the origin ref but carried no
-    binding, and the retried work painted a Main card offering "Turn into
-    project" until some later implicit act adopted it. The predecessor's own
-    binding answers first — it is the SSOT for that task's project — and the
-    origin-keyed lookup covers a root that was never bound itself while another
-    task id of the same owner message was. The new row reuses the predecessor's
-    stored origin BY VALUE, so the retry joins that message's one convertible
-    unit instead of starting a second.
-
-    The reaper calls this INSIDE its retry admission transaction, under the same
-    ``origin_claim_lock`` every implicit claim holds, and only once cancellation
-    can no longer win the boundary: ``bind_task_to_project`` is immutable, so a
-    bound-but-never-admitted retry id would answer ``project_id_for_task``
-    forever. Creates no project and never raises — a refused bind (a project that
-    stopped accepting them after admission) or an unreadable store leaves the retry unbound and
-    is disclosed as ``project_binding_failed``. Returns the project the retry was
-    bound to, "" when there was nothing to inherit.
-    """
-    tid = str(retry_task_id or "").strip()
-    origin_id = str(task_id or "").strip()
-    admission_basis = task.get("_project_admission")
-    if (not tid or not origin_id or tid == origin_id
-            or isinstance(admission_basis, dict) and admission_basis.get("project") is None):
-        return ""  # scope-only work has no room binding to inherit
-    from ouroboros.projects_registry import (
-        bind_task_to_project,
-        project_binding_for_task,
-    )
-
-    origin = _origin_from_mapping(task, absent="mid_task_no_origin")
-    try:
-        predecessor = project_binding_for_task(drive_root, origin_id) or {}
-        pid = (str(admission_basis.get("project_id") or "") if admission_basis is not None else
-               str(predecessor.get("project_id") or ""))
-    except Exception as exc:
-        _report_binding_failure(tid, "", exc, path="timeout_retry_admission",
-                                reason="project_binding_unreadable", drive_root=drive_root)
-        return ""
-    if not pid:
-        return ""
-    if isinstance(predecessor.get("source_ref"), dict):
-        origin = {"ref": dict(predecessor["source_ref"])}
-        if isinstance(predecessor.get("source_text"), str):
-            origin["text"] = predecessor["source_text"]
-    elif predecessor.get("origin_absent"):
-        origin = {"absent": str(predecessor["origin_absent"])}
-    try:
-        bind_task_to_project(drive_root, tid, pid, origin=origin, admission_basis=admission_basis)
-    except Exception as exc:
-        _report_binding_failure(tid, pid, exc, path="timeout_retry_admission",
-                                drive_root=drive_root)
-        return ""
-    return pid
-
-
 def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
     The task carries the originating ``chat_id`` (its live card and replies
@@ -443,6 +373,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "suggested_name": suggested_name,
         "source": "promote_chat_to_task",
         "context_requires_self_body_docs": evt.get("context_requires_self_body_docs", False),
+        **({"context_requires_development": evt["context_requires_development"]}
+           if isinstance(evt.get("context_requires_development"), bool) else {}),
         **({"reasoning_effort": evt["reasoning_effort"]} if evt.get("reasoning_effort") else {}),  # explicit start only
         "objective_author": dict(evt.get("objective_author") or {}),
         "owner_corpus": list(evt.get("owner_corpus") or []),
@@ -450,13 +382,13 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "_require_worker_pool": True,
         "_admission_token": admission_token,
         "promotion_admission_token": admission_token,
-        **_promoted_force_plan_metadata(evt),
     }
-    origin = consciousness_origin_metadata(evt)
+    origin = consciousness_origin_metadata({"origin_message_ref": evt.get("source_ref"), **evt})
     if origin:
         # A root consciousness started keeps its origin/category/level by value (В9':
         # ordinary Main flow, no presence-style project/workspace/source stripping).
-        task["actor_id"] = "consciousness"
+        if origin.get("initiator") == "consciousness":
+            task["actor_id"] = "consciousness"
         task.setdefault("metadata", {}).update(origin)
         apply_consciousness_authority(task)
     inherited_attachment_manifest = _pool()._apply_presence_promotion_authority(
@@ -504,13 +436,19 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         # The door's other stamp (an owner message it never logged) rides the root
         # in METADATA, where run_origin reads it, the way a ref rides by value.
         task.setdefault("metadata", {})["origin_suppressed"] = True
+    elif evt.get("origin_message_absent") is True and task["objective_author"].get("kind") == "task":
+        # The producer's third fact: no owner message opened this drafted start (never a stamp).
+        task.setdefault("metadata", {})["origin_message_absent"] = True
     if task.get("objective_author"):
-        task.setdefault("metadata", {})["objective_author"] = dict(task["objective_author"])
+        # The start's sources ride METADATA, which the scheduled receipt, the queue snapshot,
+        # the running record and a control seed already persist.
+        task.setdefault("metadata", {}).update(objective_author=dict(task["objective_author"]),
+                                               owner_corpus=[dict(row) for row in task["owner_corpus"]])
     if isinstance(evt.get("predecessor_authority_source"), dict):
         task["predecessor_authority_source"] = dict(evt["predecessor_authority_source"])
     # Owner Surface Fact: the promoting turn's sending-surface fact lands in
     # METADATA (the renderer reads task["metadata"]["client_surface"]), never a
-    # top-level key — and metadata may not exist yet (only force_plan creates it).
+    # top-level key — and metadata may not exist yet.
     if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface"):
         task.setdefault("metadata", {})["client_surface"] = dict(evt["client_surface"])
     pid = str(evt.get("project_id") or "").strip()
@@ -569,12 +507,6 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         }, attachment_manifest)
     if announce_project is not None:
         _pool()._announce_created_project(announce_project, tid, task=task)
-    # Owner 3=A: the promoter's unmet planning obligation now belongs to this root
-    # (stamped by _promoted_force_plan_metadata above); release it on the promoter's
-    # live row BEFORE the snapshot persist below, so one persist shows both facts.
-    from supervisor.plan_obligation import transfer_promoter_obligation
-
-    obligation_transfer = transfer_promoter_obligation(ctx, evt, tid)
     # A positive promote confirmation is allowed only after the durable queue
     # projection exists.  The event handler writes the scheduled task result
     # after the routing receipt; keeping that last step outside this function
@@ -610,14 +542,17 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # result therefore receives this admitted contract before worker startup.
     outcome = _pool()._promoted_scheduled_outcome(task, admitted, tid)
     outcome["_admitted_suggested_name"] = task["suggested_name"]
+    # The receipt keeps the admitted metadata, so a root interrupted before its first
+    # running write still names its author, owner corpus and origin facts.
+    admitted_metadata = (admitted if isinstance(admitted, dict) else task).get("metadata")
+    if isinstance(admitted_metadata, dict) and admitted_metadata:
+        outcome["_admitted_metadata"] = copy.deepcopy(admitted_metadata)
     if attachment_manifest:
         outcome.update(authority)
     if effective_pid:
         outcome["project_id"] = effective_pid
     if source_note:
         outcome["source_note"] = source_note
-    if obligation_transfer:
-        outcome["force_plan_transfer"] = obligation_transfer
     return outcome
 
 
@@ -643,7 +578,7 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
         workspace_repair_hint,
     )
 
-    if _presence_promotion(evt):
+    if _presence_promotion(evt) and "capability_ceiling" in (task.get("task_contract") or {}):
         # Keep the admitted folder from the inherited contract, never a public
         # event's replacement. Presence retains its canonical shared memory.
         workspace = task["task_contract"].get("workspace") or {}
@@ -803,6 +738,11 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
             )
             + "[END_HEADLESS_WORKSPACE]"
         )
+    if _presence_promotion(evt):
+        # Ordinary admission owns this root's folder, including no folder.
+        # Do not let the promoter's retained workspace override it on attachment.
+        task["task_contract"] = {key: value for key, value in task["task_contract"].items()
+                                 if key not in {"workspace", "workspace_root", "workspace_mode"}}
     return None
 
 

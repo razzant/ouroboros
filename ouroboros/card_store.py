@@ -74,12 +74,14 @@ def read_app_bytes(root: Any, sha256: Any) -> Optional[bytes]:
 
 
 def write_card(root: Any, *, chat_id: int, task_id: str, title: str, fallback_text: str, kind: str,
-               body: Dict[str, Any], replace: str = "") -> Dict[str, Any]:
-    """Store a new card, or give an earlier card of the same chat a new body (same id, revision + 1).
+               body: Dict[str, Any], replace: str = "", same_room: Any = None) -> Dict[str, Any]:
+    """Store a new card, or give an earlier card of the same room a new body (same id, revision + 1).
 
     ``body`` holds the kind's keys (``components`` and optional ``data``, ``widget`` or
     ``app``). A replaced card keeps its presses; the replacing task becomes its author,
-    the task that receives later presses.
+    the task that receives later presses. ``same_room(card)`` says a card stored under
+    another chat now lives in ``chat_id`` (its work moved into this Project), never a
+    card of an unrelated room.
     """
     now = utc_now_iso()
     if not replace:
@@ -92,7 +94,7 @@ def write_card(root: Any, *, chat_id: int, task_id: str, title: str, fallback_te
     def mutate(current: Dict[str, Any]) -> Dict[str, Any]:
         if not current:
             raise CardStoreError("CARD_REPLACE_NOT_FOUND", f"card {replace} does not exist")
-        if current.get("chat_id") != chat_id:
+        if current.get("chat_id") != chat_id and not (same_room and same_room(current)):
             raise CardStoreError("CARD_REPLACE_OTHER_CHAT", f"card {replace} belongs to another chat")
         for key in _BODY_KEYS:
             current.pop(key, None)
@@ -168,24 +170,57 @@ def record_submission(root: Any, card_id: str, *, request_id: str, action_id: st
     return {"record": record, **outcome}
 
 
-def mark_delivery(root: Any, card_id: str, request_id: str, delivered: str) -> Dict[str, Any]:
-    """Settle one press's delivery: ``delivered`` (mailbox), ``forwarded`` (owner message) or ``owed``."""
+def mark_delivery(root: Any, card_id: str, request_id: str, delivered: str, reason: str = "") -> Dict[str, Any]:
+    """Settle one press's delivery: ``delivered`` (mailbox), ``forwarded`` (owner message) or ``owed``.
+    ``reason`` ``awaiting_recipient_read``: it waits in a paused, held or queued author's mailbox."""
     def mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        row = next((row for row in current.get("submissions") or [] if row.get("request_id") == request_id), None)
-        if row is None or row.get("delivered") == delivered:
+        row = find_submission(current, request_id)
+        if row is None or (row.get("delivered"), row.get("delivery_reason", "")) == (delivered, reason):
             return None
         row["delivered"] = delivered
+        if reason:
+            row["delivery_reason"] = reason
+        else:
+            row.pop("delivery_reason", None)
         return current
 
     return _update(_card_path(root, card_id), mutate)
 
 
+def acknowledge_press(root: Any, card_id: str, request_id: str) -> None:
+    """Its author read the press (the words entered its transcript): ``read_at`` stays, so a
+    reason settled after this read never brings the wait back."""
+    def mutate(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        row = find_submission(current, request_id)
+        if row is None or row.get("read_at"):
+            return None
+        row["read_at"] = utc_now_iso()
+        return current
+
+    if valid_card_id(card_id):
+        _update(_card_path(root, card_id), mutate)
+
+
+def late_press_ref(value: Any) -> Optional[Dict[str, str]]:
+    """Typed provenance of a press whose card's author no longer holds it: ``{task_id, card_id, request_id}``."""
+    if not isinstance(value, dict):
+        return None
+    ref = {key: str(value.get(key) or "").strip() for key in ("task_id", "card_id", "request_id")}
+    return ref if ref["task_id"] and ref["request_id"] and valid_card_id(ref["card_id"]) else None
+
+
+def press_wait(row: Dict[str, Any]) -> str:
+    """``awaiting_recipient_read`` while a delivered press waits for its author to read it, else ``""``."""
+    return "" if row.get("read_at") else str(row.get("delivery_reason") or "")
+
+
 def submissions_summary(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     """What a surface shows under a card: each press's action, label, time and delivery, and
-    its ``request_id`` (an owed press is retried under it, after a reload too)."""
+    its ``request_id`` (an owed press is retried under it, after a reload too); ``reason_code``
+    while it waits for its author to read it (``press_wait``)."""
     return [{"action_id": str(row.get("action_id") or ""), "label": str(row.get("label") or row.get("action_id") or ""),
              "at": str(row.get("at") or ""), "delivery": str(row.get("delivered") or "owed"),
-             "request_id": str(row.get("request_id") or "")}
+             "request_id": str(row.get("request_id") or ""), **({"reason_code": press_wait(row)} if press_wait(row) else {})}
             for row in record.get("submissions") or [] if isinstance(row, dict)]
 
 
@@ -236,7 +271,8 @@ def unpin_card(root: Any, card_id: str) -> bool:
 
 
 __all__ = [
-    "CARD_KINDS", "CardStoreError", "MAX_APP_BYTES", "MAX_PINS", "MAX_SUBMISSIONS",
-    "find_submission", "load_card", "mark_delivery", "pin_card", "pinned_cards", "read_app_bytes", "record_publication",
-    "record_submission", "store_app_bytes", "submissions_summary", "unpin_card", "valid_card_id", "write_card",
+    "CARD_KINDS", "CardStoreError", "MAX_APP_BYTES", "MAX_PINS", "MAX_SUBMISSIONS", "acknowledge_press",
+    "find_submission", "late_press_ref", "load_card", "mark_delivery", "pin_card", "pinned_cards", "press_wait",
+    "read_app_bytes", "record_publication", "record_submission", "store_app_bytes", "submissions_summary",
+    "unpin_card", "valid_card_id", "write_card",
 ]

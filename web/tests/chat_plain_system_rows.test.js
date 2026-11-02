@@ -190,6 +190,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
         WebSocket: globalThis.WebSocket,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
+        getComputedStyle: globalThis.getComputedStyle,
     };
     const document = {
         byId: new Map(), hidden: false, activeElement: null,
@@ -206,6 +207,7 @@ function installDom(fetchImpl = async () => ({ ok: true, json: async () => ({ ac
     const mount = new ElementStub('div', document);
     document.byId.set('content', mount);
     const storage = new Map();
+    globalThis.getComputedStyle = () => ({ lineHeight: '24px', height: '168px', getPropertyValue: () => '7' });
     globalThis.document = document;
     globalThis.window = {
         document, location: { href: 'http://local/' }, history: { replaceState() {} },
@@ -418,7 +420,7 @@ test('a completion row carrying the answer renders as an ordinary Ouroboros mess
             globalThis.CustomEvent = priorCustomEvent;
         }
         assert.deepEqual(opened, {
-            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '' },
+            type: 'ouro:open-project', detail: { project: { id: 'launch', name: 'Launch' }, task_id: '', quiz_id: '', pointer: false },
         });
     } finally {
         instance?.destroy();
@@ -866,4 +868,79 @@ test('the legacy-memory notice reads in the install language; other plain system
         applyPayload({ language: '', english: true, entries: {} });
         setMissTransport(() => null);
     }
+});
+
+
+// Owner 1A/2A (21.10; docs/DESIGN.md "Project completion mirror"): Main's row for a Project ending with no authored
+// answer reads as the work, its true outcome and its cause, then the labelled preserved output; the Project is named
+// once, by its reference; a typed cause with no sentence yet says so and keeps its exact code in the row's details.
+const ENDING_NOTICE = { neutral: false, detail: 'example_new_reason.', phase: 'error',
+    salvage: 'Preserved intermediate output (not a final answer): Two update scenarios remain unchecked.',
+    cause: 'The recorded reason has no description yet.', undescribed: ['example_new_reason'] };
+const ENDING_ROW = { ...PLAIN_ROW, task_id: 'ended-root', delivery_id: 'project-completion:ended-root', task_name: 'Ship release',
+    status: 'failed', completion_reason: 'example_new_reason.', completion_notice: ENDING_NOTICE,
+    content: `Launch › Ship release · Failed\nexample_new_reason. ${ENDING_NOTICE.salvage}` };
+const elements = (node) => node.children.filter((child) => child.nodeType !== 3);
+
+function renderEnding(row, role = 'system') {
+    const { prior, mount } = installDom();
+    const made = makeInstance(mount);
+    made.handlers.get('chat')(row);
+    return { prior, instance: made.instance, bubble: findBubble(role) };
+}
+
+test('a no-answer ending reads as its work, true outcome and cause; the Project once; the exact code in details', () => {
+    const { prior, instance, bubble } = renderEnding(ENDING_ROW);
+    try {
+        const message = bubble.querySelector('.message');
+        assert.ok(message.classList.contains('project-ending'));
+        const [head, cause, details, salvage] = elements(message);
+        const [title, outcome] = elements(head);
+        assert.deepEqual([title.textContent, outcome.textContent, outcome.dataset.tone], ['Ship release', 'Failed', 'error']);
+        assert.ok(outcome.classList.contains('ui-status'), 'the status sentence: its word and dot');
+        assert.equal(cause.textContent, ENDING_NOTICE.cause);
+        assert.equal(details.tagName, 'DETAILS');
+        assert.deepEqual(elements(details).map((node) => [node.tagName, node.textContent]),
+            [['SUMMARY', 'Recorded details'], ['P', 'Recorded reason: example_new_reason']]);
+        assert.equal(salvage.textContent, ENDING_NOTICE.salvage, 'preserved output stays labelled, never an answer');
+        const words = [head, ...elements(head), cause, ...elements(details), salvage].map((node) => node.textContent).join('\n');
+        assert.doesNotMatch(words, /Launch/, 'the Project is named once, by its reference');
+        assert.doesNotMatch(cause.textContent, /example_new_reason/, 'the line never shows the raw code');
+        const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
+        assert.equal(bubble.children.indexOf(actions), bubble.children.indexOf(message) + 1);
+        assert.deepEqual(referenceShape(actions.children[0]), LAUNCH_REFERENCE);
+        // Display only: the bubble was built from the canonical text, which Copy keeps.
+        assert.match(bubble.innerHTML, /Launch › Ship release · Failed\nexample_new_reason\./);
+        assert.ok(bubble.querySelector('.chat-message-copy'));
+    } finally { instance.destroy(); restoreDom(prior); }
+});
+
+test('an ending without the typed view keeps its retained text, never re-read into fields', () => {
+    for (const row of [
+        { ...ENDING_ROW, completion_notice: { neutral: false, detail: 'example_new_reason.', phase: 'error', salvage: ENDING_NOTICE.salvage } },
+        { ...ENDING_ROW, task_name: '' },
+        { ...ENDING_ROW, completion_notice: { ...ENDING_NOTICE, phase: 'working' } },
+    ]) {
+        const { prior, instance, bubble } = renderEnding(row);
+        try {
+            assert.equal(bubble.querySelector('.message').classList.contains('project-ending'), false);
+            assert.match(bubble.innerHTML, /Launch › Ship release · Failed\nexample_new_reason\./);
+            assert.equal(bubble.querySelector('.project-ending-details'), null);
+            const actions = bubble.children.find((node) => node.classList.contains('system-message-actions'));
+            assert.deepEqual(referenceShape(actions.children[0]), LAUNCH_REFERENCE);
+        } finally { instance.destroy(); restoreDom(prior); }
+    }
+});
+
+test('an authored final keeps its answer; its limitation says an undescribed cause neutrally, the code in details', () => {
+    const { prior, instance, bubble } = renderEnding({ ...ENDING_ROW, completion_answer: 'The audit is complete.',
+        completion_notice: { ...ENDING_NOTICE, salvage: '' } }, 'assistant');
+    try {
+        assert.equal(bubble.querySelector('.message').classList.contains('project-ending'), false, 'the answer is untouched');
+        const limitation = bubble.querySelector('.project-answer-limitation');
+        assert.deepEqual([limitation.textContent, limitation.title], [ENDING_NOTICE.cause, ENDING_NOTICE.cause]);
+        const details = bubble.querySelector('.project-ending-details');
+        assert.equal(bubble.children.indexOf(details), bubble.children.indexOf(limitation) + 1);
+        assert.equal(elements(details)[1].textContent, 'Recorded reason: example_new_reason');
+    } finally { instance.destroy(); restoreDom(prior); }
 });

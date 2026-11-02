@@ -79,7 +79,8 @@ def test_successor_startup_brief_notes_row_exact_read_and_new_gate_unchanged(har
     # The frozen prefix: the brief with its exact reader; no history walk, no inherited plan authority.
     brief = prefix['predecessor_authority']
     assert brief['source']['arguments'] == {'task_id': ctx.task_id, 'include_authority': True}
-    assert brief['status'] == 'failed' and brief['task_contract'] and 'omitted_fields' in brief
+    assert brief['status'] == 'failed' and 'task_contract' not in brief
+    assert brief['omitted_fields']['task_contract'] > 0
     assert 'historical_review_context' not in json.dumps(prefix) and 'plan_review_authority' not in prefix
     assert NOTE not in json.dumps(prefix) and LONG not in str(messages)
     assert tail == [], 'a fresh successor has no review rows of its own'
@@ -107,6 +108,7 @@ def test_successor_startup_brief_notes_row_exact_read_and_new_gate_unchanged(har
                              task_contract=task['task_contract'], budget_drive_root=ctx.drive_root)
     payload = json.loads(_get_task_result(reader_ctx, ctx.task_id, include_authority=True))
     assert payload['authority'][SELECTED_VIEW_FIELD] == receipt['selected_review_history_view']
+    assert payload['authority']['task_contract'], 'the omitted contract stays readable at its exact source'
     record = json.loads(read_actor_source_bytes(ctx.drive_root, ctx.task_id, ref))
     assert NOTE in json.dumps(record) and record['covered']
     assert any(LONG in read_actor_source_bytes(ctx.drive_root, ctx.task_id, covered['source_ref']).decode('utf-8')

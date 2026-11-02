@@ -18,6 +18,7 @@ from starlette.testclient import TestClient
 from ouroboros import task_results as results
 from ouroboros.gateway.task_hurry import _admit_hurry_locked, api_task_hurry
 from ouroboros.owner_mailbox import KIND_HURRY, _mailbox_path, drain_owner_entries
+from ouroboros.swarm_rollup import initial_swarm_rollup
 from ouroboros.utils import atomic_write_json
 from supervisor import queue, state, task_reaper, worker_health, workers
 from tests._usage_store_testing import ledger_rows
@@ -142,8 +143,6 @@ def test_real_admission_hurry_and_pre_running_death_recover(pool, monkeypatch, o
         before_hurry = results.load_task_result(pool.root, task_id, strict=True)
         assert before_hurry["status"] == ("requested" if origin == "plain" else "scheduled")
         assert before_hurry["admitted_dispatch"] == "possible"
-    if phase == "pending" and origin == "plain":
-        events_through = (pool.root / "logs/events.jsonl").stat().st_size
     response = _hurry(pool.root, task_id)
     assert response.status_code == 200, response.text
     row = results.load_task_result(pool.root, task_id, strict=True)
@@ -160,8 +159,11 @@ def test_real_admission_hurry_and_pre_running_death_recover(pool, monkeypatch, o
             "owner_corpus", "task_group_id", "task_group",
         ) if key in admitted}
         assert set(row) == ({"task_id", "status", "_schema_version", "ts", "updated_at", "owner_hurry",
-                             "root_task_id", "description", "task_attempt", "swarm_fanout_rollup"} | persisted)
-        assert row["swarm_fanout_rollup"] == {"source_root": str(pool.root.resolve()), "through": events_through}
+                             "root_task_id", "description", "task_attempt", "swarm_fanout_rollup",
+                             "swarm_fanout_basis"} | persisted)
+        assert row["swarm_fanout_rollup"]["version"] == 2
+        assert row["swarm_fanout_rollup"]["fanout_count"] == 0
+        assert row["swarm_fanout_basis"] == {"base": initial_swarm_rollup(pool.root)}
         assert all(row[key] == admitted[key] for key in persisted)
         assert row["root_task_id"] == task_id and row["description"] == admitted.get("text", "")
         # The host attempt key (terminal_time witness), never the queue-private `_attempt`.
@@ -207,15 +209,16 @@ def test_initializer_holds_queue_lock_and_does_not_rewrite_existing_wait(pool, m
         return actual(*args, **kwargs)
 
     monkeypatch.setattr(results, "write_task_result", observe)
-    events_through = (pool.root / "logs/events.jsonl").stat().st_size
     _admit_hurry_locked(task_id)
     assert len(calls) == 1
     assert calls[0]["create_only"] is True and calls[0]["strict_existing_dict"] is True
     row = results.load_task_result(pool.root, task_id, strict=True)
     assert {key: value for key, value in calls[0].items() if key not in {"create_only", "strict_existing_dict"}} == {
         key: value for key, value in row.items() if key not in {
-            "task_id", "status", "_schema_version", "ts", "updated_at", "swarm_fanout_rollup"}}
-    assert row["swarm_fanout_rollup"] == {"source_root": str(pool.root.resolve()), "through": events_through}
+            "task_id", "status", "_schema_version", "ts", "updated_at", "swarm_fanout_rollup", "swarm_fanout_basis"}}
+    assert row["swarm_fanout_rollup"]["version"] == 2
+    assert row["swarm_fanout_rollup"]["fanout_count"] == 0
+    assert row["swarm_fanout_basis"] == {"base": initial_swarm_rollup(pool.root)}
     assert row["root_task_id"] == task_id and row["metadata"] == queue.PENDING[0]["metadata"]
     actual(pool.root, task_id, "running", owner_wait={"state": "waiting", "wait_id": "w", "source_ref": {"sha256": "source"}},
            metadata={"grant": "preserved"}, started_at="original", model_waits={"quota": "kept"})

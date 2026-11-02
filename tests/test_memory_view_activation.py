@@ -47,7 +47,8 @@ def test_a_capture_activates_the_chronicle_exactly_once_and_imports_the_legacy_m
     assert calls == []  # choosing the spec activates nothing
     snapshot = mv.capture_memory_view(tmp_path, MAIN_TASK, spec)
     assert len(calls) == 1 and calls[0] == {}  # one non-waiting activation per capture
-    assert snapshot.active and snapshot.store_status == {"state": "active"}
+    # The first capture after activation reads its open rows live: their stored facts are the job's to fill.
+    assert snapshot.active and snapshot.store_status == {"state": "active", "tail_facts": "filling"}
     assert snapshot.frontier == {"status": "exact", "pos": 10}
     assert ChronicleStore(tmp_path).activation()["kind"] == "activation"
     # The next capture finds the receipt (the fast path) and still activates once.

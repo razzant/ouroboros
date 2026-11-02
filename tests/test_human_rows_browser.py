@@ -19,6 +19,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup
 from tests.test_sidebar_activity_browser import FRAMES, activity, mount_sidebar
+from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 subscription_ui = setup.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -136,8 +137,19 @@ def test_unrelated_system_rows_keep_working_and_sending(subscription_ui, tmp_pat
     assert ui["errors"] == []
 
 
+@pytest.fixture(params=["chromium", "webkit"])
+def engine_ui(request, monkeypatch):
+    """``subscription_ui`` in Chromium and WebKit; the browser that actually launched is checked, not assumed."""
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
+    if os.environ.get("OUROBOROS_UI_EVIDENCE_DIR"):  # one engine's screenshots never replace the other's
+        monkeypatch.setenv("OUROBOROS_UI_EVIDENCE_DIR", str(Path(os.environ["OUROBOROS_UI_EVIDENCE_DIR"]) / request.param))
+    ui = request.getfixturevalue("subscription_ui")
+    assert ui["page"].context.browser.browser_type.name == request.param
+    return ui
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1360), ("dark", 1360), ("light", 390)])
-def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, monkeypatch, theme, width):
+def test_reworded_host_rows_live_and_after_reload(engine_ui, tmp_path, monkeypatch, theme, width):
     import supervisor.queue as q
     from ouroboros.cancel_intents import active_intent, request_cancel
     from ouroboros.server_owner_routing import _record_routing_receipt
@@ -148,7 +160,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
     from supervisor.events_schedule_task import _reject_schedule_task
     from supervisor.terminal_delivery import build_unreviewed_salvage_event, deliver_miss_lane_outcome
 
-    ui, out = subscription_ui, _evidence(tmp_path)
+    ui, out = engine_ui, _evidence(tmp_path)
     page = ui["page"]
     bridge, frames = _host(tmp_path, monkeypatch)
     # Each run is its own install: the process-wide delivered-id memo must not dedupe it.
@@ -160,21 +172,22 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
     mounted = mount_sidebar(ui, width, theme, False, ROOM, [])
     if width < 700:  # the narrow layout opened the navigation drawer; choosing Main Chat closes it
         page.locator('#primary-sidebar [data-nav-page="chat"]').click()
-        page.wait_for_function("() => !document.body.classList.contains('nav-drawer-open')")
+        wait_drawer_closed(page)  # the room stays inert until its close motion ends
     for tid in ("t-custody", "t-parent", "t-stop"):
         write_task_result(tmp_path, tid, STATUS_RUNNING, chat_id=1, result="working")
         message_bus.send_with_budget(1, f"Working on {tid}.", is_progress=True, task_id=tid, narration=True)
 
-    # 1. Delegated custody: the owner's card row lists only what holds something.
+    # 1. Delegated custody: the owner's card row lists only what holds something. The delivery reads the task's
+    # current custody (the pipeline's disclosure, handed over as custody_audit), not a stored copy.
+    custody = {"audit_status": "ok", "open_run_ids": [], "pending_invocation_ids": [],
+               "undisposed_patch_run_ids": [], "terminal_runs": [
+                   {"run_id": "run-7c1", "state": "failed", "model": "leaf-model"}]}
     write_task_result(tmp_path, "t-custody", "completed", chat_id=1, result="Report done.",
-                      delegate_terminal_reconciliation={
-                          "audit_status": "ok", "open_run_ids": [], "pending_invocation_ids": [],
-                          "undisposed_patch_run_ids": [], "terminal_runs": [
-                              {"run_id": "run-7c1", "state": "failed", "model": "leaf-model"}]})
+                      delegate_terminal_reconciliation=custody)
     event = prepare_terminal_send_event(
         tmp_path, {"id": "t-custody", "chat_id": 1}, "Report done.", {"terminal_origin": "model_final"},
         {"type": "send_message", "task_id": "t-custody", "chat_id": 1, "text": "Report done.",
-         "progress_meta": {"task_terminal_status": "completed"}}, presence=False)
+         "progress_meta": {"task_terminal_status": "completed"}}, presence=False, custody_audit=custody)
     events_chat_delivery._handle_send_message(event, sender)
     # 2. A cancellation receipt without a saved message promises nothing below.
     write_task_result(tmp_path, "t-cancel", "cancelled", chat_id=1, result="stopped")
@@ -234,7 +247,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
     def check(phase):
         page.evaluate(FRAMES)
         for card in page.locator(".chat-live-card").all():
-            # A card opens by its own Show details (a portal has none: its room holds the details).
+            # A card opens by its own Details button (a portal has none: its room holds the details).
             disclosure = card.locator(":scope > [data-live-summary-button] [data-live-disclosure]")
             if card.get_attribute("data-expanded") != "1" and disclosure.is_visible():
                 disclosure.click()
@@ -259,6 +272,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
 
     live = check("live")
     assert all(live.values()), live
+    ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === WebSocket.OPEN")
     page.locator(".msg-routing-annotation").filter(has_text="Message saved for task").wait_for()
@@ -267,7 +281,7 @@ def test_reworded_host_rows_live_and_after_reload(subscription_ui, tmp_path, mon
     # The production history endpoint carries the card rows as well as the
     # standalone receipt and mailbox annotation; pin every observed live/replay pair.
     assert all(replay.values()), replay
-    assert ui["errors"] == []
+    assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1360), ("dark", 1360), ("light", 390)])

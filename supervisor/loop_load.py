@@ -51,7 +51,7 @@ class _LockWindow:
         self.hold_total += held
         if waited > self.wait_max:
             self.wait_max = waited
-        if held > self.hold_max:
+        if held >= self.hold_max:  # a window whose holds all measure 0.0 still names a site
             self.hold_max, self.hold_max_site = held, site
 
     def facts(self) -> Dict[str, Any]:
@@ -99,10 +99,10 @@ class MeasuredRLock:
             self._lock.acquire()  # re-entrant: granted at once, not measured again
             self._depth += 1
             return True
-        asked = time.monotonic()
+        asked = time.perf_counter()  # high resolution: monotonic ticks at ~15.6 ms on Windows
         if not self._lock.acquire(blocking, timeout):
             return False
-        self._granted = time.monotonic()
+        self._granted = time.perf_counter()
         self._waited, self._depth = self._granted - asked, 1
         try:
             frame = sys._getframe(2)  # 0 this method, 1 acquire/__enter__, 2 the caller
@@ -118,7 +118,7 @@ class MeasuredRLock:
             if self._lock._is_owned():
                 self._depth -= 1
                 if not self._depth:
-                    held = time.monotonic() - self._granted
+                    held = time.perf_counter() - self._granted
                     with self._stats:
                         self._window.note(self._waited, held, self._site)
                     self._site = None

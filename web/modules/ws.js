@@ -1,4 +1,5 @@
-import { apiFetch, openSignIn } from './api_client.js';
+import { isPanicFrame, panicWithoutSocket } from './panic.js';
+import { openSignIn, readState } from './api_client.js';
 /** WebSocket manager; connect after modules register listeners.
  *
  * Outbound messages sent while the socket is down are queued in memory (at most
@@ -6,6 +7,7 @@ import { apiFetch, openSignIn } from './api_client.js';
  * the next open; `send(..., {queue: false})` skips the queue. A watchdog checks
  * every 10 s and closes a socket that has delivered no inbound message for 45 s,
  * which enters the normal reconnect path.
+ * Panic returns `intercepted`: an emergency control, never a sent chat or queued submission.
  */
 
 // Consecutive healthy /api/state probes tolerated while the socket stays down
@@ -196,24 +198,21 @@ export class WS {
                 let signedOut = false;
                 let served;
                 try {
-                    const resp = await apiFetch('/api/state', { cache: 'no-store' });
+                    // One bounded read: a request or body that never answers ends
+                    // as a failed probe within its lifetime and the chain re-arms.
+                    const { response: resp, state: body } = await readState();
                     // The gate refuses an unauthenticated socket before accepting
                     // it, which reaches this page as an ordinary close (1006,
                     // never 4401): the state read is where the refusal is legible.
                     signedOut = resp.status === 401;
-                    if (resp.ok) {
-                        // Healthy requires an OK status AND a parseable object
-                        // body: a captive portal / interposed proxy answering
-                        // 200 HTML must count as a FAILED probe, or a
-                        // remembered SHA would reload straight into the portal
-                        // and destroy queued outbound messages.
-                        try {
-                            const body = await resp.json();
-                            if (body && typeof body === 'object') {
-                                healthy = true;
-                                served = body;
-                            }
-                        } catch {}
+                    // Healthy requires an OK status AND a parseable object
+                    // body: a captive portal / interposed proxy answering
+                    // 200 HTML must count as a FAILED probe, or a
+                    // remembered SHA would reload straight into the portal
+                    // and destroy queued outbound messages.
+                    if (resp.ok && body && typeof body === 'object') {
+                        healthy = true;
+                        served = body;
                     }
                 } catch {}
                 if (this._recoveryEpisode !== episode) {
@@ -278,7 +277,6 @@ export class WS {
 
     _scheduleReconnect() {
         if (this._reconnectTimer) return;
-        document.getElementById('reconnect-overlay')?.classList.add('visible');
         this._scheduleUiRecovery('socket-disconnect', 15000);
         const delay = this.reconnectDelay;
         this._reconnectTimer = setTimeout(() => {
@@ -309,14 +307,12 @@ export class WS {
                     Math.min(Math.round(delay * 1.5), POST_OPEN_RETRY_MAX_MS));
             }, delay);
         };
-        apiFetch('/api/state', { cache: 'no-store' }).then(async (resp) => {
+        // One bounded read. A body that does not parse is still an answer (decided
+        // as unknown below); a request or body that outlives the read's lifetime
+        // is a non-answer and repeats like a failed request.
+        readState().then(({ response: resp, state: served }) => {
             if (this.ws !== socket) return;
             if (!resp.ok) { retry(); return; }
-            let served;
-            try {
-                served = await resp.json();
-            } catch {}
-            if (this.ws !== socket) return;
             const decision = this._applyServedDecision(served, previouslyConnected, true);
             if (decision !== 'keep') this._reloadForDecision(decision);
         }, retry).catch(() => {});
@@ -329,6 +325,7 @@ export class WS {
         const queued = [...this._pendingMessages];
         this._pendingMessages = [];
         for (const msg of queued) {
+            if (isPanicFrame(msg)) continue;
             try {
                 this.ws.send(JSON.stringify(msg));
                 this.emit('outbound_sent', {
@@ -383,7 +380,6 @@ export class WS {
             // per-instance "seen an open before" flag as false on the next real
             // reconnect and skip the full rebuild; previouslyConnected cannot.
             this.emit('open', { previouslyConnected });
-            document.getElementById('reconnect-overlay')?.classList.remove('visible');
             this._refreshStateAfterOpen(previouslyConnected);
             this._flushPendingMessages();
         };
@@ -411,6 +407,12 @@ export class WS {
 
     send(msg, options = {}) {
         const payload = { ...msg };
+        if (isPanicFrame(payload)) {
+            void panicWithoutSocket({ ...payload.client_surface, input: payload.type === 'chat' ? 'typed_chat' : 'command' },
+                this.ws, options.onPanicAccepted);
+            return { status: 'intercepted', clientMessageId: '' };
+        }
+
         if (!payload.client_message_id && payload.type === 'chat') {
             payload.client_message_id = `msg-${Date.now()}-${this._nextClientMessageId++}`;
         }

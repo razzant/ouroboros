@@ -298,10 +298,31 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
 # contribution base; ordinary manual/tag CI cannot certify per-change book growth.
 
 BOOK_GROWTH_RULE = (
-    "Each touched book must end no larger than at its contribution base; added text is paid "
-    "by shortening the same book. Manual/tag CI without that base does not verify this rule. "
-    "The owner's book-growth label can approve an exception; local commits are not blocked."
+    "Each touched book, BIBLE.md and the prompts (prompts/*.md as one text) must end no larger "
+    "than at its contribution base; added text is paid by shortening the same text. Manual/tag "
+    "CI without that base does not verify this rule. The owner's book-growth label can approve "
+    "an exception; local commits are not blocked."
 )
+
+# The constitution and the prompts follow the books' growth rule (owner decision 3A, 2026-10-28):
+# every mind and check loads them. The prompt files are one text, so words moved between them
+# cost nothing and a new prompt file is growth.
+RULED_TEXTS = {"constitution": "BIBLE.md", "prompts": "prompts"}
+_TEXT_NAMES = {"constitution": "BIBLE.md", "prompts": "Prompts"}
+
+
+def ruled_text_of(path: str) -> str:
+    """``"constitution"``, ``"prompts"`` or ``""`` for a repository path; pure path shape."""
+    normalized = str(path or "").replace("\\", "/").lstrip("./")
+    if normalized == RULED_TEXTS["constitution"]:
+        return "constitution"
+    folder, _, name = normalized.rpartition("/")
+    return "prompts" if folder == RULED_TEXTS["prompts"] and name.endswith(".md") else ""
+
+
+def text_name(text_id: str) -> str:
+    """How a book or ruled text is named in a balance line."""
+    return _TEXT_NAMES.get(text_id) or f"{text_id.title()} book"
 
 
 @dataclass(frozen=True)
@@ -406,28 +427,56 @@ def composed_size(sizes: dict[str, int]) -> int:
     return sum(sizes.values()) + 2 * (len(sizes) - 1)
 
 
+def ruled_text_sizes(root: Path, text_id: str, ref: str = "") -> dict[str, int] | None:
+    """UTF-8 bytes of each file of a ruled text, in the working tree or at ``ref``; ``None`` when absent."""
+    root, where = Path(root), RULED_TEXTS[text_id]
+    try:
+        if ref:
+            listing = _git_bytes(root, "ls-tree", "-l", "-z", "--full-tree", ref, "--",
+                                 where if text_id == "constitution" else f"{where}/")
+            rows = [row.partition("\t") for row in (listing or b"").decode("utf-8", "replace").split("\0")]
+            sizes = {path: int(meta.split()[3]) for meta, _, path in rows
+                     if path and meta.split()[1] == "blob" and ruled_text_of(path) == text_id}
+        else:  # a Windows checkout may hold CRLF for these unpinned files: count the committed LF form
+            files = [root / where] if text_id == "constitution" else sorted((root / where).glob("*.md"))
+            sizes = {file.relative_to(root).as_posix(): len(file.read_bytes().replace(b"\r\n", b"\n"))
+                     for file in files if file.is_file()}
+    except (OSError, ValueError, IndexError):  # a file gone mid-read: unmeasured, like an unreadable book
+        return None
+    return sizes or None
+
+
+def ruled_text_paths(root: Path) -> list[str]:
+    """The working-tree files of every ruled text, for a caller that measures everything."""
+    return [path for text_id in RULED_TEXTS for path in (ruled_text_sizes(root, text_id) or {})]
+
+
 def book_balances(root: Path, paths: Iterable[str] | None = None) -> list[BookBalance]:
-    """The balance of every book ``paths`` touch (every book when ``None``); never raises."""
+    """The balance of every book or ruled text ``paths`` touch (all of them when ``None``); never raises."""
+    paths = None if paths is None else list(paths)
     wanted = list(BOOK_ENTRYPOINTS) if paths is None else sorted(
         {book_id for book_id, entry in BOOK_ENTRYPOINTS.items()
          for path in paths if book_entrypoint_for(path) == entry})
-    if not wanted:
+    texts = list(RULED_TEXTS) if paths is None else sorted({ruled_text_of(path) for path in paths} - {""})
+    if not wanted and not texts:
         return []
     upstream, base = contribution_base(root)
+    measures = [(book_id, book_source_sizes, composed_size) for book_id in wanted]
+    measures += [(text_id, ruled_text_sizes, lambda sizes: sum(sizes.values())) for text_id in texts]
     balances: list[BookBalance] = []
-    for book_id in wanted:
-        now = book_source_sizes(root, book_id)
+    for text_id, sizes_at, total in measures:
+        now = sizes_at(root, text_id)
         if now is None:
             continue
-        head = book_source_sizes(root, book_id, "HEAD")
-        at_base = book_source_sizes(root, book_id, base) if base else None
+        head = sizes_at(root, text_id, "HEAD")
+        at_base = sizes_at(root, text_id, base) if base else None
         changed = tuple((path, now.get(path, 0) - (head or {}).get(path, 0))
                         for path in dict.fromkeys([*now, *(head or {})])
                         if now.get(path, 0) != (head or {}).get(path, 0))
         balances.append(BookBalance(
-            book_id, composed_size(now),
-            composed_size(now) - composed_size(head) if head is not None else None,
-            composed_size(now) - composed_size(at_base) if at_base is not None else None,
+            text_id, total(now),
+            total(now) - total(head) if head is not None else None,
+            total(now) - total(at_base) if at_base is not None else None,
             upstream, changed, base))
     return balances
 
@@ -438,7 +487,7 @@ def _signed(value: int | None) -> str:
 
 def render_book_balance(balance: BookBalance) -> str:
     """One line: worktree size, HEAD delta, contribution delta and its actual cached base."""
-    line = f"{balance.book_id.title()} book {balance.size:,} B: {_signed(balance.vs_head)} vs HEAD"
+    line = f"{text_name(balance.book_id)} {balance.size:,} B: {_signed(balance.vs_head)} vs HEAD"
     if balance.upstream:
         line += f", {_signed(balance.vs_upstream)} vs {balance.upstream} (merge-base {balance.merge_base or 'unavailable'})"
     if balance.vs_upstream is None:
@@ -449,22 +498,24 @@ def render_book_balance(balance: BookBalance) -> str:
 
 
 def book_balance_note(root: Path, paths: Iterable[str]) -> str:
-    """The footer for a write to Ouroboros's own body; ``""`` when no book source was written.
+    """The footer for a write to Ouroboros's own body; ``""`` when no book or ruled text was written.
 
     Callers decide that ``root`` is the body (the system repository or its bound candidate):
     a user's project with a ``docs/architecture`` folder never receives this note.
     """
-    touched = [path for path in paths if book_path_role(path)]
+    touched = [path for path in paths if book_path_role(path) or ruled_text_of(path)]
     if not touched:
         return ""
     balances = book_balances(root, touched)
     wanted = {book_entrypoint_for(path) for path in touched}
     available = {balance.book_id for balance in balances}
-    unavailable = [f"{book_id.title()} book balance unavailable"
+    unavailable = [f"{text_name(book_id)} balance unavailable"
                    for book_id, entry in BOOK_ENTRYPOINTS.items()
                    if entry in wanted and book_id not in available]
+    unavailable += [f"{text_name(text_id)} balance unavailable"
+                    for text_id in sorted({ruled_text_of(path) for path in touched} - {""} - available)]
     lines = [render_book_balance(balance) for balance in balances] + unavailable
     if any(balance.owed for balance in balances):
-        return "ℹ️ Reference books:\n" + "\n".join(lines) + "\n" + BOOK_GROWTH_RULE
+        return "ℹ️ Text growth:\n" + "\n".join(lines) + "\n" + BOOK_GROWTH_RULE
     measured = not unavailable and all(balance.vs_upstream is not None for balance in balances)
-    return "ℹ️ Reference book: " + "; ".join(lines) + ("; nothing owed." if measured else ".")
+    return "ℹ️ Text growth: " + "; ".join(lines) + ("; nothing owed." if measured else ".")

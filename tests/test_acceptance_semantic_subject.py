@@ -249,12 +249,12 @@ def test_a_selected_finish_delivers_without_opening_the_seal_and_closes_ingress(
     tool_ctx._delivery_control_required = True
     seen = []
     monkeypatch.setattr(loop, "_project_child_result_dispositions", lambda *_args: None)
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", lambda *_args: False)
+    monkeypatch.setattr(loop, "_enforce_plan_gate", lambda *_args: False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_args: "")
     monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_args: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
     monkeypatch.setattr(loop, "_finalize_task_services", lambda *_args: seen.append("services") or False)
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_args: "")
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_args: "")
     monkeypatch.setattr(loop, "_forced_orphan_note", lambda *_args, **_kwargs: "")
     fences = []
     tool_ctx.begin_acceptance_fence = lambda **kwargs: fences.append(kwargs) or {"token": "never", "owner_message_generation": 0}

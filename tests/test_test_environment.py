@@ -199,6 +199,9 @@ def test_safe_test_retains_its_new_root_and_keeps_the_command_status(tmp_path):
     assert len(retained) == 1, result.stderr
     root = Path(retained[0])
     assert root.parent == tmp_path.resolve() and root.name.startswith("ob-")
+    # Spotlight skips everything below it (fake app bundles among the fixtures), and it stays short:
+    # nested in a session's /tmp/obs-* scratch, a pool listener below it still fits AF_UNIX's 104 bytes.
+    assert root.name.endswith(".noindex") and len(root.name) == len("ob-12345678.noindex")
     assert (root / "home" / "probe").read_text() == "kept"
     # Handed down so each pytest controller claims its own basetemp beneath it.
     assert Path(result.stdout.splitlines()[-1]) == root
@@ -460,3 +463,47 @@ def test_session_finish_retains_the_session_tree(tmp_path, monkeypatch):
     session = SimpleNamespace(config=SimpleNamespace(_ouroboros_initial_mock_pollution=set()), exitstatus=0)
     conftest.pytest_sessionfinish(session, 0)
     assert (session_root / "data").is_dir() and session.exitstatus == 0
+
+
+_RETENTION_PROBE = """
+import os
+import pytest
+
+@pytest.fixture(autouse=True)
+def _manufactured_retention(tmp_path):
+    from ouroboros.test_environment import retain_tree
+    from tests._shared import retire_synthetic_retention
+    held = tmp_path / "held"
+    held.mkdir()
+    assert retain_tree(held, "probe: stubbed reap")
+    yield
+    if os.environ["RETENTION_PROBE"] == "retire":
+        assert retire_synthetic_retention(held, "probe: stubbed reap")
+"""
+
+
+@pytest.mark.parametrize("mode", ["leave", "retire"])
+def test_a_marker_left_in_a_tests_tmp_path_fails_that_test_under_a_releasing_owner(tmp_path, mode):
+    """#1908: one forgotten synthetic marker kept every green battery's whole root."""
+    from tests._shared import retire_synthetic_retention
+
+    probe, launcher_root = tmp_path / "probe", tmp_path / "launcher-root"
+    probe.mkdir()
+    launcher_root.mkdir()
+    (probe / "retention_probe.py").write_text(_RETENTION_PROBE, encoding="utf-8")
+    env = _nested_env(PYTHONPATH=str(probe), RETENTION_PROBE=mode, OUROBOROS_TEST_TEMP_ROOT=str(launcher_root))
+    try:
+        result = subprocess.run([sys.executable, "-m", "pytest", _NODE, "-o", "addopts=", "-q",
+                                 "-p", "retention_probe"],
+                                cwd=REPO, env=env, text=True, capture_output=True, timeout=300)
+        output = result.stdout + result.stderr
+        if mode == "leave":
+            assert result.returncode == 1 and "1 passed" in output and "1 error" in output, output
+            assert "ERROR at teardown of test_git_discovery_cannot_escape_to_an_ancestor_checkout" in output, output
+            assert "left retention in its tmp_path" in output and "held (probe: stubbed reap)" in output, output
+            assert "retire_synthetic_retention" in output, output
+        else:
+            assert result.returncode == 0, output
+    finally:
+        for held in launcher_root.glob("b*/t/*/held"):
+            retire_synthetic_retention(held, "probe: stubbed reap")  # the nested run's manufactured marker

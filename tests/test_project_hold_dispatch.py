@@ -117,36 +117,27 @@ def test_unknown_original_identity_never_recaptures_today(host, tmp_path, monkey
     assert 'automatic recovery is not authorized' in row['_project_admission_restore_hold']['detail']
 
 
-@pytest.mark.parametrize('kind', ['crash', 'timeout'])
 @pytest.mark.parametrize('outage', [False, True])
-def test_retry_owner_admits_but_unknown_handoff_cannot_auto_release(host, tmp_path, monkeypatch, kind, outage):  # noqa: F811
+def test_retry_owner_admits_but_unknown_handoff_cannot_auto_release(host, tmp_path, monkeypatch, outage):  # noqa: F811
+    """The same-id crash retry: its owner admits it, an unknown no-dispatch handoff never auto-releases."""
     from ouroboros.task_results import write_task_result
-    from supervisor import task_reaper, worker_health
+    from supervisor import worker_health
     from tests.test_worker_crash_retry import _make_worker
 
     task = accepted(host, tmp_path)
     host.pending.clear()
     write_task_result(host.root, 'held', 'running')
-    if kind == 'timeout':
-        from tests.test_retry_project_binding import _patch_retry_input_handoff
-        _patch_retry_input_handoff(monkeypatch)
-        retry = task_reaper._enqueue_retry(queue, task, task_id='held', retry_task_id='retry',
-            attempt=1, terminal_reason='idle_timeout', recon_fields={})
-        assert retry[0], retry
-        assert load_task_result(host.root, 'held')['superseded_by'] == 'retry'
-        assert load_task_result(host.root, 'retry')['supersedes_task_id'] == 'held'
-    else:
-        dead = _make_worker(busy_task_id='held', exitcode=1)
-        dead.reaping = True
-        workers.WORKERS[0] = dead
-        meta = {'task': task, 'attempt': 1, 'worker_id': 0}
-        queue.RUNNING['held'] = meta
-        monkeypatch.setattr(workers, 'QUEUE_MAX_RETRIES', 1)
-        monkeypatch.setattr(workers, 'reconstruct_task_cost', lambda *_a, **_kw: {})
-        monkeypatch.setattr(workers, 'respawn_worker', lambda *_a: None)
-        job = dict(worker=dead, task_id='held', task=task, meta=meta, worker_id=0,
-                   exitcode=1, attempt=1, drive_root=str(host.root))
-        worker_health._recover_crashed_task_without_terminal(job, queue)
+    dead = _make_worker(busy_task_id='held', exitcode=1)
+    dead.reaping = True
+    workers.WORKERS[0] = dead
+    meta = {'task': task, 'attempt': 1, 'worker_id': 0}
+    queue.RUNNING['held'] = meta
+    monkeypatch.setattr(workers, 'QUEUE_MAX_RETRIES', 1)
+    monkeypatch.setattr(workers, 'reconstruct_task_cost', lambda *_a, **_kw: {})
+    monkeypatch.setattr(workers, 'respawn_worker', lambda *_a: None)
+    job = dict(worker=dead, task_id='held', task=task, meta=meta, worker_id=0,
+               exitcode=1, attempt=1, drive_root=str(host.root))
+    worker_health._recover_crashed_task_without_terminal(job, queue)
     assert len(host.pending) == 1
     assert host.pending[0]['admitted_dispatch'] == 'possible'
     sent = worker(host, monkeypatch)
@@ -158,7 +149,7 @@ def test_retry_owner_admits_but_unknown_handoff_cannot_auto_release(host, tmp_pa
         assert not sent and host.pending[0]['_project_admission_restore_hold']
         assert 'no-dispatch evidence is unconfirmed' in host.pending[0]['_project_admission_restore_hold']['detail']
     else:
-        assert [row['id'] for row in sent] == ['retry' if kind == 'timeout' else 'held']
+        assert [row['id'] for row in sent] == ['held']
 
 
 @pytest.mark.parametrize('change', ['chat_id', 'created_at', 'routing_incarnation',

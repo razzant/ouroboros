@@ -572,7 +572,8 @@ def test_legacy_lifecycle_ordering(
             events.append("telegram_client_closed")
 
     class FakeMenu:
-        def __init__(self, _token: str, chat_id: int, _state: Path, *, client: Any) -> None:
+        def __init__(self, _token: str, chat_id: int, _state: Path, *, client: Any,
+                     api_root: str | None = None) -> None:
             assert chat_id == 12345 and isinstance(client, FakeTelegramClient)
 
         async def verify_private_owner(self) -> str:

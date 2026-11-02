@@ -93,7 +93,7 @@ def test_assignment_tick_already_folds_lost_consumption(host, monkeypatch, clock
     assert execution_elapsed_seconds(workers.RUNNING['held'], clock[0]) == pytest.approx(90)
 
 
-def test_consumed_worker_death_takes_terminal_custody_before_crash_retry(host, monkeypatch, clock):  # noqa: F811
+def test_consumed_worker_death_obeys_the_ordinary_crash_retry_limit(host, monkeypatch, clock):  # noqa: F811
     from supervisor import worker_health
     from ouroboros.task_results import load_task_result
     from tests.test_worker_crash_retry import _make_worker
@@ -118,7 +118,7 @@ def test_consumed_worker_death_takes_terminal_custody_before_crash_retry(host, m
                         lambda *_a, **_k: {'terminal_source_present': False})
     worker_health.recover_confirmed_dead_worker(job)
     result = load_task_result(host.root, 'held')
-    assert result['status'] == 'failed' and result['reason_code'] == 'worker_crash_budget_pausing'
+    assert result['status'] == 'failed' and result['reason_code'] == 'worker_crash_retry_exhausted'
     assert not host.pending
 
 

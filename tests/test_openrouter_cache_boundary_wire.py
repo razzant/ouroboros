@@ -10,7 +10,8 @@ from ouroboros.llm import LLMClient
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "openai", "openai-compatible"])
-def test_sdk_wire_keeps_boundaries_only_on_supported_transport(provider):
+def test_sdk_wire_keeps_boundaries_only_on_supported_transport(provider, monkeypatch):
+    monkeypatch.delenv("OUROBOROS_PROMPT_CACHE_TTL", raising=False)  # the shipped 1h tier
     original = [{"role": "system", "content": [
         {"type": "text", "text": "Stable identity and memory", "_caption": "host only",
          "cache_control": {"type": "ephemeral", "ttl": "1h"}},
@@ -37,11 +38,15 @@ def test_sdk_wire_keeps_boundaries_only_on_supported_transport(provider):
         sdk.chat.completions.create(**payload)
     wire = json.dumps(sent[0], ensure_ascii=False)
     assert "Stable identity and memory" in wire and "Current task" in wire
-    assert "_caption" not in wire and "ttl" not in wire
-    if provider == "openrouter":
-        blocks = sent[0]["messages"][0]["content"]
-        assert blocks[0]["cache_control"] == {"type": "ephemeral"}
-        assert "cache_control" not in blocks[1]
-    else:
+    assert "_caption" not in wire
+    # OpenRouter keeps this family's bare marker; a generic compatible server gets the
+    # marker with the owner's TTL (the finalizer's family); direct OpenAI gets none.
+    assert ("ttl" in wire) is (provider == "openai-compatible")
+    if provider == "openai":
         assert "cache_control" not in wire
+    else:
+        blocks = sent[0]["messages"][0]["content"]
+        assert blocks[0]["cache_control"] == (
+            {"type": "ephemeral"} if provider == "openrouter" else {"type": "ephemeral", "ttl": "1h"})
+        assert "cache_control" not in blocks[1]
     assert original == before

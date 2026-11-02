@@ -4,8 +4,8 @@ substrate: never a transport failure, a malformed answer or a verdict.
 Two halves, both directions each. The WORDS about an awaited slot change (the
 per-actor projection, the panel fold, the aggregate's reasons).
 The ARITHMETIC does not: aggregate, quorum and the per-actor gate fields equal the
-literal values pinned below for every input, and the loud rows (expired window, lost
-custody, settled failure, typed refusal, reservation shape) keep their words. A slot
+literal values pinned below for every input. Canonical unfinished workers remain
+pending after a drain expires; lost custody, settled failures and refusals remain typed. A slot
 is awaited only while it carries no answer: a row that carries one is judged by its
 answer exactly as before, words included, whatever its custody state says.
 """
@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.review_actor_aggregation import aggregate_review_actors
+from ouroboros.review_seat_outcome import aggregate_outcomes, finalize_seat_outcome
 from ouroboros.review_projection import (
     AWAITING_PROJECTION,
     _review_actor_projection,
@@ -153,11 +153,12 @@ def aggregate(shapes, policy="open"):
     surface, settings = POLICIES[policy]
     actors = [row(shape, f"s{index + 1}") for index, shape in enumerate(shapes)]
     slots = [SimpleNamespace(slot_id=actor.slot_id, role_hint="") for actor in actors]
-    result = aggregate_review_actors(
-        request=SimpleNamespace(surface=surface, policy=dict(settings)), slots=slots, actors=actors,
-        slots_by_id={slot.slot_id: slot for slot in slots},
-        actor_projection=_review_actor_projection,
-    )
+    # These historical object assessments exercise the compatibility projections;
+    # live array/two-part surfaces are covered by test_review_seat_outcome.
+    request = SimpleNamespace(surface="task_acceptance", policy=dict(settings), resolved_wave_id="", task_id="test")
+    for actor, slot in zip(actors, slots):
+        finalize_seat_outcome(request, slot, actor)
+    result = aggregate_outcomes(request, slots, actors)
     return result, actors
 
 
@@ -270,7 +271,6 @@ def test_awaited_slots_are_reported_once_and_never_as_a_fault():
 
 @pytest.mark.parametrize("shapes, real", [
     (("run_failed", "pending", "pending"), [f"s1:{RUN_FAILED_ERROR}", "s1:degraded"]),
-    (("timeout", "pending", "pending"), [f"s1:{TIMEOUT_ERROR}", "s1:degraded"]),
     (("custody_lost", "pending", "pending"), [f"s1:{CUSTODY_ERROR}", "s1:degraded"]),
     (("degraded", "pending", "pending"), ["s1:degraded"]),
 ])
@@ -291,12 +291,10 @@ def test_a_refusal_beside_a_wait_keeps_both_of_its_entries():
     (("not_dispatched",) * 3,
      [f"s1:{REFUSAL_ERROR}", f"s2:{REFUSAL_ERROR}", f"s3:{REFUSAL_ERROR}",
       "s1:degraded", "s2:degraded", "s3:degraded"]),
-    (("timeout",) * 3,
-     [f"s1:{TIMEOUT_ERROR}", f"s2:{TIMEOUT_ERROR}", f"s3:{TIMEOUT_ERROR}",
-      "s1:degraded", "s2:degraded", "s3:degraded"]),
+    (("timeout",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
     (("pass", "custody_lost", "custody_lost"),
      [f"s2:{CUSTODY_ERROR}", f"s3:{CUSTODY_ERROR}", "s2:degraded", "s3:degraded"]),
-    (("reservation",) * 3, ["s1:", "s2:", "s3:", "s1:degraded", "s2:degraded", "s3:degraded"]),
+    (("reservation",) * 3, ["awaiting 3 of 3 reviewer slot(s): s1, s2, s3 — no verdict"]),
     (("pass", "pass", "empty"), ["s3:empty", "s3:degraded"]),
     (("pass", "pass", "malformed"), ["s3:degraded"]),
     ((), ["quorum_not_met: pass_count=0 < min_successful=2"]),
@@ -375,16 +373,16 @@ def test_a_stored_parsed_answer_on_a_pending_row_projects_as_before():
     # A real failure beside a wait keeps its own word.
     (("run_failed", "pending", "pending"), "provider_transport_error", "malformed"),
     (("custody_lost", "pending", "pending"), "provider_transport_error", "malformed"),
-    (("timeout", "pending", "pending"), "timeout", "malformed"),
+    (("timeout", "pending", "pending"), "awaiting", "awaiting"),
     (("pending", "not_dispatched", "not_dispatched"), "not_dispatched", "malformed"),
     (("pass", "run_failed", "pending"), "partial", "malformed"),
     # No awaited slot: the base fold, literally.
     (("pass", "pass", "pass"), "success", "valid"),
-    (("pass", "pass", "timeout"), "partial", "malformed"),
+    (("pass", "pass", "timeout"), "awaiting", "awaiting"),
     (("pass", "pass", "malformed"), "success", "malformed"),
-    (("timeout",) * 3, "timeout", "malformed"),
+    (("timeout",) * 3, "awaiting", "awaiting"),
     (("not_dispatched",) * 3, "not_dispatched", "malformed"),
-    (("reservation",) * 3, "provider_transport_error", "malformed"),
+    (("reservation",) * 3, "awaiting", "awaiting"),
     ((), "provider_transport_error", "malformed"),
 ])
 def test_panel_words_follow_the_collected_slots(shapes, transport, parse):
@@ -446,7 +444,7 @@ def test_a_released_run_reads_as_awaiting_and_then_as_its_answers(tmp_path, monk
         def chat(self, **kwargs):
             entered.release()
             assert release.wait(10), "fixture did not release its model"
-            return {"content": PASS_TEXT}, {"prompt_tokens": 5, "completion_tokens": 2}
+            return {"content": "[]\nNO_FINDINGS"}, {"prompt_tokens": 5, "completion_tokens": 2}
 
     class Unused:
         def chat(self, **kwargs):

@@ -24,8 +24,8 @@ def _codex_slot(slot_id="triad_286lhb"):
                       session_target="codex=gpt-6-astra", session_profile="gptpro4")
 
 
-def _actor(*, status="ok", state="settled", usage=None, **facts):
-    return SimpleNamespace(usage=usage or {}, operation_state=state, status=status, **facts)
+def _actor(*, status="ok", state="settled", usage=None, parse_status="valid", **facts):
+    return SimpleNamespace(usage=usage or {}, operation_state=state, status=status, parse_status=parse_status, **facts)
 
 
 def test_a_started_row_names_the_reviewer_and_only_what_the_frozen_slot_asked_for():
@@ -161,5 +161,14 @@ def test_an_empty_answer_reads_as_an_empty_answer_never_as_answered():
     line = review_actor_progress_text("plan_review", "finished", slot, empty)
     assert line == "Plan reviewer codex=gpt-6-astra gave an empty answer."
     assert " answered — " not in line
-    full = SimpleNamespace(status="ok", operation_state="settled", usage={}, reset_at="", reported_cause="")
+    full = SimpleNamespace(status="ok", operation_state="settled", parse_status="valid", usage={}, reset_at="", reported_cause="")
     assert review_actor_progress_text("plan_review", "finished", slot, full).startswith("Plan reviewer codex=gpt-6-astra answered — ")
+
+
+def test_receiving_bytes_does_not_claim_a_parsed_verdict():
+    slot = ReviewSlot("seat", "model")
+    assert review_actor_progress_text("plan_review", "finished", slot, _actor(parse_status="")) == (
+        "Plan reviewer model answer received, verdict being read.")
+    assert review_actor_progress_text("plan_review", "finished", slot, _actor(parse_status="malformed")) == (
+        "Plan reviewer model returned an unreadable verdict.")
+    assert "answered" in review_actor_progress_text("plan_review", "finished", slot, _actor(parse_status="valid"))

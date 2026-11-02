@@ -335,7 +335,8 @@ def _signed_session(data_dir: Path, age_sec: int) -> str:
 
 def _history_notice(page) -> str:
     """The Main feed's persistent history note ("Some saved history is not loaded ..."), if shown."""
-    return page.evaluate("""() => [...document.querySelectorAll('#page-chat .chat-history-status')]
+    return page.evaluate("""() => [...document.querySelectorAll(
+        '#page-chat .chat-history-status, #page-chat .chat-load-older.has-gaps :is(.chat-load-older-note, .chat-history-gap)')]
         .filter(node => !node.hidden).map(node => node.textContent.trim()).join(' | ')""")
 
 
@@ -840,8 +841,8 @@ def test_update_status_restart_and_panic_are_the_cores_own_process_facts(stack):
             session.shot("2-restarted")
 
             # Panic: the core stops everything and exits; the interface host is untouched.
-            page.locator('[data-chat-command="panic"]').click()
-            page.locator("[data-confirm-ok]").click()
+            page.locator('#page-chat [data-chat-command="panic"]').click()
+            expect(page.locator("[data-confirm-ok]")).to_have_count(0)
             exit_code = core.process.wait_exit(90)
             page.wait_for_function(DISCONNECTED, timeout=30_000)
             after = {"api": session.api("GET", "/api/state", None)["status"],

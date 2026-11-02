@@ -33,7 +33,7 @@ _LOCAL_READONLY_TEXT = (
     "external tools and may write knowledge notes, memory marks and "
     "chronicle page drafts in its own name, but may not call first-party "
     "local tool 'commit_reviewed'. Parent tasks must perform other writes, commits, "
-    "review gates, tool expansion, runtime control, shell, and skills. "
+    "review gates, tool grants, runtime control, shell, and skills. "
     "Nested readonly delegation is allowed only through schedule_subagent "
     "within configured depth/cap limits."
 )
@@ -41,8 +41,8 @@ _ACTING_BUILTIN_TEXT = (
     "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
     "write inside its assigned write root and run shell/services "
     "there, but may not call first-party tool 'commit_reviewed'. It cannot "
-    "commit the live body, run review gates/runtime/skills lifecycle, enable "
-    "tools, or write identity or scratchpad (chronicle pages and parts only "
+    "commit the live body, run review gates/runtime/skills lifecycle, grant "
+    "itself tools, or write identity or scratchpad (chronicle pages and parts only "
     "as its own drafts); the parent applies isolated patches or verifies "
     "shared external files and is the sole live-body committer."
 )
@@ -61,6 +61,13 @@ _MANAGED_UNAVAILABLE_TEXT = (
     "update transaction state could not be verified. Retry after the update state is "
     "available or repaired."
 )
+_DIAGNOSTIC_TEXT = (
+    "⚠️ DIAGNOSTIC_CAPABILITY_BLOCKED: this task-related diagnostic may inspect "
+    "work and request existing task controls; it has no product-write or external-tool authority."
+)
+# The host-minted binding the guard reads from the context, never from the registry facade.
+_DIAGNOSTIC_METADATA = {"work_diagnostic": {"kind": "silence", "task_id": "source", "root_task_id": "root",
+                                            "task_attempt": 1, "episode_id": "episode"}}
 _SAFETY_DENIAL_TEXT = "⚠️ SAFETY_VIOLATION: fixture denial"
 
 
@@ -437,6 +444,8 @@ def test_registry_guard_owner_facades_preserve_identity() -> None:
         "acting_external",
         "managed_active",
         "managed_unavailable",
+        "diagnostic_product",
+        "diagnostic_external",
     ),
 )
 def test_registry_guard_native_outcomes_preserve_exact_text(
@@ -448,7 +457,9 @@ def test_registry_guard_native_outcomes_preserve_exact_text(
         _subagent_and_update_guard_result,
     )
 
-    ctx = SimpleNamespace(task_id="task-1", task_metadata={})
+    diagnostic = scenario.startswith("diagnostic_")
+    ctx = SimpleNamespace(task_id="task-1", task_metadata=dict(_DIAGNOSTIC_METADATA) if diagnostic else {},
+                          active_context_mode="max")
     # v7next adaptation: this tree's guard takes the REGISTRY (its read-only
     # allowlist grew the verify_and_record zero-run carve, tip drift), so the
     # fake carries the ctx and the plain allowlist predicate.
@@ -460,19 +471,25 @@ def test_registry_guard_native_outcomes_preserve_exact_text(
     )
     kwargs = {
         "entry": object()
-        if scenario in {"local_readonly", "acting_builtin", "managed_active", "managed_unavailable"}
+        if scenario in {"local_readonly", "acting_builtin", "managed_active", "managed_unavailable",
+                        "diagnostic_product"}
         else None,
-        "ext_tool": {"name": "ext_4_demo_ping"} if scenario == "acting_external" else None,
+        "ext_tool": {"name": "ext_4_demo_ping"} if scenario in {"acting_external", "diagnostic_external"} else None,
         "is_mcp": False,
-        "local_readonly_subagent": scenario == "local_readonly",
+        "local_readonly_subagent": scenario in {"local_readonly", "diagnostic_product", "diagnostic_external"},
         "acting_subagent": scenario in {"acting_builtin", "acting_external"},
         "acting_tool_grants": (),
-        "repo_mutation": scenario in {"managed_active", "managed_unavailable"},
+        "repo_mutation": scenario in {"managed_active", "managed_unavailable", "diagnostic_product"},
     }
-    name = "ext_4_demo_ping" if scenario == "acting_external" else (
-        "write_file" if scenario.startswith("managed_") else "commit_reviewed"
+    name = "ext_4_demo_ping" if scenario in {"acting_external", "diagnostic_external"} else (
+        "write_file" if scenario.startswith("managed_") or scenario == "diagnostic_product" else "commit_reviewed"
     )
-    if scenario == "managed_active":
+    if diagnostic:
+        # The diagnostic gate answers first, before the managed-update and read-only gates.
+        monkeypatch.setattr(update_merge, "managed_assisted_tx_for", lambda *_args: (_ for _ in ()).throw(
+            AssertionError("the diagnostic refusal precedes managed-update state")))
+        expected = ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_DIAGNOSTIC_TEXT)
+    elif scenario == "managed_active":
         monkeypatch.setattr(update_merge, "managed_assisted_tx_for", lambda *_args: (None, True))
         expected = ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_MANAGED_ACTIVE_TEXT)
     elif scenario == "managed_unavailable":
@@ -533,6 +550,13 @@ def test_registry_guard_allow_paths_return_no_result(monkeypatch) -> None:
         (),
         True,
     ) is None
+    # A diagnostic's inspection and source-control tools pass its own gate to the read-only one.
+    registry._ctx = SimpleNamespace(task_id="silence-episode", task_metadata=dict(_DIAGNOSTIC_METADATA),
+                                    active_context_mode="max")
+    for name in ("read_file", "get_task_result", "pause_task"):
+        registry._readonly_tool_allowed = lambda tool, name=name: tool == name
+        assert _subagent_and_update_guard_result(
+            registry, name, object(), None, False, True, False, (), False) is None
 
 
 def test_registry_native_guards_precede_safety_and_physical_dispatch(

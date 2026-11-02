@@ -1,0 +1,408 @@
+{
+  "engine_tree": "94eaa9ef8cb232b3d3a4b31628c9e1a9c1b5c666",
+  "scenario": "third",
+  "provider": "offline Codex HTTP fixture",
+  "uploads": [
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      },
+      "retryOfOperationId": "job-45d9458ee2d7"
+    },
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    }
+  ],
+  "idempotency_keys": [
+    "b1e04ee3e2f04647839b9fbf544eb73f",
+    "fa235d446507441ebe64fca06ce2c60d",
+    "e75b44636d49422082e5f4b72d6953a4"
+  ],
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-2b9f64ea71c3\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-2b9f64ea71c3",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-2b9f64ea71c3\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-2b9f64ea71c3/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-2b9f64ea71c3\",\"state\":\"uploaded\",\"receivedBytes\":183,\"expectedBytes\":183}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-2b9f64ea71c3/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-d0738697a1a0\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6.json\",\"sha256\":\"sha256:37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6\",\"sizeBytes\":183,\"createdAt\":\"2026-10-21T06:10:27.866Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-4c667c334c2d8eec.json",
+      "body_sha256": "4c667c334c2d8eec5d918a9be7521a0b7bda5a74f1b0350959563ca67d2cf0e3"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-45d9458ee2d7",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-4c667c334c2d8eec.json",
+      "body_sha256": "4c667c334c2d8eec5d918a9be7521a0b7bda5a74f1b0350959563ca67d2cf0e3",
+      "repeat": 14
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-45d9458ee2d7",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-45d9458ee2d7\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:10:28.275Z\",\"startedAt\":\"2026-10-21T06:10:28.309Z\",\"finishedAt\":\"2026-10-21T06:10:28.752Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:28.339Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-c33bb480f3ef\",\"sha256\":\"sha256:f925ff158f87d1f566a033a5304ca2c5e188138c943811d83b31c5ab62573b60\",\"sizeBytes\":2649},\"readyAt\":\"2026-10-21T06:10:28.751Z\",\"expiresAt\":\"2026-11-20T06:10:28.751Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":true,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.1445000000003347,\"silenceMs\":4.373042000001078,\"lastChunkAfterResponseMs\":0.1445000000003347,\"largestSilenceMs\":4.373042000001078,\"source\":\"codex\",\"operationId\":\"job-45d9458ee2d7\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"Re-send the same generation input once in auto mode with retryOfOperationId set to this operation id.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:28.624Z\",\"state\":\"provisional\"}]}}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-45d9458ee2d7/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"failed\",\"message\":null,\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":true,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.1445000000003347,\"silenceMs\":4.373042000001078,\"lastChunkAfterResponseMs\":0.1445000000003347,\"largestSilenceMs\":4.373042000001078,\"source\":\"codex\",\"operationId\":\"job-45d9458ee2d7\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"Re-send the same generation input once in auto mode with retryOfOperationId set to this operation id.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:28.624Z\",\"state\":\"provisional\"}]}},\"failureEvidence\":{\"bodyBase64\":\"eyJkZXRhaWwiOiJUaGUgJ2dwdC02LjEtc29sJyBtb2RlbCBpcyBub3Qgc3VwcG9ydGVkIHdoZW4gdXNpbmcgQ29kZXggd2l0aCBhIENoYXRHUFQgYWNjb3VudC4ifQ==\",\"receivedBytes\":94,\"bodyComplete\":true,\"stage\":\"json\",\"errors\":[],\"causeCycle\":false}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-45d9458ee2d7/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-45d9458ee2d7\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:10:28.275Z\",\"startedAt\":\"2026-10-21T06:10:28.309Z\",\"finishedAt\":\"2026-10-21T06:10:28.752Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:28.339Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-c33bb480f3ef\",\"sha256\":\"sha256:f925ff158f87d1f566a033a5304ca2c5e188138c943811d83b31c5ab62573b60\",\"sizeBytes\":2649},\"releasedAt\":\"2026-10-21T06:10:28.952Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":true,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.1445000000003347,\"silenceMs\":4.373042000001078,\"lastChunkAfterResponseMs\":0.1445000000003347,\"largestSilenceMs\":4.373042000001078,\"source\":\"codex\",\"operationId\":\"job-45d9458ee2d7\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"Re-send the same generation input once in auto mode with retryOfOperationId set to this operation id.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:28.624Z\",\"state\":\"provisional\"}]}}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-e7acbe373d24\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":223}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-e7acbe373d24",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-e7acbe373d24\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":223}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-e7acbe373d24/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-e7acbe373d24\",\"state\":\"uploaded\",\"receivedBytes\":223,\"expectedBytes\":223}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-e7acbe373d24/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-6ccdb9ba9ecb\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-523affcc140f516ff48524ba598fb3c62ba64d330d1d8f599bd3e933fcca05a1.json\",\"sha256\":\"sha256:523affcc140f516ff48524ba598fb3c62ba64d330d1d8f599bd3e933fcca05a1\",\"sizeBytes\":223,\"createdAt\":\"2026-10-21T06:10:29.137Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-350e87e8f90d05b3.json",
+      "body_sha256": "350e87e8f90d05b3ca2259ba7bdea08cf26efc79eb43db3f56734abcb1bb6241"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-7a89512a5b0b",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-350e87e8f90d05b3.json",
+      "body_sha256": "350e87e8f90d05b3ca2259ba7bdea08cf26efc79eb43db3f56734abcb1bb6241",
+      "repeat": 23
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-7a89512a5b0b",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-7a89512a5b0b\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:10:29.624Z\",\"startedAt\":\"2026-10-21T06:10:29.624Z\",\"finishedAt\":\"2026-10-21T06:10:30.402Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:29.626Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":null}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-12a7d5a0d778\",\"sha256\":\"sha256:d576bffbd4ee800996c39b1349afb14ac34964db367f5f98682680a332113c0f\",\"sizeBytes\":3256},\"readyAt\":\"2026-10-21T06:10:30.402Z\",\"expiresAt\":\"2026-11-20T06:10:30.402Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":false,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.1445000000003347,\"silenceMs\":4.373042000001078,\"lastChunkAfterResponseMs\":0.1445000000003347,\"largestSilenceMs\":4.373042000001078,\"source\":\"codex\",\"operationId\":\"job-7a89512a5b0b\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"},{\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"Check the requested model and account plan, refresh account catalogs, or choose another model.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:28.624Z\",\"state\":\"provisional\"},{\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:30.115Z\",\"state\":\"provisional\"}],\"retryOfOperationId\":\"job-45d9458ee2d7\",\"differentialOutcome\":\"equivalent_refusal\"}}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-7a89512a5b0b/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"failed\",\"message\":null,\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":null},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":false,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.1445000000003347,\"silenceMs\":4.373042000001078,\"lastChunkAfterResponseMs\":0.1445000000003347,\"largestSilenceMs\":4.373042000001078,\"source\":\"codex\",\"operationId\":\"job-7a89512a5b0b\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"},{\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"Check the requested model and account plan, refresh account catalogs, or choose another model.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:28.624Z\",\"state\":\"provisional\"},{\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:30.115Z\",\"state\":\"provisional\"}],\"retryOfOperationId\":\"job-45d9458ee2d7\",\"differentialOutcome\":\"equivalent_refusal\"}},\"failureEvidence\":{\"bodyBase64\":\"eyJkZXRhaWwiOiJUaGUgJ2dwdC02LjEtc29sJyBtb2RlbCBpcyBub3Qgc3VwcG9ydGVkIHdoZW4gdXNpbmcgQ29kZXggd2l0aCBhIENoYXRHUFQgYWNjb3VudC4ifQ==\",\"receivedBytes\":94,\"bodyComplete\":true,\"stage\":\"json\",\"errors\":[],\"causeCycle\":false}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-7a89512a5b0b/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-7a89512a5b0b\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:10:29.624Z\",\"startedAt\":\"2026-10-21T06:10:29.624Z\",\"finishedAt\":\"2026-10-21T06:10:30.402Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:29.626Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":null}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-12a7d5a0d778\",\"sha256\":\"sha256:d576bffbd4ee800996c39b1349afb14ac34964db367f5f98682680a332113c0f\",\"sizeBytes\":3256},\"releasedAt\":\"2026-10-21T06:10:30.774Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"model_capability_refused\",\"message\":\"The selected Codex account refused the requested model before generation.\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"requestedModel\":\"gpt-6.1-sol\",\"generationStarted\":false,\"retryOnOtherAccount\":false,\"capabilityKind\":\"model_not_supported\",\"capabilityEvidence\":\"provider_text\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"stage\":\"json\",\"receivedBytes\":94,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.1445000000003347,\"silenceMs\":4.373042000001078,\"lastChunkAfterResponseMs\":0.1445000000003347,\"largestSilenceMs\":4.373042000001078,\"source\":\"codex\",\"operationId\":\"job-7a89512a5b0b\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"},{\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"capabilityKind\":\"model_not_supported\"}],\"nextStep\":\"Check the requested model and account plan, refresh account catalogs, or choose another model.\",\"alternativeRemains\":true,\"modelMarks\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:28.624Z\",\"state\":\"provisional\"},{\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"providerReason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"since\":\"2026-10-21T06:10:30.115Z\",\"state\":\"provisional\"}],\"retryOfOperationId\":\"job-45d9458ee2d7\",\"differentialOutcome\":\"equivalent_refusal\"}}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-dbde82e22b9c\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-dbde82e22b9c",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-dbde82e22b9c\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-dbde82e22b9c/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-dbde82e22b9c\",\"state\":\"uploaded\",\"receivedBytes\":183,\"expectedBytes\":183}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-dbde82e22b9c/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-7eb844c01cea\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6.json\",\"sha256\":\"sha256:37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6\",\"sizeBytes\":183,\"createdAt\":\"2026-10-21T06:10:31.059Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-3091db75e7c79f63.json",
+      "body_sha256": "3091db75e7c79f634df35830aa72d63c6ba4b27c73773ed64f23a9f9a6f78e4a"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-b52668231f95",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-3091db75e7c79f63.json",
+      "body_sha256": "3091db75e7c79f634df35830aa72d63c6ba4b27c73773ed64f23a9f9a6f78e4a",
+      "repeat": 9
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-b52668231f95",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-b52668231f95\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:10:31.335Z\",\"startedAt\":\"2026-10-21T06:10:31.354Z\",\"finishedAt\":\"2026-10-21T06:10:31.816Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:31.420Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"c\",\"accountFingerprint\":\"9cdfcfbf89a00c151a91fddb7584b6725ae0e41bcae0d013a48b104fb4f99918\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-cd29a39fc2f2\",\"sha256\":\"sha256:eb8fd57e45f93bd7fb2b47dfcc28491ad39a789ba336bb1e4f08817475802d08\",\"sizeBytes\":1153},\"readyAt\":\"2026-10-21T06:10:31.816Z\",\"expiresAt\":\"2026-11-20T06:10:31.816Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-b52668231f95/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"completed\",\"message\":{\"role\":\"assistant\",\"content\":\"served by c\",\"nativeContinuation\":{\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"c\",\"accountFingerprint\":\"9cdfcfbf89a00c151a91fddb7584b6725ae0e41bcae0d013a48b104fb4f99918\",\"model\":\"gpt-6.1-sol\"},\"format\":\"codex.responses.v1\",\"payload\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"served by c\"}]}]}},\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"c\",\"accountFingerprint\":\"9cdfcfbf89a00c151a91fddb7584b6725ae0e41bcae0d013a48b104fb4f99918\",\"model\":\"gpt-6.1-sol\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-b52668231f95/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-b52668231f95\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:10:31.335Z\",\"startedAt\":\"2026-10-21T06:10:31.354Z\",\"finishedAt\":\"2026-10-21T06:10:31.816Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:31.420Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"c\",\"accountFingerprint\":\"9cdfcfbf89a00c151a91fddb7584b6725ae0e41bcae0d013a48b104fb4f99918\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-cd29a39fc2f2\",\"sha256\":\"sha256:eb8fd57e45f93bd7fb2b47dfcc28491ad39a789ba336bb1e4f08817475802d08\",\"sizeBytes\":1153},\"releasedAt\":\"2026-10-21T06:10:32.041Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/harnesses",
+      "status": 501,
+      "body_utf8": "{\"code\":\"service_not_configured\",\"message\":\"harnesses service is not configured\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/agent-capabilities",
+      "status": 501,
+      "body_utf8": "{\"code\":\"service_not_configured\",\"message\":\"agentCapabilities service is not configured\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/credential-profiles",
+      "status": 200,
+      "body_utf8": "{\"profiles\":[{\"profile\":{\"profile_id\":\"a\",\"harness_id\":\"codex\",\"display_name\":\"a\",\"credential_kind\":\"config_dir_login\",\"isolation_locator\":\"/tmp/cx-capability/third/a\",\"secret_ref\":null,\"enabled\":true,\"created_at\":null},\"status\":{\"profile_id\":\"a\",\"harness_id\":\"codex\",\"availability\":\"available\",\"verification\":\"passed\",\"verification_source\":\"local_store\",\"detail\":\"Offline fixture account\",\"last_verified_at\":null},\"identity\":null},{\"profile\":{\"profile_id\":\"b\",\"harness_id\":\"codex\",\"display_name\":\"b\",\"credential_kind\":\"config_dir_login\",\"isolation_locator\":\"/tmp/cx-capability/third/b\",\"secret_ref\":null,\"enabled\":true,\"created_at\":null},\"status\":{\"profile_id\":\"b\",\"harness_id\":\"codex\",\"availability\":\"available\",\"verification\":\"passed\",\"verification_source\":\"local_store\",\"detail\":\"Offline fixture account\",\"last_verified_at\":null},\"identity\":null},{\"profile\":{\"profile_id\":\"c\",\"harness_id\":\"codex\",\"display_name\":\"c\",\"credential_kind\":\"config_dir_login\",\"isolation_locator\":\"/tmp/cx-capability/third/c\",\"secret_ref\":null,\"enabled\":true,\"created_at\":null},\"status\":{\"profile_id\":\"c\",\"harness_id\":\"codex\",\"availability\":\"available\",\"verification\":\"passed\",\"verification_source\":\"local_store\",\"detail\":\"Offline fixture account\",\"last_verified_at\":null},\"identity\":null}],\"harnessAccounts\":[],\"accountPools\":[]}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/quota?view=resources_freshness&requestKind=text",
+      "status": 400,
+      "body_utf8": "{\"code\":\"invalid_request\",\"message\":\"Request validation failed for 5 fields.\",\"retryable\":false,\"fieldErrors\":{\"/snapshots/0/constraints/0/freshness\":[\"Expected 'fresh' | 'stale' | 'unknown', received undefined.\"],\"/snapshots/1/constraints/0/freshness\":[\"Expected 'fresh' | 'stale' | 'unknown', received undefined.\"],\"/snapshots/2/constraints/0/freshness\":[\"Expected 'fresh' | 'stale' | 'unknown', received undefined.\"],\"/resources\":[\"Expected array, received undefined.\"],\"/availability_scope\":[\"Expected object, received undefined.\"]},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"issueCount\":5,\"omittedIssueCount\":0}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/accounts/routing-evidence?includeCapabilities=true",
+      "status": 200,
+      "body_utf8": "{\"capabilities\":[{\"harness_id\":\"codex\",\"profile_id\":\"a\",\"requested_model\":\"gpt-6.1-sol\",\"account_fingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"provider_reason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"observed_at\":\"2026-10-21T06:10:28.624Z\",\"expires_at\":\"2026-10-21T10:10:28.624Z\",\"state\":\"provisional\"},{\"harness_id\":\"codex\",\"profile_id\":\"b\",\"requested_model\":\"gpt-6.1-sol\",\"account_fingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"provider_reason\":\"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.\",\"observed_at\":\"2026-10-21T06:10:30.115Z\",\"expires_at\":\"2026-10-21T10:10:30.115Z\",\"state\":\"provisional\"}],\"refusals\":[{\"harness_id\":\"codex\",\"profile_id\":\"a\",\"requested_model\":\"gpt-6.1-sol\",\"observed_at\":\"2026-10-21T06:10:28.624Z\",\"expires_at\":\"2026-10-21T07:10:28.624Z\"},{\"harness_id\":\"codex\",\"profile_id\":\"b\",\"requested_model\":\"gpt-6.1-sol\",\"observed_at\":\"2026-10-21T06:10:30.115Z\",\"expires_at\":\"2026-10-21T07:10:30.115Z\"}],\"lastService\":[]}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/quota?view=resources",
+      "status": 400,
+      "body_utf8": "{\"code\":\"invalid_request\",\"message\":\"Request validation failed for 1 field.\",\"retryable\":false,\"fieldErrors\":{\"/resources\":[\"Expected array, received undefined.\"]},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"issueCount\":1,\"omittedIssueCount\":0}}"
+    }
+  ],
+  "provider_posts": [
+    {
+      "account": "a",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    },
+    {
+      "account": "b",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    },
+    {
+      "account": "c",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    }
+  ]
+}

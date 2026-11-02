@@ -24,6 +24,7 @@ import inspect
 import json
 import pathlib
 import sys
+import threading
 import types
 
 import pytest
@@ -287,7 +288,7 @@ def test_macos_recovery_uses_the_live_window_and_current_gateway_after_setup(mon
     setup = created["window"]
     assert webview.app_menu[0].title == "Help"
     assert [item.title for item in webview.app_menu[0].items] == ["Open built-in setup"], (
-        "the setup window runs no skill page code, so it offers no start without plugins")
+        "a hung web view commits no load, so the menu offers no reload that pretends to rescue one")
     setup_action = webview.app_menu[0].items[0]
     assert setup_action.title == "Open built-in setup"
     setup_action.function()  # no page JavaScript or bridge receiver participates
@@ -315,20 +316,15 @@ def test_macos_recovery_uses_the_live_window_and_current_gateway_after_setup(mon
 
     main = webview.create_window("Ouroboros", url="http://127.0.0.1:8901")
     webview.start(menu=host.setup_recovery_menu(main, read_port))
-    main_action, plugins_off = webview.app_menu[0].items
+    (main_action,) = webview.app_menu[0].items
     assert main_action is not setup_action, "the main GUI loop replaces the old binding"
     main_action.function()
     assert main.loaded_urls == ["http://127.0.0.1:8901/onboarding?builtin=1"]
     setup_action.function()
     assert len(setup.loaded_urls) == 2
-    # A page that skill page code froze cannot reload itself: the app menu reloads it without that code.
-    assert plugins_off.title == "Start without plugins"
-    plugins_off.function()
-    assert main.loaded_urls[-1] == "http://127.0.0.1:8901/?plugins=off"
     webview.windows.remove(main)
     main_action.function()
-    plugins_off.function()
-    assert len(main.loaded_urls) == 2, "a retired window is no longer a navigation target"
+    assert len(main.loaded_urls) == 1, "a retired window is no longer a navigation target"
 
 
 @pytest.mark.parametrize("platform", ["win32", "linux"])
@@ -500,7 +496,7 @@ def test_server_boot_never_writes_the_settings_file():
     assert "SETTINGS_PATH" not in imported
     # The normalization still runs, still reaches the environment, and only then
     # is the owner's runtime-mode baseline pinned against it.
-    applied_at = source.index("apply_runtime_provider_defaults(load_settings())")
+    applied_at = source.index("apply_runtime_provider_defaults(load_settings(migrate=True))")
     env_at = source.index("_apply_settings_to_env(settings)")
     baseline_at = source.index("initialize_runtime_mode_baseline()")
     assert applied_at < env_at < baseline_at
@@ -522,7 +518,8 @@ def test_server_boot_leaves_the_settings_bytes_alone(tmp_path, monkeypatch):
     from ouroboros import config as cfg
     from ouroboros.server_runtime import apply_runtime_provider_defaults
 
-    document = {"OUROBOROS_MODEL_HEAVY": "anthropic/claude-opus-" + "4.7"}
+    document = {"OUROBOROS_MODEL_HEAVY": "anthropic/claude-opus-" + "4.7",
+                "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}
     assert apply_runtime_provider_defaults(dict(document))[1] is True, (
         "the fixture must give boot something it could persist")
     settings_path = tmp_path / "settings.json"
@@ -555,9 +552,15 @@ def test_server_boot_leaves_the_settings_bytes_alone(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.server_auth.get_configured_network_password", lambda: "")
     before = settings_path.read_bytes()
     before_mtime = settings_path.stat().st_mtime_ns
+    running = set(threading.enumerate())
 
     with TestClient(srv.app):
         pass
+    # The lifespan hands the drive root to its import owner, a daemon that then runs the steps
+    # waiting on publication; a slow runner is still inside them when the client closes.
+    for thread in set(threading.enumerate()) - running:
+        if thread.name in ("current-store-import", "store-ready-steps"):
+            thread.join(60)
 
     assert settings_path.read_bytes() == before, "boot rewrote the settings document"
     assert settings_path.stat().st_mtime_ns == before_mtime

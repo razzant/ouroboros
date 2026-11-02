@@ -6,8 +6,8 @@ rows; a repeated row of one task takes the last), then the strict task result (t
 file never moves), else ``not_recorded``; there is no pass over the chat chain.
 ``host_stamp`` stays the same call with the same ``{tasks, computed_at}`` result.
 The entries keep every original key and gain only optional facts copied from the same
-source: ``outcome_final``, ``reason_code``, ``objective_status`` and the source
-row's ``source_address``; the full ``outcome_axes`` never enter a stamp.
+source: ``outcome_final``, ``outcome_authority``, ``reason_code``, ``objective_status`` and
+the source row's ``source_address``; the full ``outcome_axes`` never enter a stamp.
 ``part_stamp`` summarizes member page stamps and keeps every failure in full.
 No test calls a model or the network.
 """
@@ -29,7 +29,7 @@ from tests._store_shared import result_signature, seed_result, unreadable_result
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 ORIGINAL_KEYS = {"task_id", "status", "outcome", "outcome_phase", "source", "result_ref", "review_verdict"}
-OPTIONAL = {"outcome_final", "reason_code", "objective_status", "source_address"}
+OPTIONAL = {"outcome_final", "outcome_authority", "reason_code", "objective_status", "source_address"}
 
 
 def ts(n: int) -> str:
@@ -160,11 +160,13 @@ def test_host_stamp_keeps_its_original_order_and_format_for_all_four_sources(tmp
     assert by_task["both"]["outcome_final"] is True and by_task["both"]["source_address"] == addr(rows[8])
     # 2: host facts only, never final.
     assert by_task["facts"]["source"] == "host_task_facts" and by_task["facts"]["outcome_final"] is False
+    assert by_task["facts"]["outcome_authority"] == "pre_finalization_host_facts"
+    assert by_task["both"]["outcome_authority"] == "canonical_task_result_after_finalization"
     assert by_task["facts"]["source_address"] == addr(rows[4]) and by_task["facts"]["reason_code"] == "tool_budget"
     # 3: the strict task result; the file is where it was, byte for byte.
     assert by_task["fromfile"]["source"] == "task_results" and by_task["fromfile"]["status"] == "completed"
     assert result_signature(tmp_path, "fromfile") == before
-    assert "outcome_final" not in by_task["fromfile"] and "source_address" not in by_task["fromfile"]
+    assert not {"outcome_final", "outcome_authority", "source_address"} & set(by_task["fromfile"])
     # 4: nothing anywhere.
     assert by_task["nowhere"] == {"task_id": "nowhere", "status": "not_recorded"}
     # A child task is stamped from its own terminal projection.

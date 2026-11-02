@@ -25,8 +25,12 @@ body {
    `100vh - padding` floor overflowed every onboarding page by exactly the
    control's height. A body column lets the shell take the space that is really
    left: `flex: 1 0 auto` fills a short page and still grows past the viewport
-   when a step is genuinely taller — the only scroll onboarding should have. */
+   when a step is genuinely taller — the only scroll onboarding should have.
+   style.css, linked for the shared provider cards, makes the app shell's body
+   one fixed viewport that never scrolls; this page's body stays a document. */
 body {
+  height: auto;
+  overflow: visible;
   min-height: 100vh;
   padding: 16px;
   display: flex;
@@ -1198,7 +1202,7 @@ textarea::placeholder {
   .wizard-step-copy,
   .step-copy,
   .panel-card p,
-  .field-note,
+  .field-note:not(.compatible-load-status),
   .footer-copy {
     display: none;
   }
@@ -1427,8 +1431,8 @@ textarea:not(.ui-control):not(.ui-checkbox):focus {
 
 /* ---- Starter skills (board B13): one Summary row that opens in place into ONE vertical scroll of categorized
    cards — two columns, one on a phone; a ticked card takes the wizard's chosen tone. Under the list stay the two
-   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here because this page does not
-   load style.css. */
+   public hub rows' trust choices. The house edge fade and 6px scrollbar are named here so this list does not
+   depend on style.css. */
 .summary-card-rows { display: flex; flex-direction: column; gap: 10px; }
 .skills-starter-summary { display: grid; gap: 2px; min-width: 0; }
 .skills-starter-value { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }

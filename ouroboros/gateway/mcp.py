@@ -31,11 +31,23 @@ def _ensure_configured() -> None:
         log.warning("MCP reconfigure_from_settings failed", exc_info=True)
 
 
+def _status_with_weights() -> Dict[str, Any]:
+    """The status snapshot plus each server's catalog potential (``tool_connections.catalog_weights``)."""
+    from ouroboros.tool_connections import catalog_weights
+
+    payload = get_manager().status_payload()
+    weights = catalog_weights()
+    for server in payload["servers"]:
+        server.update(weights["servers"].get(server["id"], {}))
+    payload["weights"] = weights["totals"]
+    return payload
+
+
 async def api_mcp_status(request: Request) -> JSONResponse:
     """GET /api/mcp/status — masked status snapshot for the UI."""
     try:
         await asyncio.to_thread(_ensure_configured)
-        payload = await asyncio.to_thread(get_manager().status_payload)
+        payload = await asyncio.to_thread(_status_with_weights)
         return JSONResponse(payload)
     except Exception as exc:
         log.exception("api_mcp_status failed")
@@ -61,7 +73,7 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
 
 async def api_mcp_test(request: Request) -> JSONResponse:
     """Probe the edited candidate with the same URL rehydration as Settings."""
-    from ouroboros.gateway.settings import MCPSecretIdentityAmbiguous, _rehydrate_mcp_servers_payload
+    from ouroboros.gateway.secret_rows import MCPSecretIdentityAmbiguous, rehydrate_mcp_servers as _rehydrate_mcp_servers_payload
 
     try:
         body: Dict[str, Any] = await request_json_or(request, {})

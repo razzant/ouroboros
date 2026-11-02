@@ -209,8 +209,12 @@ def test_model_assigning_editors_share_the_grouped_source_select() -> None:
     )
     assert re.search(r"export\s+(?:function|const)\s+configuredApiProviders\b", primitives_source), (
         "web/modules/route_editor_primitives.js must export configuredApiProviders — the "
-        "API keys group lists one entry per provider with a stored credential (docs/DESIGN.md §7)"
+        "API keys group lists one entry per connection (docs/DESIGN.md §7)"
     )
+    # The entries are the server's connection list (`_meta.connections`, one per key), not a
+    # second client-side table of credential fields; flat keys only name the built-in keys of a
+    # document without that list (the first-run wizard's draft).
+    assert "settings?._meta?.connections" in primitives_source
 
     missing: list[str] = []
     for name in editors:

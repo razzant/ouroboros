@@ -80,7 +80,7 @@ def test_restored_unstarted_claim_recovers_and_delete_preserves_accepted_work(q,
     q.queue.check_scheduled_tasks()
     assert [task["id"] for task in q.pending] == [claimed["task_id"]]
     outcome = q.queue.mutate_scheduled_task("delete", "s1", reason="owner", actor="owner")
-    assert outcome["status"] == "delete_deferred"
+    assert outcome["status"] == "withdrawn"
     assert _rows(q)["s1"]["occurrence"]["token"] == claimed["token"]
 
 

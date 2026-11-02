@@ -242,7 +242,7 @@ def test_finalize_now_mid_hold_takes_no_call_terminal(tmp_path, monkeypatch, _qu
     assert "finalize_now" in details
 
 
-def test_generic_task_and_multi_run_never_hold(tmp_path, monkeypatch, _quiet_probe):
+def test_generic_task_does_not_hold_but_configured_multiple_runs_do(tmp_path, monkeypatch, _quiet_probe):
     monkeypatch.setattr(delegate_hold, "supervised_wait",
                         lambda *_a, **_k: pytest.fail("ineligible shapes must not hold"))
     fake_call, calls = _unknown_then_check_call(_recover_model(monkeypatch))
@@ -258,15 +258,12 @@ def test_generic_task_and_multi_run_never_hold(tmp_path, monkeypatch, _quiet_pro
     assert calls["n"] == 2 and result == "recovered"
     assert usage["transport_recovery"]["old_outcome"] == "unknown"
 
-    # Configured but TWO live leaves.
-    calls["n"] = 0
-    registry2 = _configured_registry(tmp_path, task_id="t-multi")
-    _start_leaf(tmp_path, task_id="t-multi", run_id="run-m1")
-    _start_leaf(tmp_path, task_id="t-multi", run_id="run-m2")
-    result, usage2, _t = run_llm_loop(**_loop_kwargs(tmp_path, registry2, []))
-    assert calls["n"] == 2 and result == "recovered"
-    assert usage2["transport_recovery"]["old_outcome"] == "unknown"
-    assert _read_hold_events(tmp_path) == []
+    registry2 = _configured_registry(tmp_path, task_id="multi")
+    _start_leaf(tmp_path, task_id="multi", run_id="multi-a")
+    _start_leaf(tmp_path, task_id="multi", run_id="multi-b")
+    assert delegate_hold.latch_after_unknown(registry2, error_kind="provider_outcome_unknown",
+        drive_logs=tmp_path, task_id="multi", emit_progress=lambda *_a: None)
+    assert set(read_unknown_hold(registry2._ctx)["run_ids"]) == {"multi-a", "multi-b"}
 
 
 def test_recovered_latch_reenters_hold_before_any_dispatch(tmp_path, monkeypatch, _quiet_probe):
@@ -388,6 +385,26 @@ def test_refused_wait_takes_terminal_not_paid_resume(tmp_path, monkeypatch, _qui
     assert trace.get("forced_finalization", {}).get("source") == "provider_outcome_unknown_no_resend"
     details = [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
     assert "wait_refused" in details
+
+
+def test_an_unreadable_tick_through_the_real_wait_takes_the_fault_terminal(tmp_path, monkeypatch, _quiet_probe):
+    """#947 through the real supervising wait: the host's unreadable tick is a typed failure that
+    still says ``fault``, so the hold buys no paid resume on it and ends with ``wait_fault``."""
+    from ouroboros.delegate_supervision import supervised_wait
+
+    monkeypatch.setattr(delegate_hold, "supervised_wait",
+                        lambda ctx, run: supervised_wait(ctx, run, wait_once=lambda *_a, **_k: "<html>proxy</html>"))
+    fake_call, calls = _unknown_then_check_call(lambda *_: pytest.fail("no dial on an unreadable tick"))
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    registry = _configured_registry(tmp_path)
+    _start_leaf(tmp_path)
+    _r, _usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
+
+    assert calls["n"] == 1
+    assert trace.get("forced_finalization", {}).get("source") == "provider_outcome_unknown_no_resend"
+    assert "wait_fault" in [row.get("detail") for row in _read_hold_events(tmp_path) if row["phase"] == "ended"]
 
 
 def test_ack_failure_fails_closed_without_dispatch(tmp_path, monkeypatch, _quiet_probe):
@@ -568,7 +585,7 @@ def test_eligibility_probe_closes_its_gateway(tmp_path, monkeypatch, _quiet_prob
                         lambda **_k: _Gw(), raising=False)
     registry = _configured_registry(tmp_path, task_id="t-gw")
     _start_leaf(tmp_path, task_id="t-gw", run_id="run-gw")
-    assert delegate_hold._single_live_run(registry._ctx) == "run-gw"
+    assert delegate_hold._eligible_live_runs(registry._ctx) == ["run-gw"]
     assert closed == [True]
 
 
@@ -587,11 +604,11 @@ def test_review_panel_work_is_not_a_leaf_this_nanny_may_hold_on(tmp_path, _quiet
         idempotency_key="inv-panel", request={"prompt": "packet"},
         route="codex", source="review_substrate.extraction")
     custody._CUSTODY.clear()
-    assert delegate_hold._single_live_run(registry._ctx) == ""
+    assert delegate_hold._eligible_live_runs(registry._ctx) == []
 
     _start_leaf(tmp_path, task_id="t-review-hold", run_id="run-leaf")
     custody._CUSTODY.clear()
-    assert delegate_hold._single_live_run(registry._ctx) == "run-leaf"
+    assert delegate_hold._eligible_live_runs(registry._ctx) == ["run-leaf"]
 
 
 def test_transport_dead_observation_keeps_the_hold_instead_of_a_refused_exit(

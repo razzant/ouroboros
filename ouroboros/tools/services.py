@@ -247,6 +247,8 @@ def _finalize_service_log_for_drive(
             result["errors"].append(f"delete: {type(exc).__name__}: {exc}")
     elif log_path.exists():
         result["retained_live_log_path"] = str(log_path)
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(drive_root, timestamp=log_path.stat().st_mtime)
     return result
 
 
@@ -506,14 +508,18 @@ def _start_service(
         if advice:
             ctx.emit_progress_fn(advice)
     declared_outputs = [str(item) for item in (outputs or []) if str(item or "").strip()]
-    from ouroboros.tools.shell_outputs import _declared_output_baseline, _declared_output_refusal
+    from ouroboros.tools.shell_outputs import _declared_output_baseline, _declared_output_refusal, _prepare_declared_output_context
 
     # A known refusal stops the start; only a baseline that could not be taken lets it proceed, disclosed.
-    output_refusal = _declared_output_refusal(ctx, declared_outputs, workdir, cwd_root=cwd_root, binding=binding)
+    output_context, output_error = _prepare_declared_output_context(ctx, declared_outputs, workdir)
+    if output_error is not None:
+        return _publish_tool_result(ctx, output_error)
+    output_refusal = _declared_output_refusal(ctx, declared_outputs, workdir, cwd_root=cwd_root, binding=binding,
+                                             output_context=output_context)
     if output_refusal:
         return _refused_before_start(ctx, output_refusal)
     before_outputs, baseline_problem = _declared_output_baseline(
-        ctx, declared_outputs, workdir, cwd_root=cwd_root, binding=binding)
+        ctx, declared_outputs, workdir, cwd_root=cwd_root, binding=binding, output_context=output_context)
     baseline_note = {"output_baseline_unavailable": baseline_problem} if baseline_problem else {}
     # Resolve the effective keep BEFORE choosing a backend: a task-level
     # service_teardown='keep' must reach the executor path too, else an
@@ -527,7 +533,7 @@ def _start_service(
         _stop_service(ctx, name=service_name)
     from ouroboros import body_candidate
 
-    if _executor_can_run_cwd(ctx, workdir):
+    if output_context is not None or _executor_can_run_cwd(ctx, workdir):
         try:
             payload = executor_start_service(
                 ctx,
@@ -545,6 +551,7 @@ def _start_service(
                 env_overlay=interpreter_path_overlay(active_node_resolution(ctx)),
                 env=env,
                 secret_values=secret_values,
+                output_context=output_context,
             )
             return json.dumps({**payload, **baseline_note}, ensure_ascii=False, indent=2)
         except OwnerPauseRefused as exc:
@@ -606,6 +613,8 @@ def _start_service(
     service_base_env = candidate_env if candidate_env is not None else _service_env()
 
     log_fh = log_path.open("ab")
+    from ouroboros.maintenance_retirement import artifact_changed
+    artifact_changed(ctx.drive_root)
     try:
         bootstrap_process_path()
         # Supervised spawn: the durable custody record means a SIGKILLed worker
@@ -855,46 +864,13 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
                 meta={"artifact_registered": True} if artifact_registered else {},
             ),
         )
-    if executor_ref_from_ctx(ctx) is not None:
-        payload = executor_stop_service(ctx, service_name)
-        if payload is None:
-            return f"⚠️ SERVICE_NOT_FOUND: {name}"
+    payload = executor_stop_service(ctx, service_name)
+    if payload is not None:
         if payload.get("stop_failed"):
             return "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
-        artifact_note = ""
-        artifact_failed = False
-        artifact_registered = False
-        before_outputs = payload.pop("_before_outputs", {})
-        if payload.get("outputs"):
-            try:
-                from ouroboros.tools.shell import _register_process_outputs
-
-                output_binding = _service_output_binding(
-                    ctx,
-                    cwd_root=str(payload.get("cwd_root") or ""),
-                    cwd_base=str(payload.get("cwd_base") or ""),
-                    cwd=str(payload.get("host_cwd") or ""),
-                    cwd_source=str(payload.get("cwd_source") or ""),
-                    skill_name=str(payload.get("skill_name") or ""),
-                )
-                artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
-                    ctx,
-                    [str(item) for item in (payload.get("outputs") or [])],
-                    pathlib.Path(str(payload.get("host_cwd") or ".")),
-                    cwd_root=str(payload.get("cwd_root") or ""),
-                    changed_paths=_working_tree_changes(str(payload.get("host_cwd") or ".")),
-                    before_outputs=before_outputs if isinstance(before_outputs, dict) else None,
-                    binding=output_binding,
-                )
-                artifact_note += _baseline_gap_note(payload.get("outputs"), before_outputs)
-            except Exception as exc:
-                artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- executor service output finalization failed: {type(exc).__name__}: {exc}"
-                artifact_failed = True
-        if artifact_note:
-            payload["artifact_outputs"] = artifact_note.strip()
-        payload["artifact_output_failed"] = bool(artifact_failed)
+        artifact_registered = _finalize_executor_service_outputs(ctx, payload)
         rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-        if artifact_failed:
+        if payload["artifact_output_failed"]:
             text = "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared executor service outputs were not finalized.\n\n" + rendered
             return _publish_tool_result(
                 ctx,
@@ -914,6 +890,51 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
             ),
         )
     return f"⚠️ SERVICE_NOT_FOUND: {name}"
+
+
+def _finalize_executor_service_outputs(ctx: ToolContext, payload: Dict[str, Any]) -> bool:
+    """Finalize a confirmed stop with its start context; return registration status.
+
+    Shared by explicit stop and normal task completion. Kept services and Panic
+    bypass this; an unconfirmed stop retains custody and its output inputs.
+    """
+    if payload.get("stop_failed") or payload.get("cleanup_dispatched") is False:
+        return False
+    artifact_note = ""
+    artifact_failed = False
+    artifact_registered = False
+    before_outputs = payload.pop("_before_outputs", {})
+    output_context = payload.pop("_output_context", None)
+    if payload.get("outputs"):
+        try:
+            from ouroboros.tools.shell import _register_process_outputs
+
+            output_binding = _service_output_binding(
+                ctx,
+                cwd_root=str(payload.get("cwd_root") or ""),
+                cwd_base=str(payload.get("cwd_base") or ""),
+                cwd=str(payload.get("host_cwd") or ""),
+                cwd_source=str(payload.get("cwd_source") or ""),
+                skill_name=str(payload.get("skill_name") or ""),
+            )
+            artifact_note, artifact_failed, artifact_registered = _register_process_outputs(
+                ctx,
+                [str(item) for item in (payload.get("outputs") or [])],
+                pathlib.Path(str(payload.get("host_cwd") or ".")),
+                cwd_root=str(payload.get("cwd_root") or ""),
+                changed_paths=_working_tree_changes(str(payload.get("host_cwd") or ".")),
+                before_outputs=before_outputs if isinstance(before_outputs, dict) else None,
+                binding=output_binding,
+                output_context=output_context,
+            )
+            artifact_note += _baseline_gap_note(payload.get("outputs"), before_outputs)
+        except Exception as exc:
+            artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- executor service output finalization failed: {type(exc).__name__}: {exc}"
+            artifact_failed = True
+    if artifact_note:
+        payload["artifact_outputs"] = artifact_note.strip()
+    payload["artifact_output_failed"] = bool(artifact_failed)
+    return bool(artifact_registered)
 
 
 def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
@@ -1054,7 +1075,7 @@ def prune_service_logs(
 ) -> Dict[str, Any]:
     """Archive old logs only after local and durable process custody release their writers."""
     from ouroboros import body_candidate
-    from ouroboros.retention import age_cutoff, get_gc_retention_days
+    from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
 
     # Explicit overrides are honored as-is (age_cutoff floors at 0 => explicit 0
     # prunes everything before `now`), uniform with the worktree/task prunes; only
@@ -1087,6 +1108,8 @@ def prune_service_logs(
                     child_stat = child.lstat()
                 except OSError:
                     continue
+                if stat.S_ISREG(child_stat.st_mode) and child_stat.st_mtime >= cutoff:
+                    keep_until(report, child_stat.st_mtime, retention_days)
                 if stat.S_ISREG(child_stat.st_mode) and child_stat.st_mtime < cutoff:
                     facts = service_execution_facts(f"{task_dir.name}:{child.stem}")
                     if facts is None and child.stem.endswith(".executor"):
@@ -1116,7 +1139,7 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("start_service", {
             "name": "start_service",
-            "description": "Start a task-scoped long-running service and return pid/readiness/state. In runtime_mode=light a service whose cwd is the Ouroboros repository is refused (LIGHT_MODE_BLOCKED): pass an explicit external/task/artifact cwd.",
+            "description": "Start a long-running process owned by this task (dev server, watcher) and return pid/readiness/state; it is stopped when the task ends unless kept alive (keep_alive). In runtime_mode=light a service whose cwd is the Ouroboros repository is refused (LIGHT_MODE_BLOCKED): pass an explicit external/task/artifact cwd.",
             "parameters": {"type": "object", "properties": {
                 "cmd": {"type": "array", "items": {"type": "string"}},
                 "cwd": {
@@ -1152,7 +1175,7 @@ def get_tools() -> List[ToolEntry]:
         }, _service_logs),
         ToolEntry("stop_service", {
             "name": "stop_service",
-            "description": "Stop a task-scoped service process group.",
+            "description": "Stop a task-scoped service's process group, then copy the files it declared in outputs into the task artifact store.",
             "parameters": {"type": "object", "properties": {
                 "name": {"type": "string", "default": "service"},
             }, "required": []},

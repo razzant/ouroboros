@@ -148,7 +148,10 @@ def test_warm_snapshot_recovery_uses_actual_stop_cause(tmp_path, monkeypatch, ca
     if not conversion_fails:
         assert outcomes[0]["error"] == "sleep_wake_vetoed" and outcomes[0]["veto"] == expected
     assert "_budget_pause_resume" not in task
-    if cause != "crash":
+    if cause == "restart":
+        from ouroboros.delegate_recovery import consume_owner_restart, pending_owner_restart
+        consume_owner_restart(tmp_path, pending_owner_restart(tmp_path))
+    elif cause == "panic":
         flag.unlink()
     assert q.resume_budget_paused_task("root")["ok"]
     ctx.budget_pause_resume = task["_budget_pause_resume"]

@@ -166,7 +166,7 @@ def test_retained_context_cannot_replace_missing_original(tmp_path):
     assert _read(tmp_path, chat_id=project["chat_id"], around=address)[1]["anchor"]["state"] == "absent"
 
 
-@pytest.mark.parametrize("kind", ["main_notice", "project_completion_summary", "steer_not_delivered"])
+@pytest.mark.parametrize("kind", ["project_completion_summary", "steer_not_delivered"])
 def test_pinned_main_and_origin_notices_keep_their_authoritative_home(tmp_path, kind):
     project = create_project(tmp_path, "bound")
     bind_task_to_project(tmp_path, "bound-task", project["id"], origin={"absent": "system"})
@@ -174,6 +174,19 @@ def test_pinned_main_and_origin_notices_keep_their_authoritative_home(tmp_path, 
     page = _found(tmp_path, address)
     assert page["anchor"]["chat_id"] == 1
     assert _read(tmp_path, chat_id=project["chat_id"], around=address)[1]["anchor"]["chat_id"] == 1
+
+
+def test_a_project_works_main_notice_is_found_in_main_and_its_project_and_homes_there(tmp_path):
+    """One row in two rooms (ARCHITECTURE §3 "Room contract"): found where asked in either; from an
+    unrelated room its home is its work's Project, never ambiguous."""
+    project, other = create_project(tmp_path, "bound"), create_project(tmp_path, "other")
+    bind_task_to_project(tmp_path, "bound-task", project["id"], origin={"absent": "system"})
+    _, address = _save(tmp_path, task_id="bound-task", direction="out", type="main_notice")
+    assert _found(tmp_path, address)["anchor"]["chat_id"] == 1
+    found = _read(tmp_path, chat_id=project["chat_id"], around=address)[1]["anchor"]
+    assert found["state"] == "found" and found["chat_id"] == project["chat_id"]
+    moved = _read(tmp_path, chat_id=other["chat_id"], around=address)[1]["anchor"]
+    assert moved["state"] == "moved" and moved["chat_id"] == project["chat_id"]
 
 
 def test_hash_prefix_ambiguity_never_selects_a_convenient_match(tmp_path, monkeypatch):
@@ -221,7 +234,7 @@ def test_unanswerable_lineage_of_other_page_rows_is_ordinary_unknown_never_a_bar
         _save(tmp_path, ts=_ts(41 + index), task_id=f"loose-{index}", direction="out", text=f"Loose work {index}")
     _, address = _save(tmp_path, ts=_ts(47), client_message_id="owner-row")
     _, quoted_work = _save(tmp_path, ts=_ts(50), task_id="loose-quoted", direction="out", text="Quoted work")
-    monkeypatch.setattr(projects_registry, "_read_lineage", lambda root, task_ids: None)  # the task store is busy
+    monkeypatch.setattr(projects_registry, "_read_lineage", lambda root, task_ids, **_kw: None)  # unreadable authority
     assert {"Loose work 4", "Loose work 5"} <= {row.get("text") for row in _found(tmp_path, address)["messages"]}
     # The quoted row's own room still needs readable authority: its task's lineage decides it.
     status, page = _read(tmp_path, around=quoted_work)

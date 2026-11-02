@@ -6,8 +6,110 @@ is never empty while history remains; a room's rows are addressed out of the sto
 (``RoomLens``), never read out of other rooms' history.
 """
 
-from ouroboros.gateway import history_paging
+import pytest
+
+from ouroboros.gateway import history, history_paging
 from tests.test_chat_history_paging import isolated_runtime, pages, request, row, write  # noqa: F401
+
+
+@pytest.mark.parametrize("project_room", [False, True])
+@pytest.mark.parametrize("source", ["chat", "progress"])
+@pytest.mark.parametrize("in_span", [False, True])
+def test_import_gap_follows_delivered_span_after_quota_deferral(tmp_path, project_room, source, in_span):
+    from ouroboros.projects_registry import create_project
+
+    chat_id = create_project(tmp_path, "gap-room", name="Gap room")["chat_id"] if project_room else 1
+    path = tmp_path / "logs" / f"{source}.jsonl"
+    write(path, [row(index, source, chat_id=chat_id, ts=f"2026-09-12T00:00:{index:02d}Z")
+                 for index in range(20)])
+    path.write_bytes(b"{broken\n" + path.read_bytes() + (b"{broken\n" if in_span else b""))
+    if source == "progress":
+        write(tmp_path / "logs" / "chat.jsonl", [row(0, chat_id=chat_id)])
+    params = {"chat_id": str(chat_id), "n_human": "2", "n_progress": "2"}
+    status, recent = request(tmp_path, **params)
+    assert status == 200
+    span = recent["coverage"]["spans"][source]
+    assert span["from"] > len(b"{broken\n")
+    assert span["gaps"] == (["malformed_jsonl"] if in_span else [])
+    assert (f"{source}_malformed_jsonl" in recent["window"]["truncated_by"]) is in_span
+    status, replay = request(tmp_path, cursor=recent["page_cursor"], **params)
+    assert status == 200 and replay["messages"] == recent["messages"]
+    assert replay["coverage"] == recent["coverage"]
+    loaded = list(pages(tmp_path, **{**params, "n_human": "0" if source == "progress" else "2"}))
+    assert any("malformed_jsonl" in page["coverage"]["spans"][source]["gaps"] for page in loaded)
+
+
+def test_lineage_deferral_also_recomputes_gap_range(tmp_path):
+    path = tmp_path / "logs" / "progress.jsonl"
+    write(path, [row(index, "progress", delegation_role="subagent", parent_task_id="parent",
+                     task_id="child", subagent_event="running") for index in range(310)])
+    path.write_bytes(b"{broken\n" + path.read_bytes())
+    status, page = request(tmp_path)
+    assert status == 200 and len(page["messages"]) == 300
+    assert "lineage_cap" in page["window"]["truncated_by"]
+    assert page["coverage"]["spans"]["progress"]["from"] > len(b"{broken\n")
+    assert page["coverage"]["spans"]["progress"]["gaps"] == []
+
+
+@pytest.mark.parametrize("failure", [history_paging.StoreMigrating, OSError])
+def test_final_gap_read_failure_remains_retryable_endpoint_error(tmp_path, monkeypatch, failure):
+    write(tmp_path / "logs" / "progress.jsonl", [row(i, "progress") for i in range(20)])
+    original, calls = history_paging.HistorySource.gaps, []
+
+    def unavailable(self, lower, upper):
+        if self.source == "progress" and lower > 0:
+            calls.append((lower, upper))
+            raise failure("controlled final-range read failure")
+        return original(self, lower, upper)
+
+    monkeypatch.setattr(history_paging.HistorySource, "gaps", unavailable)
+    status, failed = request(tmp_path, n_progress="2")
+    assert calls and status == 503
+    assert failed["reason_code"] == ("migrating" if failure is history_paging.StoreMigrating
+                                     else "history_source_unavailable")
+    assert failed["window"]["complete"] is False and failed["has_more"] is True
+    monkeypatch.setattr(history_paging.HistorySource, "gaps", original)
+    status, recovered = request(tmp_path, n_progress="2")
+    assert status == 200 and len(recovered["messages"]) == 2
+
+
+def test_narrowed_import_gap_does_not_clear_projection_failure(tmp_path, monkeypatch):
+    write(tmp_path / "logs" / "progress.jsonl", [row(i, "progress") for i in range(20)])
+    original = history._collect_progress_rows
+
+    def partial(*args, **kwargs):
+        rows, count, gaps = original(*args, **kwargs)
+        return rows, count, gaps | {history_paging.PROJECTION_FAILED}
+
+    monkeypatch.setattr(history, "_collect_progress_rows", partial)
+    status, page = request(tmp_path, n_progress="2")
+    assert status == 200 and page["coverage"]["spans"]["progress"]["from"] > 0
+    assert page["coverage"]["spans"]["progress"]["gaps"] == [history_paging.PROJECTION_FAILED]
+    assert "progress_projection_failed" in page["window"]["truncated_by"]
+    assert "after_cursor" not in page
+
+
+def test_gap_refresh_only_reads_changed_spans_and_preserves_other_evidence(tmp_path, monkeypatch):
+    calls = []
+
+    class Reader:
+        def __init__(self, root, source, lens, upper):
+            assert root == tmp_path and source == "chat" and lens == "room" and upper == 100
+
+        def gaps(self, lower, upper):
+            calls.append((lower, upper))
+            return {"invalid_jsonl_row"}
+
+    monkeypatch.setattr(history_paging, "HistorySource", Reader)
+    page = {"before": {"chat": 40, "progress": 10}, "selections": {"chat": ([], 0, set()),
+            "progress": ([], 10, set())}, "lens": {"chat": "room"}, "upper": {"chat": 100},
+            "page_ends": {"chat": 80}}
+    gaps = {"chat": {"malformed_jsonl", "segment_unimportable", "projection_failed", "other"},
+            "progress": {"malformed_jsonl"}}
+    result = history_paging.delivered_history_gaps(tmp_path, page, gaps)
+    assert calls == [(40, 80)]
+    assert result == {"chat": {"invalid_jsonl_row", "projection_failed", "other"},
+                      "progress": {"malformed_jsonl"}}
 
 
 def foreign_archives(root, stamp, count=3):

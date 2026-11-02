@@ -14,6 +14,7 @@ facts read in the page go to ``OUROBOROS_UI_EVIDENCE_DIR`` when it is set.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from ouroboros.consciousness_view import describe_consciousness_state
 from tests import test_subscription_setup_browser as setup_browser
 from tests._work_projection_shared import work_fields
 
@@ -31,7 +33,7 @@ pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 ROOM_FACTS = """(scope) => {
     const root = scope === 'main' ? document.querySelector('#page-chat') : document.querySelector('#project-panel');
     const trigger = root?.querySelector('.rw-trigger');
-    const surface = root?.querySelector('.rw-surface');
+    const surface = trigger ? document.getElementById(trigger.getAttribute('aria-controls')) : null;  // the room's work Shade, never the chip's
     const text = (el) => (el?.textContent || '').replace(/\\s+/g, ' ').trim();
     const shown = (el) => Boolean(el) && !el.hidden, markOf = (el) => (shown(el) ? `${el.dataset.shape} ${el.dataset.hue}` : '');
     const rows = [...(surface?.querySelectorAll('.rw-row') || [])].map((row) => {
@@ -215,10 +217,24 @@ class Transport:
     def body(self, *, ready=True):
         """The ``/api/state`` body for the current census, with the server's own work projection of the same rows."""
         rows = json.loads(json.dumps(self.activities))
+        raw, fences = dict(self.raw), dict(self.fences)
+        # A phase alone grants no Resume and proves no execution. Supply the
+        # queue observation and current fence that the real census reads.
+        for item in rows:
+            if item.get("pause_cause") == "owner" and item["phase"] in {"budget_pausing", "budget_paused"}:
+                task_id = item["activity_id"]
+                pausing = item["phase"] == "budget_pausing"
+                raw[task_id] = {"running": pausing, **raw.get(task_id, {})}
+                fences.setdefault(item.get("root_task_id") or task_id, {
+                    "state": "requested" if pausing else "paused", "parked_members": [] if pausing else [task_id]})
+        # Consciousness facts show each bar's chip: one more neighbour no word may move (DESIGN bible 6).
+        next_wake = datetime.now(timezone.utc) + timedelta(hours=1)
         return {"sha": "room-work-fixture", "supervisor_ready": ready, "active_chat_activities": rows,
+                "bg_consciousness_enabled": True, "bg_consciousness_state": describe_consciousness_state(
+                    {"next_wake_at": next_wake.isoformat()}, True),
                 "active_chat_activities_complete": self.complete, "projects": self.projects,
                 "project_chat_ids": [p["chat_id"] for p in self.projects],
-                **work_fields(rows, self.raw, results=self.results, fences=self.fences, complete=self.complete)}
+                **work_fields(rows, raw, results=self.results, fences=fences, complete=self.complete)}
 
     def _state(self, route):
         self.state_reads += 1
@@ -368,6 +384,9 @@ def open_project(page, project):
     page.wait_for_selector(f"#panel-pchat-{project['id']}", state="attached")
     page.wait_for_function("() => !document.getElementById('project-panel').hidden")
     page.wait_for_selector("#project-panel .project-panel-bar .rw-trigger", state="attached")
+    # Docked the panel comes in from the window's edge once its room has painted: geometry is read where it rests.
+    page.wait_for_function("() => { const panel = document.getElementById('project-panel'); return panel.classList.contains('open')"
+                           " && !panel.getAnimations().some((a) => a.playState === 'running'); }")
     settle_frames(page)
 
 
@@ -652,9 +671,10 @@ FULL_MENU = ["finalize", "hurry", "pause", "stop_now"]
 @pytest.mark.parametrize("ending", ["finished", "offline"])
 @pytest.mark.parametrize("subject", ["card", "cardless"])
 def test_open_task_menu_never_outlives_its_census_state(room_ui, subject, ending):
-    """The shared menu opened from a row is for that row's state when it opened. Pausing and Paused offer
-    only Stop now (Resume is the row's own button); a finished or offline row offers nothing. A stale menu must go (or match) by the frame the row says its new state, and a
-    stale Pause or Hurry pressed in it must post nothing (the menu calls them before any caller guard)."""
+    """The shared menu opened from a row is for that row's state when it opened. Pausing keeps a retry of Pause;
+    Paused offers only Stop now (Resume is the row's own button); a finished or offline row offers nothing.
+    A stale menu must go (or match) by the frame the row says its new state, and a
+    withdrawn Pause or Hurry pressed in it must post nothing (the menu calls them before any caller guard)."""
     task_id = "rw-live" if subject == "card" else "rw-far"
     history = {1: [*reading(6), *([progress("rw-live", "Comparing the cited pages.", 30,
                                             suggested_name="Compare the cited pages")] if subject == "card" else [])]}
@@ -697,7 +717,8 @@ def test_open_task_menu_never_outlives_its_census_state(room_ui, subject, ending
 
     def press_stale(stage, menu_items):
         """A stale menu's consequence: its Hurry/Pause run before any caller guard and post."""
-        action = next((name for name in ("hurry", "pause") if name in (menu_items or [])), "")
+        forbidden = ("hurry",) if stage == "pausing" else ("hurry", "pause")
+        action = next((name for name in forbidden if name in (menu_items or [])), "")
         if not action:
             return
         posted = len(transport.posts)
@@ -709,13 +730,24 @@ def test_open_task_menu_never_outlives_its_census_state(room_ui, subject, ending
 
     try:
         assert open_menu() == FULL_MENU
-        # Pausing: the work's controls are Stop alone, so the menu opened for Working must go or match.
+        # Pausing retains the coalescing Pause retry, but withdraws Hurry and Wrap up.
         first, last = transition("pausing", lambda f: (f["word"], f["secondary"]) == ("Pausing…", ""),
                                  census(phase="budget_pausing", pause_cause="owner"))
-        if first["menu"] not in (None, ["stop_now"]) or last["menu"] not in (None, ["stop_now"]):
+        if first["menu"] not in (None, ["pause", "stop_now"]) or last["menu"] not in (None, ["pause", "stop_now"]):
             problems.append(f"pausing: a stale menu outlived Working → Pausing (first frame {first['menu']}, "
                             f"after {last['t']} ms {last['menu']})")
         press_stale("pausing", facts(page)["menu"])
+        assert open_menu() == ["pause", "stop_now"], "a fresh menu keeps the accepted Pause retry"
+        posted = len(transport.posts)
+        page.locator('body > .task-control-menu [data-task-control="pause"]').click()
+        page.wait_for_function("() => [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('Pausing'))")
+        assert [path for path, _ in transport.posts[posted:]] == [f"/api/tasks/{task_id}/pause"]
+        assert transport.posts[-1][1].get("request_id"), transport.posts[-1]
+        # Hover pauses a toast's lifetime (#2193); move away so it expires while the Work list stays open.
+        notice = page.locator('#toast-stack .toast').filter(has_text="Pausing:")
+        page.mouse.move(0, 0)
+        notice.wait_for(state="detached")
+        assert open_menu() == ["pause", "stop_now"]
         # Paused: a fresh open offers only Stop now (Resume is the row's own button); the old menu must go or match.
         first, last = transition("paused", lambda f: (f["word"], f["secondary"]) == ("Paused", ""),
                                  census(phase="budget_paused"))
@@ -723,6 +755,7 @@ def test_open_task_menu_never_outlives_its_census_state(room_ui, subject, ending
             problems.append(f"paused: a stale menu outlived Pausing → Paused (first frame {first['menu']}, "
                             f"after {last['t']} ms {last['menu']})")
         press_stale("paused", facts(page)["menu"])
+        assert open_menu() == ["stop_now"]
         if facts(page)["menu"]:
             page.keyboard.press("Escape")
 
@@ -857,8 +890,9 @@ def test_view_question_reaches_the_exact_question_and_proves_its_room(room_ui):
     assert landed["focusInCard"] and "chat-quiz-question" in landed["focusClass"], landed
     assert landed["comment"] in ("", None) and landed["selected"] == 0 and landed["enabled"] == 2, landed
     assert landed["visible"], landed
-    after = facts(page)
-    assert after["surfaceHidden"] and after["back"] == "Back to reading", after
+    # The list is closed at once and folds away (the Shade's own motion) before it is hidden.
+    after = wait_facts(page, "main", lambda f: f["surfaceHidden"], "the list folded away")
+    assert after["back"] == "Back to reading", after
     assert page.locator("#chat-input").input_value() == "Draft stays for Main"
     assert transport.decision_posts() == [], "View question answers nothing"
     capture(page, "question-landed")
@@ -979,13 +1013,11 @@ def test_project_shade_hold_outside_press_switch_and_latest_root(room_ui):
     # The room waits for the host's verification: the row says Waiting, and the hold's own label beside it.
     assert (held["word"], held["secondary"], held["tone"]) == ("Waiting", "Waiting for Project access", "held"), held
     settle_unfold(page, "project")
-    geometry = page.evaluate("""() => { const box = s => document.querySelector(s).getBoundingClientRect();
-        const bar = box('#project-panel .project-panel-bar'), shade = box('#project-panel .rw-shade'), panel = box('#project-panel');
-        return {bar: [bar.left, bar.bottom, bar.right], shade: [shade.left, shade.top, shade.right, shade.bottom],
-                panel: [panel.left, panel.right], vh: innerHeight}; }""")
-    assert abs(geometry["shade"][1] - geometry["bar"][1]) <= 1.5, geometry
-    assert geometry["shade"][0] >= geometry["panel"][0] - 0.5 and geometry["shade"][2] <= geometry["panel"][1] + 0.5
-    assert geometry["shade"][3] <= geometry["vh"], geometry
+    geometry = page.evaluate(_BAR_GEOMETRY, "project")
+    shade, panel = geometry["shade"], page.locator("#project-panel").bounding_box()
+    assert_hangs_under_capsule(shade, geometry["capsule"], "the held Project's list")
+    assert shade["x"] >= panel["x"] - 0.5 and shade["x"] + shade["w"] <= panel["x"] + panel["width"] + 0.5, (shade, panel)
+    assert shade["bottom"] <= geometry["vh"], geometry
     capture(page, "project-open")
     # The first outside press on the dimmed Main only dismisses the Shade, never the room.
     backdrop = page.locator("#project-panel-backdrop")
@@ -1015,9 +1047,19 @@ def test_project_shade_hold_outside_press_switch_and_latest_root(room_ui):
     # Switching rooms takes the control along; the new room shows only its own.
     open_project(page, OTHER_PROJECT)
     switched = wait_facts(page, "project", lambda f: f["exists"], "the other Project's control")
-    assert switched["disabled"] and switched["rows"] == [], switched
+    assert switched["rows"] == [], switched
     assert page.locator("#panel-pchat-rw-proj").count() == 0
     assert page.locator("#project-panel .rw-trigger").count() == 1
+    # With nothing listed the title still opens the list: the room's whole name heads it and it says so (DESIGN
+    # "Room work status"; the name's one line in the bar may be cut).
+    assert not switched["disabled"], switched
+    page.locator("#project-panel .app-page-title").click()
+    empty = wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the empty Project's list")
+    assert empty["rows"] == [] and empty["note"] == "Nothing running or queued.", empty
+    assert page.locator("#project-panel .rw-shade:not(.cx-shade) .rw-title").inner_text() == OTHER_PROJECT["name"]
+    assert page.locator("#project-panel .app-page-title").get_attribute("title") == OTHER_PROJECT["name"]
+    page.keyboard.press("Escape")
+    wait_facts(page, "project", lambda f: f["surfaceHidden"], "the empty list closed")
     page.locator("#project-panel-close").click()
     main = wait_facts(page, "main", lambda f: f["exists"], "Main's control")
     assert main["disabled"], "Main keeps no finished list"
@@ -1064,9 +1106,9 @@ def test_keyboard_focus_escape_and_independent_controls(room_ui):
     wait_facts(page, "main", lambda f: not f["surfaceHidden"], "open again")
     for _ in range(12):
         page.keyboard.press("Tab")
-        if facts(page)["surfaceHidden"]:
+        if facts(page)["expanded"] == "false":
             break
-    assert facts(page)["surfaceHidden"], "Tab out of the list closes it"
+    wait_facts(page, "main", lambda f: f["surfaceHidden"], "Tab out of the list closes it")
     # Copy: one press both dismisses the list and copies; nothing is swallowed in Main.
     control.click()
     wait_facts(page, "main", lambda f: not f["surfaceHidden"], "open for Copy")
@@ -1074,14 +1116,14 @@ def test_keyboard_focus_escape_and_independent_controls(room_ui):
     bubble.hover()
     bubble.locator(".chat-message-copy").click()
     assert page.evaluate("() => window.__copied") == ["The copyable answer stays independent of the list."]
-    assert facts(page)["surfaceHidden"]
+    wait_facts(page, "main", lambda f: f["surfaceHidden"], "the press that copied dismissed the list")
     # Files: the composer's "+" → Attach file opens its chooser with the list open.
     control.click()
     wait_facts(page, "main", lambda f: not f["surfaceHidden"], "open for Files")
     with page.expect_file_chooser(timeout=5_000):
         page.locator("#chat-plus").click()
-        page.locator(".chat-plus-menu [data-plus-item='attach']").click()
-    assert facts(page)["surfaceHidden"]
+        page.locator(".chat-plus-menu:not([data-leaving]) [data-plus-item='attach']").click()
+    wait_facts(page, "main", lambda f: f["surfaceHidden"], "Attach file dismissed the list")
     assert transport.posts == []
 
 
@@ -1099,13 +1141,14 @@ _BAR_GEOMETRY = """(scope) => {
     const neighbours = [...bar.querySelectorAll('button, .chat-budget-pill')]
         .filter((el) => visible(el) && el !== trigger && !trigger.contains(el) && !el.closest('.rw-shade-anchor'))
         .map((el) => ({ name: el.id || el.dataset.chatCommand || String(el.className).split(' ')[0], ...box(el) }));
-    const shade = bar.parentElement.querySelector('.rw-shade') || bar.querySelector('.rw-shade');
+    const shade = document.getElementById(trigger.getAttribute('aria-controls'));  // the work Shade, not the chip's
     const alpha = (color) => { const m = color.match(/rgba?\\(([^)]+)\\)/); if (!m) return color === 'transparent' ? 0 : 1;
         const parts = m[1].split(/[ ,/]+/).filter(Boolean); return parts.length > 3 ? parseFloat(parts[3]) : 1; };
     const reachable = [...(shade?.querySelectorAll('.rw-more, .rw-main') || [])].filter(visible).every((el) => {
         const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
         return Boolean(hit) && (hit === el || el.contains(hit)); });
-    return { bar: box(bar), title: box(title), trigger: box(trigger), neighbours, word: badge.textContent.trim(),
+    return { bar: box(bar), capsule: box(bar.querySelector('.app-page-title-row')), title: box(title), trigger: box(trigger),
+             neighbours, word: badge.textContent.trim(),
              clipped: badge.scrollWidth > badge.clientWidth + 0.5, note: !trigger.querySelector('.rw-sr').hidden,
              shade: shade && !shade.hidden ? box(shade) : null, shadeAlpha: shade ? alpha(getComputedStyle(shade).backgroundColor) : null,
              reachable, vw: innerWidth, vh: innerHeight, overflow: document.documentElement.scrollWidth - innerWidth };
@@ -1152,7 +1195,7 @@ def settle_unfold(page, room):
     """Wait until the room's Shade has finished unfolding (its 170 ms entrance slides it 6px), so geometry reads its
     resting place rather than a frame of the animation."""
     root = "#page-chat" if room == "main" else "#project-panel"
-    page.wait_for_function("""(root) => { const s = document.querySelector(`${root} .rw-shade`);
+    page.wait_for_function("""(root) => { const s = document.querySelector(`${root} .rw-shade:not(.cx-shade)`);
         return Boolean(s) && !s.hidden && !(s.getAnimations?.() || []).some((a) => a.playState === 'running'); }""",
                            arg=root, timeout=10_000)
     settle_frames(page)
@@ -1223,6 +1266,13 @@ def test_header_words_never_move_a_neighbour_or_resize_the_bar(room_ui, width, h
     evidence(f"bar-words-console-{tag}", transport.console)
 
 
+def assert_hangs_under_capsule(shade, capsule, what):
+    """The work list is a sheet of its own under the bar's capsules: from the status capsule's left edge, a gap
+    (``--space-2``, 8px) below it (DESIGN "Room work status")."""
+    assert abs((shade["y"] - capsule["bottom"]) - 8) <= 1.5, (what, "a gap below the status capsule", shade, capsule)
+    assert abs(shade["x"] - capsule["x"]) <= 1.5, (what, "from the status capsule's left edge", shade, capsule)
+
+
 def assert_project_backing(page):
     facts = page.locator("#project-panel").evaluate("""el => {
         const s = getComputedStyle(el);
@@ -1277,7 +1327,7 @@ def test_shade_geometry_light_dark_and_screenshots(room_ui, width, height, theme
         assert abs(opened["bar"]["h"] - closed["bar"]["h"]) <= 0.5, ("opening never resizes the bar", closed, opened)
         shade, bar = opened["shade"], opened["bar"]
         assert shade, opened
-        assert abs(shade["y"] - bar["bottom"]) <= 1.5, ("the Shade unfolds from the bar's bottom edge", shade, bar)
+        assert_hangs_under_capsule(shade, opened["capsule"], f"{room} {tag}")
         assert shade["x"] >= bar["x"] - 0.5 and shade["x"] + shade["w"] <= bar["x"] + bar["w"] + 0.5, (shade, bar)
         assert shade["x"] >= 0 and shade["x"] + shade["w"] <= opened["vw"] and shade["bottom"] <= opened["vh"], opened
         assert opened["shadeAlpha"] == 1, "content never shows through the Shade"

@@ -43,6 +43,8 @@ function fixture(history = []) {
     return {
         instance,
         meta: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-meta]')?.innerHTML || '',
+        // `Started by Consciousness` is a labelled fact of the card's details, beside its compact line.
+        facts: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-facts]')?.innerHTML || '',
         bubbles: () => nodes(messages).filter((n) => n.classList?.contains('chat-bubble') && n.classList.contains('assistant')),
         emit: (type, row) => handlers.get(type)({ chat_id: 1, ts: TS, ...row }),
         census: (rows) => instance.hydrateStateSnapshot({
@@ -87,17 +89,17 @@ test('the live projections carry the label so any frame can name the block', () 
     assert.equal('initiator' in taskTerminalSummary({ task_id: 't', task_terminal_status: 'completed' }), false);
 });
 
-test('live: the block meta line says Consciousness and the final bubble is signed', () => {
+test('live: the block details say Started by Consciousness and the final bubble is signed', () => {
     const f = fixture();
     try {
         f.census(direct());
         f.emit('chat', progress());
-        assert.match(f.meta(), /Consciousness/);
+        assert.match(f.facts(), /<dt>Started by<\/dt><dd>Consciousness<\/dd>/);
         f.emit('chat', final());
         const [bubble] = f.bubbles();
         assert.ok(bubble, 'the final is an ordinary assistant bubble');
         assert.match(bubble.innerHTML, /class="sender">Ouroboros · Consciousness</);
-        assert.match(f.meta(), /Consciousness/, 'the terminal frame keeps the label on the block');
+        assert.match(f.facts(), /<dt>Started by<\/dt><dd>Consciousness<\/dd>/, 'the terminal frame keeps the label on the block');
     } finally { f.close(); }
 });
 
@@ -107,7 +109,7 @@ test('live: a tool-only wake names its block from the stamped tool frame', () =>
         f.census(direct());
         f.emit('log', { chat_id: 1, data: { type: 'tool_call_finished', tool: 'read_file', is_error: false,
             task_id: TASK, ts: TS, initiator: 'consciousness', _is_direct_chat: true, cancelable: true } });
-        assert.match(f.meta(), /Consciousness/);
+        assert.match(f.facts(), /<dt>Started by<\/dt><dd>Consciousness<\/dd>/);
     } finally { f.close(); }
 });
 
@@ -116,7 +118,7 @@ test('an owner turn shows no label anywhere', () => {
     try {
         f.census(direct('turn-o'));
         f.emit('chat', progress({ task_id: 'turn-o', initiator: undefined }));
-        assert.doesNotMatch(f.meta('turn-o'), /Consciousness/);
+        assert.doesNotMatch(f.facts('turn-o'), /Consciousness/);
         f.emit('chat', final({ task_id: 'turn-o', initiator: undefined }));
         assert.match(f.bubbles()[0].innerHTML, /class="sender">Ouroboros</);
         assert.doesNotMatch(f.bubbles()[0].innerHTML, /Consciousness/);
@@ -130,7 +132,7 @@ test('reload: the replayed rows keep the label on the block and on the bubble', 
     ]);
     try {
         await f.instance.refreshHistory({ revision: 1 });
-        assert.match(f.meta(), /Consciousness/);
+        assert.match(f.facts(), /<dt>Started by<\/dt><dd>Consciousness<\/dd>/);
         assert.match(f.bubbles()[0].innerHTML, /class="sender">Ouroboros · Consciousness</);
     } finally { f.close(); }
 });

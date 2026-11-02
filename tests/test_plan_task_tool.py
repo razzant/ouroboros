@@ -166,8 +166,6 @@ def test_first_revision_requires_affected_paths_and_schema_errors_write_nothing(
                 {"ask": "everyone"}, {"message": "hello"}, {"reviewer_effort": "turbo", "ask": "council"}, {"nonsense": 1}):
         text, result = _call(ctx, **bad)
         assert "PLAN_ARGS_INVALID" in text and result.code == "TOOL_ARG_ERROR", bad
-    text, result = _call(ctx, ask="council")
-    assert "PLAN_ASK_NEEDS_A_PLAN" in text
     assert sub.calls == [] and _record(harness) == plan_record.empty_record()
 
 
@@ -215,7 +213,7 @@ def test_read_is_free_and_shows_the_state(harness):
     sub = harness.install({})
     ctx = harness.make_ctx()
     text, result = _call(ctx)
-    assert "No plan revision recorded" in text and result.meta["plan_effect"] == "read"
+    assert "No plan revision is recorded" in text and result.meta["plan_effect"] == "read"
     _write(ctx)
     text, result = _call(ctx)
     assert "# Plan — revision 1 of 1" in text and "exactly 5 slides" in text and "Nothing holds your final answer" in text
@@ -427,7 +425,7 @@ def test_pending_seats_settle_from_the_custody_hook_and_wake_the_mailbox(harness
     record = _record(harness)
     assert [p["status"] for p in record["asks"][0]["participants"]] == ["pending", "pending", "answered"]
     assert result.meta["plan_pending_asks"] == 1 and "Still working: s1, s2" in text
-    decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False, force_plan=False)
+    decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False)
     assert decision["status"] == "awaiting" and decision["allow"] is True  # silence never holds
     from ouroboros.review_records import ReviewActorRecord
 
@@ -531,22 +529,25 @@ def test_a_typed_lane_refusal_reaches_the_participant_record_and_an_untyped_fail
     assert rows["s3"]["error"] == "transport died"
 
 
-def test_a_session_participant_reads_the_same_redacted_evidence_inline_never_raw_locators(harness):
-    """A retrieving session seat sees the SAME redacted evidence bytes a packet seat sees and is
-    told not to re-read the raw locators (4e133c8a); a secret in the attached file reaches nobody."""
-    (harness.workspace / "notes.md").write_text(
-        "plan notes\nANTHROPIC_API_KEY=sk-ant-FAKEFIXTURE-not-a-real-key-ABCDEFGHIJKLMNOP\n", encoding="utf-8")
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_a_session_participant_reads_the_same_exact_evidence_inline_as_a_packet_seat(harness, newline):
+    """A retrieving session seat sees the SAME evidence bytes a packet seat sees, and those are the
+    file's own bytes: a secret-shaped line in an attached file is not rewritten for either, and its
+    line endings are not normalised."""
+    line = "ANTHROPIC_API_KEY=sk-ant-FAKEFIXTURE-not-a-real-key-ABCDEFGHIJKLMNOP"
+    expected = f"plan notes{newline}{line}{newline}"
+    # Bytes, not text mode: text mode would translate newlines on Windows; the fixture fixes them.
+    (harness.workspace / "notes.md").write_bytes(expected.encode("utf-8"))
     harness.state["slots"] = _slots(("api1", "m/a"), ("sess1", "cursor=grok", "session"))
     sub = harness.install({})
     _write(harness.make_ctx(), ask="council", attach=["notes.md"])
     request = sub.calls[0]["request"]
     session = str(request.slot_session_tasks["sess1"])
     assert request.session_root == str(harness.workspace)
-    assert "RETRIEVING REVIEWER" in session and "REDACTED snapshot" in session
-    assert "do NOT re-read the raw evidence locators" in session and "plan notes" in session
+    assert "RETRIEVING REVIEWER" in session and "the same bytes every reviewer sees" in session
+    assert "REDACTED" not in session and expected in session
     packet = _user_text(request.slot_messages["api1"][-1]["content"])
-    assert "plan notes" in packet and "secrets_redacted=true" in packet
-    assert "sk-ant-FAKEFIXTURE" not in session + packet
+    assert expected in packet and "secrets_redacted" not in packet
     assert request.policy["output_contract"].startswith("Return ONE JSON object")
 
 

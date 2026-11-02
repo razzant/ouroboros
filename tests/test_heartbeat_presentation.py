@@ -17,6 +17,30 @@ def _heartbeat_ctx(tmp_path, task):
     ), pushed
 
 
+def _ledger(monkeypatch, answer):
+    """Replace the one ledger read of the live root heartbeat (``usage_breakdown`` with
+    custody coverage) and record each call; ``answer`` is the bucket or the error it raises."""
+    from ouroboros import usage_accounting
+
+    calls = []
+
+    def read(drive_root, **kwargs):
+        calls.append(kwargs)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", read)
+    return calls
+
+
+def _live_read(calls, root_task_id):
+    """The root heartbeat read its own subtree once, stale-allowed and with custody coverage."""
+    [call] = calls
+    assert call["root_task_id"] == root_task_id
+    assert call["allow_stale"] is True and call["include_custody"] is True
+
+
 def test_liveness_and_incident_controls_remain_active() -> None:
     from supervisor import queue
 
@@ -39,10 +63,9 @@ def test_liveness_and_incident_controls_remain_active() -> None:
 
 
 def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: {
+    calls = _ledger(monkeypatch, {
         "accounted_usd": 76.82, "reserved_usd": 1.25,
         "unresolved_upper_bound_usd": 0.5, "unknown_unmetered": 2,
         "non_final_rows": 3, "integrity_degraded": False, "cost_final": True,
@@ -52,6 +75,7 @@ def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatc
     })
     _handle_task_heartbeat({"task_id": "root-hb", "phase": "running"}, ctx)
 
+    _live_read(calls, "root-hb")
     frame = pushed[0]
     assert frame["accounted_upper_bound_usd_with_children"] == 76.82
     assert frame["cost_final"] is False
@@ -61,34 +85,30 @@ def test_root_heartbeat_carries_one_live_subtree_projection(tmp_path, monkeypatc
 
 
 def test_child_heartbeat_does_not_read_or_publish_live_cost(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: (
-        _ for _ in ()
-    ).throw(AssertionError("child heartbeat must not read the ledger")))
+    calls = _ledger(monkeypatch, AssertionError("child heartbeat must not read the ledger"))
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "child-hb", "type": "task", "root_task_id": "root-hb",
         "parent_task_id": "root-hb", "delegation_role": "subagent",
     })
     _handle_task_heartbeat({"task_id": "child-hb", "phase": "running"}, ctx)
 
+    assert calls == []
     assert "cost_accounting_status" not in pushed[0]
     assert "accounted_upper_bound_usd_with_children" not in pushed[0]
 
 
 def test_root_heartbeat_keeps_ledger_failure_honest(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: (
-        _ for _ in ()
-    ).throw(OSError("ledger unavailable")))
+    calls = _ledger(monkeypatch, OSError("ledger unavailable"))
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-hb", "type": "task", "root_task_id": "root-hb",
     })
     _handle_task_heartbeat({"task_id": "root-hb", "phase": "running"}, ctx)
 
+    _live_read(calls, "root-hb")
     frame = pushed[0]
     assert frame["cost_accounting_status"] == "unavailable"
     assert frame["accounted_upper_bound_usd_with_children"] is None
@@ -96,10 +116,9 @@ def test_root_heartbeat_keeps_ledger_failure_honest(tmp_path, monkeypatch):
 
 
 def test_root_heartbeat_omits_empty_or_legacy_only_cost(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: {
+    calls = _ledger(monkeypatch, {
         "accounted_usd": 0.0, "attempt_counts": {"metadata_only": 4},
         "subscription_sessions": 0, "unknown_unmetered": 0,
         "non_final_rows": 0, "integrity_degraded": False,
@@ -109,6 +128,7 @@ def test_root_heartbeat_omits_empty_or_legacy_only_cost(tmp_path, monkeypatch):
     })
     _handle_task_heartbeat({"task_id": "root-empty", "phase": "running"}, ctx)
 
+    _live_read(calls, "root-empty")
     assert "cost_accounting_status" not in pushed[0]
     assert "accounted_upper_bound_usd_with_children" not in pushed[0]
 
@@ -116,7 +136,6 @@ def test_root_heartbeat_omits_empty_or_legacy_only_cost(tmp_path, monkeypatch):
 def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numeric(
     tmp_path, monkeypatch,
 ):
-    from ouroboros import usage_accounting
     from supervisor.events import _handle_task_heartbeat
 
     usage = {
@@ -124,22 +143,45 @@ def test_root_heartbeat_keeps_unknown_zero_cost_nullable_and_measured_zero_numer
         "subscription_sessions": 0, "unknown_unmetered": 1,
         "non_final_rows": 1, "integrity_degraded": False,
     }
-    monkeypatch.setattr(usage_accounting, "usage_projection", lambda *_a, **_kw: usage)
+    calls = _ledger(monkeypatch, usage)
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-unknown", "type": "task", "root_task_id": "root-unknown",
     })
     _handle_task_heartbeat({"task_id": "root-unknown", "phase": "running"}, ctx)
+    _live_read(calls, "root-unknown")
     unknown = pushed[0]
     assert unknown["cost_accounting_status"] == "available"
     assert unknown["accounted_upper_bound_usd_with_children"] is None
     assert unknown["unknown_unmetered"] == 1
 
-    usage = {**usage, "unknown_unmetered": 0, "non_final_rows": 0}
+    calls = _ledger(monkeypatch, {**usage, "unknown_unmetered": 0, "non_final_rows": 0})
     ctx, pushed = _heartbeat_ctx(tmp_path, {
         "id": "root-free", "type": "task", "root_task_id": "root-free",
     })
     _handle_task_heartbeat({"task_id": "root-free", "phase": "running"}, ctx)
+    _live_read(calls, "root-free")
     assert pushed[0]["accounted_upper_bound_usd_with_children"] == 0.0
+
+
+def test_root_heartbeat_with_an_empty_ledger_and_an_open_run_is_unknown_not_absent(tmp_path):
+    """No ledger row yet, but a delegated run of this root is still open: the real read
+    publishes an unknown amount with its custody, never ``$0`` and never nothing."""
+    from ouroboros import delegate_custody as custody, usage_store
+    from supervisor.events import _handle_task_heartbeat
+
+    usage_store.migrate_from_journal(tmp_path)  # the server's startup phase; a stale display read never migrates
+    entry = custody.RunCustody(run_id="open-run", task_id="root-open", root_task_id="root-open", route_id="test")
+    assert custody.record_started(tmp_path, entry)
+    ctx, pushed = _heartbeat_ctx(tmp_path, {
+        "id": "root-open", "type": "task", "root_task_id": "root-open",
+    })
+    _handle_task_heartbeat({"task_id": "root-open", "phase": "running"}, ctx)
+
+    frame = pushed[0]
+    assert frame["cost_accounting_status"] == "available"
+    assert frame["accounted_upper_bound_usd_with_children"] is None
+    assert frame["cost_custody"]["open_run_ids"] == ["open-run"]
+    assert frame["cost_final"] is False and frame["cost_with_children_partial"] is True
 
 
 def test_a_retired_liveness_knob_leaves_no_deprecation_chatter(tmp_path, monkeypatch) -> None:

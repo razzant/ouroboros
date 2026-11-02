@@ -203,7 +203,7 @@ def test_cold_wait_requires_observed_restart_and_current_wait(tmp_path):
     atomic_write_json(path, {"status": "normal_exit_acknowledged", "task_ids": ["root-1"]})
     assert restore_owner_wait_allowed(tmp_path, task)
     (tmp_path / "state/panic_stop.flag").write_text("panic")
-    assert not restore_owner_wait_allowed(tmp_path, task)
+    assert restore_owner_wait_allowed(tmp_path, task), "boot translates installation input; source proof does not"
 
 
 def test_a_new_owner_wait_is_dated_by_itself_and_a_review_park_is_not_stamped_here(tmp_path):

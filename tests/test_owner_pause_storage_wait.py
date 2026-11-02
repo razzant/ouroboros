@@ -94,9 +94,7 @@ def test_existing_controls_remain_distinct_while_the_database_is_busy(boundary, 
     root, ctx, limit = boundary
     task = {"id": "same"}
     hooks = {}
-    if control == "panic":
-        (root / "state/panic_stop.flag").touch()
-    elif control == "deadline":
+    if control == "deadline":
         task["deadline_at"] = "2000-01-01T00:00:00+00:00"
     else:
         hooks["owner_control"] = lambda: control

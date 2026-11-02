@@ -44,7 +44,7 @@ def test_child_knowledge_write_carries_the_child_focus_in_history(tmp_path):
     assert "saved" in tools._knowledge_write(root, "people/ada", "Ada reviews on Fridays.", mode="append")
     rows = {row["task_id"]: row for row in _history(tmp_path)}
     assert rows["kid00001"]["focus"] == {"role": "child", "task_id": "kid00001", "parent_task_id": "root0001",
-                                         "root_task_id": "root0001", "chat_id": 1}
+                                         "root_task_id": "root0001", "chat_id": 1, "room_id": "1"}
     assert rows["root0001"]["focus"]["role"] == "root" and rows["root0001"]["focus"]["parent_task_id"] == ""
     # A seam that names no focus keeps the honest unknown, like the other history stamps.
     address = knowledge_store.resolve_knowledge_address(tmp_path, "people/lee", "global")
@@ -122,9 +122,10 @@ def test_integrating_mind_writes_pages_and_presence_reads_and_marks_only():
 
 
 def test_presence_ceiling_reads_and_marks_memory_but_writes_no_page():
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_allows_tool
-    from ouroboros.presence_capabilities import PresenceProfileResolution
-    from ouroboros.presence_runtime import ResolvedPresenceRuntime
+    from ouroboros.presence_authority import presence_ceiling_allows_tool
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceProfileResolution
+    from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 
     resolution = PresenceProfileResolution(
         active=(), missing_required=(), missing_optional=(), orphaned=(),

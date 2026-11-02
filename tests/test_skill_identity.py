@@ -10,8 +10,10 @@ the owner-edit seam; turn-on-when-ready.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
+import os
 import pathlib
 
 import pytest
@@ -30,6 +32,74 @@ def _skill(root: pathlib.Path, name: str = "probe", *, extra: str = "") -> pathl
 
 
 # --- the digest -----------------------------------------------------------------------
+
+
+@pytest.fixture
+def digest_memo(monkeypatch):
+    """A memo and device verdicts of this test's own (both are process-wide)."""
+    monkeypatch.setattr(si, "_DIGESTS", collections.OrderedDict())
+    monkeypatch.setattr(si, "_LOCAL_DEVICES", {})
+
+
+def _payload_opens(monkeypatch, skill: pathlib.Path) -> list:
+    opened, real = [], pathlib.Path.open
+    monkeypatch.setattr(pathlib.Path, "open", lambda self, *args, **kwargs: (
+        opened.append(self.name) if self.parent == skill else None) or real(self, *args, **kwargs))
+    return opened
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX change time; Windows hashes every time")
+def test_a_kept_digest_reads_no_payload_but_an_edit_that_restores_size_and_mtime_is_hashed_again(
+        tmp_path, monkeypatch, digest_memo):
+    """P3 at the payload: an unchanged file is not read again, and a same-size edit whose mtime is set back
+    (``utime``, ``touch -r``) still moves the change time, so the next digest reads the new bytes."""
+    from ouroboros.skill_loader import compute_content_hash
+
+    monkeypatch.setattr(si, "_RACY_NS", 0)  # keep a just-written file at once (the clock-tick guard has its own test)
+    skill = _skill(tmp_path / "external")
+    if (skill / "notes.md").stat().st_ctime_ns % 1_000_000_000 == 0:
+        pytest.skip("a whole-second filesystem clock: there only the clock-tick guard keeps the key exact")
+    first = compute_content_hash(skill)
+    opened = _payload_opens(monkeypatch, skill)
+    assert compute_content_hash(skill) == first and "notes.md" not in opened
+    info = (skill / "notes.md").stat()
+    (skill / "notes.md").write_text("BODY\n", encoding="utf-8")  # the same size
+    os.utime(skill / "notes.md", ns=(info.st_atime_ns, info.st_mtime_ns))
+    assert (skill / "notes.md").stat().st_mtime_ns == info.st_mtime_ns
+    opened.clear()  # the edit's own write
+    assert compute_content_hash(skill) != first and opened.count("notes.md") == 1
+
+
+def test_a_file_changed_within_a_clock_tick_of_its_hash_is_read_every_time(tmp_path, monkeypatch, digest_memo):
+    """A coarse filesystem clock (one second on HFS+ and ext3) can give a later write the same change time:
+    a file that changed within ``_RACY_NS`` of being hashed is never served from the memo; once its change
+    time lies further back, the digest is kept and the file is not read again."""
+    from ouroboros.skill_loader import compute_content_hash
+
+    skill = _skill(tmp_path / "external")
+    first = compute_content_hash(skill)
+    opened = _payload_opens(monkeypatch, skill)
+    assert compute_content_hash(skill) == first and "notes.md" in opened
+    if os.name != "nt":
+        monkeypatch.setattr(si, "_RACY_NS", 0)  # as if the change time were old enough
+        compute_content_hash(skill)
+        opened.clear()
+        assert compute_content_hash(skill) == first and "notes.md" not in opened
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows hashes every time anyway")
+def test_a_filesystem_the_store_does_not_call_local_is_hashed_every_time(tmp_path, monkeypatch, digest_memo):
+    """Network, FUSE and unknown filesystems may keep change times dishonestly (a client's attribute cache,
+    a userspace driver): there the memo is never consulted, however old the change time."""
+    from ouroboros import store
+    from ouroboros.skill_loader import compute_content_hash
+
+    monkeypatch.setattr(si, "_RACY_NS", 0)
+    monkeypatch.setattr(store, "_filesystem_type", lambda path: "nfs")
+    skill = _skill(tmp_path / "external")
+    first = compute_content_hash(skill)
+    opened = _payload_opens(monkeypatch, skill)
+    assert compute_content_hash(skill) == first and "notes.md" in opened
 
 
 @pytest.mark.parametrize("note,bucket", sorted(si.PER_INSTALL_NOTE_BUCKETS.items()))
@@ -219,18 +289,6 @@ def test_legacy_hub_conversion_uses_only_the_original_manifest_declaration(tmp_p
         assert listing["update_available"] is None
     else:
         assert record["release"]["digest"] == si.release_digest_from_files(files)
-
-
-def test_free_replay_matches_history_rows_of_the_same_snapshot(tmp_path):
-    from ouroboros.skill_review_cycles import find_free_replay_row
-    from ouroboros.skill_review_history import append_history
-
-    drive_root = tmp_path / "data"
-    append_history(drive_root, "probe", status="clean", content_hash="1" * 64, findings=[],
-                   paid=True, review_contract_fingerprint="fp")
-    kwargs = dict(group_id="manual:probe", content_hash="2" * 64, contract_fingerprint="fp")
-    assert find_free_replay_row(drive_root, "probe", **kwargs) is None
-    assert find_free_replay_row(drive_root, "probe", legacy_hashes=("1" * 64,), **kwargs) is not None
 
 
 # --- the gate ----------------------------------------------------------------------------
@@ -462,7 +520,6 @@ def test_turn_on_when_ready_enables_an_accepted_install(tmp_path, not_cyber, mon
     from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready
     from ouroboros.skill_loader import load_enabled
 
-    monkeypatch.setattr("ouroboros.skill_lifecycle_actions._sync_schedules", lambda *a: None)
     drive_root = tmp_path / "data"
     _trusted_install(drive_root)
     result = reconcile_turn_on_when_ready(drive_root, "probe", repo_path="")
@@ -475,7 +532,6 @@ def test_turn_on_when_ready_never_overrides_a_choice_or_a_missing_basis(tmp_path
     from ouroboros.skill_lifecycle_actions import reconcile_turn_on_when_ready
     from ouroboros.skill_loader import load_enabled, save_enabled
 
-    monkeypatch.setattr("ouroboros.skill_lifecycle_actions._sync_schedules", lambda *a: None)
     drive_root = tmp_path / "data"
     _trusted_install(drive_root, turn_on=False)
     assert reconcile_turn_on_when_ready(drive_root, "probe", repo_path="")["action"] == "not_requested"
@@ -573,7 +629,7 @@ def test_a_verdict_lands_only_while_its_bytes_are_installed(tmp_path, moved_on):
     import types
 
     from ouroboros.skill_loader import find_skill, skill_state_dir_path
-    from ouroboros.skill_review import SkillReviewOutcome, _persist_reviewed_outcome
+    from ouroboros.skill_review import SkillReviewOutcome, _persist_projection
 
     drive_root = tmp_path / "data"
     skill_dir = _skill(drive_root / "skills" / "external")
@@ -582,8 +638,8 @@ def test_a_verdict_lands_only_while_its_bytes_are_installed(tmp_path, moved_on):
                                  content_hash=skill.content_hash)
     if moved_on:
         (skill_dir / "notes.md").write_text("changed during the panel\n", encoding="utf-8")
-    result = _persist_reviewed_outcome(types.SimpleNamespace(), skill, drive_root, outcome, history=[],
-                                       review_rebuttal="", contract_fp="fp", rebuttal_sha="")
+    _persist_projection(types.SimpleNamespace(), skill, drive_root, outcome)
+    result = outcome
     persisted = (skill_state_dir_path(drive_root, "probe") / "review.json").is_file()
     assert persisted is not moved_on
     assert result.status == ("pending" if moved_on else "clean")

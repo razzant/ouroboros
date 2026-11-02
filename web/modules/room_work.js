@@ -1,9 +1,9 @@
 /**
  * The room's work status in its bar (DESIGN "Room work status"). The bar's one status control, right after
  * the room's title, paints the word, tone and mark the chat's producer gives it (the room in the server's work
- * projection, work_status.roomStatusView; status_mark.js draws the mark) and opens this room's work as one Shade under
- * the bar, in Main and a Project alike. Presentation only, over the chat instance's own owners; it keeps no task
- * state, phase vocabulary, poller, pager, question index or permission:
+ * projection, work_status.roomStatusView; status_mark.js draws the mark) and opens this room's work as one floating
+ * list under the bar's capsules, in Main and a Project alike. Presentation only, over the chat instance's own owners;
+ * it keeps no task state, phase vocabulary, poller, pager, question index or permission:
  *   membership  this room's works (`works()`, the instance's reconciled projection: one row per work, helpers and
  *               Continue episodes inside it), the owner's unconfirmed sends (`pendingSubmissions`); a Project with
  *               nothing else keeps its latest represented root card
@@ -27,7 +27,11 @@ import {
     OUTCOME_TONES, amberNote, clock, openWorkControls, workControls, workMenuActions, workQuestion, workRowView,
 } from './work_status.js';
 import { showToast } from './toast.js';
+import { motionMs, reducedMotion } from './motion.js';
+import { isStackLayout } from './layout.js';
 
+// The closed list rises back as it fades (room_work.css rw-unfold, reversed).
+const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
 const NAME_CHARS = 160;
 const REPLY_CHARS = 60;
 const GROUP_RANK = { needs: 0, progress: 1, waiting: 2, unconfirmed: 3, latest: 4 };
@@ -69,6 +73,27 @@ export function workCard(work, records) {
  * Mount the status control and its list for one chat instance. The caller passes its own owners by their
  * names; `update()` repaints on the next frame after any of them changed.
  */
+/**
+ * A list hung under a bar's capsules (room_work.css): from the status capsule's left edge to the right edge of the
+ * bar's last visible control (a toolbar's own box reaches past its capsules), below the capsule. Measured where the bar
+ * really laid them out and written as three custom properties on the list's anchor. A control inside a list (this
+ * room's work, or the consciousness chip's) is never the bar's edge.
+ */
+export function hangUnderCapsules(bar, anchor) {
+    const titleRow = bar?.querySelector('.app-page-title-row');
+    if (!titleRow || !anchor?.isConnected) return;
+    const edge = anchor.getBoundingClientRect();
+    const capsule = titleRow.getBoundingClientRect();
+    const ends = [...bar.querySelectorAll('button, summary')]
+        .filter((node) => node.getClientRects().length && !titleRow.contains(node) && !node.closest('.rw-shade-anchor'))
+        .map((node) => node.getBoundingClientRect().right);
+    const end = ends.length ? Math.max(...ends) : edge.right;
+    const px = (value) => `${Math.round(value)}px`;
+    anchor.style.setProperty('--rw-left', px(Math.max(0, capsule.left - edge.left)));
+    anchor.style.setProperty('--rw-right', px(Math.max(0, edge.right - end)));
+    anchor.style.setProperty('--rw-top', px(capsule.bottom - edge.top));
+}
+
 export function createRoomWork({
     page, asPanel = false, ws = null, statusBadge, messagesDiv, reading, stateSnapshots = null, revealQuestion = null,
     works = () => null, liveCardRecords: records = new Map(),
@@ -115,8 +140,10 @@ export function createRoomWork({
     const titleRow = bar?.querySelector('.app-page-title-row');
     if (titleRow) titleRow.appendChild(trigger);
     else badgeParent?.insertBefore(trigger, badgeNext);
+    // A Project's name in its bar: one line that may end in an ellipsis (room_work.css), whole at the list's head.
+    const name = panel && bar?.querySelector('.app-page-title');
 
-    // ---- the surface: one Shade in every room, unfolding from the bottom edge of the room's bar
+    // ---- the surface: one floating list in every room, hung under the room's bar (room_work.css)
     const surface = element('div', 'rw-surface rw-shade');
     surface.id = `${uid}-surface`;
     surface.hidden = true;
@@ -125,18 +152,29 @@ export function createRoomWork({
     surface.setAttribute('role', 'dialog');
     // Names are authored text: the chrome in here is translated at the producer, so the overlay never walks it.
     surface.setAttribute('data-i18n-authored', '');
+    // A Project's list starts with the room's whole name, which its title in the bar may cut (DESIGN "Shell").
+    const head = name ? element('p', 'rw-title') : null;
     const list = element('div', 'rw-list');
     const note = element('p', 'rw-note');
     note.hidden = true;
-    surface.append(list, note);
-    // A zero-height anchor under the bar: the Shade follows the bar's real height at every width. Main's
+    // The commands a narrow bar keeps in its list (Main's Restart and budget: page_header.js); empty, it takes no room.
+    const extras = element('div', 'rw-extras');
+    if (head) surface.append(head);
+    surface.append(list, note, extras);
+    // A zero-height anchor under the bar: the list follows the bar's real height at every width. Main's
     // header floats over the transcript, so its anchor is the header's own last child at its bottom edge.
     const shadeAnchor = element('div', 'rw-shade-anchor');
     shadeAnchor.appendChild(surface);
-    if (asPanel) (bar || page.querySelector('.chat-panel-statusbar'))?.insertAdjacentElement('afterend', shadeAnchor);
-    else (bar || page).appendChild(shadeAnchor);
+    if (bar) bar.appendChild(shadeAnchor);
+    else if (asPanel) page.querySelector('.chat-panel-statusbar')?.insertAdjacentElement('afterend', shadeAnchor);
+    else page.appendChild(shadeAnchor);
     // The element that says "open" for CSS: the Project panel, or Main's header.
     const openHost = panel || (asPanel ? null : bar);
+
+    // The list hangs under the bar's capsules, measured again whenever the open list paints.
+    function placeSurface() {
+        if (bar) hangUnderCapsules(bar, shadeAnchor);
+    }
 
     // ---- Back to reading: one explicit return to the passage a navigation left
     const back = element('button', 'rw-back');
@@ -183,6 +221,11 @@ export function createRoomWork({
         target.addEventListener(type, fn, options);
         disposers.push(() => target.removeEventListener?.(type, fn, options));
     };
+    if (titleRow) {
+        listen(titleRow, 'click', (event) => {
+            if (!trigger.disabled && !trigger.hidden && !event.target?.closest?.('.rw-trigger')) trigger.click();
+        });
+    }
 
     // ---- model
     // The owner's own message for a direct turn or an unconfirmed send, by its exact client id.
@@ -648,6 +691,12 @@ export function createRoomWork({
         paintTrigger();
         paintNote();
         if (!open) return;
+        placeSurface();
+        if (head) {
+            const whole = clean(name.textContent);
+            if (head.textContent !== whole) head.textContent = whole;
+            head.hidden = !whole;
+        }
         const keys = new Set(rows.map((row) => row.key));
         for (const [key, view] of views) {
             if (!keys.has(key)) { view.el.remove(); views.delete(key); expanded.delete(key); }
@@ -675,18 +724,33 @@ export function createRoomWork({
     }
 
     // The word goes whole or not at all (DESIGN "Shell"): shown, measured, dropped when the row would cut it, in one
-    // task so nothing paints between; the mark stays and the control's name keeps the word. Measured again when the
-    // word or the bar's width changes (the bar is sized by the page, so this never feeds itself).
-    let fittedWord = null;
+    // task so nothing paints between; a preparing turn's start step beside it (the badge's data-step) goes first. The
+    // mark stays and the control's name keeps the whole status. Measured again when the word, step, mark or available
+    // width changes. Remember the capsule's width AFTER fitting, so observing its content-sized box does not feed a
+    // hide/show cycle back into the ResizeObserver.
+    // A Project's name keeps one line (room_work.css). On a phone a name still cut there makes the consciousness chip
+    // show its brain alone (its name keeps the whole state); a desk keeps the chip's word and the name ellipsizes.
+    // Panic never yields.
+    let fittedWord = null, fittedWidth = null, fitNeeded = false;
     function fitWord() {
         if (destroyed) return;
         delete trigger.dataset.word;
-        if (statusBadge.scrollWidth > statusBadge.clientWidth + 1) trigger.dataset.word = 'off';
+        delete trigger.dataset.step;
+        const chip = name && bar.querySelector('.cx-chip');
+        if (chip) delete chip.dataset.fit;
+        const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
+        if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
+        if (cut()) trigger.dataset.word = 'off';
+        if (chip && isStackLayout({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {
+            chip.dataset.fit = 'mark';
+        }
+        fittedWidth = titleRow?.clientWidth;
     }
 
     function paintTrigger() {
-        const text = clean(statusBadge.textContent);
-        const listed = rows.length > 0;
+        const text = [clean(statusBadge.textContent), clean(statusBadge.dataset.step)].filter(Boolean).join(' · ');
+        // A Project's list always has its head, the room's whole name, so its title opens it even with no work.
+        const listed = Boolean(head) || rows.length > 0 || extras.children.length > 0;
         // Word, tone, mark and what waits for the owner come together from the chat's producer
         // (work_status.roomStatusView via setStatus); the control paints them and never ranks row tones or reads a
         // class name for a second opinion. Before the producer's first answer the room is not online yet: an unknown
@@ -696,7 +760,7 @@ export function createRoomWork({
         trigger.dataset.tone = tone;
         trigger.dataset.open = open ? '1' : '0';
         trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-        trigger.title = text;  // the whole status word, never clipped away (an extra, not the only path)
+        trigger.title = text;  // the whole status, never clipped away (an extra, not the only path)
         caret.hidden = !listed;
         // The work's shape in the word's ink; while something in the room waits for the owner (a question, or an action
         // only the owner takes) the amber dot takes its place and the word keeps its own ink: Working with a question
@@ -709,7 +773,7 @@ export function createRoomWork({
         if (waitNote.textContent !== said) waitNote.textContent = said;
         waitNote.hidden = !said;
         // A new word, or a mark of another width beside the same word (the owner's dot for the dots), is measured again.
-        if (text !== fittedWord || reshaped) { fittedWord = text; fitWord(); }
+        if (text !== fittedWord || reshaped || fitNeeded) { fittedWord = text; fitNeeded = false; fitWord(); }
         if (!listed && open) close({ restoreFocus: false });
     }
 
@@ -718,17 +782,37 @@ export function createRoomWork({
         const message = !connected() ? tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.')
             : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
                 : Array.isArray(latest?.works) && latest.works_complete === false
-                    ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.') : '';
+                    ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.')
+                    // A Project's list that opened on its name alone says so in Activity's words.
+                    : head && !rows.length ? tr('room_work.note.empty', 'Nothing running or queued.') : '';
         if (note.textContent !== message) note.textContent = message;
         note.hidden = !message || !open;
     }
 
     // ---- behaviour
+    // The list folds away the way it unfolded: closed at once (its state, its focus), it stays drawn, inert, until its
+    // motion ends; opened again meanwhile, it stops folding where it is.
+    let folding = null;
+    function foldAway() {
+        const ms = motionMs('--motion-fade');
+        if (!ms || reducedMotion() || typeof surface.animate !== 'function') { surface.hidden = true; return; }
+        surface.inert = true;
+        const fold = surface.animate(SHADE_FOLDS, { duration: ms, easing: 'ease-in', fill: 'forwards' });
+        folding = fold;
+        fold.finished.then(() => { if (folding === fold && !open) surface.hidden = true; }, () => {}).finally(() => {
+            if (folding !== fold) return;
+            folding = null;
+            surface.inert = false;
+            fold.cancel();
+        });
+    }
+
     function openSurface(viaKeyboard = false) {
         if (open || destroyed || trigger.disabled || trigger.hidden) return;
         open = true;
         frozen = new Map();
         order = [];
+        if (folding) { const fold = folding; folding = null; surface.inert = false; fold.cancel(); }
         surface.hidden = false;
         openHost?.setAttribute('data-rw-open', '');
         render();
@@ -742,7 +826,7 @@ export function createRoomWork({
         if (!open) return;
         open = false;
         closeTaskControlMenu();
-        surface.hidden = true;
+        foldAway();
         openHost?.removeAttribute('data-rw-open');
         frozen = null;
         order = [];
@@ -771,8 +855,10 @@ export function createRoomWork({
 
     function scrollToNode(node) {
         reading.cancel();
-        // Main's header floats over the feed: the target lands just below it, not under it.
-        const reserve = asPanel ? 0 : parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0;
+        // Main's measured reserve includes its error note; Project's in-flow bars already clear the feed.
+        const reserve = asPanel
+            ? Math.max(0, (bar?.getBoundingClientRect().bottom || 0) - messagesDiv.getBoundingClientRect().top)
+            : parseFloat(page.style?.getPropertyValue?.('--chat-header-reserve')) || 0;
         messagesDiv.scrollTop += node.getBoundingClientRect().top - messagesDiv.getBoundingClientRect().top - reserve;
         reading.stick = false;
         reading.scroll();
@@ -793,7 +879,7 @@ export function createRoomWork({
         close({ restoreFocus: false });
         scrollToNode(target);
         showBack(place.anchor, place);
-        // The card's one control of its own, "Show details", takes the keyboard; a portal (which hides it) takes it itself.
+        // The card's one control of its own, "Details", takes the keyboard; a portal (which hides it) takes it itself.
         const disclosure = records.get(row.id)?.disclosureEl;
         const focus = disclosure?.isConnected && disclosure.getClientRects?.().length ? disclosure : target;
         if (focus === target && !target.hasAttribute?.('tabindex')) target.setAttribute('tabindex', '-1');
@@ -888,6 +974,8 @@ export function createRoomWork({
 
     // ---- wiring
     listen(globalThis.window, 'ouro:language-changed', schedule);
+    // Whether a cut Project name takes the chip's word depends on the layout (fitWord), so a switch fits again.
+    if (name) listen(globalThis.window, 'ouro:layout-changed', () => { fitNeeded = true; schedule(); });
     // A click with detail 0 is Enter or Space on the focused control: a keyboard open lands in the list.
     listen(trigger, 'click', (event) => { if (open) close(); else openSurface(event?.detail === 0); });
     listen(trigger, 'keydown', (event) => {
@@ -897,6 +985,8 @@ export function createRoomWork({
         }
     });
     listen(back, 'click', goBack);
+    // A command chosen in the Shade is the end of this look (Restart asks its own question, the budget opens Costs).
+    listen(extras, 'click', () => close({ restoreFocus: false }));
     listen(doc, 'pointerdown', (event) => {
         // A press lasts until the click its release makes (a touch's mouse events follow its pointerup), so a
         // focus move inside it, its own or a closing menu handing focus back, folds nothing under the pointer.
@@ -904,7 +994,7 @@ export function createRoomWork({
         const target = event.target;
         // The shared task-controls menu is a portal outside the list but part of its interaction.
         if (target?.closest?.('.task-control-menu')) return;
-        lastInside = surface.contains(target) || trigger.contains(target);
+        lastInside = surface.contains(target) || trigger.contains(target) || Boolean(titleRow?.contains(target));
         if (!open || lastInside) return;
         close({ restoreFocus: false });
         // The first outside press only dismisses the list: a press on the dimmed Main must not also close the room.
@@ -974,7 +1064,7 @@ export function createRoomWork({
         next?.focus?.({ preventScroll: true });
         next?.scrollIntoView?.({ block: 'nearest' });
     });
-    // The Project panel's own close dismisses a Shade that lives outside the room's page.
+    // The Project panel's own close dismisses a list that lives outside the room's page.
     listen(doc, 'click', (event) => {
         if (open && event.target?.closest?.('#project-panel-close')) close({ restoreFocus: false });
     }, true);
@@ -985,11 +1075,20 @@ export function createRoomWork({
         const away = Boolean(page.hidden) || !page.isConnected;
         if (away) { navigationIntent += 1; close({ restoreFocus: false }); showBack(null); }
         trigger.hidden = away;
+        if (!away) fitWord();
     }) : null;
     watcher?.observe(page, { attributes: true, attributeFilter: ['hidden'] });
     const Resize = globalThis.ResizeObserver;
-    const sizer = bar && typeof Resize === 'function' ? new Resize(() => fitWord()) : null;
+    const sizer = bar && typeof Resize === 'function' ? new Resize((entries) => {
+        if (entries.some(entry => entry.target === bar) || titleRow?.clientWidth !== fittedWidth) {
+            // Use the existing paint frame: resizing an observed capsule inside delivery
+            // would produce an undelivered-notifications loop warning in WebKit.
+            fitNeeded = true; schedule();
+        } else if (open) schedule();  // another capsule of the bar moved: the open list follows its edges
+    }) : null;
     sizer?.observe(bar);
+    if (titleRow) sizer?.observe(titleRow);
+    for (const node of bar?.children || []) if (node !== shadeAnchor && node !== titleRow) sizer?.observe(node);
 
     function schedule() {
         if (destroyed || scheduled) return;
@@ -1001,6 +1100,7 @@ export function createRoomWork({
     render();
     return {
         update: schedule,
+        extras,
         close: () => close({ restoreFocus: false }),
         // The room leaves the screen: the list closes and the saved passage no longer applies.
         leave() {

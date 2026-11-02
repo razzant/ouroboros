@@ -241,13 +241,16 @@ def test_status_read_provenance_has_one_reader_across_surfaces():
     assert "export function accountRows(" in store, (
         "the store lost the single connected-rows projection"
     )
-    # The native-login rule rides in the shared projection: a native CLI session
-    # counts as a connected row (a native codex login used to read as
-    # "0 accounts connected" when a consumer counted only named profiles).
+    # #244: a native-only machine is an engine on the retired account model.
+    # It reads as that typed state, decided once beside the projection, never
+    # as "0 accounts connected" and never as pseudo-rows re-read off the old
+    # client's carrier.
     rows_body = store.split("export function accountRows(", 1)[1].split("\nexport ", 1)[0]
-    assert "native_login_detected" in rows_body, (
-        "accountRows no longer projects native logins; a native-only machine "
-        "reads as 0 accounts connected again"
+    rows_code = "\n".join(line for line in rows_body.splitlines() if not line.strip().startswith("//"))
+    assert "harnessAccounts" not in rows_code, "accountRows reads the retired native carrier again"
+    assert "export function accountModelUnsupported(" in store, (
+        "the store lost the one retired-account-model decision; a pre-3.6 engine "
+        "would read as 0 accounts connected again"
     )
     # «Не вини демона, который отвечал»: `unreachable` is the endpoint's global
     # "the answer did not complete" — a RUNNING daemon refusing one fanned-out

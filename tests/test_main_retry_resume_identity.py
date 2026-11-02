@@ -1,6 +1,6 @@
 """#1660 / #1730: Main uses the same current retry identity as the Resume door.
 
-Real Project admission, idle-timeout retry publication, exact root-budget park,
+Real Project admission, a historical idle-timeout retry's stored state, exact root-budget park,
 HTTP state and Main's JS consumer. Only OS workers, models and the clock are
 doubled by the existing retry fixtures; no identity predicate is stubbed.
 """
@@ -20,7 +20,8 @@ from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _mock_pause
 from tests.test_execution_clock_resume_handover import _dispatch_one, _save_first_attempt, clock as clock
 from tests.test_main_state_projection import _attention_rows, _main_consumer, _member_http, _member_owner
 from tests.test_project_hold_recovery import accepted
-from tests.test_retry_pause_identity import _assign, _reap, _successors, reaper as reaper
+from tests._silence_reaper_support import historical_timeout_retry
+from tests.test_retry_pause_identity import _assign, _successors, reaper as reaper
 from tests.test_swarm_host_admission import host as host
 
 pytestmark = pytest.mark.serial
@@ -32,7 +33,7 @@ def _project_retry(host, tmp_path, monkeypatch, clock, reaper):
     first = _dispatch_one(host, monkeypatch)
     _save_first_attempt(host, first, monkeypatch, clock)
     workers.WORKERS[0] = SimpleNamespace(wid=0, busy_task_id="held", reaping=False, active_capacity=True)
-    _reap(clock, reaper)
+    historical_timeout_retry(clock)
     [retry] = _successors(host)
     logical = load_task_result(host.root, "held", strict=True)
     physical = load_task_result(host.root, retry["id"], strict=True)
@@ -160,11 +161,11 @@ def test_owner_pause_of_a_retry_stays_quiet_in_main(host, tmp_path, monkeypatch,
 
 
 def test_a_superseded_retry_is_not_the_current_root_actor(host, tmp_path, monkeypatch, clock, reaper):
-    from supervisor.events_budget import explicit_resume_required
+    from ouroboros.gateway.state import _pending_resume_available
 
     first = _project_retry(host, tmp_path, monkeypatch, clock, reaper)
     [running] = _assign(host, monkeypatch)
-    _reap(clock, reaper, running["id"])
+    historical_timeout_retry(clock, running["id"])
     [current] = [row for row in host.pending if row.get("timeout_retry_from") == first["id"]]
     stored = load_task_result(host.root, first["id"], strict=True)
     assert stored["superseded_by"] == stored["retry_task_id"] == current["id"]
@@ -173,7 +174,7 @@ def test_a_superseded_retry_is_not_the_current_root_actor(host, tmp_path, monkey
     stale = {**first, "_budget_pause": dict(parked["_budget_pause"])}
     assert not root_actor(host.root, "held", first["id"], strict=True)
     assert root_actor(host.root, "held", current["id"], strict=True)
-    assert explicit_resume_required(queue, stale, owner_paused=False) is False
+    assert _pending_resume_available(queue, stale, owner_paused=False) is False
 
 
 @pytest.mark.parametrize("identity", ["logical-root", "current-retry", "child", "unreadable-chain"])

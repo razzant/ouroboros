@@ -34,7 +34,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros import maintenance_jobs, store
+from ouroboros import (delegate_capture_job, delegate_pending, maintenance_jobs, maintenance_retirement,
+                       plan_collection_job, record_compression, room_appearances, store, subagent_metrics)
 from ouroboros.startup_historical_audit import _REPORT_BYTES, finish_maintenance_job, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
@@ -144,7 +145,8 @@ def _trash_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str,
     state = "failed" if report["stuck"] else "done"
     row = maintenance_jobs.job(root, "custody_trash") or {}
     if report["removed"] or (row.get("state"), row.get("stuck") or {}) != (state, report["stuck"]):
-        maintenance_jobs.record(root, "custody_trash", state=state, stuck=report["stuck"], removed=report["removed"])
+        maintenance_jobs.record(root, "custody_trash", state=state, stuck=report["stuck"], removed=report["removed"],
+                                retained=report["retained"])
     return {"state": state, "items": report["removed"]}
 
 
@@ -176,21 +178,53 @@ def _task_rows(root: pathlib.Path) -> int:
         return int(txn.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
 
 
-def _analyze_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
+# The planner statistics every store keeps, on every SQLite build: row counts (``sqlite_stat1``), as the app's own
+# SQLite keeps. A build with ENABLE_STAT4 (Homebrew's Python, for one) also samples each index into ``sqlite_stat4``,
+# and every new connection loads those samples with the schema, a cost that grows with the history
+# (tests/test_cost_contract.py B7). The job's row names the policy, so a store analyzed under another moves once.
+STATISTICS = "stat1"
+
+
+def _stale(row: Dict[str, Any], tasks: int) -> bool:
     """Planner statistics once per store file (this row lives in it), and again once the task
     table grew tenfold since: statistics describe the data's magnitude, so a fresh install's
-    would mislead the planner as it grows. Never by itself a reason to spawn the child."""
+    would mislead the planner as it grows."""
+    return row.get("state") != "done" or tasks >= 10 * max(1, int(row.get("tasks") or 0))
+
+
+def _sampled(root: pathlib.Path) -> bool:
+    """Whether ``sqlite_stat4`` holds a sample: its schema row, then at most one of its rows."""
+    with store.open_store(root, write=False) as txn:
+        table = txn.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat4'").fetchone()
+        return bool(table and txn.conn.execute("SELECT 1 FROM sqlite_stat4 LIMIT 1").fetchone())
+
+
+def _analyze_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
+    """Stale statistics, a row that does not name today's ``STATISTICS``, or samples beside one that does:
+    an older body's job (a plain ``ANALYZE``, then a merge into this row) rebuilds them on a STAT4 build and
+    keeps the row's word. Never by itself a reason to spawn the child: a store analyzed before moves when
+    the child next runs."""
     if not child:
         return False
-    return row.get("state") != "done" or _task_rows(root) >= 10 * max(1, int(row.get("tasks") or 0))
+    return row.get("statistics") != STATISTICS or _sampled(root) or _stale(row, _task_rows(root))
 
 
 def _analyze_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
+    """``ANALYZE`` when the statistics are stale; then the samples go and this connection's planner
+    reloads what stays (``ANALYZE sqlite_master``), in the transaction that writes the row: a store
+    analyzed before keeps its ``sqlite_stat1`` and its tenfold base, an interrupted run changes nothing."""
+    row = maintenance_jobs.job(root, "sqlite_analyze") or {}
     with store.open_store(root, write=True) as txn:
         tasks = int(txn.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
-        txn.conn.execute("ANALYZE")
-    maintenance_jobs.record(root, "sqlite_analyze", state="done", tasks=tasks)
-    return {"state": "done", "items": tasks}
+        stale = _stale(row, tasks)
+        if stale:
+            txn.conn.execute("ANALYZE")
+        if txn.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat4'").fetchone():
+            txn.conn.execute("DELETE FROM sqlite_stat4")
+            txn.conn.execute("ANALYZE sqlite_master")
+        maintenance_jobs.record_in(txn, "sqlite_analyze", state="done", statistics=STATISTICS,
+                                   **({"tasks": tasks} if stale else {}))
+    return {"state": "done", "items": tasks if stale else 0}
 
 
 def _packing_inputs(root: pathlib.Path) -> Dict[str, Any]:
@@ -220,30 +254,38 @@ def _packing_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any],
 
 def _packing_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
     """Discovery (archive first, then the first changed task stamp) and, when it finds work, one
-    packing pass with its own fresh census. The inputs are read before the pass and recorded after
-    it, so a task closing during the pass makes the next look differ. A pass that unlinked records
-    ``quiet: False``; one that left candidates deferred, busy or faulted records their count as
-    ``pending`` with the store revision it has seen: the one its own record leaves when nothing
-    else wrote during the pass, else the one the pass began at, since a write during the pass (the
-    contender's receipt, committed after the deferral and before this record) is one the pass has
-    not seen, and recording the later revision would swallow it (``_packing_due`` re-arms on the
-    next write; a quiet install then retries once and rests until the store moves again). A raised
-    discovery or pass records nothing: the job stays due for the next look."""
+    packing pass, both over the census the job row addresses: the rows written terminal since the
+    position the last pass recorded (``census``, the counter it read before its pass, under the store's
+    body fact ``body``) and the candidates it left (``pending``); every loose folder only without a
+    readable position (``evidence_packer.census_since``: the first run, an older body's pass, another
+    HEAD booted on the store since, a counter that went back). The inputs are read before the pass and
+    recorded after it, so a task closing during the
+    pass makes the next look differ. A pass that unlinked records ``quiet: False``; one that left
+    candidates deferred, busy or faulted records their ids as ``pending`` with the store revision
+    it has seen: the one its own record leaves when nothing else wrote during the pass, else the
+    one the pass began at, since a write during the pass (the contender's receipt, committed after
+    the deferral and before this record) is one the pass has not seen, and recording the later
+    revision would swallow it (``_packing_due`` re-arms on the next write; a quiet install then
+    retries once and rests until the store moves again). A raised discovery or pass records
+    nothing: the job stays due for the next look."""
     from ouroboros import evidence_packer, evidence_packs as packs
 
+    row = maintenance_jobs.job(root, "evidence_packing") or {}
     inputs = _packing_inputs(root)
     began = _revision(root)  # the census reads the store after this point
-    report: Dict[str, Any] = {"status": "completed", **dict.fromkeys(evidence_packer.COUNTERS, 0)}
-    if evidence_packer.packing_pending(root, should_stop):
-        report = evidence_packer.run_pass(root)
+    body = evidence_packer.store_body(root)
+    since, owed = evidence_packer.census_since(row, inputs["terminal"], body), evidence_packer.owed_ids(row)
+    report: Dict[str, Any] = {"status": "completed", **dict.fromkeys(evidence_packer.COUNTERS, 0), "unfinished": []}
+    if evidence_packer.packing_pending(root, should_stop, since=since, owed=owed):
+        report = evidence_packer.run_pass(root, since=since, owed=owed)
         packs.record_storage_pack(root, phase=report["status"], **{key: report[key] for key in evidence_packer.COUNTERS})
     if should_stop():
         return {"state": "pending", "items": report["examined"]}
-    pending = report["deferred"] + report["busy"] + report["faults"]
     with store.open_store(root, write=True) as txn:  # one write: the row and the revision it has seen
         seen = txn.revision() + 1 if txn.revision() == began else began
         maintenance_jobs.record_in(txn, "evidence_packing", state="done", terminal=inputs["terminal"],
-                                   quiet=not report["unlinked"], pending=pending, revision=seen,
+                                   census=inputs["terminal"], body=body, quiet=not report["unlinked"],
+                                   pending=list(report["unfinished"]), revision=seen,
                                    packed=report["packed"], examined=report["examined"])
     return {"state": "done", "items": report["examined"]}
 
@@ -255,10 +297,7 @@ def _dialogue_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any]
 
     if row.get("state") == "failed":
         return child
-    if not dialogue_store.present(root):
-        return False
-    return any(int(view.get("pending") or 0) for view in dialogue_import.import_status(root).values()
-               if isinstance(view, dict))
+    return dialogue_store.present(root) and dialogue_import.import_owed(root)
 
 
 def _dialogue_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
@@ -266,6 +305,49 @@ def _dialogue_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[s
 
     row = run_dialogue_import(root, should_stop=should_stop) or {}
     return {"state": str(row.get("state") or "unknown"), "items": int(row.get("done") or 0)}
+
+
+def _tail_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
+    """The chronicle index's stored tail facts are absent, unfinished or of another dialogue store or frontier
+    (``memory_inventory.tail_owed``: an update, a rebuilt index, a replaced store). A failed fill waits for the
+    child to run for another reason; an unreadable fact defers to the next look, never blocking the other jobs."""
+    from ouroboros.memory_inventory import tail_owed
+
+    if row.get("state") == "failed":
+        return child
+    try:
+        return tail_owed(root)
+    except Exception:
+        log.debug("Memory tail facts unreadable; the next look asks again", exc_info=True)
+        return False
+
+
+def _tail_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
+    """``memory_inventory.fill_tail``, resumable at its stored prefix; this row keeps only its state."""
+    from ouroboros.memory_inventory import fill_tail
+
+    try:
+        report = fill_tail(root, should_stop)
+    except Exception as exc:
+        if not _contention(exc):
+            maintenance_jobs.record(root, "memory_tail", state="failed")
+        raise
+    if (maintenance_jobs.job(root, "memory_tail") or {}).get("state") != report["state"]:
+        maintenance_jobs.record(root, "memory_tail", state=report["state"])
+    return report
+
+
+def _appearances_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:
+    """``room_appearances.run``, resumable at the store's mark; this row keeps only its state."""
+    try:
+        report = room_appearances.run(root, should_stop)
+    except Exception as exc:
+        if not _contention(exc):
+            maintenance_jobs.record(root, "room_appearances", state="failed")
+        raise
+    if (maintenance_jobs.job(root, "room_appearances") or {}).get("state") != report["state"]:
+        maintenance_jobs.record(root, "room_appearances", state=report["state"])
+    return report
 
 
 def _hot_facts_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
@@ -290,24 +372,33 @@ def _hot_facts_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[
 # order. ``child`` is False for the server's look: a job may then decline to be a reason to spawn
 # (it still runs whenever the child runs for another reason).
 JOBS: Dict[str, tuple] = {
+    # Captures already addressed by the server must not queue behind a history import.
+    "delegate_capture": (delegate_capture_job.due, delegate_capture_job.run),
+    "subagent_metrics": (subagent_metrics.job_due, subagent_metrics.run_job),
+    "pending_invocations": (delegate_pending.backfill_due, delegate_pending.backfill),
     # Before the archive import: the drives it reconciles can leave dialogue work, which the import
     # then finishes in the same pass (the next pass rests; tests/test_cost_contract.py B6).
     "legacy_reconcile": (_legacy_due, _legacy_run),
     "dialogue_import": (_dialogue_due, _dialogue_run),  # the owner's history: newest segments first
+    "memory_tail": (_tail_due, _tail_run),  # after the import: the tail's positions are settled
+    "room_appearances": (room_appearances.due, _appearances_run),  # after the import, like the tail
     "hot_facts": (_hot_facts_due, _hot_facts_run),
+    "ended_plan_asks": (plan_collection_job.due, plan_collection_job.run),
+    "custody_trash": (_trash_due, _trash_run),  # before retirement: a removed drive's bytecode goes in the same pass
+    "runtime_retirement": (maintenance_retirement.due, maintenance_retirement.run),
     "child_ref_promotion": (_promotion_due, _promotion_run),
-    "custody_trash": (_trash_due, _trash_run),
     "temp_sweep": (_temp_due, _temp_run),
     "sqlite_analyze": (_analyze_due, _analyze_run),
+    "record_compression": (record_compression.due, record_compression.run),
     "evidence_packing": (_packing_due, _packing_run),  # last: its quiet fact follows every other write
 }
 JOB_NAMES = tuple(JOBS)
 
 
 def due(root: Any) -> List[str]:
-    """The jobs whose facts say work may wait (cheap reads only; nothing is walked here)."""
+    """Read job facts, replaying owed producer wakes before dispatch; no history walk."""
     root = pathlib.Path(root)
-    rows = maintenance_jobs.jobs(root)
+    rows = maintenance_jobs.jobs(root, JOBS)
     facts = _store_facts(root)
     return [name for name, (is_due, _run) in JOBS.items() if is_due(root, rows.get(name) or {}, facts, False)]
 
@@ -327,6 +418,20 @@ def run_job(root: Any, name: str, *, should_stop: Optional[Callable[[], bool]] =
     return run_one(root, should_stop or (lambda: False))
 
 
+def _last_error(root: pathlib.Path, name: str, exc: Optional[BaseException]) -> None:
+    """A job that threw keeps its ``state`` (several due rules read it: a transient exception must not
+    park a resumable job) and gains ``last_error`` ``{class, at}``; its next normal return clears it.
+    The facts stay readable beside the place the job serves (``storage_removers``)."""
+    try:
+        if exc is not None:
+            maintenance_jobs.record(root, name, last_error={"class": type(exc).__name__, "at": _now()})
+        elif "last_error" in (maintenance_jobs.job(root, name) or {}):
+            with store.open_store(root, write=True) as txn:
+                maintenance_jobs.forget_in(txn, name, "last_error")
+    except Exception:
+        log.debug("Maintenance job %s outcome not recorded", name, exc_info=True)
+
+
 def run(root: Any, *, should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """The child's pass: every due job in order; one job's failure never skips the next."""
     root, stop = pathlib.Path(root), should_stop or (lambda: False)
@@ -340,7 +445,11 @@ def run(root: Any, *, should_stop: Optional[Callable[[], bool]] = None) -> Dict[
             if not _contention(exc):
                 log.warning("Maintenance job %s failed", name, exc_info=True)
                 report["status"] = "failed"
+                _last_error(root, name, exc)
             outcome = {"state": "pending" if _contention(exc) else "failed", "items": 0}
+        else:
+            if outcome is not None:
+                _last_error(root, name, None)
         if outcome is not None:
             report["jobs"][name] = {"state": str(outcome.get("state") or "unknown"),
                                     "items": int(outcome.get("items") or 0)}
@@ -451,7 +560,8 @@ child = MaintenanceChild()
 # ---- the child half --------------------------------------------------------------------------
 
 def _lower_priority() -> None:
-    """Background priority: POSIX nice, the Windows below-normal class; best effort."""
+    """Background priority: POSIX nice, the Windows below-normal class; best effort. The disk tier stays
+    each job's own (``record_compression`` lowers its thread's around its run)."""
     try:
         if os.name == "nt":
             import ctypes

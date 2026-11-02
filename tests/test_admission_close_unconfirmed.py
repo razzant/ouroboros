@@ -2,7 +2,7 @@
 root admission seal at an author stop reads the queue's typed answer.
 
 The vocabulary half: one reason token, one owner sentence in BOTH twins
-(``project_dialogue.TASK_CAUSE_PHRASES`` / ``web/modules/log_events.js``), pinned by
+(``project_dialogue.TASK_CAUSE_PHRASES`` / ``web/modules/task_reason_words.js``), pinned by
 ``web/tests/fixtures/outcome_phase_parity.json`` on both sides of the boundary, and a
 reducer that keeps an accepted decision out of BLOCKED. Nothing writes the note now (the
 acceptance decision writer is gone); stored task cards still carry it. The behaviour half:
@@ -42,7 +42,7 @@ def _record(status: str, reason: str, *, enforcement: str = "blocking") -> dict:
 def test_the_note_has_one_sentence_in_both_twins():
     """Old acceptance decisions carry the note; their task cards keep saying it."""
     assert TASK_CAUSE_PHRASES[NOTE] == SENTENCE
-    twin = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "log_events.js").read_text(encoding="utf-8")
+    twin = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "task_reason_words.js").read_text(encoding="utf-8")
     assert f'{NOTE}: "{SENTENCE}",' in twin, "the browser twin carries the byte-identical sentence"
 
 

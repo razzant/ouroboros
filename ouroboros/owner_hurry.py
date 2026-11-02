@@ -262,11 +262,11 @@ def archive_current(drive_root: Any, task_id: str, *, reason: str) -> bool:
 
 
 def retry_reset(task_drive: Any, canonical_drive_root: Any, task_id: str, *, reason: str) -> None:
-    """The ONE shared same-id requeue reset (§19.7.2 item 11).
+    """The ONE shared same-id attempt reset (§19.7.2 item 11).
 
-    EVERY same-id requeue producer — the reaper timeout path AND the
-    ``supervisor/workers.py`` crash-requeue — calls this.  Attempt-local
-    mailbox controls are revoked, while durable owner text and its ack ledger
+    Crash and planned-restart requeues (``worker_health.py``, ``workers.py``)
+    and the hard-bound reaper, whose attempt ends without a retry, call this.
+    Attempt-local controls are revoked; durable owner text and its ack ledger
     survive for canonical/replay continuity.  The current ``owner_hurry``
     block is archived into history. Fail-soft; never raises.
     """
@@ -393,7 +393,7 @@ def _plan_facts(ctx: Any) -> tuple[Dict[str, Any], Dict[str, Any], bool]:
     return record, legacy, unreadable
 
 
-def force_plan_decision(
+def plan_gate_decision(
     ctx: Any, llm_trace: Dict[str, Any], *,
     hard_rail: str = "", enforcement: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -402,8 +402,7 @@ def force_plan_decision(
     ``plan_record.gate_projection`` decides: held only under Blocking (outside Cyber
     Pro, no owner hurry) by an open objection an owner-marked reviewer raised in the
     ask it answered — for any task (owner batch 2, Q2=B); silence, refusals, pending
-    asks and mind-added critics never hold; a Swarm ``force_plan`` stays unmet until
-    one ask reached at least one reviewer. While the hurry latch is armed the
+    asks and mind-added critics never hold. While the hurry latch is armed the
     projection is computed as locally advisory and says so (attribution for the task
     detail). ``enforcement`` is supplied by the loop wrapper from ITS namespace so the
     existing ``loop.get_review_enforcement`` test seam holds.
@@ -411,9 +410,6 @@ def force_plan_decision(
     from ouroboros import plan_record
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
-    reconcile_transferred_obligation(ctx)
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
     record, legacy, unreadable = _plan_facts(ctx)
     if enforcement is None:
         from ouroboros.config import get_review_enforcement
@@ -421,7 +417,7 @@ def force_plan_decision(
         enforcement = get_review_enforcement()
     decision = plan_record.gate_projection(
         record, enforcement=str(enforcement or ""), cyber_pro=not review_enforcement_blocks("blocking"),
-        hurry=latched(ctx) is not None, force_plan=metadata.get("force_plan") is True,
+        hurry=latched(ctx) is not None,
         hard_rail=hard_rail, legacy=legacy, unreadable=unreadable)
     if decision.get("required") and decision.get("open_objections"):
         # The outcome class at delivery (``outcome_axes.execution.plan_review``).
@@ -429,98 +425,23 @@ def force_plan_decision(
     return decision
 
 
-def reconcile_transferred_obligation(ctx: Any) -> str:
-    """Release the worker's copy of an obligation the supervisor already moved.
-
-    A promote/route admitted AFTER the tool's wait returned unconfirmed still
-    records the transfer durably (the promoter's task result carries
-    ``force_plan_transfer.to``); without this read the worker's metadata kept
-    ``force_plan`` and its finalization held for a plan the new root owes.
-    Returns the task id the obligation moved to, or '' when nothing moved."""
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    if metadata.get("force_plan") is not True:
-        return ""
-    task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    root = _canonical_root(ctx)
-    if not task_id or root is None:
-        return ""
-    try:
-        from ouroboros.task_results import load_task_result
-
-        transfer = (load_task_result(root, task_id) or {}).get("force_plan_transfer")
-    except Exception:
-        log.debug("force_plan transfer read failed for %s", task_id, exc_info=True)
-        return ""
-    moved_to = str((transfer or {}).get("to") or "").strip() if isinstance(transfer, dict) else ""
-    if moved_to:
-        release_force_plan_obligation(ctx, moved_to)
-    return moved_to
-
-
-def unmet_force_plan_obligation(ctx: Any) -> Dict[str, Any]:
-    """Does THIS task still owe a plan review nobody has started (owner 3=A)?
-
-    A Swarm-admitted root carries ``force_plan`` in its metadata; the obligation is
-    MET once one ask of its plan reached at least one reviewer (the same fact
-    ``force_plan_decision`` reads; a dispatched legacy v2 wave of an in-flight task counts).
-    Only an UNMET obligation follows the work a promote moves elsewhere. An
-    unreadable record is not proof of anything and transfers nothing (I-17).
-    """
-    from ouroboros import plan_record
-
-    if reconcile_transferred_obligation(ctx):
-        return {"unmet": False, "reason": "transferred"}
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    if metadata.get("force_plan") is not True:
-        return {"unmet": False, "reason": "not_required"}
-    task_id = str(getattr(ctx, "task_id", "") or "").strip()
-    root = _canonical_root(ctx)
-    if not task_id or root is None:
-        return {"unmet": False, "reason": "no_task_identity"}
-    record, legacy, unreadable = _plan_facts(ctx)
-    if unreadable:
-        return {"unmet": False, "reason": "plan_record_unreadable"}
-    if plan_record.asks_dispatched(record) + int(legacy.get("asks_dispatched") or 0) > 0:
-        return {"unmet": False, "reason": "plan_asked"}
-    return {
-        "unmet": True,
-        "source": str(metadata.get("force_plan_source") or "operator").strip() or "operator",
-    }
-
-
-def release_force_plan_obligation(ctx: Any, transferred_to: str) -> None:
-    """The worker's copy of the fact the supervisor released in the promote
-    transaction: ``force_plan_decision`` reads this metadata, so the promoter's
-    own finalization stops requiring a plan the new root now owes."""
-    metadata = getattr(ctx, "task_metadata", None)
-    if not isinstance(metadata, dict):
-        return
-    metadata["force_plan"] = False
-    metadata["force_plan_transferred_to"] = str(transferred_to or "")
-
-
 def _objection_lines(decision: Dict[str, Any], *, holding_only: bool) -> List[str]:
+    from ouroboros.plan_record import ask_subject
+
     rows = [o for o in decision.get("open_objections") or [] if not holding_only or o.get("holds")]
-    return [f"{o.get('seat_id')}/{o.get('id')} (ask {o.get('ask_id')}, revision {o.get('revision')}"
+    return [f"{o.get('seat_id')}/{o.get('id')} (ask {o.get('ask_id')}, {ask_subject(o.get('revision'))}"
             + ("; not adjudicated in its raiser's last reply" if o.get("not_adjudicated") else "")
             + ("; imported from the previous plan review" if o.get("legacy") else "") + f"): {o.get('text')}" for o in rows]
 
 
 def plan_review_reminder(decision: Dict[str, Any]) -> str:
     """The user-turn reminder appended while the planning gate holds the normal final
-    answer (``_enforce_swarm_actions``)."""
+    answer (``_enforce_plan_gate``)."""
     tag = "[PLAN_REVIEW_HOLD]"
     status = str(decision.get("status") or "")
     if status == "unreadable":
         return (f"{tag} This task's plan record cannot be read, so the gate holds until it can; "
                 "plan_task() reads it, and finish_task(action='stop') ends honestly with unfinished work.")
-    if status == "force_plan_unmet":
-        return (f"{tag} This task was admitted with a planning obligation. Write your plan with plan_task — goal, "
-                "done_when, affected_paths (the files the work will change; [] when none) and plan prose — and ask "
-                "the council (ask='council'); an ask that reaches at least one reviewer satisfies it. Analysis and "
-                "non-mutating preparation remain open.")
     held = _objection_lines(decision, holding_only=True)
     return (f"{tag} Blocking enforcement: {len(held)} open objection{'' if len(held) == 1 else 's'} of owner-marked "
             "reviewers hold your normal final answer:\n- " + "\n- ".join(held) + "\n"
@@ -533,16 +454,15 @@ def plan_review_reminder(decision: Dict[str, Any]) -> str:
 def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "") -> str:
     """The loud host suffix when the planning gate did not hold the final answer but the
     council's talk was not over: open objections (released by a rail, Advisory, Cyber Pro
-    or the owner's hurry), asks whose answers had not arrived, an unmet Swarm obligation
-    or an unreadable record released by a rail."""
+    or the owner's hurry), asks whose answers had not arrived, or an unreadable record
+    released by a rail."""
     if not decision.get("required"):
         return ""
     objections = decision.get("open_objections") or []
     pending = decision.get("pending_asks") or []
     status = str(decision.get("status") or "")
-    unmet = decision.get("force_plan_met") is False
     unreadable = bool(decision.get("unreadable"))
-    if not objections and not pending and not unmet and not unreadable:
+    if not objections and not pending and not unreadable:
         return ""
     held = [o for o in objections if o.get("holds")]
     count = (f"{len(objections)} open objection{'' if len(objections) == 1 else 's'}"
@@ -556,10 +476,8 @@ def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "") ->
             what = f"{count}: {listed}"
         elif pending:
             what = "answers still on their way for ask(s) " + ", ".join(pending)
-        elif unreadable:
-            what = "the plan record could not be read"
         else:
-            what = "the planning obligation was not met"
+            what = "the plan record could not be read"
         return f"\n\n⚠️ {subject} is open ({what}); {rail} required best-effort finalization."
     if objections:
         why = ("released by the owner's hurry request" if decision.get("owner_hurry_local_advisory") else
@@ -571,15 +489,6 @@ def plan_review_disclosure(decision: Dict[str, Any], forced_reason: str = "") ->
                 + " had not arrived when the task ended; silence holds nothing and is not agreement"
                 + (f"; the dispatch outcome of ask(s) {', '.join(decision['unknown_outcome'])} is unknown — a new ask may pay twice"
                    if decision.get("unknown_outcome") else "") + ".")
-    if unmet and decision.get("allow"):
-        attempts = int(decision.get("asks_unroutable") or 0)
-        reached = (f"{attempts} ask{'' if attempts == 1 else 's'} could reach no reviewer (every named route was unavailable)"
-                   if attempts else "no ask reached a reviewer")
-        why = ("released by the owner's hurry request" if decision.get("owner_hurry_local_advisory") else
-               "Cyber Pro: Ouroboros proceeded by its own judgment" if decision.get("decision_authority") == "cyber_pro" else
-               "outages never hold, so the obligation is disclosed, not held" if str(decision.get("enforcement") or "") == "blocking" else
-               "work proceeded under the owner-selected advisory enforcement")
-        return f"\n\n⚠️ Plan review: this task's planning obligation was not met — {reached}; {why}."
     return ""
 
 

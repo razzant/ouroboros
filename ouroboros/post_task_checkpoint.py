@@ -245,6 +245,11 @@ def _delegated_receipt_counts(value: Any) -> tuple[int, int] | None:
     return counts
 
 
+# Local custody rows are written only by their owners and the retirement writers on the canonical
+# result (``tool_custody``, ``local_custody_repair``); a child's replica carries results, not custody.
+CANONICAL_CUSTODY_FIELDS = ("launch_handoffs", "retired_tool_invocations", "retired_model_consumers")
+
+
 def project_replica_task_result_fields(
     canonical_fields: Dict[str, Any],
     replica_fields: Dict[str, Any],
@@ -255,7 +260,8 @@ def project_replica_task_result_fields(
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
     rules below. The replica continues to own result and trace fields;
-    review snapshots retain the newest host publication of each panel.
+    review snapshots retain the newest host publication of each panel, and a
+    verification ledger stays canonical while the replica carries the same capture.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
     """
     from ouroboros.terminal_time import preserve_terminal_attempt, replica_terminal_time
@@ -269,6 +275,8 @@ def project_replica_task_result_fields(
     # including its absence on historical rows; replicas cannot originate it.
     overlay.pop("canonical_terminal_projection_origin", None)
     overlay.pop("pause_notices", None)  # confirmed host transitions alone own pending chat disclosure
+    for field in CANONICAL_CUSTODY_FIELDS:  # a replica never revives a retired claim nor erases a live one
+        overlay.pop(field, None)
     # Unread-mail custody is a union: a stale replica never drops a canonical row.
     from ouroboros.task_custody import merge_unread_mail
 
@@ -286,6 +294,14 @@ def project_replica_task_result_fields(
         overlay["review_projection"] = merge_review_projection(
             canonical_fields.get("review_projection"), overlay["review_projection"],
         )
+    # Each producer call dates its ledger capture (``created_at``). The canonical copy of the same
+    # capture holds the host's refreshed summary (#2472) and any refs retention rebound; only a
+    # later capture from the child replaces it.
+    ledger = canonical_fields.get("verification_ledger")
+    if (isinstance(ledger, dict) and ledger.get("created_at")
+            and isinstance(overlay.get("verification_ledger"), dict)
+            and overlay["verification_ledger"].get("created_at") == ledger["created_at"]):
+        overlay.pop("verification_ledger")
     canonical_checkpoint = canonical_fields.get("root_phase_checkpoint")
     canonical_post_task = (
         str(canonical_checkpoint.get("post_task_synthesis") or "")
@@ -542,9 +558,10 @@ def set_root_post_task_checkpoint(
                 from ouroboros.usage_accounting import usage_breakdown
                 from supervisor.state import reconstruct_task_cost
 
-                cost_fields.update(reconstruct_task_cost(task_id, fields=True, drive_root=authority_root))
+                cost_fields.update(reconstruct_task_cost(task_id, fields=True, drive_root=authority_root,
+                                                         custody_root=env.drive_root))
                 subtree = usage_breakdown(
-                    authority_root, root_task_id=logical_root_id
+                    authority_root, root_task_id=logical_root_id, custody_root=env.drive_root, include_custody=True
                 )
                 accounting = _root_accounting_snapshot(logical_root_id, subtree)
                 subtree_final = bool(subtree.get("cost_final"))
@@ -554,6 +571,7 @@ def set_root_post_task_checkpoint(
                         round(subtree_amount, 6) if subtree_amount is not None else None
                     ),
                     "cost_with_children_partial": not subtree_final,
+                    "cost_custody": subtree.get("cost_custody"),
                     "cost_final": bool(cost_fields.get("cost_final") and subtree_final),
                     # #498: a ROOT's terminal record speaks for its whole tree, so
                     # the carrier is rebuilt from the SUBTREE bucket, replacing the

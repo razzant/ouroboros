@@ -2,13 +2,13 @@
 
 The best-effort work the post-task orchestrator
 (``agent_task_pipeline._run_post_task_processing_async``) dispatches after a
-task ends: the tool-trace summary, the free host facts row, the fallback
-memory draft (only while consciousness is off) and scratchpad compression,
-plus the shared pre-synthesis usage snapshot and the compact review
-projection. No stage writes lessons, the Pattern Register or the backlog:
-the acting mind authors those (``knowledge_write``). Extracted from
-agent_task_pipeline.py; the pipeline re-exports every name, so historical
-imports and monkeypatch targets keep working."""
+task ends: the tool-trace summary, the free host facts row and the fallback
+memory draft or candidate, plus the shared pre-synthesis usage snapshot and
+the compact review projection. No stage writes lessons or knowledge notes:
+the acting mind authors those (``knowledge_write``); no stage rewrites the
+scratchpad: the mind folds it (#918, ``update_scratchpad`` with ``replaces``).
+Extracted from agent_task_pipeline.py; the pipeline re-exports every name, so
+historical imports and monkeypatch targets keep working."""
 
 from __future__ import annotations
 
@@ -77,7 +77,6 @@ def task_tool_metrics(llm_trace: dict) -> dict:
 def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -> dict:
     """Freeze the existing owner corpus and check receipts before actor cleanup."""
     from ouroboros._outcome_receipts import verification_receipt_ledger_row
-    from ouroboros.observability import redact_projection
     from ouroboros.review_evidence_sections import (
         _accept_owner_directives, _accept_verification_summary,
     )
@@ -116,7 +115,7 @@ def capture_task_inputs(ctx: Any, task: dict, drive_root: Any, receipts: list) -
         log.warning("Task verification input unavailable for synthesis: %s", task_id, exc_info=True)
     # Copy once into the normal durable completion package. Prompt workers must
     # neither retain mutable actor objects nor re-read a later task's messages.
-    return json.loads(json.dumps(redact_projection(result).value, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(result, ensure_ascii=False, default=str))
 
 
 
@@ -237,10 +236,11 @@ def _pre_synthesis_usage_snapshot(
         from ouroboros.cost_projection import COST_SCOPE_ROOT_TREE, build_cost_presentation
 
         logical_root_id = str(task.get("root_task_id") or task_id)
-        subtree = usage_breakdown(budget_root, root_task_id=logical_root_id)
+        subtree = usage_breakdown(budget_root, root_task_id=logical_root_id, custody_root=env.drive_root, include_custody=True)
         snapshot.update({
             "accounted_upper_bound_usd_with_children": round(float(subtree["accounted_usd"]), 6),
             "cost_presentation": build_cost_presentation(subtree, scope=COST_SCOPE_ROOT_TREE),
+            "cost_custody": subtree.get("cost_custody"),
             "reserved_usd": round(float(subtree["reserved_usd"]), 6),
             "unresolved_upper_bound_usd": round(
                 float(subtree["unresolved_upper_bound_usd"]), 6
@@ -279,7 +279,7 @@ def _compact_review_projection(llm_trace: Dict[str, Any], task: Dict[str, Any] |
 
         records, omitted = task_ledger_records(task or {}, drive_root)
         projection = compact_review_projection(llm_trace.get("review_runs") or [], records=records)
-        if records:
+        if records or omitted == "1+":
             projection["review_records_omitted"] = omitted
         return projection
     except Exception:
@@ -327,12 +327,12 @@ def _record_task_facts(env: Any, task: Dict[str, Any], usage: Dict[str, Any],
             "_is_direct_chat": bool(task.get("_is_direct_chat")), **initiator_meta(task),
             **({"typed_routing_action": str(usage["typed_routing_action"])} if usage.get("typed_routing_action") else {}),
             "text": "", **task_tool_metrics(llm_trace),
-            "rounds": None if usage.get("loop_evidence_unavailable") else int(usage.get("rounds") or 0),
+            "rounds": usage.get("rounds"),
             "outcome_axes": normalize_outcome_axes(usage), "reason_code": str(usage.get("reason_code") or ""),
             "result_ref": {"kind": "task_result", "task_id": task_id, "reader": "get_task_result"},
             "files_rescued": files_rescued,
             **_summary_row_cost_fields(usage), **presence_provenance_fields(task),
-            **({"review_projection": review_projection} if review_projection.get("panels") else {}),
+            **({"review_projection": review_projection} if review_projection.get("panels") or review_projection.get("gaps") or review_projection.get("review_records_omitted") else {}),
         })
     except Exception:
         log.warning("Task facts row was not recorded for %s (non-critical)", task_id, exc_info=True)
@@ -401,8 +401,8 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
                                llm_trace: Dict[str, Any]) -> str:
     """Run the fallback memory draft (``memory_fallback``) inside the root post-task worker.
 
-    With consciousness on it reads one state and makes no call. Otherwise at most one
-    Light call, scoped and billed as consolidation; a refusal with a receipt and a
+    At most one Light call drafts an acting record (consciousness off) or an unsealed
+    failed-work candidate (on), billed as consolidation; a refusal with a receipt and a
     returned failure read ``degraded``, a budget or unknown-provider kind interrupts.
     """
     try:
@@ -428,7 +428,7 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
             append_jsonl(pathlib.Path(drive_logs) / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "memory_fallback_draft", "task_id": str(task.get("id") or ""),
                 "unit": run.unit.describe() if run.unit else None, "outcome": run.outcome, "kind": run.kind or None,
-                "record_id": run.record_id or None, "input_tokens": run.input_tokens,
+                "record_id": run.record_id or None, "input_tokens": run.input_tokens, "effect": run.effect or None,
                 "accounted_upper_bound_usd": round(float(usage["cost"]), 6) if usage.get("cost") is not None else None,
                 "route": observed_route_stamp(usage) if usage else None})
         except Exception:
@@ -438,41 +438,6 @@ def _run_memory_fallback_draft(env: Any, task: Dict[str, Any], llm: Any, drive_l
         propagate_paid_interruption(error)
         log.debug("Fallback memory draft setup failed", exc_info=True)
         return "stage_setup_failed"
-
-
-def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
-    """Run scratchpad consolidation inside the root post-task worker."""
-    try:
-        from ouroboros import consolidator as _c
-
-        should_consolidate = _c.should_consolidate_scratchpad
-        consolidate = _c.consolidate_scratchpad
-        if should_consolidate(memory):
-            _identity = memory.load_identity()
-            from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
-
-            base_scope = current_usage_scope()
-            scratch_scope = (
-                replace(base_scope, category="consolidation", source="scratchpad_consolidation")
-                if base_scope is not None
-                else UsageScope(
-                    drive_root=env.drive_root,
-                    category="consolidation",
-                    source="scratchpad_consolidation",
-                )
-            )
-
-            with usage_scope(scratch_scope):
-                u = consolidate(memory, llm, _identity)
-            if u and (u.get("cost") or u.get("prompt_tokens")):
-                from supervisor.state import update_budget_from_usage
-                update_budget_from_usage(u)
-            return _post_task_paid_interruption(u.get("_consolidation_errors") if isinstance(u, dict) else [])
-    except Exception as error:
-        propagate_paid_interruption(error)
-        log.debug("Scratchpad consolidation setup failed", exc_info=True)
-        return "stage_setup_failed"
-
 
 
 # --- a Pause an earlier version saved: ended once by the maintenance pass ---

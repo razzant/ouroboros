@@ -73,7 +73,7 @@ def test_large_operative_values_persist_once_and_rehydrate_for_consumers(tmp_pat
 @pytest.mark.parametrize("damage", ["missing", "changed"])
 def test_unavailable_full_spec_preserves_paid_state_and_never_becomes_empty_claims(tmp_path, damage, source):
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.owner_hurry import force_plan_decision
+    from ouroboros.owner_hurry import plan_gate_decision
     from ouroboros.review_evidence_sections import _accept_effective_claims
 
     _, wave = _record(tmp_path, _spec(goal="Deliver", acceptance_claims=[_claim("required criterion")]))
@@ -90,7 +90,7 @@ def test_unavailable_full_spec_preserves_paid_state_and_never_becomes_empty_clai
     # The claims binder the result review reads raises; it never answers with an empty bar.
     with pytest.raises(artifacts.PlanReviewSourceUnavailable):
         _accept_effective_claims(ctx, ctx.task_contract, tmp_path, "large-plan")
-    assert force_plan_decision(ctx, {}, enforcement="blocking")["allow"] is False
+    assert plan_gate_decision(ctx, {}, enforcement="blocking")["allow"] is False
 
 
 def test_legacy_cut_without_source_keeps_its_gap(tmp_path):

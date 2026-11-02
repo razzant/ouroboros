@@ -7,10 +7,14 @@ stale page) answers 409 ``card_stale`` instead of reaching whatever control now 
 that id. An action declaring ``once: true`` keeps only its first press (a later one
 answers 409 with the winner). The card store records the press first, then it is
 delivered: into the authoring task's mailbox as a ``card_input`` frame while that task
-still reads its mail, else as the owner's own message in the card's chat
-(``deliver_as_owner_message``, the late-quiz path) — their words only (the pressed
-label and the form's values), as a reply to the card's row. A failed delivery stays
-``owed``; the same ``request_id`` retries it, whatever the card became since.
+lives, else its admitted Continue successor's (a paused, held or queued one keeps it until
+it continues and reads it: ``awaiting_recipient_read``; no hold is released), else as the
+owner's own message in the card's chat (``deliver_as_owner_message``, the late-quiz path)
+— their words only (the pressed label and the form's values), as a reply to the card's
+row, typed ``card_press`` so it follows its author's thread like a late answer: the head an
+earlier late answer or press of that author started, else a fresh one, never another
+task's reader. A failed delivery stays ``owed``; the same ``request_id`` retries it,
+whatever the card became since.
 """
 
 from __future__ import annotations
@@ -31,13 +35,31 @@ _MAX_VALUE_CHARS = 4000
 _MAX_VALUES_BYTES = 64 * 1024
 
 
-def card_input_frame(record: Dict[str, Any], label: str, values: Optional[Dict[str, Any]]) -> str:
-    """The host-authored frame the authoring task reads; the press is the owner's, the words are the host's."""
-    text = (f"[Card input] The owner pressed «{label}» on your card «{record.get('title') or ''}» "
-            f"(card {record['card_id']}).")
+def card_input_frame(record: Dict[str, Any], label: str, values: Optional[Dict[str, Any]], *, author: str = "") -> str:
+    """The host-authored frame its reader reads; the press is the owner's, the words are the host's.
+    ``author`` names the task that showed the card when the reader is another task."""
+    card = f"the card «{record.get('title') or ''}» that task {author} showed" if author else \
+        f"your card «{record.get('title') or ''}»"
+    text = f"[Card input] The owner pressed «{label}» on {card} (card {record['card_id']})."
     if values:
         text += "\nValues:\n" + json.dumps(values, ensure_ascii=False, indent=1)
     return text
+
+
+def card_press_model_text(root: Any, ref: Any, owner_words: str) -> str:
+    """What a head reads for a press on a finished author's card: the frame rebuilt from the stored press;
+    an unreadable one keeps the owner's words with that author named."""
+    from ouroboros.card_store import find_submission, late_press_ref, load_card
+
+    press = late_press_ref(ref)
+    if press is None:
+        return owner_words
+    record = load_card(root, press["card_id"]) or {}
+    row = find_submission(record, press["request_id"]) or {}
+    if not row:
+        return f"[Card input] On a card of task {press['task_id']} that can no longer be read, the owner pressed:\n{owner_words}"
+    return card_input_frame({**record, "title": row.get("title", record.get("title"))},
+                            str(row.get("label") or row.get("action_id") or ""), row.get("values"), author=press["task_id"])
 
 
 def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
@@ -74,38 +96,54 @@ def _checked_values(raw: Any, action: Dict[str, Any]) -> Tuple[Optional[Dict[str
 
 def _deliver(drive_root: pathlib.Path, record: Dict[str, Any], submission: Dict[str, Any],
              source: str) -> Tuple[str, str]:
-    """``(delivery, reason)`` for one recorded press: ``delivered``, ``forwarded`` or ``owed``."""
+    """``(delivery, reason)`` for one recorded press: ``delivered`` into its author's, else its admitted
+    Continue successor's, mailbox (``awaiting_recipient_read`` while that one reads no mail now),
+    ``forwarded`` or ``owed``; a press the owner's ingress already accepted converges there."""
     from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, is_a2a_chat_id
-    from ouroboros.gateway.task_decision import _live_root_task, deliver_as_owner_message
+    from ouroboros.gateway.task_decision import _mail_holder, deliver_as_owner_message
     from ouroboros.owner_mailbox import KIND_CARD_INPUT, write_owner_message
-    from supervisor import queue as q
+    from ouroboros.question_answers import admitted_successor, reading_recipient
+    from supervisor import message_bus, queue as q
     from supervisor.workers import get_direct_chat_agent
 
     card_id, request_id = str(record["card_id"]), str(submission["request_id"])
     label = str(submission.get("label") or submission["action_id"])
+    card = {**record, "title": submission.get("title", record.get("title"))}
     # A press goes to the author of the card it was pressed on, also when it is retried after a replace.
-    text = card_input_frame({**record, "title": submission.get("title", record.get("title"))}, label,
-                            submission.get("values"))
     task_id = str(submission.get("task_id", record.get("task_id")) or "")
-    if task_id:
-        agent = get_direct_chat_agent(task_id)
-        # Room intake's admission owner: no mailbox write after the author's final drain closed.
-        with getattr(agent, "_owner_message_admission_lock", None) or q._queue_lock:
-            task, _reason = _live_root_task(task_id)
-            if task is not None:
-                drive = pathlib.Path(drive_root) if agent is not None else q._task_drive_for_task(task, task_id)
-                if write_owner_message(drive, text, task_id, msg_id=f"card_input:{card_id}:{request_id}",
-                                       kind=KIND_CARD_INPUT):
-                    return "delivered", ""
-                return "owed", "mailbox_write_failed"
     chat_id = record.get("publication_chat_id", record.get("chat_id"))
+    client_id = f"card_input:{card_id}:{request_id}"
+    # A press the owner's ingress already accepted keeps that one effect: its retry converges there.
+    accepted = type(chat_id) is int and message_bus.accepted_chat_message(drive_root, chat_id, client_id) is not None
+    # The author, else its admitted Continue successor: whichever lives holds the press, as for an answer.
+    recipient, holder = reading_recipient(drive_root, task_id, _mail_holder) if task_id and not accepted else ("", None)
+    attempted = set()
+    while holder is not None and recipient not in attempted:
+        attempted.add(recipient)
+        agent = get_direct_chat_agent(recipient)
+        # Room intake's admission owner: no mailbox write after the recipient's final drain closed.
+        with getattr(agent, "_owner_message_admission_lock", None) or q._queue_lock:
+            task, reason = _mail_holder(recipient)
+            if task is not None:
+                drive = pathlib.Path(drive_root) if agent is not None else q._task_drive_for_task(task, recipient)
+                text = card_input_frame(card, label, submission.get("values"), author="" if recipient == task_id else task_id)
+                # Paused, held or queued: the press waits for it like an answer does, and its read settles the wait.
+                waits = reason == "task_not_reading"
+                if write_owner_message(drive, text, recipient, msg_id=client_id, kind=KIND_CARD_INPUT, card_delivery={
+                        "card_id": card_id, "request_id": request_id, "canonical_root": str(drive_root)} if waits else None):
+                    return "delivered", "awaiting_recipient_read" if waits else ""
+                return "owed", "mailbox_write_failed"
+        # It ended before admission: follow its admitted Continue under that one's own lock, as an answer does.
+        recipient, holder = reading_recipient(drive_root, admitted_successor(drive_root, recipient), _mail_holder)
     if type(chat_id) is not int or is_a2a_chat_id(chat_id) or chat_id == HIDDEN_CHAT_ID:
         return "owed", "card_chat_unanswerable"
     # The owner's bubble holds their words; replying to the card's row tells the model which card they answered.
     address = str(record.get("publication_address") or "")
+    # No living holder: the typed press follows its author's thread in routing, the way a late answer does.
+    metadata = {**({"reply_to": address} if address else {}),
+                **({"card_press": {"task_id": task_id, "card_id": card_id, "request_id": request_id}} if task_id else {})}
     forwarded, reason = deliver_as_owner_message(drive_root, chat_id, owner_press_text(label, submission.get("values")),
-                                                 f"card_input:{card_id}:{request_id}", source=source,
-                                                 task_metadata={"reply_to": address} if address else None)
+                                                 client_id, source=source, task_metadata=metadata or None)
     return ("forwarded", "") if forwarded else ("owed", reason or "late_answer_delivery_unknown")
 
 
@@ -123,7 +161,8 @@ async def answer_card_decision(drive_root: pathlib.Path, body: Dict[str, Any], *
     """Record and deliver one press; ``(status, DecisionResponse)``. The caller checked ``request_id``."""
     import asyncio
 
-    from ouroboros.card_store import CardStoreError, find_submission, load_card, mark_delivery, record_submission
+    from ouroboros.card_store import (CardStoreError, find_submission, load_card, mark_delivery, press_wait,
+                                      record_submission)
     from ouroboros.contracts.plugin_api import ExtensionRegistrationError
     from ouroboros.extension_ui_validation import validate_card_components
 
@@ -174,7 +213,7 @@ async def answer_card_decision(drive_root: pathlib.Path, body: Dict[str, Any], *
                      "winner": {"request_id": str(winner.get("request_id") or ""), "at": str(winner.get("at") or ""),
                                 "delivery": str(winner.get("delivered") or "owed")}}
     submission, record = outcome["submission"], outcome["record"]
-    delivery, reason = str(submission.get("delivered") or "owed"), ""
+    delivery, reason = str(submission.get("delivered") or "owed"), press_wait(submission)
     if delivery == "owed":
         try:
             delivery, reason = await run_sync_to_completion(_deliver, drive_root, record, submission, source)
@@ -182,7 +221,9 @@ async def answer_card_decision(drive_root: pathlib.Path, body: Dict[str, Any], *
             log.warning("Card press delivery remains owed for %s", card_id, exc_info=True)
             delivery, reason = "owed", "card_delivery_failed"
         if delivery != "owed":
-            record = await asyncio.to_thread(mark_delivery, drive_root, card_id, request_id, delivery) or record
+            record = await asyncio.to_thread(mark_delivery, drive_root, card_id, request_id, delivery, reason) or record
+            if delivery == "delivered":  # the answer says what the record says: a read that came first ended the wait
+                reason = press_wait(find_submission(record, request_id) or {})
     try:
         from supervisor.card_delivery import send_card_state
         from supervisor.message_bus import get_bridge
@@ -194,7 +235,7 @@ async def answer_card_decision(drive_root: pathlib.Path, body: Dict[str, Any], *
                "delivery": delivery, "card_id": card_id, "revision": int(record.get("revision") or 1)}
     if delivery == "owed":
         return 202, {**payload, "reason_code": reason}
-    return 200, payload
+    return 200, {**payload, "reason_code": reason} if reason else payload
 
 
-__all__ = ["answer_card_decision", "card_input_frame", "owner_press_text"]
+__all__ = ["answer_card_decision", "card_input_frame", "card_press_model_text", "owner_press_text"]

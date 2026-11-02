@@ -1,4 +1,4 @@
-"""Activity distinguishes a retained accepted occurrence from a removed schedule."""
+"""Activity keeps a withdrawn schedule visible and restorable, its accepted work in flight included."""
 from __future__ import annotations
 
 import datetime
@@ -15,7 +15,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
-def test_schedule_delete_reports_retained_work_and_real_removal(direct_server_with_data):
+def test_schedule_delete_withdraws_rows_that_stay_visible_and_restorable(direct_server_with_data):
     from playwright.sync_api import expect, sync_playwright
 
     from ouroboros.task_results import write_task_result
@@ -63,16 +63,18 @@ def test_schedule_delete_reports_retained_work_and_real_removal(direct_server_wi
                     page.click('[data-dashboard-tab="activity"]')
                     section = page.locator('[data-activity-section="schedules"]')
                     retained = section.locator(f'[data-act="schedule-delete"][data-id="{schedule_id}"]')
-                    retained.click()
-                    with page.expect_response(lambda response: response.url.endswith(f"/api/schedules/{schedule_id}/action")
-                                              and response.request.method == "POST") as changed:
-                        page.get_by_role("dialog").get_by_role("button", name="Delete", exact=True).click()
-                    result = changed.value.json()
-                    assert result["status"] == "delete_deferred" and result["schedule"] is not None
-                    toast = page.locator(".toast").filter(has_text="Schedule deletion is pending:").last
-                    expect(toast).to_contain_text(result["detail"])
-                    expect(toast).to_have_css("opacity", "1")
+                    if name == "desktop":
+                        retained.click()
+                        with page.expect_response(lambda response: response.url.endswith(f"/api/schedules/{schedule_id}/action")
+                                                  and response.request.method == "POST") as changed:
+                            page.get_by_role("dialog").get_by_role("button", name="Delete", exact=True).click()
+                        result = changed.value.json()
+                        assert result["status"] == "withdrawn" and result["schedule"] is not None, result
+                        toast = page.locator(".toast").filter(has_text="Schedule withdrawn.").last
+                        expect(toast).to_have_css("opacity", "1")
+                    # Known work in flight keeps the withdrawn row in the standing list.
                     expect(retained).to_be_visible()
+                    expect(section).to_contain_text("deletion pending · work in flight")
                     shot = diagnostic_directory(root.parent, "schedule-delete") / f"schedule-delete-{name}.png"
                     page.screenshot(path=str(shot), full_page=True, animations="disabled")
                     print(f"SCHEDULE_DELETE_SCREENSHOT {shot}")
@@ -82,8 +84,17 @@ def test_schedule_delete_reports_retained_work_and_real_removal(direct_server_wi
                                               and response.request.method == "POST") as removed:
                         page.get_by_role("dialog").get_by_role("button", name="Delete", exact=True).click()
                     result = removed.value.json()
-                    assert result["status"] == "deleted" and result["schedule"] is None
-                    expect(removable).to_have_count(0)
+                    assert result["status"] == "withdrawn" and result["schedule"] is not None, result
+                    # Without work in flight the withdrawn row moves to history and can come back.
+                    expect(removable).to_be_hidden()
+                    section.locator("[data-activity-history] > summary").click()
+                    expect(section.locator("[data-activity-history]")).to_contain_text("withdrawn · restorable")
+                    restore = section.locator(f'[data-act="schedule-toggle"][data-id="{clean_id}"][data-action="restore"]')
+                    with page.expect_response(lambda response: response.url.endswith(f"/api/schedules/{clean_id}/action")
+                                              and response.request.method == "POST") as restored:
+                        restore.click()
+                    assert restored.value.json()["status"] == "updated", restored.value.json()
+                    expect(section.locator(f'[data-act="schedule-toggle"][data-id="{clean_id}"][data-action="disable"]')).to_be_visible()
                 finally:
                     page.close()
         finally:

@@ -12,6 +12,7 @@ from tests import test_subscription_setup_browser as setup_browser
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
+settings_saves = setup_browser.settings_saves
 # Every route picker offers an API lane per provider whose credential is
 # stored, so a fixture that selects one advertises that provider's key first.
 API_KEYS = {"openrouter": "OPENROUTER_API_KEY", "openai": "OPENAI_API_KEY"}
@@ -75,8 +76,7 @@ def open_agents(ui):
 
 
 def saved_catalog(ui):
-    writes = [body for path, body in ui["posts"] if path == "/api/settings"]
-    actors = writes[-1]["OUROBOROS_SUBAGENTS"]
+    actors = settings_saves(ui)[-1]["OUROBOROS_SUBAGENTS"]
     return json.loads(actors) if isinstance(actors, str) else actors
 
 
@@ -113,7 +113,7 @@ def test_subscription_accounts_roundtrip_existing_editors(role_ui, width):
     capture(page, f"role-actors-{width}")
     page.locator("#btn-save-settings").click()
     page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    writes = [body for path, body in ui["posts"] if path == "/api/settings"]
+    writes = settings_saves(ui)
     assert len(writes) == 1
     assert "OUROBOROS_REVIEWER_SLOTS" not in writes[0], "review lanes are never authored"
     items = saved_catalog(ui)["items"]
@@ -264,7 +264,7 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
     capture(page, f"catalog-recovery-draft-{consumer.lower()}")
     with page.expect_response("**/api/settings"):
         page.locator("#btn-save-settings").click()
-    saved = [body for path, body in ui["posts"] if path == "/api/settings"][-1]
+    saved = settings_saves(ui)[-1]
     if consumer == "Models":
         assert saved["OUROBOROS_MODEL"] == "claudexor::opaque-source=gpt-owner-unsaved"
         assert saved["OUROBOROS_MODEL_ACCOUNTS"]["main"] == "personal"
@@ -288,5 +288,5 @@ def test_image_generation_has_no_settings_default(role_ui):
     capture(page, "image-settings-model-selected-narrow")
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()
-    saved = [body for path, body in ui['posts'] if path == '/api/settings'][-1]
+    saved = settings_saves(ui)[-1]
     assert 'OUROBOROS_MODEL_IMAGE' not in saved

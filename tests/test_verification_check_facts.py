@@ -212,9 +212,8 @@ def _tool_rows(logs):
 def test_failed_check_reaches_every_consumer_as_one_completed_call(process_context):
     from ouroboros.loop_tool_execution import process_tool_results
     from ouroboros.observability import read_call_payload
-    from ouroboros.outcomes import _classify_tool_errors
+    from ouroboros.outcomes import _OK_TOOL_STATUSES, _classify_tool_errors
     from ouroboros.post_task_synthesis import task_tool_metrics
-    from ouroboros.reflection import _trace_call_errored
     from ouroboros.tool_call_log import replay_evidence
     from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 
@@ -245,7 +244,8 @@ def test_failed_check_reaches_every_consumer_as_one_completed_call(process_conte
     [row] = llm_trace["tool_calls"]
     assert row["verification"] == verdict and row["status"] == "ok"
     # No error bucket and no error in the task-facts census, for a handled criterion failure.
-    assert not _trace_call_errored(row) and task_tool_metrics(llm_trace)["tool_errors"] == 0
+    assert not row["is_error"] and row["status"] in _OK_TOOL_STATUSES
+    assert task_tool_metrics(llm_trace)["tool_errors"] == 0
     assert not any(_classify_tool_errors(llm_trace).values())
     # History replay: the settled observation carries the verdict and the live preview.
     observation = next(o for o in replay_evidence(data, ctx.task_id)["observations"] if o["fact"] == "settled")

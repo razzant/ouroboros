@@ -45,6 +45,16 @@ _TASK_COLUMNS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id"
 _CANDIDATE_PAGES = 10
 
 
+def replica_key(row: Any) -> Optional[tuple]:
+    """A row the passport writes to the task's drive and the canonical log alike (REPLICA_RULE), by its
+    natural key, so a reader of both keeps one; None for every other row and for one missing a key field."""
+    from ouroboros.contracts.record_contract import ANCHOR_BY_TYPE
+
+    anchor = ANCHOR_BY_TYPE.get(str(row.get("type") or "")) if isinstance(row, dict) else None
+    key = tuple(row.get(name) for name in anchor.natural_key) if anchor is not None and anchor.plane == "both" else ()
+    return (anchor.type, *key) if key and all(value not in (None, "") for value in key) else None
+
+
 async def api_logs_tail(request: Request) -> JSONResponse:
     # Child discovery, archived reads and projection can all touch disk.
     return await asyncio.to_thread(_logs_tail, request)
@@ -119,6 +129,8 @@ def _logs_tail(request: Request) -> JSONResponse:
     except StoreError as exc:
         return json_error(f"the dialogue store is unavailable: {exc}", 503, reason_code="history_source_unavailable")
     rows.sort(key=lambda item: (str(item.get("ts") or ""), str(item.get("_source_root") or ""), int(item.get("_line") or 0)))
+    seen: set = set()
+    rows = [row for row in rows if (key := replica_key(row)) is None or not (key in seen or seen.add(key))]
     return JSONResponse({"name": name, "entries": rows[-limit:]})
 
 

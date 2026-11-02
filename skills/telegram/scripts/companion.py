@@ -929,7 +929,8 @@ async def _wait_blocked_state(
             "menu_drift",
         ),
         _GenerationResult.TELEGRAM_BLOCKED: (
-            "Telegram rejected the bot configuration; disable and re-enable after fixing it.",
+            "Telegram rejected the bot configuration; disable and re-enable after fixing it,"
+            " or save another Bot API server.",
             "telegram_rejected",
         ),
         _GenerationResult.SETTINGS_BLOCKED: (
@@ -938,6 +939,11 @@ async def _wait_blocked_state(
         ),
     }
     message, reason_code = messages[reason]
+    # The menu calls follow the saved server, so another saved server is a new attempt;
+    # an unreadable value is no reading, never a change.
+    refused_by = getattr(menu, "last_rejected_api_root", None)
+    if refused_by is None and reason is _GenerationResult.TELEGRAM_BLOCKED:
+        refused_by = settings_observer.api_base()
     while True:
         if not miniapp_enabled(settings_observer.state_dir):
             return _GenerationResult.DISABLED
@@ -958,6 +964,11 @@ async def _wait_blocked_state(
             if reason is _GenerationResult.SETTINGS_BLOCKED:
                 if settings_observer.safe_for_exposure(owner):
                     return _GenerationResult.RECONNECT
+            if reason is _GenerationResult.TELEGRAM_BLOCKED:
+                current = settings_observer.api_base()
+                if refused_by is not None and current is not None and current != refused_by:
+                    return _GenerationResult.RECONNECT
+                refused_by = refused_by or current
         except (TelegramSettingsError, TelegramMenuTransportError, asyncio.TimeoutError):
             continue
         except TelegramMenuError:

@@ -248,11 +248,18 @@ def test_catalog_is_semi_stable_while_dated_history_stays_dynamic(tmp_path, monk
     assert "reviewer_slots_last" in core.dynamic_text
     assert "subagent_last_delegation" in core.dynamic_text
     # An old receipt without a typed identity shows its recorded route target.
-    assert '"selected_subagent_id": "codex=gpt-5.6-sol"' in core.dynamic_text
+    runtime = json.loads(core.dynamic_text.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
+    assert runtime["capabilities"]["delegation"]["subagents_last_executions"][0]["selected_subagent_id"] == "codex=gpt-5.6-sol"
+    # Runtime history is identities and exact readers (C5, THESIS I-7): the requested and applied
+    # profiles stay in the receipts the named readers return.
+    receipts = {name: (tmp_path / "state" / name).read_text(encoding="utf-8")
+                for name in ("reviewer_slot_last_execution.json", "subagent_last_delegation.json")}
+    assert all(f"state/{name}" in core.dynamic_text for name in receipts)
     for profile in (
         "review-requested", "review-applied", "delegate-requested", "delegate-applied",
     ):
-        assert profile in core.dynamic_text
+        assert profile not in core.dynamic_text
+        assert any(profile in text for text in receipts.values())
     assert "configured_route" not in core.dynamic_text
 
 
@@ -355,3 +362,103 @@ def test_schedule_subagent_reaches_the_model_with_the_typed_disabled_refusal(
     assert "subagent_disabled" in result
     assert "switched off" in result
     assert "unknown_subagent_id" not in result
+
+
+def test_dynamic_session_supervision_fact_line_and_switch_model_cache_invariance(
+    tmp_path, monkeypatch,
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+    from ouroboros.context import _capture_context_core
+    from ouroboros.memory import Memory
+    from ouroboros.subagent_runtime import cognitive_route_billing_basis
+
+    system_text = (Path(__file__).resolve().parent.parent / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    assert "Agent-session rows\nrun their leaf on my human's subscriptions (shared quota); scheduling one also\ncreates a supervising child on my own current route — or on the row I name as\nits supervisor — billed as that route bills; API rows on a provider key bill per\ntoken; weighing that is mine." in system_text
+    assert "A configured nanny keeps\nits inherited authority; its cognitive route is my parent's unless the parent\nnamed another row, and I may change it with `switch_model`. Children inside a\nvendor session stay opaque to me." in system_text
+    assert "shared quota, no API dollars" not in system_text
+    assert "keeps\nits inherited authority and cognitive route" not in system_text
+
+    assert cognitive_route_billing_basis("claudexor::claude=sonnet-4-6") == (
+        "claudexor::claude=sonnet-4-6", "subscription",
+    )
+    assert cognitive_route_billing_basis("qwen/qwen3-coder", use_local=True) == (
+        "qwen/qwen3-coder (local)", "unknown",
+    )
+    assert cognitive_route_billing_basis("qwen/qwen3-coder", use_local=True, cost=0.0) == (
+        "qwen/qwen3-coder (local)", "measured",
+    )
+    assert cognitive_route_billing_basis("openai::gpt-5.6-sol") == (
+        "openai::gpt-5.6-sol", "unknown",
+    )
+    assert cognitive_route_billing_basis("openai/gpt-5.6-sol", cost=0.015) == (
+        "openai/gpt-5.6-sol", "measured",
+    )
+
+    env = _context_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    session_settings = _settings(_row(
+        "builder",
+        kind="agent_session",
+        target="codex=gpt-5.6-sol",
+        recommendation="Use for session implementation.",
+        effort="high",
+    ))
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: session_settings)
+    ctx_before = SimpleNamespace(
+        repo_dir=tmp_path / "repo",
+        drive_root=tmp_path,
+        active_model="openai::gpt-5.6-sol",
+        active_use_local=False,
+        task_metadata={"model": "openai::gpt-5.6-sol"},
+    )
+    core_before = _capture_context_core(
+        env, Memory(drive_root=tmp_path),
+        {"id": "task-1", "type": "task", "text": "work", "model": "openai::gpt-5.6-sol"},
+        None, ctx_before,
+    )
+    expected_before = (
+        "An Agent-session row also creates a supervising child on openai::gpt-5.6-sol; "
+        "its calls bill as unknown; the row named as supervisor replaces that route."
+    )
+    assert expected_before in core_before.dynamic_text
+    assert "also creates a supervising child on" not in core_before.semi_stable_text
+
+    # Simulate switch_model to a subscription-backed cognitive route: semi_stable_text stays byte-identical.
+    ctx_after = SimpleNamespace(
+        repo_dir=tmp_path / "repo",
+        drive_root=tmp_path,
+        active_model="openai::gpt-5.6-sol",
+        active_model_override="claudexor::claude=sonnet-4-6",
+        active_use_local=False,
+        task_metadata={"model": "openai::gpt-5.6-sol"},
+    )
+    core_after = _capture_context_core(
+        env, Memory(drive_root=tmp_path),
+        {"id": "task-1", "type": "task", "text": "work", "model": "openai::gpt-5.6-sol"},
+        None, ctx_after,
+    )
+    expected_after = (
+        "An Agent-session row also creates a supervising child on claudexor::claude=sonnet-4-6; "
+        "its calls bill as subscription; the row named as supervisor replaces that route."
+    )
+    assert core_after.semi_stable_text == core_before.semi_stable_text
+    assert expected_after in core_after.dynamic_text
+    assert expected_before not in core_after.dynamic_text
+
+    # API-only install: no Agent-session row in the visible catalog -> fact line is absent.
+    api_only_settings = _settings(_row(
+        "api-builder",
+        kind="api_model",
+        target="openai/gpt-5.6-sol",
+        recommendation="Use for API implementation.",
+        effort="high",
+    ))
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: api_only_settings)
+    core_api = _capture_context_core(
+        env, Memory(drive_root=tmp_path),
+        {"id": "task-1", "type": "task", "text": "work", "model": "openai::gpt-5.6-sol"},
+        None, ctx_before,
+    )
+    assert "also creates a supervising child on" not in core_api.dynamic_text
+    assert "also creates a supervising child on" not in core_api.semi_stable_text

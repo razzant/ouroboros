@@ -8,6 +8,24 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+
+def answered_quiz_block(drive_root: Any, task_id: str, quiz_id: Any) -> dict[str, Any]:
+    """The answered card ``quiz_id`` of ``task_id`` exactly as its projection recorded it, else ``{}``.
+
+    Scope is the caller's: ``resolve_owner_source`` admits only the calling task's own
+    card; Continue reads only the card identity the producer carried into a start.
+    """
+    from ouroboros.owner_quiz import STATE_ANSWERED, quiz_states
+
+    row = quiz_states(drive_root, task_id).get(str(quiz_id or ""), {})
+    if row.get("state") != STATE_ANSWERED or not row.get("request_id"):
+        return {}
+    index = row.get("answered_index")
+    options = row.get("options") or []
+    label = options[index] if type(index) is int and 0 <= index < len(options) else ""
+    return row if label or str(row.get("comment") or "").strip() else {}
+
+
 def resolve_owner_source(ctx: Any, source: Any) -> dict[str, Any]:
     """Resolve an actual owner source belonging to this task's conversation."""
     from ouroboros.tool_access import canonical_data_root
@@ -44,20 +62,13 @@ def resolve_owner_source(ctx: Any, source: Any) -> dict[str, Any]:
     if not task_id or source.get("task_id") != task_id:
         return {}
     if kind == "quiz":
-        from ouroboros.owner_quiz import STATE_ANSWERED, quiz_states
-
-        row = quiz_states(drive, task_id).get(str(source.get("quiz_id") or ""), {})
-        if row.get("state") != STATE_ANSWERED or not row.get("request_id"):
-            return {}
-        index = row.get("answered_index")
-        options = row.get("options") or []
-        label = options[index] if type(index) is int and 0 <= index < len(options) else ""
         from ouroboros.owner_quiz import late_answer_owner_text, recorded_answer_frame
-        text = late_answer_owner_text(row)
-        if not label and not str(row.get("comment") or "").strip():
+
+        row = answered_quiz_block(drive, task_id, source.get("quiz_id"))
+        if not row:
             return {}
         return {"kind": kind, "task_id": task_id, "quiz_id": row["quiz_id"],
-                "request_id": row["request_id"], "ts": row.get("answered_at"), "text": text,
+                "request_id": row["request_id"], "ts": row.get("answered_at"), "text": late_answer_owner_text(row),
                 "question_frame": recorded_answer_frame(row)}
     if kind == "mailbox":
         from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries

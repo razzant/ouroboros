@@ -18,7 +18,8 @@ tarballs have different locations and are deliberately outside this unit's
 contract; containers use [`packaging/docker/compose.yaml`](../docker/compose.yaml)
 ([`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md)).
 
-The package installs the unit at:
+The package installs the unit (tracked here as `ouroboros.service.in`: macOS types a
+`.service` file as an application) at:
 
 ```text
 /usr/lib/systemd/user/ouroboros.service

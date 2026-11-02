@@ -79,6 +79,7 @@ class ToolContext:
     current_chat_id: Optional[int] = None
     current_task_type: Optional[str] = None
     pending_restart_reason: Optional[str] = None
+    pending_restart_request: Optional[Dict[str, Any]] = None
     last_push_succeeded: bool = False
     last_reviewed_commit_sha: str = ""
     # The real binder accepts keyword facts (``narration=True`` for a tool that relays
@@ -125,7 +126,7 @@ class ToolContext:
     # Task depth for fork-bomb protection.
     task_depth: int = 0
 
-    # True inside handle_chat_direct, not a queued worker task.
+    # The task began as direct chat; stays True after a pool handoff (current carrier: task_carrier).
     is_direct_chat: bool = False
     # Pre-commit review state.
     _review_advisory: List[Any] = field(default_factory=list)

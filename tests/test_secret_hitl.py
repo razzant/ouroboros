@@ -1,11 +1,13 @@
 """Integration-secret HITL: showSecretHitl asks, the protected form's saveSecretToken saves.
 
-Proved against a real task store, a real Settings file and the real decision ingress:
-the value reaches ``settings.json`` under the skill's declared key and NOWHERE else
-(response, store, mailbox, history, audit, logs), the model receives metadata-only
-``secret_filled``/``secret_cancelled``, ordinary answer paths refuse the request, and
-save/cancel/failure/duplicate/interruption keep ``saved`` truthful. The canaries have no
-token shape, so no redaction pattern could be what keeps them out of an output.
+Proved against a real task store, a real Settings file and the real decision ingress: the
+value reaches ``settings.json`` under the skill's declared key and NOWHERE else (response,
+store, mailbox, history, audit, logs, transport events); the model receives metadata-only
+``secret_filled``/``secret_replaced``/``secret_cancelled``; ordinary answer paths refuse the
+request; a save writes only while each key is still set or unset as the form showed it, so
+Replace is explicit; the form stays usable after its task ended and a late save resumes
+nothing; save/cancel/failure/duplicate/interruption keep ``saved`` truthful. The canaries have
+no token shape, so no redaction pattern could be what keeps them out of an output.
 """
 
 from __future__ import annotations
@@ -58,11 +60,11 @@ def _write_skill(root: pathlib.Path, name: str = "fakeplug", *, env: str = "FAKE
 
 @pytest.fixture
 def env(tmp_path, monkeypatch, caplog):
+    import supervisor.message_bus as mb
+    import supervisor.queue as q
     from ouroboros import config as cfg
     from ouroboros.gateway import secret_decision as sd
     from ouroboros.gateway import task_decision as td
-    import supervisor.message_bus as mb
-    import supervisor.queue as q
 
     root = tmp_path
     monkeypatch.setattr(cfg, "DATA_DIR", root)
@@ -80,8 +82,18 @@ def env(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(mb, "get_bridge", lambda: Bridge())
     monkeypatch.setattr(mb, "DATA_DIR", root)
     monkeypatch.setattr(mb, "publish_event", lambda *args: events.append(args))
-    live = {"task": {"id": TASK}}
-    monkeypatch.setattr(td, "_live_root_task", lambda task_id: (live["task"], "") if live["task"] else (None, "task_not_live"))
+    # The asker as the queue sees it: reading (""), paused/held ("task_not_reading", a mail holder)
+    # or gone ("task_not_live"), with upstream's holds_mail semantics.
+    live = {"task": {"id": TASK}, "reason": ""}
+
+    def live_root_task(task_id, *, holds_mail=False):
+        if live["task"] is None:
+            return None, "task_not_live"
+        if live["reason"] == "task_not_reading":
+            return (live["task"] if holds_mail else None), "task_not_reading"
+        return live["task"], ""
+
+    monkeypatch.setattr(td, "_live_root_task", live_root_task)
     monkeypatch.setattr(q, "_task_drive_for_task", lambda task, task_id: root, raising=False)
     app = Starlette(routes=[Route("/api/decisions/secret", endpoint=sd.api_secret_decision, methods=["POST"]),
                             Route("/api/decisions", endpoint=td.api_decision_answer, methods=["POST"])])
@@ -100,9 +112,19 @@ def _ask(env, fields=("botToken",), plugin="fakeplug") -> str:
     return quiz_id
 
 
-def _save(env, quiz_id, values, request_id="r1"):
+def _status(env, quiz_id):
+    return env.client.post("/api/decisions/secret", json={"decision_id": f"quiz:{TASK}:{quiz_id}", "action": "status"})
+
+
+def _observed(env, quiz_id):
+    """What a form that just read status shows: per field, whether its key is set."""
+    return {row["id"]: row["configured"] for row in _status(env, quiz_id).json()["keys"]}
+
+
+def _save(env, quiz_id, values, request_id="r1", observed=None):
     return env.client.post("/api/decisions/secret", json={
-        "request_id": request_id, "decision_id": f"quiz:{TASK}:{quiz_id}", "values": values})
+        "request_id": request_id, "decision_id": f"quiz:{TASK}:{quiz_id}", "values": values,
+        "observed": _observed(env, quiz_id) if observed is None else observed})
 
 
 def _cancel(env, quiz_id, request_id="c1"):
@@ -113,6 +135,10 @@ def _cancel(env, quiz_id, request_id="c1"):
 def _settings(env) -> dict:
     path = env.root / "settings.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _put_settings(env, **values):
+    (env.root / "settings.json").write_text(json.dumps({**_settings(env), **values}), encoding="utf-8")
 
 
 def _mail(env):
@@ -135,7 +161,7 @@ def _assert_absent(env, *values, texts=()):
             for needle in needles:
                 assert needle not in data, f"a submitted value leaked into {path}"
     logged = env.caplog.text.encode()
-    for text in [*texts, logged.decode()]:
+    for text in [*texts, logged.decode(), json.dumps(env.events, ensure_ascii=False, default=str)]:
         for value in values:
             assert value not in text and json.dumps(value)[1:-1] not in text
 
@@ -153,11 +179,20 @@ def test_canonical_manifest_field_maps_ids_to_declared_env_keys():
             parse_skill_manifest_text(_MANIFEST.format(name="x", version="1", env="X_TOKEN", fields=fields))
 
 
-def test_telegram_declares_its_bot_token_as_a_custom_secret_field():
+@pytest.mark.parametrize("skill,mapping", [("telegram", {"botToken": "TELEGRAM_BOT_TOKEN"}),
+                                           ("gemini_live", {"apiKey": "GEMINI_API_KEY"}),
+                                           ("grok_realtime", {"apiKey": "XAI_API_KEY"})])
+def test_bundled_skills_declare_their_owner_entered_keys(skill, mapping):
     repo = pathlib.Path(__file__).resolve().parents[1]
-    manifest = parse_skill_manifest_text((repo / "skills" / "telegram" / "SKILL.md").read_text(encoding="utf-8"))
-    assert manifest.secret_fields == {"botToken": "TELEGRAM_BOT_TOKEN"}
-    assert sr.declared_secret_fields(manifest) == {"botToken": "TELEGRAM_BOT_TOKEN"}
+    manifest = parse_skill_manifest_text((repo / "skills" / skill / "SKILL.md").read_text(encoding="utf-8"))
+    assert manifest.secret_fields == mapping and sr.declared_secret_fields(manifest) == mapping
+
+
+def test_openai_realtime_keeps_its_provider_key_in_settings():
+    """OPENAI_API_KEY is a provider credential: no secret form may front it."""
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    manifest = parse_skill_manifest_text((repo / "skills" / "openai_realtime" / "SKILL.md").read_text(encoding="utf-8"))
+    assert manifest.secret_fields == {}
 
 
 @pytest.mark.parametrize("key", ["OPENROUTER_API_KEY", "OUROBOROS_NETWORK_PASSWORD", "GITHUB_TOKEN", "TOTAL_BUDGET"])
@@ -177,8 +212,18 @@ def test_requests_name_only_declared_fields_of_an_installed_skill(env):
             sr.resolve_secret_request(env.root, plugin, fields)
         assert caught.value.code == code
     request = sr.resolve_secret_request(env.root, "fakeplug", ["botToken"])
-    assert request["fields"] == [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN"}]
-    assert request["content_hash"]
+    assert request == {"plugin_name": "fakeplug", "fields": [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN"}]}
+
+
+def test_secret_fields_is_appended_so_positional_manifest_construction_keeps_every_slot():
+    import dataclasses
+
+    from ouroboros.contracts.skill_manifest import SkillManifest
+
+    assert [item.name for item in dataclasses.fields(SkillManifest)][-1] == "secret_fields"
+    positional = SkillManifest("n", "d", "1", "script", "", [], "any", "python3", 30, ["K"], [{"name": "run.py"}])
+    assert positional.env_from_settings == ["K"] and positional.scripts == [{"name": "run.py"}]
+    assert positional.secret_fields == {}
 
 
 # ------------------------------------------------------------------ the tool
@@ -198,12 +243,13 @@ def test_show_secret_hitl_records_a_waiting_metadata_only_question(env, monkeypa
     assert entry.schema["parameters"]["required"] == ["pluginName", "fields"]
 
     text = _show_secret_hitl(ctx, pluginName="fakeplug", fields=["botToken"])
-    assert text.startswith("OK: secret request ") and "secret_filled {pluginName, fields}" in text
+    assert text.startswith("OK: secret request ") and "secret_filled or secret_replaced" in text
+    assert "If this task ends first, the form stays usable" in text and "stops saving" not in text
     [event] = sent
     assert event["type"] == "send_quiz" and event["wait_for_answer"] is True and event["options"] == []
     block = _block(env, event["quiz_id"])
-    assert block["secret_request"]["plugin_name"] == "fakeplug"
-    assert block["secret_request"]["fields"] == [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN"}]
+    assert block["secret_request"] == {"plugin_name": "fakeplug",
+                                       "fields": [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN"}]}
     assert block["wait_for_answer"] is True and ctx._owner_wait_requested == event["quiz_id"]
 
     child = ToolContext(repo_dir=env.root, drive_root=env.root, task_metadata={"parent_task_id": "root"})
@@ -213,7 +259,24 @@ def test_show_secret_hitl_records_a_waiting_metadata_only_question(env, monkeypa
     assert "SECRET_FIELD_UNDECLARED" in refused and len(sent) == 1
 
 
-# ------------------------------------------------------------- save / cancel
+# ------------------------------------------------------------- status / save / cancel
+
+def test_status_names_key_states_and_readers_without_any_value(env):
+    _write_skill(env.root, "reader", env="FAKEPLUG_TOKEN", fields="  token: FAKEPLUG_TOKEN")
+    quiz_id = _ask(env)
+    body = _status(env, quiz_id).json()
+    assert body["state"] == "open" and body["keys"] == [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN",
+                                                        "configured": False}]
+    assert [row["name"] for row in body["consumers"]] == ["fakeplug", "reader"]
+    assert all(row["granted"] == [] and row["reads"] == ["FAKEPLUG_TOKEN"] for row in body["consumers"])
+    _put_settings(env, FAKEPLUG_TOKEN=CANARY)
+    response = _status(env, quiz_id)
+    assert response.json()["keys"][0]["configured"] is True
+    assert response.headers["cache-control"] == "no-store"
+    _assert_absent(env, CANARY, texts=[response.text])
+    assert env.client.post("/api/decisions/secret", json={"decision_id": f"quiz:{TASK}:{quiz_id}", "action": "status",
+                                                          "values": {"botToken": CANARY}}).status_code == 400
+
 
 def test_save_writes_settings_only_and_delivers_metadata_only_secret_filled(env):
     quiz_id = _ask(env)
@@ -222,14 +285,17 @@ def test_save_writes_settings_only_and_delivers_metadata_only_secret_filled(env)
     body = response.json()
     assert body["saved"] is True and body["state"] == "answered" and body["duplicate"] is False
     assert body["secret_filled"] == {"pluginName": "fakeplug", "fields": ["botToken"]}
-    assert body["grant_missing"] == ["FAKEPLUG_TOKEN"]  # saving granted nothing
+    [reader] = body["secret_outcome"]["consumers"]
+    assert reader["name"] == "fakeplug" and reader["granted"] == []  # saving granted nothing
+    assert "replaced_fields" not in body["secret_outcome"]
     assert response.headers["cache-control"] == "no-store"
     assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY
 
     [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]
     assert 'secret_filled: {"pluginName": "fakeplug", "fields": ["botToken"]}' in mail["text"]
-    assert "Secret filled: fakeplug, botToken" in mail["text"]
-    assert "Saved is not connected" in mail["text"] and "Verbatim" not in mail["text"]
+    assert "saved it to Settings (FAKEPLUG_TOKEN)" in mail["text"] and "do not ask for it here" in mail["text"]
+    assert "Saving is not a connection" in mail["text"] and "needs the owner's grant for FAKEPLUG_TOKEN" in mail["text"]
+    assert "Verbatim" not in mail["text"]
     block = _block(env, quiz_id)
     assert block["secret_outcome"]["event"] == "secret_filled" and "comment" not in block
     assert block["secret_save"]["state"] == "saved"
@@ -237,20 +303,93 @@ def test_save_writes_settings_only_and_delivers_metadata_only_secret_filled(env)
     from tests import _dialogue
 
     history = [row for row in _dialogue.chat_rows(env.root) if row.get("type") == "quiz_answer"]
-    assert history and "Secret filled: fakeplug, botToken" in history[-1]["text"]
+    assert history and "saved it to Settings (FAKEPLUG_TOKEN)" in history[-1]["text"]
     assert any(frame.get("secret_outcome", {}).get("event") == "secret_filled" for frame in env.frames)
     audit = [json.loads(line) for line in (env.root / "logs" / "events.jsonl").read_text().splitlines()]
     assert any(row.get("action") == "secret_request_save" and row.get("fields") == ["botToken"] for row in audit)
     _assert_absent(env, CANARY, texts=[response.text, json.dumps(env.frames, ensure_ascii=False)])
 
-    replay = _save(env, quiz_id, {"botToken": CANARY})
+    replay = _save(env, quiz_id, {"botToken": CANARY}, observed={"botToken": False})  # the same tab's retry
     assert replay.status_code == 200 and replay.json()["duplicate"] is True
     assert len([entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]) == 1
-    loser = _save(env, quiz_id, {"botToken": CANARY_B}, request_id="other-tab")
+    loser = _save(env, quiz_id, {"botToken": CANARY_B}, request_id="other-tab", observed={"botToken": True})
     assert loser.status_code == 409 and loser.json()["saved"] is False
     assert loser.json()["reason_code"] == "secret_request_settled" and loser.json()["secret_filled"]["fields"] == ["botToken"]
     assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY
     _assert_absent(env, CANARY, CANARY_B, texts=[replay.text, loser.text])
+
+
+def test_a_stale_empty_form_never_replaces_a_key_saved_since_and_replace_is_explicit(env):
+    """Save -> Replace: the form showed no key; another writer saved one; the empty form's save is
+    refused with the fresh key state, nothing written, and only an explicit Replace overwrites."""
+    _put_settings(env, UNRELATED_SETTING="keep")
+    first, second = _ask(env), _ask(env)
+    shown = _observed(env, second)
+    assert shown == {"botToken": False}
+    assert _save(env, first, {"botToken": CANARY}).status_code == 200  # saved elsewhere meanwhile
+    stale = _save(env, second, {"botToken": CANARY_B}, request_id="stale", observed=shown)
+    body = stale.json()
+    assert stale.status_code == 409 and body["reason_code"] == "secret_key_state_changed" and body["saved"] is False
+    assert body["keys"] == [{"id": "botToken", "setting_key": "FAKEPLUG_TOKEN", "configured": True}]
+    assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY and "secret_save" not in _block(env, second)
+    # An unrelated Settings change is not this request's observation.
+    _put_settings(env, UNRELATED_SETTING="changed elsewhere")
+    replaced = _save(env, second, {"botToken": CANARY_B}, request_id="replace", observed={"botToken": True})
+    assert replaced.status_code == 200 and replaced.json()["secret_replaced"]["fields"] == ["botToken"]
+    assert replaced.json()["secret_outcome"]["replaced_fields"] == ["botToken"]
+    assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY_B and _settings(env)["UNRELATED_SETTING"] == "changed elsewhere"
+    mail = [entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"][-1]
+    assert "secret_replaced" in mail["text"] and "replaced the existing value" in mail["text"]
+    assert "some keep the old one until the owner disables and re-enables them" in mail["text"]
+    # A form that showed a set key while it was cleared is refused the other way round.
+    third = _ask(env)
+    _put_settings(env, FAKEPLUG_TOKEN="")
+    cleared = _save(env, third, {"botToken": CANARY}, request_id="c", observed={"botToken": True})
+    assert cleared.json()["reason_code"] == "secret_key_state_changed"
+    assert cleared.json()["keys"][0]["configured"] is False and _settings(env)["FAKEPLUG_TOKEN"] == ""
+    _assert_absent(env, CANARY, CANARY_B, texts=[stale.text, replaced.text, cleared.text])
+
+
+def test_replace_while_readers_are_enabled_reports_them_and_grants_nothing(env):
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, save_enabled, save_skill_grants
+
+    _put_settings(env, FAKEPLUG_TOKEN="old-synthetic", FAKEPLUG_REGION="eu")
+    skill = find_skill(env.root, "fakeplug")
+    save_enabled(env.root, "fakeplug", True)
+    save_skill_grants(env.root, "fakeplug", ["FAKEPLUG_TOKEN", "FAKEPLUG_REGION"], content_hash=skill.content_hash,
+                      requested_keys=["FAKEPLUG_TOKEN", "FAKEPLUG_REGION"])
+    before = grant_status_for_skill(env.root, find_skill(env.root, "fakeplug"))
+    quiz_id = _ask(env)
+    status = _status(env, quiz_id).json()
+    assert status["keys"][0]["configured"] is True
+    assert status["consumers"] == [{"name": "fakeplug", "enabled": True, "reads": ["FAKEPLUG_TOKEN"],
+                                    "granted": ["FAKEPLUG_TOKEN"]}]
+    response = _save(env, quiz_id, {"botToken": CANARY})
+    assert response.status_code == 200 and response.json()["secret_outcome"]["event"] == "secret_replaced"
+    assert response.json()["secret_outcome"]["consumers"][0]["enabled"] is True
+    after = grant_status_for_skill(env.root, find_skill(env.root, "fakeplug"))
+    assert after["granted_keys"] == before["granted_keys"] and after["missing_keys"] == before["missing_keys"]
+    _assert_absent(env, CANARY, texts=[response.text])
+
+
+def test_a_first_fill_of_a_shared_absent_key_keeps_other_approvals(env):
+    """A general first use (a key like GEMINI_API_KEY absent from Settings): the save makes every
+    declaring skill request it, missing; the other keys those skills were approved for stay."""
+    from ouroboros.skill_loader import find_skill, grant_status_for_skill, save_skill_grants
+
+    _write_skill(env.root, "mailer", env="MAILER_HOST_KEY, FAKEPLUG_TOKEN", fields="  token: FAKEPLUG_TOKEN")
+    _put_settings(env, MAILER_HOST_KEY="host-synthetic")
+    mailer = find_skill(env.root, "mailer")
+    save_skill_grants(env.root, "mailer", ["MAILER_HOST_KEY"], content_hash=mailer.content_hash,
+                      requested_keys=["MAILER_HOST_KEY"])
+    quiz_id = _ask(env)
+    response = _save(env, quiz_id, {"botToken": CANARY})
+    assert response.status_code == 200
+    readers = {row["name"]: row for row in response.json()["secret_outcome"]["consumers"]}
+    assert readers["mailer"]["granted"] == [] and readers["fakeplug"]["granted"] == []
+    status = grant_status_for_skill(env.root, find_skill(env.root, "mailer"))
+    assert status["granted_keys"] == ["MAILER_HOST_KEY"] and status["missing_keys"] == ["FAKEPLUG_TOKEN"]
+    _assert_absent(env, CANARY, texts=[response.text])
 
 
 def test_cancel_saves_nothing_and_wakes_the_task_with_a_distinct_cancellation(env):
@@ -265,7 +404,7 @@ def test_cancel_saves_nothing_and_wakes_the_task_with_a_distinct_cancellation(en
     assert 'secret_cancelled: {"pluginName": "fakeplug", "fields": ["botToken"]}' in mail["text"]
     assert "[Host note] The task can tell the owner what is still missing" in mail["text"]
     assert "unknown" not in mail["text"]
-    late = _save(env, quiz_id, {"botToken": CANARY})
+    late = _save(env, quiz_id, {"botToken": CANARY}, observed={"botToken": False})
     assert late.status_code == 409 and late.json()["reason_code"] == "secret_request_settled"
     assert "FAKEPLUG_TOKEN" not in _settings(env)
     assert _cancel(env, quiz_id).json()["duplicate"] is True
@@ -309,6 +448,29 @@ def test_ordinary_answer_paths_refuse_options_and_comments_without_echo(env):
     _assert_absent(env, CANARY_B, texts=[json.dumps(payload, ensure_ascii=False)])
 
 
+def test_wrong_request_and_cross_task_identities_write_nothing(env):
+    quiz_id = _ask(env)
+    write_task_result(env.root, "task-2", "running", chat_id=1)
+    other = env.client.post("/api/decisions/secret", json={"request_id": "x", "decision_id": f"quiz:task-2:{quiz_id}",
+                                                           "values": {"botToken": CANARY}, "observed": {"botToken": False}})
+    assert other.status_code == 404 and other.json()["saved"] is False
+    plain = uuid.uuid4().hex
+    owner_quiz.record_asked(env.root, TASK, quiz_id=plain, question="Which?", options=["a", "b"], chat_id=1)
+    ordinary = env.client.post("/api/decisions/secret", json={"request_id": "y", "decision_id": f"quiz:{TASK}:{plain}",
+                                                              "values": {"botToken": CANARY}, "observed": {"botToken": False}})
+    assert ordinary.status_code == 409 and ordinary.json()["reason_code"] == "not_a_secret_request"
+    for broken in ({"decision_id": f"quiz:{TASK}:{quiz_id}", "values": {"botToken": CANARY}, "observed": {"botToken": False}},
+                   {"request_id": "z", "decision_id": "quiz:../etc:x", "values": {"botToken": CANARY}},
+                   {"request_id": "z", "decision_id": f"quiz:{TASK}:{quiz_id}", "values": {"botToken": CANARY}},
+                   {"request_id": "z", "decision_id": f"quiz:{TASK}:{quiz_id}", "values": {"botToken": CANARY},
+                    "observed": {"botToken": False}, "extra": CANARY}):
+        refused = env.client.post("/api/decisions/secret", json=broken)
+        assert refused.status_code == 400 and refused.json()["saved"] is False, broken
+        assert CANARY not in refused.text
+    assert not _settings(env) and _block(env, quiz_id)["state"] == "open"
+    _assert_absent(env, CANARY, texts=[other.text, ordinary.text])
+
+
 def test_values_must_match_the_request_and_be_keepable(env):
     quiz_id = _ask(env)
     cases = ({"botToken": "abcdefgh..."}, {"botToken": "***set***"}, {"botToken": "  "},
@@ -324,30 +486,61 @@ def test_values_must_match_the_request_and_be_keepable(env):
     _assert_absent(env, CANARY, CANARY_B)
 
 
-def test_stale_skill_and_finished_task_write_nothing(env):
-    stale = _ask(env)
-    _write_skill(env.root, version="0.2.0")  # the reviewed content changed under the pending request
-    response = _save(env, stale, {"botToken": CANARY})
+def test_an_old_request_never_gains_a_changed_mapping_but_survives_an_unrelated_update(env):
+    kept = _ask(env)
+    _write_skill(env.root, version="0.2.0")  # new bytes, same mapping
+    assert _save(env, kept, {"botToken": CANARY}).status_code == 200
+    remapped = _ask(env)
+    _write_skill(env.root, env="FAKEPLUG_TOKEN, FAKEPLUG_OTHER_TOKEN", fields="  botToken: FAKEPLUG_OTHER_TOKEN",
+                 version="0.3.0")
+    response = _save(env, remapped, {"botToken": CANARY_B}, observed={"botToken": True})
     assert response.status_code == 409 and response.json()["reason_code"] == "secret_request_stale"
-    assert "secret_save" not in _block(env, stale)
+    assert "secret_save" not in _block(env, remapped) and "FAKEPLUG_OTHER_TOKEN" not in _settings(env)
+    assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY
+    _assert_absent(env, CANARY, CANARY_B)
+
+
+def test_a_finished_task_keeps_the_form_and_a_late_save_resumes_nothing(env, monkeypatch):
+    """Owner choice: the form stays usable after the asking task ends. The save is recorded on
+    the card and in history as a host fact; no owner words, no fresh head, no mailbox."""
+    import supervisor.message_bus as mb
+
+    spoken = []
+    monkeypatch.setattr(mb, "accept_local_message", lambda *args, **kwargs: spoken.append(args) or ({}, False))
     finished = _ask(env)
     owner_quiz.reconcile_terminal(env.root, TASK)
+    env.live["task"] = None
+    assert _status(env, finished).json()["state"] == "expired_terminal"
     response = _save(env, finished, {"botToken": CANARY})
-    assert response.status_code == 409 and response.json()["reason_code"] == "secret_request_inactive"
-    assert not _settings(env)
-    _assert_absent(env, CANARY)
+    assert response.status_code == 200 and response.json()["saved"] is True
+    assert response.json()["answered_after_terminal"] is True
+    block = _block(env, finished)
+    assert block["state"] == "answered" and block["answered_after_terminal"] is True
+    assert block["delivery"]["state"] == "delivered" and block["delivery"]["route"] == "history"
+    assert not spoken and not _mail(env)
+    from ouroboros.dialogue_provenance import row_author
+    from tests import _dialogue
+
+    [row] = [row for row in _dialogue.chat_rows(env.root) if row.get("type") == "quiz_answer"]
+    assert row_author(row)["kind"] == "host"
+    assert "this save resumed nothing" in row["text"]
+    _assert_absent(env, CANARY, texts=[response.text])
 
 
-def test_a_finished_asker_writes_nothing_even_before_its_terminal_reconcile(env):
-    """The task-done seam has not expired the block yet (crash or post-work window): the save
-    reads the live queue, heals the question like an ordinary answer, and writes nothing."""
+def test_a_finished_asker_before_its_terminal_reconcile_is_settled_then_saved_late(env, monkeypatch):
+    """The task-done seam has not expired the block yet (crash or post-work window): the save reads
+    the live queue, settles the question as an ordinary answer does, and records a late save."""
+    import supervisor.message_bus as mb
+
+    monkeypatch.setattr(mb, "accept_local_message", lambda *args, **kwargs: pytest.fail("no owner turn"))
     quiz_id = _ask(env)
     env.live["task"] = None
     assert _block(env, quiz_id)["state"] == "open"
     response = _save(env, quiz_id, {"botToken": CANARY})
-    assert response.status_code == 409 and response.json()["reason_code"] == "secret_request_inactive"
-    assert response.json()["saved"] is False and not _settings(env)
-    assert _block(env, quiz_id)["state"] == "expired_terminal" and "secret_save" not in _block(env, quiz_id)
+    assert response.status_code == 200 and response.json()["saved"] is True
+    block = _block(env, quiz_id)
+    assert block["answered_after_terminal"] is True and not _mail(env)
+    assert any(frame["state"] == "expired_terminal" for frame in env.frames)
     _assert_absent(env, CANARY)
 
 
@@ -390,39 +583,50 @@ def test_interruption_after_the_settings_commit_stays_saved_and_unknown_never_re
     assert body["saved"] is True and body["reason_code"] == "secret_completion_unrecorded"
     assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY
     block = _block(env, quiz_id)
-    # The durable pre-write marker survives the process: unknown, never reported filled.
+    # The durable pre-write marker survives the process: unknown, never reported saved.
     assert block["state"] == "open" and block["secret_save"]["state"] == "writing"
     assert block["secret_save"]["request_id"] == "r1" and "secret_outcome" not in block
     assert not _mail(env)
     monkeypatch.setattr(sr, "finalize_save", real_finalize)
-    # Another process may not close it underneath a claimed write.
+    # Another path may not close it underneath a claimed write.
     model = owner_quiz.record_closed(env.root, TASK, quiz_id=quiz_id, reason="done", actor_task_id=TASK)
     assert model["ok"] is False and model["error"] == "secret_save_in_progress"
-    # Status first: the same request is never repeated over a write that may have landed.
+    # Status first: it says unknown, and a set key does not prove this attempt saved it.
+    status = _status(env, quiz_id).json()
+    assert status["save_unconfirmed"] is True and status["keys"][0]["configured"] is True
     repeat = _save(env, quiz_id, {"botToken": CANARY})
     assert repeat.status_code == 409 and repeat.json()["saved"] is None
     assert repeat.json()["reason_code"] == "secret_save_unconfirmed" and repeat.json()["save_unconfirmed"] is True
     assert not _mail(env)
-    # The owner's explicit save-again is a new request; it replaces the unknown and completes once.
+    # The owner's explicit save-again is a new request over whatever it stored: a Replace now.
     again = _save(env, quiz_id, {"botToken": CANARY}, request_id="r2")
     assert again.status_code == 200 and again.json()["saved"] is True
-    assert _block(env, quiz_id)["secret_save"]["interrupted_request_id"] == "r1"
+    assert again.json()["secret_outcome"]["event"] == "secret_replaced"
+    assert _block(env, quiz_id)["secret_save"]["unconfirmed_request_ids"] == ["r1"]
     assert len([entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]) == 1
     _assert_absent(env, CANARY, texts=[response.text, repeat.text, again.text])
 
 
-def test_an_unreadable_read_back_is_written_but_never_reported_filled(env, monkeypatch):
+@pytest.mark.parametrize("failure", ["unreadable", "mismatch"])
+def test_a_read_back_that_does_not_confirm_is_written_but_never_reported_saved(env, monkeypatch, failure):
     from ouroboros.gateway import owner_settings
 
     quiz_id = _ask(env)
+    real_document = owner_settings._owner_settings_document
 
-    def unreadable():
-        raise OSError("settings read failed")
+    def read_back(**kwargs):
+        document = real_document(**kwargs)
+        if document.get("FAKEPLUG_TOKEN") != CANARY:  # the status read, before the write
+            return document
+        if failure == "unreadable":
+            raise OSError("settings read failed")
+        return {**document, "FAKEPLUG_TOKEN": "something-else"}
 
-    monkeypatch.setattr(owner_settings, "_owner_settings_document", unreadable)
+    monkeypatch.setattr(owner_settings, "_owner_settings_document", read_back)
     response = _save(env, quiz_id, {"botToken": CANARY})
-    assert response.status_code == 500
-    assert response.json()["saved"] is True and response.json()["reason_code"] == "secret_save_unverified"
+    assert response.status_code == 500 and response.json()["saved"] is True
+    assert response.json()["reason_code"] == {"unreadable": "secret_save_unverified",
+                                              "mismatch": "secret_not_retained"}[failure]
     block = _block(env, quiz_id)
     assert block["state"] == "open" and block["secret_save"]["state"] == "writing"
     assert "secret_outcome" not in block and not _mail(env)
@@ -434,19 +638,19 @@ def test_an_interrupted_claim_is_taken_over_or_cancelled_with_its_unknown_disclo
     assert sr.claim_save(env.root, TASK, taken, "dead-process")["ok"] is True  # then the process died
     response = _save(env, taken, {"botToken": CANARY}, request_id="new")
     assert response.status_code == 200
-    assert _block(env, taken)["secret_save"]["interrupted_request_id"] == "dead-process"
+    assert _block(env, taken)["secret_save"]["unconfirmed_request_ids"] == ["dead-process"]
     cancelled = _ask(env)
     sr.claim_save(env.root, TASK, cancelled, "dead-process")
     body = _cancel(env, cancelled).json()
     # The cancel saved nothing itself, but cannot say nothing is stored: saved is unknown.
-    assert body["state"] == "closed" and body["interrupted_save"] is True and body["saved"] is None
-    assert "unknown" in body["closed_reason"] and "nothing was saved" not in body["closed_reason"]
+    assert body["state"] == "closed" and body["secret_outcome"]["interrupted_save"] is True and body["saved"] is None
+    assert "unknown" in body["closed_reason"] and "nothing" not in body["closed_reason"]
     [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_closed"]
     assert "whether its value reached Settings (FAKEPLUG_TOKEN) is unknown" in mail["text"]
-    assert "nothing was saved" not in mail["text"] and "unchanged" not in mail["text"]
+    assert "saved nothing for" not in mail["text"] and "unchanged" not in mail["text"]
 
 
-def test_recovery_redelivers_a_filled_secret_through_its_own_path(env, monkeypatch):
+def test_recovery_redelivers_a_saved_secret_through_its_own_path(env, monkeypatch):
     import asyncio
 
     from ouroboros import owner_mailbox
@@ -463,7 +667,7 @@ def test_recovery_redelivers_a_filled_secret_through_its_own_path(env, monkeypat
     write_task_result(env.root, TASK, "running", owner_quiz=row)
     asyncio.run(recover_question_deliveries(env.root))
     [mail] = [entry for entry in _mail(env) if entry.get("kind") == "quiz_answer"]
-    assert "Secret filled: fakeplug, botToken" in mail["text"]
+    assert "saved it to Settings (FAKEPLUG_TOKEN)" in mail["text"]
     from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND
 
     ctx, messages = _drain(env)  # the recovered delivery is the same typed host row
@@ -471,7 +675,7 @@ def test_recovery_redelivers_a_filled_secret_through_its_own_path(env, monkeypat
     _assert_absent(env, CANARY)
 
 
-def test_secret_requests_stay_off_the_extension_bus_but_reach_the_web(env):
+def test_transports_get_a_hint_never_an_answerable_secret_card(env):
     import supervisor.message_bus as mb
 
     quiz_id = uuid.uuid4().hex
@@ -485,9 +689,14 @@ def test_secret_requests_stay_off_the_extension_bus_but_reach_the_web(env):
                              wait_for_answer=True)
     assert ok
     [frame] = [frame for frame in shown if frame.get("type") == "quiz"]
-    assert frame["secret_request"]["plugin_name"] == "fakeplug"
-    bridge.send_quiz_state(quiz_id, TASK, "open", wait_for_answer=False)
-    assert not [event for event in env.events if event[0] in ("chat.quiz", "chat.quiz_state")]
+    assert frame["secret_request"]["plugin_name"] == "fakeplug" and frame["question"] == sr.question_text(request)
+    [(_topic, event)] = [event for event in env.events if event[0] == "chat.quiz"]
+    assert event["options"] == [] and event["secret_request"] == request
+    assert event["question"] == sr.transport_hint(request)
+    assert "protected form in the Ouroboros app" in event["question"] and "http" not in event["question"]
+    bridge.send_quiz_state(quiz_id, TASK, "answered", secret_outcome={"event": "secret_filled"})
+    [(_topic, state)] = [event for event in env.events if event[0] == "chat.quiz_state"]
+    assert state["state"] == "answered" and state["secret_outcome"] == {"event": "secret_filled"}
     from ouroboros.gateway.history import _assemble_history_response
 
     replay = json.loads(_assemble_history_response(env.root, 1, 10, 0))["messages"]
@@ -513,8 +722,9 @@ def test_simultaneous_saves_and_cancel_have_exactly_one_winner(env):
 
     quiz_id = _ask(env)
     decision = f"quiz:{TASK}:{quiz_id}"
-    bodies = [{"request_id": "tab-a", "decision_id": decision, "values": {"botToken": CANARY}},
-              {"request_id": "tab-b", "decision_id": decision, "values": {"botToken": CANARY_B}},
+    shown = {"botToken": False}
+    bodies = [{"request_id": "tab-a", "decision_id": decision, "values": {"botToken": CANARY}, "observed": shown},
+              {"request_id": "tab-b", "decision_id": decision, "values": {"botToken": CANARY_B}, "observed": shown},
               {"request_id": "tab-c", "decision_id": decision, "action": "cancel"}]
     results, gate = {}, threading.Barrier(len(bodies))
 
@@ -540,10 +750,11 @@ def test_simultaneous_saves_and_cancel_have_exactly_one_winner(env):
 
 
 def test_a_task_ending_mid_save_keeps_the_outcome_without_inventing_an_owner_turn(env, monkeypatch):
-    from ouroboros.gateway import owner_settings
     import supervisor.message_bus as mb
+    from ouroboros.gateway import owner_settings
 
     quiz_id = _ask(env)
+    shown = _observed(env, quiz_id)
     real_update = owner_settings._owner_update_settings
 
     def ends_then_writes(*args, **kwargs):
@@ -554,7 +765,7 @@ def test_a_task_ending_mid_save_keeps_the_outcome_without_inventing_an_owner_tur
     monkeypatch.setattr(owner_settings, "_owner_update_settings", ends_then_writes)
     spoken = []
     monkeypatch.setattr(mb, "accept_local_message", lambda *args, **kwargs: spoken.append(args) or ({}, False))
-    response = _save(env, quiz_id, {"botToken": CANARY})
+    response = _save(env, quiz_id, {"botToken": CANARY}, observed=shown)
     assert response.status_code == 200 and response.json()["saved"] is True
     block = _block(env, quiz_id)
     assert block["state"] == "answered" and block["answered_after_terminal"] is True
@@ -594,13 +805,17 @@ def test_the_waiting_task_wakes_with_metadata_only_secret_filled_in_its_next_mod
     _handle_send_quiz(event, SimpleNamespace(DRIVE_ROOT=env.root, bridge=bridge))
     assert any(frame.get("type") == "quiz" and frame.get("secret_request") for frame in shown)
     quiz_id = event["quiz_id"]
+    env.live["task"] = {"id": ctx.task_id}
     posted = []
 
     def owner_fills_the_form(_seconds):
         if not posted:
+            decision = f"quiz:{ctx.task_id}:{quiz_id}"
+            status = env.client.post("/api/decisions/secret", json={"decision_id": decision, "action": "status"})
+            observed = {row["id"]: row["configured"] for row in status.json()["keys"]}
             posted.append(env.client.post("/api/decisions/secret", json={
-                "request_id": "form-1", "decision_id": f"quiz:{ctx.task_id}:{quiz_id}",
-                "values": {"botToken": CANARY}}))
+                "request_id": "form-1", "decision_id": decision, "values": {"botToken": CANARY},
+                "observed": observed}))
 
     monkeypatch.setattr("ouroboros.owner_wait.time.sleep", owner_fills_the_form)
     messages = [{"role": "tool", "tool_call_id": "c1", "content": result}]
@@ -615,7 +830,7 @@ def test_the_waiting_task_wakes_with_metadata_only_secret_filled_in_its_next_mod
                              owner_ctx=ctx)
     model_input = "\n".join(str(row.get("content") or "") for row in messages[before:])
     assert 'secret_filled: {"pluginName": "fakeplug", "fields": ["botToken"]}' in model_input
-    assert "Secret filled: fakeplug, botToken" in model_input and "do not ask for it again" in model_input
+    assert "saved it to Settings (FAKEPLUG_TOKEN)" in model_input and "do not ask for it here" in model_input
     assert ctx._owner_directives == directives  # no owner words were made up for the host's outcome
     from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND
 
@@ -626,25 +841,6 @@ def test_the_waiting_task_wakes_with_metadata_only_secret_filled_in_its_next_mod
 
 
 # ------------------------------------------------------- typed host provenance
-
-_BASE_MANIFEST_FIELDS = [
-    "name", "description", "version", "type", "when_to_use", "requires", "os", "runtime", "timeout_sec",
-    "env_from_settings", "scripts", "entry", "permissions", "conflicts", "subscribe_events", "companion_processes",
-    "scheduled_tasks", "ui_tab", "contributes", "plugin_api", "model_experience", "context_snapshot", "body", "raw_extra",
-    "schema_version",
-]
-
-
-def test_secret_fields_is_appended_so_positional_manifest_construction_keeps_every_slot():
-    import dataclasses
-
-    from ouroboros.contracts.skill_manifest import SkillManifest
-
-    assert [item.name for item in dataclasses.fields(SkillManifest)] == [*_BASE_MANIFEST_FIELDS, "secret_fields"]
-    positional = SkillManifest("n", "d", "1", "script", "", [], "any", "python3", 30, ["K"], [{"name": "run.py"}])
-    assert positional.env_from_settings == ["K"] and positional.scripts == [{"name": "run.py"}]
-    assert positional.secret_fields == {}
-
 
 def _drain(env):
     import queue
@@ -664,7 +860,7 @@ def _kinds(messages):
     return [row.get(HOST_CONTEXT_KIND_KEY) for row in messages]
 
 
-def test_a_filled_secret_is_a_typed_host_row_and_adds_nothing_to_the_owner_corpus(env):
+def test_a_saved_secret_is_a_typed_host_row_and_adds_nothing_to_the_owner_corpus(env):
     from ouroboros.context_budget import OWNER_WORDS_KIND
     from ouroboros.owner_quiz import SECRET_OUTCOME_ROW_KIND
 
@@ -696,7 +892,6 @@ def test_a_cancelled_secret_frame_is_host_typed_and_only_the_owner_act_is_retain
     assert ctx._owner_directives == []  # a click is retained as an action, not invented owner wording
     assert _block(env, quiz_id)["closed_actor"] == "owner"
     assert _block(env, quiz_id)["secret_outcome"]["event"] == "secret_cancelled"
-    assert "[Host note]" not in json.dumps(ctx._owner_directives)
 
 
 def test_owner_corpus_readers_keep_secret_frames_host_authored(env):
@@ -726,17 +921,17 @@ def test_owner_corpus_readers_keep_secret_frames_host_authored(env):
     _assert_absent(env, CANARY, texts=[json.dumps(later, ensure_ascii=False)])
 
 
-@pytest.mark.parametrize("change", ["mapping", "content", "unchanged"])
-def test_skill_freshness_is_checked_after_waiting_for_the_real_settings_lock(env, monkeypatch, change):
-    """A blocked POST must not use the mapping it saw before another writer's lock."""
-    from concurrent.futures import ThreadPoolExecutor
+@pytest.mark.parametrize("change", ["mapping", "content", "unchanged", "key_set"])
+def test_mapping_and_key_state_are_checked_after_waiting_for_the_real_settings_lock(env, monkeypatch, change):
+    """A blocked POST must not use the mapping or key state it saw before another writer's lock."""
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     from ouroboros import config as cfg
 
     cfg.SETTINGS_PATH.write_text('{"UNRELATED": "keep"}\n', encoding="utf-8")
-    before = cfg.SETTINGS_PATH.read_bytes()
     quiz_id = _ask(env)
+    shown = _observed(env, quiz_id)
     acquire = cfg._acquire_settings_lock
     held = acquire()
     assert held is not None
@@ -748,7 +943,7 @@ def test_skill_freshness_is_checked_after_waiting_for_the_real_settings_lock(env
 
     monkeypatch.setattr(cfg, "_acquire_settings_lock", observed_acquire)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        pending = pool.submit(_save, env, quiz_id, {"botToken": CANARY}, "waited-save")
+        pending = pool.submit(_save, env, quiz_id, {"botToken": CANARY}, "waited-save", shown)
         try:
             assert entered.wait(2) and not pending.done()
             if change == "mapping":
@@ -756,15 +951,19 @@ def test_skill_freshness_is_checked_after_waiting_for_the_real_settings_lock(env
                              fields="  botToken: FAKEPLUG_OTHER_TOKEN", version="0.2.0")
             elif change == "content":
                 _write_skill(env.root, version="0.2.0")
+            elif change == "key_set":  # another process writing under its own lock hold
+                cfg.SETTINGS_PATH.write_text(json.dumps({"UNRELATED": "keep", "FAKEPLUG_TOKEN": CANARY_B}), encoding="utf-8")
+            before = cfg.SETTINGS_PATH.read_bytes()
         finally:
             cfg._release_settings_lock(held)
         response = pending.result(timeout=5)
     body = response.json()
-    if change == "unchanged":
+    if change in ("unchanged", "content"):
         assert response.status_code == 200 and body["saved"] is True
         assert _settings(env)["FAKEPLUG_TOKEN"] == CANARY
     else:
-        assert response.status_code == 409 and body["reason_code"] == "secret_request_stale", body
+        reason = "secret_request_stale" if change == "mapping" else "secret_key_state_changed"
+        assert response.status_code == 409 and body["reason_code"] == reason, body
         assert body["saved"] is False and "secret_filled" not in body
         assert cfg.SETTINGS_PATH.read_bytes() == before
         block = _block(env, quiz_id)
@@ -773,27 +972,18 @@ def test_skill_freshness_is_checked_after_waiting_for_the_real_settings_lock(env
     _assert_absent(env, CANARY, texts=[response.text])
 
 
-def test_a_paused_asker_keeps_filled_outcome_owed_until_it_reads_again(env, monkeypatch):
-    """History records the save, but Pause must not discharge the asker's unread outcome."""
-    import asyncio
-    from ouroboros.gateway import task_decision as td
-
+def test_a_paused_asker_keeps_the_saved_outcome_owed_until_it_reads_again(env):
+    """History records the save, but Pause must neither discharge nor wake: the outcome waits in
+    the paused asker's mailbox, owed until it reads."""
     quiz_id = _ask(env)
-    live_reader = td._live_root_task
-    monkeypatch.setattr(td, "_live_root_task", lambda task_id: (None, "task_not_reading"))
+    env.live["reason"] = "task_not_reading"
     response = _save(env, quiz_id, {"botToken": CANARY})
     assert response.status_code == 200 and response.json()["saved"] is True
     block = _block(env, quiz_id)
-    assert block["delivery"]["history_at"]
-    assert block["delivery"]["state"] == "owed"
-    assert not block.get("discharged_at") and not _mail(env)
-
-    monkeypatch.setattr(td, "_live_root_task", live_reader)
-    quizzes = owner_quiz.quiz_states(env.root, TASK)
-    quizzes[quiz_id]["delivery"]["next_retry_at"] = "2000-01-01T00:00:00+00:00"
-    write_task_result(env.root, TASK, "running", owner_quiz=quizzes)
-    asyncio.run(td.recover_question_deliveries(env.root))
+    assert block["delivery"]["history_at"] and block["delivery"]["state"] == "owed"
+    assert block["delivery"]["reason_code"] == "awaiting_recipient_read" and not block.get("discharged_at")
+    assert "answered_after_terminal" not in block and "delivery_after_terminal" not in block
     [mail] = [row for row in _mail(env) if row.get("kind") == "quiz_answer"]
-    assert "Secret filled: fakeplug, botToken" in mail["text"]
+    assert "saved it to Settings (FAKEPLUG_TOKEN)" in mail["text"]
     assert _block(env, quiz_id)["delivery"]["recipient_task_id"] == TASK
     _assert_absent(env, CANARY, texts=[response.text, mail["text"]])

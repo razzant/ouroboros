@@ -1,8 +1,10 @@
 """Existing automatic retries continue saved work (owner 2026-10-08, quiz 1b1a2d93, option 1).
 
-Eligibility, count and cadence are unchanged: the same-ID worker-crash retry and
-the idle-timeout retry (same or new execution id) only change their STARTING
-POINT, from the original prompt to the dead attempt's frozen working state.
+Eligibility, count and cadence are unchanged: the same-ID worker-crash retry only
+changes its STARTING POINT, from the original prompt to the dead attempt's frozen
+working state. The idle-timeout retry the decision also covered is gone (#1376: silence
+no longer kills, and a hard bound never retries); a stored new-ID successor still reads
+its predecessor's source (``tests/test_working_retry_sources.py``).
 Cases without an automatic retry stay manual; the two crash causes that retain a
 source become Continue-eligible; a source-less pausing seed is completed.
 """
@@ -16,7 +18,6 @@ from ouroboros import working_checkpoint as wc
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.task_results import load_task_result, write_task_result
 from tests._budget_pause_exact_helpers import _loop_ctx
-from tests.test_owner_wait_pool import pool  # noqa: F401 - the real pool fixture
 from tests.test_worker_crash_retry import _isolate_worker_crash_state, _reserved_job  # noqa: F401
 
 pytestmark = pytest.mark.serial
@@ -78,55 +79,6 @@ def test_crashes_that_keep_their_source_are_continue_eligible(reason):
     verdict = continuation_eligibility({"status": "failed", "reason_code": reason, "task_id": "r",
                                         "root_task_id": "r"}, "r")
     assert verdict == {"eligible": True, "cause": reason, "refusal": ""}
-
-
-def test_the_idle_retry_carries_the_killed_attempts_source_to_its_new_execution_id(pool, monkeypatch):  # noqa: F811
-    from supervisor import queue, task_reaper, workers
-
-    write_task_result(pool.root, "owner", "running")
-    exact = _saved(pool.root, "owner", 3)
-    task = {**pool.meta["task"], "_attempt": 3}
-    requeued, new_attempt, _reason, _ = task_reaper._enqueue_retry(
-        queue, task, task_id="owner", retry_task_id="owner-retry", attempt=3,
-        terminal_reason="idle_timeout", recon_fields={})
-    assert requeued and new_attempt == 4
-    retry = workers.PENDING[-1]
-    assert retry["id"] == "owner-retry" and retry["original_task_id"] == "owner"
-    handoff = retry["_working_recovery"]
-    assert handoff["source_task_id"] == "owner" and handoff["from_attempt"] == 3
-    assert handoff["cause"] == "idle_timeout"
-    assert read_actor_source_bytes(pool.root, "owner", handoff["source_ref"]) == exact
-
-
-def test_retry_attachment_copy_failure_keeps_original_inputs_and_working_source(pool, monkeypatch):  # noqa: F811
-    from pathlib import Path
-
-    from ouroboros import artifacts
-    from supervisor import queue, task_reaper, workers
-
-    write_task_result(pool.root, "owner", "running")
-    exact = _saved(pool.root, "owner", 3)
-    source = pool.root / "source-input.txt"
-    source.write_text("original attachment bytes")
-    manifest = artifacts.stage_task_attachments(pool.root, "owner", [{"path": str(source)}])
-    assert manifest[0]["status"] == "staged"
-    staged = Path(manifest[0]["abs_path"])
-    task = {**pool.meta["task"], "_attempt": 3, "task_contract": {"attachment_manifest": manifest}}
-
-    def failed_copy(*args, **kwargs):
-        raise OSError("retry attachment destination unwritable")
-
-    monkeypatch.setattr(artifacts, "copy_artifact_file", failed_copy)
-    requeued, _, reason, _ = task_reaper._enqueue_retry(
-        queue, task, task_id="owner", retry_task_id="owner-retry", attempt=3,
-        terminal_reason="idle_timeout", recon_fields={})
-
-    assert not requeued and reason == "idle_timeout_retry_attachment_handoff_failed"
-    assert not any(task["id"] == "owner-retry" for task in workers.PENDING)
-    assert staged.read_text() == "original attachment bytes"
-    assert wc.checkpoint_path(pool.root, "owner", 3).read_bytes() == exact
-    handoff = wc.prepare_recovery(pool.root, "owner", from_attempt=3, cause="worker_crash")
-    assert read_actor_source_bytes(pool.root, "owner", handoff["source_ref"]) == exact
 
 
 def test_actual_worker_crash_retry_relays_saved_work_when_receiver_died_before_save(tmp_path, monkeypatch):

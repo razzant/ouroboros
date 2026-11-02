@@ -69,6 +69,7 @@ def _answer(translations):
 def test_catalog_enumerates_every_host_table_by_code_with_its_english():
     entries = gen.catalog_entries()
     assert entries["code:task.headline.done"]["text"] == "Done"
+    assert entries["code:task.headline.quiet"]["text"] == "Done · no message"  # the quiet card headline
     assert entries["code:question.status.waiting"]["text"] == "Waiting for your answer"
     assert entries["code:task.cause.author_stop"]["text"].startswith("Ouroboros stopped")
     assert entries["code:routing.refusal.target_unknown"]["text"] == "that task is no longer running"

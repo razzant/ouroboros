@@ -15,7 +15,9 @@ $Platform = "x86_64-pc-windows-msvc"
 
 # Pinned SHA256 (from the release's SHA256SUMS): a swapped/truncated archive
 # fails here instead of becoming the packaged runtime. Update the pin when
-# bumping $Release/$PyVersion, exactly as in download_python_standalone.sh.
+# bumping $Release/$PyVersion, exactly as in download_python_standalone.sh, and
+# the release signing catalog's python.exe/pythonw.exe hashes with it
+# (windows_signing_catalog.json).
 $Sha256 = "f20288c45ff11e7fe026f40ddcfb2acfe695cec18860746639e289142a589745"
 
 $Filename = "cpython-${PyVersion}+${Release}-${Platform}-install_only_stripped.tar.gz"

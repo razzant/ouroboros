@@ -66,7 +66,7 @@ def test_settings_prints_the_same_words(root, monkeypatch):  # noqa: F811
     costs = settings_mod._review_pool_costs(rows)
     assert costs["critic"]["basis"] == "observed_reviews" and costs["critic"]["reviews"] == 3
     assert costs["newcomer"] == {"usd_per_review": None, "basis": "unknown"}
-    script = ("import fs from 'node:fs'; import { reviewCostText } from './web/modules/subagents_settings.js';"
+    script = ("import fs from 'node:fs'; import { reviewCostText } from './web/modules/subagent_status_primitives.js';"
               "const { rows, costs } = JSON.parse(fs.readFileSync(0, 'utf8'));"
               "console.log(JSON.stringify(rows.map((row) => reviewCostText(row, costs[row.subagent_id] || null))));")
     shown = json.loads(subprocess.run(["node", "--input-type=module", "-e", script], cwd=REPO, check=True,

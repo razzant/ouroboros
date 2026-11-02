@@ -12,6 +12,20 @@ from tests.test_host_service_operations import (
 )
 
 
+@pytest.fixture
+def direct_budget_refusal(tmp_path, monkeypatch):
+    from queue import SimpleQueue
+    from supervisor import state, workers
+    from tests._agent_entry_helpers import task_entry_agent
+
+    agent = task_entry_agent(tmp_path, lambda _task: pytest.fail("exhausted budget entered the task body"))
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: agent)
+    monkeypatch.setattr(workers, "get_event_q", SimpleQueue)
+    monkeypatch.setattr(state, "load_state", lambda: {})
+    monkeypatch.setattr(state, "budget_remaining", lambda _state, *, strict: 0)
+
+
 def test_atomic_acceptance_before_dequeue_and_exact_source_consumption(tmp_path, monkeypatch):
     bridge = message_bus.LocalChatBridge()
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
@@ -91,36 +105,44 @@ def test_interleaved_same_chat_answers_are_matched_by_task_origin(tmp_path):
     assert b["status"] == "pending" and "text" not in b
 
 
-def test_pre_task_budget_refusal_remains_an_exact_failed_operation(tmp_path, monkeypatch):
-    from supervisor import state, worker_chat_lane, workers
+def test_pre_task_budget_refusal_remains_an_exact_failed_operation(tmp_path, monkeypatch, direct_budget_refusal):
+    from supervisor import worker_chat_lane, workers
 
     bridge = message_bus.LocalChatBridge()
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
     monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(message_bus, "load_state", lambda: {})
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 0)
     monkeypatch.setattr(workers, "send_with_budget", message_bus.send_with_budget)
     client = _client(tmp_path, bridge)
     assert client.post("/chat/inject", headers=_headers(), json={
         "chat_id": CHAT, "client_message_id": MSG, "text": "do work",
     }).status_code == 202
     ref = bridge.get_updates(0, timeout=0)[0]["message"]["accepted_source_ref"]
-    worker_chat_lane._handle_chat_direct_locked(CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": True})
+    worker_chat_lane._run_chat_task(None, CHAT, "do work", task_metadata={"origin_message_ref": ref, "_host_operation": True})
     result = client.get(f"/chat/operations/{CHAT}:{MSG}", headers=_headers()).json()
     assert result["status"] == "failed" and "Budget exhausted" in result["text"]
 
 
 @pytest.mark.parametrize("chat_id", [1, 123456])
-def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monkeypatch, chat_id):
-    from supervisor import state, worker_chat_lane, workers
+def test_ordinary_main_and_transport_refusals_keep_their_original_envelope(monkeypatch, chat_id, direct_budget_refusal):
+    """A registered refusal is keyed, but only host operations retain a terminal origin."""
+    from supervisor import worker_chat_lane, workers
 
-    sent = []
-    monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 0)
+    sent, frames = [], []
+    bridge = message_bus.LocalChatBridge()
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **kw: sent.append((a, kw)))
-    worker_chat_lane._handle_chat_direct_locked(chat_id, "hello", task_metadata={
+    worker_chat_lane._run_chat_task(None, chat_id, "hello", task_metadata={
         "origin_message_ref": build_owner_message_ref(chat_id=chat_id, client_message_id="ordinary", ts="now", text="hello"),
     })
-    assert sent == [((chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."), {"role": "system", "system_type": "task_admission_notice"})]
+    receipt = next(row for row in frames if row.get("type") == "typing")
+    assert receipt["client_message_id"] == "ordinary" and receipt["chat_id"] == chat_id
+    assert receipt["activity_id"]
+    assert sent == [((chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."), {
+        "task_id": receipt["activity_id"], "progress_meta": {"task_terminal_status": "failed"},
+        "role": "system", "system_type": "task_not_started",
+    })]
 
 
 @pytest.mark.parametrize("host_operation", [False, True])

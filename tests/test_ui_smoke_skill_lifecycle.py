@@ -26,7 +26,7 @@ direct_server_with_data = _direct_server_with_data
 def test_installed_repair_reloads_tool_route_widget_and_companion(direct_server_with_data, monkeypatch, tmp_path):
     import time
     import urllib.request
-    from ouroboros import extension_loader, skill_review
+    from ouroboros import extension_loader
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.platform_layer import pid_is_alive
     from ouroboros.skill_loader import compute_content_hash, load_review_state
@@ -36,8 +36,7 @@ def test_installed_repair_reloads_tool_route_widget_and_companion(direct_server_
     from ouroboros.utils import utc_now_iso
     from ouroboros.tools.registry import ToolRegistry
     from tests._extension_loader_shared import _write_ext_skill
-    from tests._skill_review_shared import _make_actor, _pass_array_for_script_skill, _patch_review
-    from tests.test_skill_review import _mark_self_authored
+    from tests._skill_review_shared import _mark_self_authored
 
     drive = direct_server_with_data["data_dir"]
     url = direct_server_with_data["url"]
@@ -74,7 +73,6 @@ def test_installed_repair_reloads_tool_route_widget_and_companion(direct_server_
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(tmp_path / "unused"))
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
-    monkeypatch.setattr(skill_review, "_review_wave_budget_block", lambda *a, **k: None)
     registry = ToolRegistry(repo_dir=Path(__file__).resolve().parents[1], drive_root=drive)
     registry._ctx.task_id = "live-repair"
     registry._ctx.current_chat_id = 42
@@ -85,7 +83,18 @@ def test_installed_repair_reloads_tool_route_widget_and_companion(direct_server_
     dialogue_store.append(drive, "chat", {**origin, "direction": "in", "text": owner_text, "source": "web"})
     registry._ctx.task_metadata = {"origin_message_ref": origin}
     record_repair_admission(drive, name, task_id="live-repair", base_content_hash=compute_content_hash(payload))
-    canned = json.dumps({"results": [_make_actor(f"reviewer-{n}", _pass_array_for_script_skill()) for n in range(3)]})
+    # The one wave over the golden pool with an offline seam: every seat answers the skill question clean.
+    import ouroboros.review_substrate as substrate
+    from tests import _contributor_packet_shared as shared
+    from tests.review_pool_rosters import set_review_pool
+
+    set_review_pool(monkeypatch, shared.golden_pool())
+
+    def clean(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        actor.raw_text = "[]\nNO_FINDINGS"
+        return actor
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam([], answer=clean))
 
     def api(path, body=None):
         request = urllib.request.Request(url + path, data=None if body is None else json.dumps(body).encode(),
@@ -95,7 +104,7 @@ def test_installed_repair_reloads_tool_route_widget_and_companion(direct_server_
 
     playwright = pytest.importorskip("playwright.sync_api")
     pids, revisions = [], []
-    with _patch_review(canned), playwright.sync_playwright() as pw:
+    with playwright.sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 850})

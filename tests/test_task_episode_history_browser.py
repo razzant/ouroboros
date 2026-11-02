@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
 import mimetypes
 import os
 from pathlib import Path
@@ -10,6 +11,8 @@ import threading
 from urllib.parse import urlsplit
 
 import pytest
+
+from tests.ui_console_errors import PageErrors
 
 ROOT = Path(__file__).resolve().parents[1]
 T = '2026-10-17T08:00:00Z'
@@ -33,11 +36,16 @@ isCurrent:()=>true,apply(){},fail(){}}});
 def test_physical_episode_content_survives_continue(tmp_path, engine):
     from playwright.sync_api import sync_playwright
 
+    review_bytes = b'Original physical review source\nREVIEW_SOURCE_TAIL\n'
+    review_ref = {'kind': 'task_source', 'root': 'artifact_store',
+                  'path': 'source_handles/context_checkpoints/old-review.txt',
+                  'sha256': hashlib.sha256(review_bytes).hexdigest(), 'size': len(review_bytes)}
     details = {
         'e1': {'task_id': 'e1', 'status': 'failed', 'reason_code': 'provider_unavailable',
                'title': 'Original report', 'started_at': T, 'ts': T,
                'review_projection': {'panels': [{'panel_id': 'old-review', 'surface': 'task_acceptance',
-                   'aggregate_signal': 'FAIL', 'reason': 'Preserved independent review detail', 'actors': []}]},
+                   'aggregate_signal': 'FAIL', 'reason': 'Preserved independent review detail', 'actors': [],
+                   'applied_source_status': 'available', 'applied_source_ref': review_ref}]},
                'artifacts': [{'name': 'earlier.txt', 'size': 16, 'status': 'ready'}]},
         'e2': {'task_id': 'e2', 'status': 'running', 'title': 'Continue: check totals', 'started_at': T, 'ts': T},
         'e3': {'task_id': 'e3', 'status': 'running', 'title': 'Continue: publish totals', 'started_at': T, 'ts': T},
@@ -48,6 +56,9 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
+
+        def do_HEAD(self):
+            self.do_GET()
 
         def do_GET(self):
             path = urlsplit(self.path).path
@@ -63,6 +74,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                     content_type = mimetypes.guess_type(source.name)[0] or 'text/plain'
                 else:
                     data, status = b'not found', 404
+            elif path == '/api/tasks/e1/artifacts/old-review.txt':
+                data, content_type = review_bytes, 'text/plain'
             elif '/artifacts/' in path:
                 data, content_type = b'earlier evidence\n', 'text/plain'
             elif path.startswith('/api/tasks/'):
@@ -76,7 +89,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != 'HEAD':
+                self.wfile.write(data)
 
         def do_POST(self):
             posts.append(self.path)
@@ -94,8 +108,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
             browser = getattr(playwright, engine).launch()
             try:
                 page = browser.new_page(viewport={'width': 1100, 'height': 850})
-                errors = []
-                page.on('pageerror', lambda error: errors.append(str(error)))
+                errors = PageErrors(page, engine)
                 page.goto(f'http://127.0.0.1:{server.server_port}/')
                 page.wait_for_function('window.fixture?.instance.hasPaintedHistory()')
 
@@ -121,6 +134,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 first = page.locator('.chat-live-card[data-task-id="e1"]')
                 expand(first)
                 first.locator('[data-result-files]').wait_for()
+                page.evaluate('window.originalReviewDoor=document.querySelector(".chat-live-card[data-task-id=e1] [data-live-review-summary]")')
                 page.screenshot(path=str(evidence / 'before.png'))
                 # A bound claim never folds the predecessor, even with a successor present.
                 details['e1']['continued_by'] = {'state': 'bound', 'successor_task_id': 'e2'}
@@ -134,12 +148,26 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 second.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / 'names.png'))
                 disclosure = second.locator('details[data-episode-task="e1"]')
-                disclosure.locator('summary').click()
+                disclosure.locator(':scope > summary').click()
                 disclosure.locator('[data-result-files]').wait_for(state='visible')
-                disclosure.locator('[data-review-section-toggle]').click()
+                disclosure.locator('[data-live-review-summary]').click()
                 disclosure.locator('[data-review-group-toggle]').click()
-                disclosure.locator('[data-review-attempt-toggle]').click()
-                assert disclosure.get_by_text('Preserved independent review detail', exact=False).is_visible()
+                disclosure.locator('[data-review-facts] > summary').click()
+                assert page.evaluate('window.originalReviewDoor===document.querySelector("details[data-episode-task=e1] [data-live-review-summary]")')
+                read = disclosure.locator('[data-review-read-url]')
+                source_url = read.get_attribute('data-review-read-url')
+                assert source_url.startswith('/api/tasks/e1/artifacts/old-review.txt?source=')
+                assert page.request.get(f'http://127.0.0.1:{server.server_port}' + source_url).body() == review_bytes
+                read.click()
+                reader = page.locator('dialog[open]:has(.document-reader-panel)')
+                reader.locator('.document-reader-body', has_text='REVIEW_SOURCE_TAIL').wait_for()
+                with page.expect_download() as review_download:
+                    reader.locator('[data-reader-action="download"]').click()
+                review_target = evidence / 'old-review.txt'
+                review_download.value.save_as(review_target)
+                assert review_target.read_bytes() == review_bytes
+                page.keyboard.press('Escape')
+                assert disclosure.locator('[data-review-attempt-detail]').get_by_text('Preserved independent review detail', exact=True).is_visible()
                 assert 'Earlier independent criticism' in disclosure.inner_text()
                 assert 'Continue: check totals' in second.locator('[data-live-episodes]').inner_text()
                 assert second.locator(':scope > [data-live-summary-button] [data-live-title]').inner_text() == 'Original report'
@@ -157,6 +185,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 details['e1']['artifacts'].append({'name': 'late.txt', 'size': 16, 'status': 'ready'})
                 emit('chat', {**review_row, 'card_row_id': 'review:e1:late', 'text': 'Late predecessor criticism'})
                 assert 'Late predecessor criticism' in disclosure.inner_text()
+                assert page.evaluate('window.originalReviewDoor===document.querySelector("details[data-episode-task=e1] [data-live-review-summary]")')
+                assert disclosure.locator('[data-review-read-url]').get_attribute('data-review-read-url') == source_url
                 late_link = disclosure.locator('a').filter(has_text='late.txt')
                 late_link.wait_for(state='visible')
                 assert '/e1/' in late_link.get_attribute('href')
@@ -182,6 +212,8 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 expand(third)
                 assert third.locator('details[data-episode-task]').count() == 2
                 assert third.locator('details[data-episode-task="e1"]').get_attribute('open') is not None
+                assert page.evaluate('window.originalReviewDoor===document.querySelector("details[data-episode-task=e1] [data-live-review-summary]")')
+                assert third.locator('details[data-episode-task="e1"] [data-review-read-url]').get_attribute('data-review-read-url') == source_url
                 assert third.locator('[data-result-files]').count() == 1
                 assert page.locator('.chat-live-card:visible').count() == 1
                 # Rebuild from history in reverse physical arrival order, not the live objects.
@@ -199,7 +231,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 assert third.locator('details[data-episode-task]').evaluate_all(
                     '(nodes)=>nodes.map(node=>node.dataset.episodeTask)') == ['e1', 'e2'], 'newer-link-first backfill keeps episode order'
                 old = third.locator('details[data-episode-task="e1"]')
-                old.locator('summary').click()
+                old.locator(':scope > summary').click()
                 old.locator('[data-result-files]').wait_for(state='visible')
                 assert 'Earlier independent criticism' in old.inner_text()
                 assert 'Continue: check totals' in third.locator('[data-live-episodes]').inner_text()
@@ -211,7 +243,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 newer_row = {'chat_id': 1, 'role': 'user', 'text': '\n'.join(f'Newer message line {n}' for n in range(60)),
                              'ts': '2026-10-17T09:00:00Z', 'history_id': 'newer'}
                 history[:] = [dict(third_row, history_id='h3'), newer_row]
-                old.locator('summary').click()
+                old.locator(':scope > summary').click()
                 page.locator('#chat-input').focus()
                 page.evaluate('fixture.instance.showLatest()')
                 page.evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
@@ -221,20 +253,20 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 assert page.evaluate('window.oldTimeline===document.querySelector("details[data-episode-task=e1] [data-live-timeline]")')
                 history[:] = full_history
                 page.evaluate('fixture.instance.refreshHistory({revision:2})')
-                old.locator('summary').click()
+                old.locator(':scope > summary').click()
                 assert 'Earlier independent criticism' in old.inner_text()
                 facts['eviction_and_readd'] = True
-                old.locator('[data-review-section-toggle]').click()
+                old.locator('[data-live-review-summary]').click()
                 old.locator('[data-review-group-toggle]').click()
-                old.locator('[data-review-attempt-toggle]').click()
-                assert old.get_by_text('Preserved independent review detail', exact=False).is_visible()
+                old.locator('[data-review-facts] > summary').click()
+                assert old.locator('[data-review-attempt-detail]').get_by_text('Preserved independent review detail', exact=True).is_visible()
                 # A long earlier episode keeps the expanded card's bounded timeline box and the one focus ring.
                 box = old.locator(':scope > [data-live-timeline]').evaluate(
                     '(n)=>[getComputedStyle(n).maxHeight,getComputedStyle(n).overflowY,n.clientHeight,n.scrollHeight]')
                 assert box[:2] == ['420px', 'auto'] and box[2] <= 420 < box[3], box
                 page.keyboard.press('Shift')  # keyboard modality: script focus then counts as keyboard focus
-                old.locator('summary').focus()
-                ring = old.locator('summary').evaluate('''(node) => {
+                old.locator(':scope > summary').focus()
+                ring = old.locator(':scope > summary').evaluate('''(node) => {
                     const probe = document.createElement('span');
                     probe.style.color = 'var(--focus-accent-border)';
                     document.body.append(probe);
@@ -254,7 +286,7 @@ def test_physical_episode_content_survives_continue(tmp_path, engine):
                 page.evaluate('fixture.instance.destroy(); fixture.instance.destroy()')
                 assert page.evaluate('fixture.handlers.size') == 0
                 assert page.locator('.chat-live-card').count() == 0
-                assert not errors, errors
+                assert not errors.unexpected(), errors
                 assert not posts, posts
                 facts.update(errors=errors, posts=posts, sent=page.evaluate('fixture.sent'), destroyed=True)
             finally:

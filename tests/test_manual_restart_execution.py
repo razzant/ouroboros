@@ -80,7 +80,8 @@ def owners(restart_root, monkeypatch):
 
 def _ctx(calls, *, kill=None, checkout=None, running=None, messages=None):
     def default_kill(**kw):
-        flags = (server_restart.DATA_DIR / "state" / "owner_restart_no_resume.flag").exists()
+        from ouroboros.delegate_recovery import active_restart_transaction
+        flags = active_restart_transaction(server_restart.DATA_DIR).get("door") == "owner_restart"
         calls.append(("kill", kw, flags))
         return True
 
@@ -129,8 +130,9 @@ def test_restart_checks_out_first_then_stops_owned_work_in_order(owners, restart
     assert kill[1]["reconcile_delegate_custody"] is False, "kill-path reconcile would ensure (start) the daemon"
     assert kill[2] is True, "the durable no-resume intent precedes the stop"
     assert reconcile == ("reconcile", set(), owned.read_owned_gateway, None)
-    assert (restart_root / "state" / "owner_restart_no_resume.flag").read_text() == "owner_restart"
-    assert (restart_root / "state" / "panic_stop.flag").read_text() == "owner_restart_no_resume"
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert active_restart_transaction(restart_root)["door"] == "owner_restart"
+    assert not (restart_root / "state" / "panic_stop.flag").exists()
     assert messages == ["♻️ Restarting.", STOP_NOTICE]
     # Nothing to stop on the empty root: the daemon stop is quiet, not a diagnostic.
     assert _rows(restart_root) == [] and not [r for r in caplog.records if r.levelno >= logging.CRITICAL]
@@ -141,7 +143,8 @@ def test_restart_pauses_admission_before_it_names_returns(owners, restart_root, 
     pool (``pause_admission``) before the returns are named, the cancels recorded and the pool retired."""
     from supervisor import workspace_preparation
 
-    flag = restart_root / "state" / "owner_restart_no_resume.flag"
+    from ouroboros.delegate_recovery import _active_restart_transaction_path
+    flag = _active_restart_transaction_path(restart_root)
     monkeypatch.setattr(workspace_preparation, "pause_admission",
                         lambda timeout=None: owners.calls.append(("pause", flag.exists())) or True)
     real_returns = server_restart._prepare_owner_restart_returns
@@ -204,7 +207,8 @@ def test_unconfirmed_worker_shutdown_is_a_diagnostic_and_the_restart_proceeds(
         assert _restart(_ctx(owners.calls, kill=kill, messages=messages), monkeypatch) == [True]
     assert "worker shutdown" in caplog.text.lower()
     assert [c[0] for c in owners.calls][-2:] == ["reconcile", "daemon_stop"]
-    assert (restart_root / "state" / "owner_restart_no_resume.flag").exists()
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert active_restart_transaction(restart_root)["door"] == "owner_restart"
     assert messages == ["♻️ Restarting.", STOP_NOTICE]
 
 

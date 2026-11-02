@@ -112,7 +112,12 @@ def _project(server, tmp_path):
 def _open(page, server, project):
     page.goto(server.base_url, wait_until="domcontentloaded")
     page.wait_for_function("() => window.__ouroWs?.ws?.readyState === 1", timeout=30000)
-    return _click_project(page, project) if project else "#chat-messages"
+    feed = _click_project(page, project) if project else "#chat-messages"
+    # Visibility precedes the phone drawer's release of the arriving room.
+    # Fill cannot focus an inert composer, even when Playwright calls it editable.
+    page.wait_for_function("feed => { const node = document.querySelector(feed); return node && !node.closest('[inert]'); }",
+                           arg=feed)
+    return feed
 
 
 def _reconnect(page, chat_id):

@@ -92,7 +92,7 @@ def _crash_restore_and_resume(queue, state, workers, monkeypatch) -> dict:
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
     assert queue.resume_budget_paused_task(TASK_ID)["ok"]
     assert budget_hold_fact(row) is None
-    return dict(row["_working_recovery"], _stop_cause=hold.get("stop_cause"))
+    return dict(row["_working_recovery"], _stop_cause=hold.get("door"))
 
 
 def _second_generation(base: Path, drive: Path, handoff: dict, monkeypatch) -> tuple:

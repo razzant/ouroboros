@@ -1,6 +1,6 @@
 // Replies of one chat instance (docs/DESIGN.md "Replies"): the Reply control beside Copy in a bubble's
 // control row (the registered message actions stand between them, message_actions.js), the quote above the
-// replying bubble's text, the strip above the composer while the owner is replying, the jump from a quote to the
+// replying bubble's text, the strip in the composer's field while the owner is replying, the jump from a quote to the
 // message it quotes, and the owner's words a relay carries into a work's room (one Ouroboros bubble: his words in
 // a quote panel above the note). A reply is a reference the host resolves: this module sends only the quoted
 // row's address and never decides who reads the words.
@@ -8,9 +8,12 @@ import { tr } from './i18n.js';
 import { showToast } from './toast.js';
 import { isStoreMigrating } from './api_client.js';
 import { authorOf, createRelayQuote, createReplyQuote, normalizeReplyRef, replySnippet } from './chat_reply_quote.js';
+import { createRelayDecks } from './chat_relay_deck.js';
 import { fullText } from './text_fit.js';
 import { bindBubbleActions } from './message_actions.js';
 import { revealTimelineNode } from './chat_render_batch.js';
+import { afterMotion } from './motion.js';
+import { readBand } from './project_read_state.js';
 
 export const REPLY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"'
     + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -52,9 +55,10 @@ function failureText({ state, task_id: taskId, error }) {
  * lets app switch to the host's destination only while this claim remains current. It returns a state or null
  * for cancellation. Neither the quote's stored chat label nor its task chooses the destination.
  */
-export function createChatReplies({ chatId, feed, input, key = '', reading, history = () => null,
+export function createChatReplies({ chatId, feed, input, composerArea = null, key = '', reading, history = () => null,
     navigate = null, present = () => true, onDomWrite = (write) => write(), actions = undefined }) {
-    // The strip stands right before the field's row (below the pills); a bare field (a test fixture) takes it itself.
+    // The strip is the field's first line: inside the field, right before its text row (composer.js); a bare field (a
+    // test fixture) takes it itself.
     const textRow = input.closest('.chat-text-row') || input;
     let storage = null;
     try { storage = sessionStorage; } catch { /* storage blocked: a staged reply lives for this page only */ }
@@ -63,6 +67,33 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
     let strip = null;
     let targetTimer = 0;
     const bubbleActions = bindBubbleActions({ feed, registry: actions, onDomWrite });
+    // How much of the feed's top the room's header covers: a placed row lands under it, not behind it.
+    const headerClearance = () => {
+        const header = feed.closest('.project-panel')?.querySelector('.project-panel-bar')
+            || feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header, .chat-panel-statusbar');
+        return Math.max(HEADER_CLEARANCE, (header?.getBoundingClientRect().bottom || 0) - feed.getBoundingClientRect().top + 12);
+    };
+    /** One explicit placement of a row under the header, as a quote's landing is: it claims the reading intent, so the
+     * reader's own later gesture supersedes it. `follow` instead returns a reader who was following the newest message
+     * to that message. */
+    function place(target, { follow = false } = {}) {
+        const position = reading();
+        if (position.claim) position.claim(); else position.cancel();
+        if (follow) {
+            position.stick = true;
+            position.followAfterLayout?.();
+            return;
+        }
+        position.stick = false;
+        revealTimelineNode(target, feed, headerClearance());
+        position.scroll();
+        position.remember(true);
+    }
+    // Notes between works: a relay row's bubble is dressed as a note card and grouped into stacks (chat_relay_deck.js);
+    // the room decides how the address reads (Main is chat 1) and lends a fanned column its reading owner and placement.
+    // What of the feed a reader sees below: the composer is drawn over the feed's foot.
+    const band = () => readBand(feed, null, composerArea);
+    const decks = createRelayDecks({ feed, chatId, onDomWrite, reading, clearance: headerClearance, band, place });
     let destroyed = false;
     // `held`: the reader's own live-edge intent while a reveal is pending (a reveal sets stick false itself).
     let revealGeneration = 0, revealing = 0, held = null;
@@ -111,8 +142,16 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
         return result;
     }
 
+    const drawn = (address) => history()?.exact(address) || (!history() && rowOf(address));
+    /** Whether a reveal of `address` lands here without a read: its row is drawn and is not a portal, whose work
+     * lives in another room. */
+    const draws = (address) => {
+        const node = drawn(address);
+        return Boolean(node) && node.dataset.portal !== '1';
+    };
+
     async function seek(address, position, wanted, prepared) {
-        let target = !prepared && (history()?.exact(address) || (!history() && rowOf(address)));
+        let target = !prepared && drawn(address);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
             if (!wanted() || !result) return null;
@@ -123,10 +162,8 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
             target = result.target;
         }
         if (!wanted()) return null;
-        const header = feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header, .chat-panel-statusbar');
-        const clearance = Math.max(HEADER_CLEARANCE,
-            (header?.getBoundingClientRect().bottom || 0) - feed.getBoundingClientRect().top + 12);
-        revealTimelineNode(target, feed, clearance);
+        target = decks.surface(target) || target;  // a tucked note's deck opens, so the row it lands on shows
+        revealTimelineNode(target, feed, headerClearance());
         position.scroll();
         // This explicit placement measured the current column. An ordinary scroll
         // keeps the old-width anchor until reflow; a newly opened room must replace it.
@@ -142,21 +179,54 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
         showToast(tr(`chat.reply.${code}`, words), 'info');
     }
 
-    function paint() {
-        strip?.remove();
+    // The strip opens and closes like the capsule row's fold (style.css): its height runs from 0 while its words fade,
+    // so the row above it rises with it instead of jumping; a reply staged over another one swaps in place. The room it
+    // takes at rest (its box and margins, --reply-room) is where the composer's reserve goes at once (chat.js). Staging
+    // focuses the field and lays the composer out, a long first frame the first time: the strip is held shut through it
+    // (`data-hold`) and opens from the frame after, so no long frame shows it half open.
+    function run(node, to) {
+        const style = typeof getComputedStyle === 'function' ? getComputedStyle(node) : null;
+        const margins = style ? (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0) : 0;
+        node.style.setProperty('--reply-h', `${node.offsetHeight}px`);
+        node.style.setProperty('--reply-room', `${node.offsetHeight + margins}px`);
+        if (to === 'open' && typeof requestAnimationFrame === 'function') {
+            node.dataset.hold = '';
+            node.dataset.motion = 'open';
+            return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => {
+                if (!('hold' in node.dataset)) return 'cancel';
+                delete node.dataset.hold;
+                return afterMotion(node, { property: 'max-height' }).done;
+            });
+        }
+        delete node.dataset.hold;
+        node.dataset.motion = to === 'open' ? 'shut' : 'open';
+        void node.offsetHeight;  // the motion starts from this height
+        node.dataset.motion = to;
+        return afterMotion(node, { property: 'max-height' }).done;
+    }
+    function paint(animate = true) {
+        const before = strip;
         strip = staged ? createReplyQuote(staged, { composer: true, onJump: jump, onCancel: () => cancel() }) : null;
         if (strip) {
             const main = strip.querySelector('.chat-quote-main');
             main.id = `${input.id}-reply`;
-            textRow.before(strip);
             // The field announces what it answers whenever it takes focus.
             input.setAttribute('aria-describedby', main.id);
+            if (before?.isConnected && before.dataset.motion !== 'shut') { before.replaceWith(strip); return; }
+            textRow.before(strip);
+            const opened = strip;
+            // A reply the room kept comes with the room; one staged now opens.
+            if (animate) void run(opened, 'open').then(() => { if (opened.dataset.motion === 'open') delete opened.dataset.motion; });
         } else input.removeAttribute('aria-describedby');
+        if (before?.isConnected && before.dataset.motion !== 'shut') {
+            before.inert = true;  // leaving, its controls take no press
+            void run(before, 'shut').then(() => before.remove());
+        }
     }
 
     /**
      * Reply to one row. A still-open question card answers in its own field (the existing answer door, never a
-     * second path); anything else stages the strip above the composer.
+     * second path); anything else stages the strip, the composer field's first line.
      */
     function start(raw) {
         const ref = normalizeReplyRef(raw);
@@ -191,7 +261,7 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
         event.preventDefault();
         cancel();
     }
-    // One listener on the composer wrap: Esc from the field and from the strip's own buttons lands here.
+    // One listener on the field (the text row's parent): Esc from the words and from the strip's own buttons lands here.
     const keyHost = textRow.parentElement || input;
     keyHost?.addEventListener('keydown', onKeydown);
 
@@ -202,7 +272,8 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
         const role = ROLE_NAMES.find((name) => bubble.classList.contains(name)) || '';
         const words = bubble.querySelector(':scope > .message')?.textContent
             || bubble.querySelector('.chat-quiz-question')?.textContent || bubble.dataset.rowWords || '';
-        return { address, chat_id: chatId, role, author_label: bubble.querySelector(':scope > .sender')?.textContent || '',
+        const sender = bubble.querySelector(':scope > .sender, :scope > .chat-bubble-voice > .sender');
+        return { address, chat_id: chatId, role, author_label: sender?.textContent || '',
             kind: bubble.querySelector('.chat-quiz-card') ? 'question' : 'message', snippet: replySnippet(words),
             ts: bubble.dataset.ts ? new Date(Number(bubble.dataset.ts)).toISOString() : '', task_id: bubble.dataset.taskId || '' };
     }
@@ -231,7 +302,7 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
 
     try {
         const saved = storage && storageKey ? storage.getItem(storageKey) : '';
-        if (saved) { staged = normalizeReplyRef(JSON.parse(saved)); paint(); }
+        if (saved) { staged = normalizeReplyRef(JSON.parse(saved)); paint(false); }
     } catch { staged = null; }
 
     /**
@@ -277,6 +348,7 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
     }
 
     function syncDerivedQuotes(around = null) {
+        decks.schedule();  // a landed row may join, split or end a run of notes
         if (!around) {
             return [...feed.querySelectorAll('.chat-bubble > .chat-quote[data-derived="1"]')]
                 .reduce((changed, quote) => syncDerivedQuote(quote.parentElement) || changed, false);
@@ -297,9 +369,11 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
         decorate(bubble, row) {
             const address = String(row?.row_address || '');
             if (address) bubble.dataset.rowAddress = address;
+            // Work speech another room also shows: its read is shared (read_ahead.js).
+            if (row?.room_revisions && typeof row.room_revisions === 'object') bubble.dataset.roomRevisions = JSON.stringify(row.room_revisions);
             const sender = bubble.querySelector('.sender');
             const role = ROLE_NAMES.find((name) => bubble.classList.contains(name));
-            const relay = role === 'assistant' ? createRelayQuote(row?.relay, { onDomWrite }) : null;
+            const relay = role === 'assistant' ? createRelayQuote(row?.relay, { onDomWrite, card: bubble.dataset.systemType === 'relay_entry' }) : null;
             const quote = relay || createReplyQuote(row?.reply_to, { onJump: jump });
             if (quote && !relay && role !== 'user') {
                 quote.dataset.derived = '1';
@@ -307,6 +381,7 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
             }
             if (quote) sender?.after(quote);
             mountControl(bubble);
+            if (row?.relay && bubble.dataset.systemType === 'relay_entry') decks.adopt(bubble, row, Boolean(relay));
         },
         /** A row built outside addMessage (media, files, links, a question card): its address makes it a reply target. */
         stamp(bubble, row) {
@@ -334,6 +409,7 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
         syncCard,
         syncDerivedQuotes,
         reveal,
+        draws,
         get revealing() { return revealing !== 0; },
         /**
          * "Send as a new message" under a delivery doubt: the owner's words join this composer's draft (sent, they are
@@ -354,6 +430,7 @@ export function createChatReplies({ chatId, feed, input, key = '', reading, hist
             destroyed = true;
             clearTimeout(targetTimer);
             bubbleActions.destroy();
+            decks.destroy();
             keyHost?.removeEventListener('keydown', onKeydown);
             strip?.remove();
             strip = null;

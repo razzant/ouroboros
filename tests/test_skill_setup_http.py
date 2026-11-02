@@ -23,7 +23,6 @@ def setup_http(tmp_path, monkeypatch):
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'advanced')
     monkeypatch.setenv('OUROBOROS_REVIEW_ENFORCEMENT', 'advisory')
     monkeypatch.setenv('OUROBOROS_SKILLS_REPO_PATH', str(tmp_path / 'absent'))
-    monkeypatch.setattr(actions, '_sync_schedules', lambda *a, **k: None)
     monkeypatch.setattr(actions, '_reconcile', lambda *a, **k: {})
     monkeypatch.setattr(extensions, '_broadcast_extension_lifecycle', lambda *a: None)
     monkeypatch.setattr(queue, 'JOB_ANSWER_WAIT_SEC', 0.03)
@@ -64,7 +63,6 @@ def test_legacy_reconcile_does_not_reenter_the_callers_lifecycle_lane(setup_http
     app, drive = setup_http
     app.router.routes.append(Route('/api/skills/{skill}/reconcile', extensions.api_skill_reconcile, methods=['POST']))
     monkeypatch.setattr('ouroboros.extension_loader.reconcile_extension', lambda *a, **k: {'action': 'unchanged'})
-    monkeypatch.setattr('supervisor.queue.resync_skill_schedules', lambda *a: None)
     entered, release = threading.Event(), threading.Event()
 
     def held():
@@ -422,7 +420,6 @@ def _launcher_grant_skill(tmp_path, monkeypatch, *, name="demo", skill_type="scr
     from starlette.routing import Route
     from ouroboros.gateway import extensions
     monkeypatch.setattr("ouroboros.skill_lifecycle_actions._reconcile", lambda *a, **k: {})
-    monkeypatch.setattr("ouroboros.skill_lifecycle_actions._sync_schedules", lambda *a: None)
     monkeypatch.setattr(extensions, "_broadcast_extension_lifecycle", lambda *a: None)
     app = Starlette(routes=[Route("/api/skills/{skill}/grants", extensions.api_skill_grants, methods=["POST"])])
     app.state.drive_root, app.state.repo_dir = drive, tmp_path / "repo"

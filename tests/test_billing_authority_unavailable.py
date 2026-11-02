@@ -89,8 +89,9 @@ def test_a_startup_read_failure_binds_no_stand_in_and_every_send_rereads(data_ro
                 outcomes.append(("reserved", reservation.scope.billing_group_id, len(calls) > 1))
         return scope
 
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=data_root), _emit_live_log=lambda *_a, **_k: None,
-                           _event_queue=None, _handle_task_scoped=scoped)
+    from tests._agent_entry_helpers import task_entry_agent
+
+    host = task_entry_agent(data_root, scoped)
     scope = OuroborosAgent.handle_task(host, {"id": "S", "type": "task"})
     assert scope.billing_group_id == "" and scope.billing_group_limit_usd is None  # nothing stands in
     assert outcomes == [("refused", "unreadable", 0), ("reserved", "P", True)]
@@ -171,7 +172,7 @@ def test_no_delegated_session_starts_under_an_unreadable_bucket(data_root):
         custody.record_start_requested(data_root, task_id="S", root_task_id="S", invocation_id="i-1",
                                        request={"prompt": "x"}, idempotency_key="i-1")
     requested, refusal = claimed_start_request(
-        data_root, claim_target="", payload_busy=lambda *_a: "", run_id="", task_id="S", root_task_id="S",
+        data_root, run_id="", task_id="S", root_task_id="S",
         invocation_id="i-2", request={"prompt": "x"}, idempotency_key="i-2")
     assert requested is False and refusal["reason"] == "billing_authority_unavailable"
     assert refusal["billing_authority"] == "unreadable" and "budget" not in refusal["detail"]

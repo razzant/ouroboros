@@ -61,17 +61,13 @@ def test_push_to_remote_push_tags_compatibility(monkeypatch):
 
     ok, _ = git_ops.push_to_remote("feature", push_tags=False)
     assert ok is True
-    assert commands == [["push", "-u", "origin", "feature"]]
+    assert commands == [["push", "--no-follow-tags", "-u", "origin", "refs/heads/feature:refs/heads/feature"]]
 
     commands.clear()
     ok, _ = git_ops.push_to_remote("feature", push_tags=True)
     assert ok is True
-    assert commands == [
-        ["push", "-u", "origin", "feature"],
-        # Only annotated tags reachable from the pushed branch: a release tag on an
-        # unadopted body candidate (shared tag namespace) must not leak (#1539).
-        ["push", "--follow-tags", "origin", "feature"],
-    ]
+    # The legacy boolean never invents evidence that this operation created a tag.
+    assert commands == [["push", "--no-follow-tags", "-u", "origin", "refs/heads/feature:refs/heads/feature"]]
 
 
 def test_readme_version_history_contains_current_version_row():

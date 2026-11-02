@@ -71,8 +71,10 @@ export function withWidgetStartMode(current, key, mode) {
 // (`.skills-card-menu` + `<dialog role="menu">`): a framed card's launch policy
 // and every card's width steps, each a radio group. The checked policy is set
 // by `syncWidgetCardControls` once the page knows the owner's preferences; the
-// checked width when the menu opens (`bindWidgetCardMenus`).
-export function renderWidgetCardControls(tab) {
+// checked width when the menu opens (`bindWidgetCardMenus`). The head draws the two
+// parts apart (`renderWidgetCardParts`): the lifecycle controls may drop under the
+// title's row, the menu stays with the move handle in one pair that never splits.
+export function renderWidgetCardParts(tab) {
     const item = (attrs, label, role = 'menuitemradio') => (
         `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
     );
@@ -88,11 +90,11 @@ export function renderWidgetCardControls(tab) {
     const remove = tab?.pinned_card ? `<div role="group" aria-label="Card">${item('data-widget-unpin', 'Remove', 'menuitem')}</div>` : '';
     const power = framed ? `<span class="ui-status" data-tone="neutral" data-widget-status hidden>Stopped</span>
         <button type="button" class="btn btn-primary btn-sm" data-widget-power>Start</button>` : '';
-    return `${power}
-        <div class="skills-card-menu">
+    const menu = `<div class="skills-card-menu">
             <button type="button" class="skills-card-menu-trigger" aria-label="Widget options" aria-haspopup="menu" aria-expanded="false" data-widget-menu-trigger>⋮</button>
             <dialog class="skills-card-menu-dialog ui-popup" role="menu" aria-label="Widget options">${policy}${sizes}${remove}</dialog>
         </div>`;
+    return { run: power, menu };
 }
 
 const STATUS_TEXT = { starting: 'Starting…', running: 'Running', stopping: 'Stopping…' };
@@ -109,6 +111,18 @@ export function setWidgetCardFault(card, text) {
     status.hidden = false;
     status.dataset.tone = 'error';
     status.dataset.widgetFault = text;
+    status.textContent = text;
+}
+
+/**
+ * A stopped card's one line about why it did not start by itself (the start ledger, holds.js), in its status slot
+ * until the next lifecycle transition rewrites it. An empty `text` leaves the slot as the transition left it.
+ */
+export function setWidgetCardNote(card, text) {
+    const status = card?.querySelector('[data-widget-status]');
+    if (!status || !text) return;
+    status.hidden = false;
+    status.dataset.tone = 'neutral';
     status.textContent = text;
 }
 

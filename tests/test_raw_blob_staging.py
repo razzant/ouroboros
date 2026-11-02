@@ -22,6 +22,7 @@ import pytest
 
 from ouroboros import review_checking as rc
 from ouroboros.subagent_worktrees import RawStagingIncomplete, isolated_git_env, stage_raw_payload_inventory
+from ouroboros.unindexed import COPIES
 from tests.group_run import run_in_group
 from tests.test_delegated_skill_payload import (  # noqa: F401
     _owned_gateway_uses_each_test_transport,
@@ -531,5 +532,6 @@ def test_payload_provisioning_of_a_path_git_refuses_never_starts_or_leaves_a_sna
     payload = delegate_payload(refusal)
     assert payload["reason"] == "execution_snapshot_failed" and payload["definitely_unrun"] is True, payload
     assert "RawStagingIncomplete" in payload["detail"] and _REFUSED in payload["detail"], payload
-    assert list((tmp_path / "snaps").glob("dlgp_*")) == [] and find_execution_snapshot("snapR") is None
+    assert not [*(tmp_path / "snaps").glob("dlgp_*"), *(tmp_path / "snaps").glob(f"{COPIES}/dlgp_*")]
+    assert find_execution_snapshot("snapR") is None
     assert not (skill / ".git").exists() and (skill / _REFUSED).read_bytes() == b"loader-visible\n"

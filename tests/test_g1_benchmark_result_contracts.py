@@ -61,7 +61,7 @@ def test_real_gui_producer_receipt_is_the_results_produced_work(tmp_path):
     ctx = context(tmp_path)
     ctx._execution_trace = {"tool_calls": []}
     assert not calls and produced_material(ctx)["effects"] == []
-    receipt = impl.click(x=10, y=20)
+    receipt = impl.click(x=10, y=20, raw=True)
     assert calls and json.loads(receipt)["ok"] is True
     tool = extension_surface_name("unix_computer_use", "click")
     ctx._execution_trace["tool_calls"].append({"tool": tool, "result": receipt, "is_error": False,

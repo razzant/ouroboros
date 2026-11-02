@@ -151,12 +151,12 @@ def test_dictation_mic_appears_once_chosen_records_and_puts_words_at_the_caret(s
     assert slot.is_hidden() and slot.locator("button").count() == 0, "no dictation mic until an engine is chosen"
     # "+" → Add dictation… → the live engine, with where its audio goes.
     page.click("#page-chat #chat-plus")
-    menu = page.locator(".chat-plus-menu")
+    menu = page.locator(".chat-plus-menu:not([data-leaving])")
     menu.wait_for()
     items = [text.strip() for text in menu.locator("[role=menuitem]").all_inner_texts()]
     assert items[-2:] == ["Add dictation…", "Make a button with Ouroboros…"], items
     menu.locator("[data-plus-item='dictation']").click()
-    chooser = page.locator(".voice-chooser")
+    chooser = page.locator(".voice-chooser:not([data-leaving])")
     chooser.wait_for()
     option = chooser.locator("[data-voice-option='whisper-voice:stt']")
     assert option.locator(".voice-menu-line").inner_text() == "On this computer"
@@ -214,7 +214,7 @@ def test_dictation_mic_appears_once_chosen_records_and_puts_words_at_the_caret(s
     slot.locator(".voice-mic").wait_for()
     assert len(state["uploads"]) == 2, "a cancelled recording uploads nothing"
     slot.locator(".voice-chevron").click()
-    engines = page.locator(".voice-menu:not(.voice-chooser)")
+    engines = page.locator(".voice-menu:not([data-leaving]):not(.voice-chooser)")
     engines.wait_for()
     assert engines.locator(".voice-menu-name").all_inner_texts() == ["Whisper", "Get another engine…", "Turn off dictation"]
     assert engines.locator("[aria-checked='true'] .voice-menu-line").inner_text() == "On this computer"
@@ -222,7 +222,7 @@ def test_dictation_mic_appears_once_chosen_records_and_puts_words_at_the_caret(s
     slot.locator(".voice-mic").wait_for(state="detached")
     assert state["voice"]["stt"] == ""
     page.click("#page-chat #chat-plus")
-    page.locator(".chat-plus-menu [data-plus-item='dictation']").wait_for()
+    page.locator(".chat-plus-menu:not([data-leaving]) [data-plus-item='dictation']").wait_for()
 
 
 @pytest.mark.parametrize("width,scheme", [(360, "light"), (1280, "dark")])
@@ -249,12 +249,12 @@ def test_read_aloud_reads_one_reply_shows_stop_and_offers_honest_voices(subscrip
     assert page.evaluate("window.__cancels") >= 1
     # The row menu: Read aloud and its voice door, in words; voices say where they speak.
     answer.locator(".message").click(button="right")
-    rows = page.locator(".chat-row-menu")
+    rows = page.locator(".chat-row-menu:not([data-leaving])")
     rows.wait_for()
     labels = rows.locator("[role=menuitem]").all_inner_texts()
     assert labels[-2:] == ["Read aloud", "Read aloud voice…"], labels
     rows.get_by_role("menuitem", name="Read aloud voice…").click()
-    voices = page.locator(".voice-menu")
+    voices = page.locator(".voice-menu:not([data-leaving])")
     voices.wait_for()
     assert voices.locator(".voice-menu-name").all_inner_texts() == ["Automatic", "Local Anna", "Online Ben"]
     assert voices.locator(".voice-menu-line").all_inner_texts() == [

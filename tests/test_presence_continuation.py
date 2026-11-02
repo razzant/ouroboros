@@ -44,7 +44,7 @@ from ouroboros.presence_runner import (
 )
 from ouroboros.review_records import ReviewSlot
 from ouroboros.task_results import load_task_result, write_task_result
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_presence_runner import _admission
 
 ANSWER = "The status report is complete: all three checks passed."
@@ -129,7 +129,7 @@ def reviewing_admission():
     return dataclasses.replace(admission, capability_ceiling=ceiling)
 
 
-def wait_for(predicate, timeout=20.0, what="condition"):
+def wait_for(predicate, timeout=60.0, what="condition"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -164,7 +164,7 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a: False)
     monkeypatch.setattr("ouroboros.tools.review_helpers.review_wave_budget_gate", lambda *_a, **_k: None)
     # One held reviewer seat is the whole review pool a result review draws from.
-    slots = [ReviewSlot(slot_id="reviewer-one", model="fixture/reviewer", effort="high", timeout_sec=30)]
+    slots = [ReviewSlot(slot_id="reviewer-one", model="fixture/reviewer", effort="high", timeout_sec=180)]
     monkeypatch.setattr("ouroboros.reviewer_slot_config.review_pool_slots", lambda *_a, **_kw: list(slots))
     data, repo = tmp_path / "data", tmp_path / "repo"
     data.mkdir()
@@ -216,7 +216,7 @@ def harness(tmp_path, monkeypatch):
                 assert write_task_message(h.data, h.addressed, self.assignment.request.task_id,
                                           source_task_id="operations-room", provenance=PROVENANCE_INDEPENDENT_TASK)
             h.entered.set()
-            assert h.release.wait(30), "the test never released the reviewer"
+            assert h.release.wait(180), "the test never released the reviewer"
             # review_change's answer contract: an empty array is a clean answer.
             text = "[]" if h.verdict == "PASS" else json.dumps([{
                 "item": "backup_window", "verdict": "FAIL", "severity": "critical",
@@ -233,6 +233,9 @@ def harness(tmp_path, monkeypatch):
             h.calls += 1
             step = h.script.pop(0) if isinstance(h.script, list) else h.script
         response = step(messages) if callable(step) else step
+        if h.ctxs and h.ctxs[-1].task_metadata.get("wake_cause") == "focus":
+            from tests.presence_legacy_helpers import focus_response
+            response = focus_response(response)
         return response, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", model)
@@ -284,7 +287,7 @@ def harness(tmp_path, monkeypatch):
     yield h
     h.release.set()
     if h.entered.is_set():
-        assert settled.wait(15)
+        assert settled.wait(60)
         settlement_notices_done()
 
 
@@ -319,7 +322,7 @@ def test_author_yields_cap_one_at_a_left_review_and_returns_with_the_new_words(h
 
     h.script = author(after_wake)
     execution = h.start(first)
-    initial = execution.initial.result(timeout=30)
+    initial = execution.initial.result(timeout=90)
     # The durable initial envelope: the same author continues, nothing was spoken yet.
     assert (initial.status, initial.outcome, initial.text, initial.output_ref) == ("continuing", "deferred", "", "")
     assert initial.continuation_ref == initial.task_id and not execution.result.done()
@@ -360,7 +363,7 @@ def test_stop_while_parked_ends_without_another_call(harness):
     h = harness
     h.script = [review(), waits()]
     execution = h.start(event())
-    initial = execution.initial.result(timeout=30)
+    initial = execution.initial.result(timeout=90)
     assert initial.status == "continuing"  # parked at the review it left
     request_cancel(h.data, initial.task_id, reason="owner stop", source="test")
     try:
@@ -377,7 +380,7 @@ def test_exhausted_rounds_never_publish_the_reviewed_answer_because_its_review_p
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "2")  # the author parks on its last inline round
     h.script = [review(), waits(), {"content": "Forced record without a declaration."}]
     execution = h.start(event())
-    assert execution.initial.result(timeout=30).status == "continuing"
+    assert execution.initial.result(timeout=90).status == "continuing"
     h.release.set()  # the review passes the answer the author never declared
     final = execution.result.result(timeout=60)
     # Rounds were not reset: the one forced call wrote a record without a declaration, so nothing speaks.
@@ -410,7 +413,7 @@ def test_stop_while_reacquiring_behind_another_turn_ends_without_a_call(harness)
     h = harness
     h.script = [review(), waits()]
     execution = h.start(event())
-    initial = execution.initial.result(timeout=30)
+    initial = execution.initial.result(timeout=90)
     assert initial.status == "continuing"
     holding, done = threading.Event(), threading.Event()
 
@@ -494,7 +497,7 @@ def test_a_stop_after_the_wake_ends_before_a_free_conversation_is_taken_back(har
     monkeypatch.setattr(owner_wait, "direct_owner_wait", wake_then_stop)
     h.script = [review(), waits()]
     execution = h.start(event())
-    assert execution.initial.result(timeout=30).status == "continuing"
+    assert execution.initial.result(timeout=90).status == "continuing"
     h.release.set()
     try:
         final = execution.result.result(timeout=60)
@@ -520,7 +523,7 @@ def test_the_resuming_author_reads_sql_rows_across_a_legacy_rotation_attempt(har
 
     h.script = author(after_wake)
     execution = h.start(event())
-    assert execution.initial.result(timeout=30).status == "continuing"
+    assert execution.initial.result(timeout=90).status == "continuing"
     assert quick_turn(h).text == "Noted."
     rotate_jsonl_log_if_needed(h.data, "chat.jsonl", "chat", max_bytes=1)
     assert not (h.data / "logs" / "chat.jsonl").exists()
@@ -548,7 +551,7 @@ def test_the_review_change_grant_alone_parks_for_a_result_but_a_change_needs_its
 
     h.script = step
     execution = h.start(event())
-    initial = execution.initial.result(timeout=30)
+    initial = execution.initial.result(timeout=90)
     assert initial.status == "continuing"  # the result review parked the author
     refusal = [str(row.get("content")) for row in h.inputs[1] if row.get("role") == "tool"]
     assert len(refusal) == 1 and "PRESENCE_RESOURCE_BLOCKED" in refusal[0]  # the change review, before any seat

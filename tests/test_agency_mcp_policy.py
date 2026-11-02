@@ -45,7 +45,9 @@ def test_cyber_url_credentials_use_existing_diagnostic_masking(monkeypatch):
     url = "https://agency-user:synthetic%3Apassword@example.com/mcp"
     cfg = mcp_client.normalize_server_config({"id": "auth", "url": url})
     assert cfg and cfg.url == url
-    assert mcp_client.redact_servers_for_status([cfg])[0]["url"] == "https://example.com/mcp"
+    manager = mcp_client.MCPManager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_SERVERS": [{"id": "auth", "url": url}]})
+    assert manager.status_payload()["servers"][0]["url"] == "https://example.com/mcp"
     diagnostic = mcp_client._redact_error_text("agency-user synthetic:password " + url, cfg)
     assert "agency-user" not in diagnostic and "password" not in diagnostic
     monkeypatch.setattr(config, "_BOOT_RUNTIME_MODE", "pro")
@@ -115,3 +117,9 @@ def test_live_http_mcp_discovery_call_and_remote_failure(tmp_path, monkeypatch, 
         server.server_close()
         thread.join(timeout=5)
         assert not thread.is_alive()
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

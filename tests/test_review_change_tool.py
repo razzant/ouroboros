@@ -300,22 +300,29 @@ def test_the_schema_is_the_planned_call() -> None:
 
     [entry] = rc.get_tools()
     params = entry.schema["parameters"]
-    assert entry.name == "review_change" and params["required"] == ["subject"]
+    assert entry.name == "review_change" and params["required"] == []
     assert list(params["properties"]) == [
-        "root", "workspace_root", "subject", "base", "head", "surface", "answer", "goal", "scope", "author_questions",
-        "reviewers", "reason", "coupling_only", "reviewer_effort", "review_rebuttal", "treat_as_body"]
+        "wake_on", "review_reference", "root", "workspace_root", "subject", "base", "head", "surface", "answer", "goal", "scope", "author_questions",
+        "reviewers", "reason", "coupling_only", "reviewer_effort", "review_rebuttal", "treat_as_body", "since_review"]
     props = params["properties"]
     assert props["root"]["enum"] == ["active_workspace", "system_repo"] and props["root"]["default"] == "active_workspace"
     assert props["subject"]["enum"] == ["index", "worktree", "base..head", "system", "result"]
     assert props["surface"]["enum"] == ["change", "preflight", "system", "result"] and props["surface"]["default"] == "change"
     assert "subject=result only" in props["answer"]["description"]
+    assert "chosen_by" not in params["properties"] and "required_root" not in params["properties"]
+    assert "Required root" in entry.schema["description"] and "host seats the whole pool" in entry.schema["description"]
     assert props["reviewer_effort"]["enum"] == list(EFFORT_SCALE)
     assert (props["treat_as_body"]["type"], props["treat_as_body"]["default"]) == ("boolean", False)
     # The schema states the predicate's rule (review_body_fact.body_fact): the flag raises
     # only an UNKNOWN body fact; a recognized body or foreign root is unchanged.
     description = props["treat_as_body"]["description"]
     assert "unknown" in description and "unchanged" in description and "even if it is not the body" not in description
-    assert entry.timeout_sec and entry.timeout_sec > 0
+    # A finite lifetime gives a finite settlement envelope; none gives none (1A: the wave's
+    # drain and the system report observe the owner's controls instead of a 6 h host timer).
+    from ouroboros.config import get_task_abs_ceiling_sec
+
+    assert (entry.timeout_sec is None) == (get_task_abs_ceiling_sec() is None)
+    assert entry.timeout_sec is None or entry.timeout_sec > 0
 
 
 # --- Root, subject and rules layer --------------------------------------------------
@@ -831,3 +838,79 @@ def test_a_review_change_records_lost_seat_is_not_reached_while_a_gate_record_aw
     assert ledger.counted_pending([lost], lost_is_terminal=True) is False
     assert ledger.panel_not_reached([lost], lost_is_terminal=True) == [{"seat_id": "t2", "cause": "custody_lost"}]
     assert ledger.counted_pending([lost]) is True and ledger.panel_not_reached([lost]) == []
+
+
+def _frozen_result(h: Harness, text: str) -> Frozen:
+    """A result subject the tool reads as given, so panel tests do not build a task result."""
+    digest = _sha(text)
+    spec = ReviewSubjectSpec(root_kind="task_result", root=str(h.project), kind="result",
+                             surface="result", layer="result", governance_root=str(h.system))
+    return Frozen(spec, text, digest, digest, "")
+
+
+def _as_child(h: Harness) -> None:
+    h.ctx.parent_task_id = "parent-task"
+    h.ctx.task_metadata = {"parent_task_id": "parent-task", "root_task_id": "parent-task"}
+
+
+def test_required_root_blocking_widens_a_named_result_subset(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = _pool()
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
+    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
+    result = h.run(subject="result", reviewers=[pool[0], "scout"], _frozen_result=_frozen_result(h, "root report\n"))
+    assert h.wave.calls[-1].triad == pool
+    assert h.wave.calls[-1].coupling == ["scout"]
+    assert set(h.wave.calls[-1].parts.values()) == {("result",)}
+    assert result["panel"]["widened_from"] == [pool[0], "scout"] and result["panel"]["chosen_by"] == "ouroboros"
+
+
+def test_a_childs_required_result_review_keeps_the_named_rows(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = _pool()
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
+    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
+    _as_child(h)
+    result = h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "child report\n"))
+    assert h.wave.calls[-1].triad == [pool[0]] and result["panel"]["widened_from"] == []
+
+
+def test_advisory_required_root_refuses_a_subset_without_a_reason(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = _pool()
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
+    with pytest.raises(rc.ReviewChangeArgumentError, match="REVIEW_PANEL_REASON_REQUIRED"):
+        h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "unexplained\n"))
+    assert h.wave.calls == []
+    result = h.run(subject="result", reviewers=[pool[0]], reason="the risky claim",
+                   _frozen_result=_frozen_result(h, "explained\n"))
+    assert h.wave.calls[-1].triad == [pool[0]] and result["panel"]["composition"] == "composed"
+
+
+def test_auto_and_cyber_pro_compose_a_named_result_subset(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = _pool()
+    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
+    auto = h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "auto report\n"))
+    assert h.wave.calls[-1].triad == [pool[0]] and auto["panel"]["widened_from"] == []
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
+    monkeypatch.setattr(rc, "get_runtime_mode", lambda: "cyber_pro")
+    cyber = h.run(subject="result", reviewers=[pool[0]], _frozen_result=_frozen_result(h, "cyber report\n"))
+    assert h.wave.calls[-1].triad == [pool[0]] and cyber["panel"]["widened_from"] == []
+
+
+def test_the_caller_records_who_chose_the_result_panel(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    pool = _pool()
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "required")
+    monkeypatch.setattr(rc, "get_review_enforcement", lambda: "blocking")
+    host = h.run(subject="result", _chosen_by="host", _frozen_result=_frozen_result(h, "host report\n"))
+    mind = h.run(subject="result", _frozen_result=_frozen_result(h, "mind report\n"))
+    assert host["panel"]["chosen_by"] == "host" and host["panel"]["composition"] == "full_pool"
+    assert sorted(host["panel"]["assigned"]) == sorted(pool)
+    assert mind["panel"]["chosen_by"] == "ouroboros" and sorted(mind["panel"]["assigned"]) == sorted(pool)
+
+
+def test_off_refuses_the_result_tool_and_a_change_review_still_runs(h: Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    with pytest.raises(rc.ReviewChangeArgumentError, match="result review is off"):
+        h.run(subject="result", _frozen_result=_frozen_result(h, "off report\n"))
+    assert h.wave.calls == []
+    _stage(h.project, "app.py", "VALUE = 2\n")
+    change = h.run(subject="index", goal="Bump", scope="app.py")
+    assert change["aggregate"] != "NOT_DISPATCHED" and h.wave.calls

@@ -1,9 +1,10 @@
 """One Light memory operation reads current knowledge whole; it writes none.
 
-Scratchpad compression is that operation now: its read tools deliver the complete current
-note (or a retained partial view of an oversized one) inside the same call. The automatic
-reflection, dialogue and pressure writers are retired, and so are their knowledge
-nominations: an answer that still nominates a note leaves it as its author wrote it.
+The shared Light transport's read tools deliver the complete current note (or a retained
+partial view of an oversized one) inside the same call. The automatic reflection, dialogue,
+pressure and scratchpad writers are retired (the last by #918: the mind folds its own
+scratchpad), and so are their knowledge nominations: an answer that still nominates a note
+is returned as text and leaves the note as its author wrote it.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import json
 import pytest
 
 from ouroboros import consolidator as c, knowledge as k
-from ouroboros.memory import Memory
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
 
@@ -76,19 +76,14 @@ def test_same_light_operation_reads_the_complete_current_note(tmp_path, fit, mon
     assert k.read_knowledge_note(original.address).raw == original.raw
 
 
-def _scratchpad(root):
-    memory = Memory(root, root)
-    memory.mutate_scratchpad_blocks(lambda _: [
-        {"ts": f"2026-09-12T10:0{index}:00Z", "source": "dialogue",
-         "content": f"ORIGINAL EPISODE {index}: asked for depth. " + "x" * 11000}
-        for index in range(3)])
-    return memory
+_EPISODES = "\n\n".join(f"ORIGINAL EPISODE {index}: asked for depth. " + "x" * 11000 for index in range(3))
 
 
 @pytest.mark.parametrize("concurrent", [False, True])
-def test_scratchpad_source_stays_durable_and_a_nominated_revision_writes_nothing(tmp_path, fit, concurrent):
+def test_a_light_source_stays_durable_and_a_nominated_revision_writes_nothing(tmp_path, fit, concurrent):
+    """Formerly carried by the post-task scratchpad pass (retired, #918): the same operation shape
+    through the shared transport, whose answer nominates an edit while an authored revision races it."""
     original = _initial(tmp_path)
-    memory = _scratchpad(tmp_path)
     update = "Two original episodes, context differs."
     edits = [{"old_text": "He asked for brevity while hurried.", "new_text": update,
               "basis": "The original episodes establish context-specific requests."}]
@@ -98,17 +93,12 @@ def test_scratchpad_source_stays_durable_and_a_nominated_revision_writes_nothing
     competing = lambda: k.write_knowledge_note(original.address, "A simultaneous newer observation.",
                                                expected_revision=original.revision)
     llm = MemoryLLM(answer, before_answer=competing if concurrent else None)
-    usage = c.consolidate_scratchpad(memory, llm)
+    reads = c.KnowledgeReadContext(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="light-operation"))
+    content, usage = c._call_consolidation_llm(llm, _EPISODES, "Light memory operation", knowledge=reads)
     assert usage["cost"] == pytest.approx(0.03)
+    assert content == answer  # returned as text: nothing parses or applies the nomination
     assert "ORIGINAL EPISODE 0" in llm.calls[1]["messages"][0]["content"]
     assert "DECISIVE ORIGINAL TAIL." in llm.calls[1]["messages"][-1]["content"]
-    blocks = memory.load_scratchpad_blocks()
-    assert len(blocks) == 2 and blocks[0]["content"] == "I learned that context matters; keep both episodes."
-    assert set(blocks[0]["metadata"]) == {"source_ref"}
-    source = memory.journal_path().read_text()
-    consolidated = json.loads(next(
-        line for line in source.splitlines() if json.loads(line).get("type") == "blocks_consolidated"))
-    assert "ORIGINAL EPISODE 0" in source and "knowledge_entries" not in consolidated
     # The nominated edit and summary never land; a concurrent authored revision stays.
     current = k.read_knowledge_note(original.address)
     if concurrent:

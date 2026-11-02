@@ -41,7 +41,6 @@ _PASSIVE_SEAMS = (
     ("ouroboros.gateway.extensions", "discover_skills"),
     ("ouroboros.gateway.extensions", "find_skill"),
     ("ouroboros.skill_review_runner", "reconcile_stale_review_jobs"),
-    ("supervisor.queue", "sync_skill_schedules"),
 )
 
 
@@ -109,6 +108,7 @@ def test_api_widgets_projects_live_tabs_without_discovery(tmp_path, monkeypatch)
             "span": 1,
             "grid_span": 1,
             "revision": loaded.content_hash,
+            "generation": extension_loader.extension_generation_digest("ext_widget"),
         }
         assert response.headers["cache-control"] == "no-store"
         assert tab["revision"] and tab["revision"] == extension_loader.live_widget_projection()[0]["revision"]
@@ -222,7 +222,8 @@ def test_live_widget_projection_joins_tabs_with_owner_revision(tmp_path):
     rows = extension_loader.live_widget_projection("ext_proj")
     assert [row["tab"]["key"] for row in rows] == ["ext_proj:module", "ext_proj:plain"]
     assert {row["revision"] for row in rows} == {loaded.content_hash}
-    assert all(set(row) == {"tab", "revision"} for row in rows)
+    assert all(set(row) == {"tab", "revision", "generation"} for row in rows)
+    assert {row["generation"] for row in rows} == {extension_loader.extension_generation_digest("ext_proj")}
     assert extension_loader.live_module_sources("ext_proj") == {
         "widget.js": "export const x = 1;\n",
         "lib/helper.mjs": "export const h = 2;\n",

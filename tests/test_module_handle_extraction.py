@@ -95,18 +95,18 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # tree did not bear it out, so the three invariants below were not running on
     # them. Sets are the tool-derived exact read sets on these bytes.
     "supervisor/queue_snapshot.py": ("supervisor/queue.py", "_queue", frozenset({
-        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "PENDING", "PRIOR_DIRECT_ROOTS",
+        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "INITIALIZED", "PENDING", "PRIOR_DIRECT_ROOTS",
         "QUEUE_PUBLICATION", "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
         "append_jsonl", "atomic_write_text", "enqueue_task", "parse_iso_to_ts",
         "persist_queue_snapshot", "restore_invalid_depth_admission", "sort_pending",
     })),
     "supervisor/queue_timeouts.py": ("supervisor/queue.py", "_queue", frozenset({
-        "DRIVE_ROOT", "FINALIZATION_GRACE_SEC", "HEARTBEAT_STALE_SEC", "PENDING",
-        "QUEUE_MAX_RETRIES", "RUNNING", "_enforce_task_timeouts_locked", "_expire_pending_deadlines_locked",
-        "_ensure_reaper_started", "_has_live_descendant", "_has_pending_descendant",
+        "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "FINALIZATION_GRACE_SEC", "HEARTBEAT_STALE_SEC", "PENDING",
+        "RUNNING", "_enforce_task_timeouts_locked", "_expire_pending_deadlines_locked",
+        "_ensure_reaper_started", "_has_pending_descendant",
         "_is_descendant_of", "_queue_lock", "_reap_queue",
         "_request_finalization_grace", "_subtree_progressing", "_task_deadline_ts",
-        "_task_drive_for_task", "coerce_chat_identity", "get_per_call_timeout_ceiling_sec",
+        "_task_drive_for_task", "coerce_chat_identity",
         "get_task_abs_ceiling_sec", "get_task_idle_timeout_sec", "load_state",
         "persist_queue_snapshot",
     })),
@@ -183,7 +183,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "write_text",
     })),
     "ouroboros/tools/git_review_cycle.py": ("ouroboros/tools/git.py", "_git", frozenset({
-        "_DOC_ONLY_EXTENSIONS", "_acquire_git_lock",
+        "_acquire_git_lock",
         "_aggregate_review_verdict",
         "_authorized_managed_update_resolver", "_check_overlapping_review_attempt",
         "_current_runtime_mode", "_ensure_gitignore", "_finalize_blocked_review",
@@ -202,12 +202,13 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "protected_paths_in", "run_cmd", "safe_relpath",
     })),
     "ouroboros/tools/git_vcs_ops.py": ("ouroboros/tools/git.py", "_git", frozenset({
-        "_acquire_git_lock", "_binding_relative_path", "_ff_pull",
+        "_acquire_git_lock", "_authorized_managed_update_resolver",
+        "_binding_relative_path", "_current_runtime_mode", "_ff_pull",
         "_limit_git_output", "_release_git_lock",
         "_run_git_network_cmd", "_vcs_binding", "_vcs_result",
         "binding_targets_system_repo", "build_resolved_resource_binding",
         "is_protected_runtime_path", "normalize_repo_path", "protected_paths_in",
-        "run_cmd", "safe_relpath",
+        "run_cmd",
     })),
     "supervisor/git_ops_remotes.py": ("supervisor/git_ops.py", "_go", frozenset({
         "BRANCH_DEV", "REPO_DIR", "_configure_credential_helper",
@@ -221,7 +222,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_list_remotes", "_managed_remote_branch_for", "_managed_remote_name",
         "_read_managed_repo_meta", "_run_git_process_bounded", "append_jsonl",
         "atomic_write_text", "rescue_before_destructive_rollback",
-        "rescue_git_capture", "utc_now_iso",
+        "rescue_git_capture", "utc_now_iso", "host_git_env",
     })),
     "supervisor/git_ops_reset.py": ("supervisor/git_ops.py", "_go", frozenset({
         "BOOTSTRAP_PIN_MARKER_NAME", "BRANCH_DEV", "BRANCH_STABLE", "DRIVE_ROOT", "REPO_DIR",
@@ -231,11 +232,11 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_clear_bootstrap_pin_marker", "_clear_update_intent",
         "_collect_repo_sync_state", "_compute_ref_ahead_count",
         "_create_rescue_snapshot", "_git_dir", "_guard_live_repo_destructive_git",
-        "_has_remote", "_maybe_repair_git_index", "_pin_to_bundle_sha_on_bootstrap",
+        "_has_remote", "_is_launcher_managed_repo", "_maybe_repair_git_index", "_pin_to_bundle_sha_on_bootstrap",
         "_preserve_branch_for_official_reset", "_read_managed_repo_meta",
         "_read_update_intent", "_ref_points_at_ref", "_rescue_untracked_incomplete",
         "_run_git_resilient", "_update_source", "append_jsonl", "git_capture",
-        "checkout_and_reset", "current_drive_root", "import_test",
+        "checkout_and_reset", "current_drive_root", "current_repo_dir", "import_test",
         "preserve_local_ref_branch", "rescue_git_capture", "update_state",
         "sync_runtime_dependencies", "utc_now_iso",
     })),
@@ -260,7 +261,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # control_subagent_spec/control_task_results leaves carry no handle reads
     # and stay off this table (D08 control-leaf precedent).
     "ouroboros/delegate_custody_reconcile.py": ("ouroboros/delegate_custody.py", "_custody", frozenset({
-        "RECONCILED", "RunCustody", "START_FAILED", "TERMINAL_STATES", "_reconcile_one",
+        "RECONCILED", "RunCustody", "START_FAILED", "_reconcile_one",
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
         "is_terminal", "output_disposition", "pending_invocations",
         "record_containment_fault", "record_settled_unread", "record_started",
@@ -273,7 +274,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "ouroboros/tools/subagent_integration_delegated.py": ("ouroboros/tools/subagent_integration.py", "_si", frozenset({
         "_baseline_drifted_paths", "_capture_at_disposition", "_locked_apply",
         "_patch_touched_paths", "_sha256_file", "_stageable_paths",
-        "_target_is_system_repo", "_write_verdict", "get_runtime_mode",
+        "_target_is_system_repo", "_write_verdict", "_integration_runtime_mode",
     })),
     "ouroboros/tools/control_scheduling.py": ("ouroboros/tools/control.py", "_ctl", frozenset({
         "load_settings",
@@ -320,7 +321,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_check_budget_limits", "_compose_delivery_suffix", "_current_delivery_candidate",
         "_delivery_evidence_state", "_emit_checkpoint_event",
         "_finalize_forced_services", "_finalize_task_services",
-        "_force_plan_disclosure", "_forced_fallback_result",
+        "_plan_gate_disclosure", "_forced_fallback_result",
         "_forced_final_answer",
         "_hold_delivery_for_skill_action", "_live_delivery_candidate",
         "_loop_tree_accounting", "_merge_finalization_trace",
@@ -334,9 +335,9 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         '_append_or_merge_user_message', '_arm_delivery_control', '_begin_task_acceptance_fence',
         '_child_disposition_state', '_compute_subagent_handoff', '_current_delivery_candidate',
         '_delivery_evidence_state', '_disclose_service_finalization',
-        '_drain_incoming_messages',
-        '_end_task_acceptance_fence', '_enforce_swarm_actions', '_extract_plain_text_from_content',
-        '_finalize_forced_services', '_finalize_task_services', '_force_plan_disclosure',
+        '_drain_incoming_messages', '_emit_checkpoint_event',  # a held completion's diagnostic row
+        '_end_task_acceptance_fence', '_enforce_plan_gate', '_extract_plain_text_from_content',
+        '_finalize_forced_services', '_finalize_task_services', '_plan_gate_disclosure',
         '_forced_fallback_result', '_forced_orphan_note', '_handle_text_response',
         '_latch_final_answer_marker', '_live_delivery_candidate', '_load_direct_child_results',
         '_maybe_early_finalize', '_maybe_enforce_child_absorption_gate', '_maybe_inject_finalization_nudges',
@@ -353,13 +354,14 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         '_current_delivery_candidate', '_degrade_retained_delivery_candidate', '_delivery_evidence_state',
         '_delivery_replace_required', '_direct_child_results', '_disclose_service_finalization', '_drain_forced_owner_directives',
         '_drain_incoming_messages', '_emit_checkpoint_event', '_finalize_forced_services',
-        '_finalize_task_services', '_force_plan_decision', '_force_plan_disclosure',
-        '_force_plan_reminder', '_forced_delegation_note', '_forced_fallback_result',
+        '_finalize_task_services', '_plan_gate_decision', '_plan_gate_disclosure',
+        '_plan_gate_reminder', '_forced_delegation_note', '_forced_fallback_result',
         '_forced_orphan_note', '_forced_unaccepted_binding', '_handle_model_wait_control', '_live_delivery_candidate',
-        '_load_direct_child_results', '_prepare_forced_prompt', '_project_child_result_dispositions',
+        '_load_direct_child_results', '_last_assistant_text', '_prepare_forced_prompt', '_project_child_result_dispositions',
+        'provider_no_call_source',
         '_publish_delivery_candidate', '_record_forced_finalization', '_release_for_owner_followup',
-        '_replace_delivery_candidate', '_resolve_forced_delivery_control_body', '_server_web_allowed_by_task',
-        '_service_finalization_evidence',
+        '_replace_delivery_candidate', '_resolve_forced_delivery_control_body', '_retire_main_reasoning',
+        '_server_web_allowed_by_task', '_service_finalization_evidence',
         'call_llm_with_retry',
     })),
     "ouroboros/loop_messages.py": ("ouroboros/loop.py", "_loop", frozenset({
@@ -376,13 +378,13 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_reconcile_transport_wait", "_run_cross_model_fallback_chain",
         "_context_overflow_retries", "_dispatch_round_model", "_emit_checkpoint_event",
         "_measure_round_main_fit", "_output_exhausted_notice", "_rebind_context_fit_plan",
-        "_server_web_allowed_by_task", "_task_deadline_epoch", "call_llm_with_retry",
+        "_retire_main_reasoning", "_server_web_allowed_by_task", "_task_deadline_epoch", "call_llm_with_retry",
         "last_physical_attempt_capture", "seal_task_transcript",
     })),
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",
         "_emit_checkpoint_event",
-        "_force_plan_decision", "_loop_tree_accounting", "_skill_finalization_message",
+        "_plan_gate_decision", "_loop_tree_accounting", "_skill_finalization_message",
         "_skill_names_touched_by_trace", "get_review_enforcement",
     })),
     # F2.3a D06 lane rows (oracle ouroboros_v7_wip @ 9f691656, re-cut on tip
@@ -422,16 +424,13 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "truncate_review_artifact",
     })),
     "ouroboros/tools/review_file_pack.py": ("ouroboros/tools/review_helpers.py", "_rh", frozenset({
-        "logger", "redact_prompt_secrets",
+        "logger",
     })),
     "ouroboros/tools/review_multi_model.py": ("ouroboros/tools/review.py", "_rev", frozenset({
         "LLMClient", "REVIEW_JSON_ARRAY_CONTRACT", "TYPED_FAILURE_FACT_KEYS", "_REPO_ROOT",
         "_cfg", "_parse_model_response", "_review_operation_fields",
         "_owner_deadline_at", "_review_query_error_payload", "load_governance_doc",
-        "review_drive_root", "slot_id_for_row", "truncate_review_artifact",
-    })),
-    "ouroboros/tools/review_prompt_text.py": ("ouroboros/tools/review_helpers.py", "_rh", frozenset({
-        "sanitize_tool_result_for_log",
+        "review_drive_root", "slot_id_for_row",
     })),
     "ouroboros/loop_round_limits.py": ("ouroboros/loop.py", "_loop", frozenset({
         "DeliveryCandidate", "_append_or_merge_user_content",

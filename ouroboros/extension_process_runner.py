@@ -40,6 +40,7 @@ from ouroboros.skill_loader import find_skill, grant_status_for_skill, skill_sta
 from ouroboros.tools.process_facts import publish_process_facts
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
+from ouroboros.tools.shell_process import tracked_start
 from ouroboros.tools.skill_exec import _scrub_env
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
@@ -269,12 +270,16 @@ def _child_env(
     granted_keys: List[str],
 ) -> Dict[str, str]:
     env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys)
-    env["OUROBOROS_APP_ROOT"] = str(pathlib.Path(drive_root).parent)
+    from ouroboros.config import resolve_app_root
+    from ouroboros.launch_roots import BASIS_ENV
+
+    env["OUROBOROS_APP_ROOT"] = str(resolve_app_root())  # the host's, never inferred from the drive's parent
     env["OUROBOROS_SETTINGS_PATH"] = str(pathlib.Path(drive_root) / "settings.json")
     env["OUROBOROS_DATA_DIR"] = str(drive_root)
     env["OUROBOROS_REPO_DIR"] = str(repo_dir)
-    if os.environ.get("OUROBOROS_PORT_FILE"):  # the hosting server's relocated endpoint, for its runtime info
-        env["OUROBOROS_PORT_FILE"] = os.environ["OUROBOROS_PORT_FILE"]
+    for key in ("OUROBOROS_PORT_FILE", BASIS_ENV):  # the host's relocated endpoint and work-root basis
+        if os.environ.get(key):
+            env[key] = os.environ[key]
     env["OUROBOROS_EXTENSION_PROCESS_CHILD"] = "1"
     for key in _RUNTIME_MODE_ENV_KEYS:
         if os.environ.get(key):
@@ -463,20 +468,23 @@ def _child_process(
     kwargs = merge_hidden_kwargs(kwargs)
     from ouroboros.tool_custody import external_handoff
     confirmed = lambda: None
-    proc = None
+    proc = after_spawn = None
     try:
         from ouroboros.owner_pause import operation_start
         confirmed = external_handoff("extension_process")
-        with operation_start():
+        with tracked_start() as publish, operation_start():
             proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 - argv is host-constructed
-    except BaseException:
-        if proc is None:
+            publish(proc)
+    except BaseException as exc:
+        if proc is not None:
+            after_spawn = exc  # its publication or start gate failed: raised in the marked span below
+        else:
             confirmed()
-        try:
-            input_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+            try:
+                input_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
     child_started_ts = time.monotonic()
     # ABI-9 spawn boundary: from here on the child EXISTS. Every exception
     # leaving this function — process registration, the on_spawn durable
@@ -484,8 +492,8 @@ def _child_process(
     # the finally block — must carry the spawned marker, or dispatch
     # provenance would record no physical_dispatch for a child that ran.
     try:
-        with _subprocess_lock:
-            _active_subprocesses.add(proc)
+        if after_spawn is not None:
+            raise after_spawn
         if stream:
             from ouroboros.process_custody import record_process
             record_process(drive_root, pid=proc.pid, cmd=cmd,

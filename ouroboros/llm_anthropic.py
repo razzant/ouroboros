@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Dict, List, Optional, Tuple
+
+from ouroboros.model_concurrency import limit_physical_send
 
 from ouroboros.anthropic_native_custody import (
     anthropic_replay_scoped,
@@ -24,6 +27,7 @@ from ouroboros.llm_attempt import (
     _VALID_CACHE_TTLS,
     _attempt_request,
     _candidate_before_dispatch,
+    single_physical_send_active,
     _execute_candidate,
     _finalized_physical_candidate,
     preserve_prior_dispatch,
@@ -32,10 +36,12 @@ from ouroboros.llm_attempt import (
     attach_processing_receipt,
     processing_contract_headers,
     processing_refusal,
+    reasoning_strip_retry_allowed,
 )
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.llm_stream import consume_stream
 from ouroboros.llm_capability_policy import normalize_reasoning_effort
+from ouroboros.reasoning_artifacts import note_replay_omission, pop_replay_omission
 from ouroboros.request_wire_recovery import (
     finalize_wire_response,
     note_wire_send_failed,
@@ -49,6 +55,9 @@ from ouroboros._usage_response import observed_processing_mode
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, anthropic_token_counts
 
 
+log = logging.getLogger("ouroboros.llm")
+
+
 class _AnthropicLaneMixin:
     """Native Anthropic request building, dispatch and response normalisation."""
 
@@ -56,16 +65,18 @@ class _AnthropicLaneMixin:
         """Retain the requests worker and its capture through logical cancellation."""
         from ouroboros.usage_accounting import adopt_physical_attempt_capture
 
+        pop_replay_omission()
+
         def invoke():
             adopt_physical_attempt_capture(None)
             try:
                 result = self._chat_anthropic(*args, **kwargs)
-                return result, None, last_physical_attempt_capture()
+                return result, None, last_physical_attempt_capture(), pop_replay_omission()
             except BaseException as exc:
                 capture = getattr(exc, "physical_attempt_capture", None) or last_physical_attempt_capture()
                 if capture is not None:
                     exc.physical_attempt_capture = capture
-                return None, exc, capture
+                return None, exc, capture, False
 
         worker = asyncio.create_task(asyncio.to_thread(invoke))
         cancellation = None
@@ -74,7 +85,7 @@ class _AnthropicLaneMixin:
                 await asyncio.shield(worker)
             except asyncio.CancelledError as exc:
                 cancellation = exc
-        result, error, capture = worker.result()
+        result, error, capture, omitted = worker.result()
         adopt_physical_attempt_capture(capture)
         if cancellation is not None:
             cancellation.physical_attempt_capture = capture
@@ -85,6 +96,8 @@ class _AnthropicLaneMixin:
             raise cancellation from error
         if error is not None:
             raise error
+        # ContextVar writes in to_thread stay in its copy unless handed back explicitly.
+        note_replay_omission(omitted)
         return result
 
     @staticmethod
@@ -221,12 +234,16 @@ class _AnthropicLaneMixin:
             if role == "system":
                 system_blocks.extend(self._anthropic_blocks_from_content(msg.get("content")))
                 continue
+            content = msg.get("content")
+            if role in {"user", "tool"} and isinstance(msg.get("cache_control"), dict):
+                # The seal's host-only row mark, rendered on this send copy only.
+                content = self._content_with_cache_boundary(content, msg["cache_control"])
 
             if role == "user":
                 self._coalesce_anthropic_message(
                     anthropic_messages,
                     "user",
-                    self._anthropic_blocks_from_content(msg.get("content")),
+                    self._anthropic_blocks_from_content(content),
                 )
                 continue
 
@@ -268,7 +285,7 @@ class _AnthropicLaneMixin:
                 tool_use_id = str(msg.get("tool_call_id") or "")
                 if not tool_use_id:
                     raise ValueError("Anthropic direct tool result is missing tool_call_id.")
-                raw_content = msg.get("content")
+                raw_content = content
                 # Anthropic accepts list tool_result content; stringify only scalars/dicts.
                 if isinstance(raw_content, list):
                     tool_result_content: Any = self._copy_messages_with_cache_policy(
@@ -416,7 +433,8 @@ class _AnthropicLaneMixin:
         usage["cost_final"] = bool(
             usage.get("cost") is not None and not usage.get("cost_estimated")
         )
-        # Preserve legacy compatibility disclosure; normal adaptation uses request_wire.
+        # Disclose and clear any tier note pending for this call (this lane's payload stages
+        # none); normal dispatch adaptation is disclosed through usage.request_wire.
         _clamp_note = self._pop_effort_clamp_disclosure()
         if _clamp_note:
             usage["reasoning_effort_clamped"] = _clamp_note
@@ -499,6 +517,8 @@ class _AnthropicLaneMixin:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import requests
 
+        pop_replay_omission()
+        reasoning_omitted = False
         payload = self._build_remote_candidate(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             stream=stream,
@@ -549,7 +569,7 @@ class _AnthropicLaneMixin:
             try:
                 result = _execute_candidate(
                     request,
-                    _post,
+                    limit_physical_send(target, _post),
                     _candidate_before_dispatch(candidate, request),
                 )
                 note_wire_send_succeeded(last_physical_attempt_capture())
@@ -570,7 +590,20 @@ class _AnthropicLaneMixin:
         except UsageAccountingError:
             raise
         except Exception as exc:
+            if single_physical_send_active():
+                self._pop_effort_clamp_disclosure()
+                raise
             retry_payload = plan_next_wire_retry(payload, error=exc, target=target)
+            if (retry_payload is None and reasoning_strip_retry_allowed(exc)
+                    and any(block.get("type") in {"thinking", "redacted_thinking"}
+                            for row in payload["messages"] for block in row["content"])):
+                # Rebuild the exact view Main will adopt, including removal of native receipts.
+                retry_payload = self._build_remote_candidate(
+                    target, self._strip_openrouter_roundtrip_metadata(messages, keep_reasoning_content=True),
+                    reasoning_effort, max_tokens, tool_choice, temperature, tools, stream=stream,
+                )
+                prompt_cache_ttl = self._normalize_payload_cache_ttl(target, retry_payload)
+                reasoning_omitted = True
             if retry_payload is None:
                 self._pop_effort_clamp_disclosure()
                 raise
@@ -590,11 +623,16 @@ class _AnthropicLaneMixin:
             else:
                 self._pop_effort_clamp_disclosure()
                 raise RuntimeError("request-wire recovery action bound exhausted") from exc
-        return self._normalize_anthropic_response(
-            response.json(),
+        body = response.json()
+        result = self._normalize_anthropic_response(
+            body,
             target,
             prompt_cache_ttl=prompt_cache_ttl,
         )
+        if reasoning_omitted and self._provider_body_error(body) is None:
+            note_replay_omission(True)
+            log.warning("Anthropic 400: retry succeeded without the replayed reasoning")
+        return result
 
 
 

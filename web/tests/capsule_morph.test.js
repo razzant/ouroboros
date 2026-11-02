@@ -36,32 +36,32 @@ function fixture({ reduced = false } = {}) {
     const body = animatable(el('div', { className: 'chat-capsule-body' }, ...segs), log);
     const capsule = animatable(el('div', { className: 'chat-capsule chat-effort-range' }, head, body), log);
     const menu = animatable(el('button', { className: 'composer-menu' }), log);
-    const pills = animatable(el('div', { className: 'chat-composer-pills' }), log);
+    const subagents = animatable(el('div', { className: 'chat-capsule chat-subagents-mode' }), log);
     const context = animatable(el('div', { className: 'chat-capsule chat-context-mode' }), log);
-    const row = el('div', { className: 'chat-toolbar-row' }, menu, pills, context, capsule);
+    const row = el('div', { className: 'chat-toolbar-row' }, menu, subagents, context, capsule);
     doc.body.append(row);
     row.rect = box(6, 378);
     menu.rect = box(12, 32);
-    pills.rect = box(50, 70);
+    subagents.rect = box(50, 70);
     context.rect = box(126, 80);
     const closed = () => {
         capsule.rect = box(212, 90);
         head.rect = box(213, 30);
         delete capsule.dataset.fit;
         capsule.dataset.open = 'false';
-        for (const kid of [menu, pills, context]) kid.hidden = false;
+        for (const kid of [menu, subagents, context]) kid.hidden = false;
     };
     const openAlone = () => {
         capsule.rect = box(6, 378);
         head.rect = box(7, 30);
         capsule.dataset.fit = 'solo';
         capsule.dataset.open = 'true';
-        for (const kid of [menu, pills, context]) kid.hidden = true;
+        for (const kid of [menu, subagents, context]) kid.hidden = true;
     };
     closed();
     const surface = () => capsule.children.find((node) => node.classList.contains('chat-capsule-surface')) || null;
     const on = (node) => log.filter((animation) => animation.node === node);
-    return { doc, win, log, row, capsule, head, body, segs, menu, pills, context, closed, openAlone, surface, on };
+    return { doc, win, log, row, capsule, head, body, segs, menu, subagents, context, closed, openAlone, surface, on };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -88,7 +88,7 @@ test('opening alone: the glass grows from the closed capsule, the head rides, th
     for (const seg of f.segs) assert.deepEqual(f.on(seg)[0].keyframes, [{ opacity: 0 }, { opacity: 1 }]);
     // The controls that stepped aside stand where they were, out of the line's flow, and fade.
     assert.equal(f.row.dataset.ownerLeaving, '');
-    for (const [kid, left, width] of [[f.menu, 12, 32], [f.pills, 50, 70], [f.context, 126, 80]]) {
+    for (const [kid, left, width] of [[f.menu, 12, 32], [f.subagents, 50, 70], [f.context, 126, 80]]) {
         assert.equal(kid.dataset.capsuleLeaving, '');
         assert.equal(kid.css.get('--leave-x'), `${left - 6}px`);
         assert.equal(kid.css.get('--leave-w'), `${width}px`);
@@ -98,10 +98,10 @@ test('opening alone: the glass grows from the closed capsule, the head rides, th
         assert.equal(fade.options.duration, MORPH.leave);
     }
     // A control whose fade has ended leaves the page at once, while the glass still grows; the others still stand.
-    f.on(f.pills)[0].finish();
+    f.on(f.subagents)[0].finish();
     await settle();
-    assert.equal(f.pills.dataset.capsuleLeaving, undefined);
-    assert.equal(f.pills.css.has('--leave-x'), false);
+    assert.equal(f.subagents.dataset.capsuleLeaving, undefined);
+    assert.equal(f.subagents.css.has('--leave-x'), false);
     assert.equal(f.menu.dataset.capsuleLeaving, '');
     assert.equal(glass.playState, 'running');
     glass.finish();
@@ -110,7 +110,7 @@ test('opening alone: the glass grows from the closed capsule, the head rides, th
     assert.equal(f.capsule.dataset.morph, undefined);
     assert.equal(f.capsule.style.transition, '', 'its colour transition is back');
     assert.equal(f.row.dataset.ownerLeaving, undefined);
-    for (const kid of [f.menu, f.pills, f.context]) {
+    for (const kid of [f.menu, f.subagents, f.context]) {
         assert.equal(kid.dataset.capsuleLeaving, undefined);
         assert.equal(kid.css.has('--leave-x'), false);
     }
@@ -134,7 +134,7 @@ test('closing alone runs back, faster: the glass folds into the closed capsule a
     assert.equal(glass.options.duration, MORPH.close);
     assert.ok(MORPH.close < MORPH.open);
     assert.deepEqual(f.on(f.head)[0].keyframes, [{ transform: 'translateX(-206px)' }, { transform: 'none' }]);
-    for (const kid of [f.menu, f.pills, f.context]) assert.deepEqual(f.on(kid)[0].keyframes, [{ opacity: 0 }, { opacity: 1 }]);
+    for (const kid of [f.menu, f.subagents, f.context]) assert.deepEqual(f.on(kid)[0].keyframes, [{ opacity: 0 }, { opacity: 1 }]);
     assert.equal(f.row.dataset.ownerLeaving, undefined, 'nothing leaves on a close');
     glass.finish();
     await settle();

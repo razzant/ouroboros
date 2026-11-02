@@ -61,7 +61,7 @@ def read_result_index(run_dir: pathlib.Path) -> list[dict[str, Any]]:
 #     request rather than by the agent finishing, so an auditor must never read
 #     it as a fair-shot capability result; derived here with the whole set.
 _TRUNCATION_CODES_NOT_BEST_EFFORT = frozenset({
-    # ADDITIVE DELTA, two codes that terminate as infra failures rather than
+    # Codes that terminate as infra failures rather than
     # best-effort completions but are the same class for an AUDITOR: the attempt
     # was cut short by transport/provider death, never a fair shot at the task.
     # Adapters that lack a separate infra channel (the GAIA/OSWorld result rows)
@@ -72,6 +72,11 @@ _TRUNCATION_CODES_NOT_BEST_EFFORT = frozenset({
     # now terminalizes as infra_failed instead of "completed (best effort)".
     "llm_api_error",
     "provider_unavailable",
+    # Known-window admission exhausted size recovery before the task could
+    # finish; a host forecast stopped it, not a measured capability failure.
+    "context_overflow",
+    # Recovery ended before a usable answer; not a completed capability trial.
+    "output_recovery_exhausted",
 })
 
 RUNTIME_TRUNCATION_REASON_CODES = BEST_EFFORT_REASON_CODES | _TRUNCATION_CODES_NOT_BEST_EFFORT

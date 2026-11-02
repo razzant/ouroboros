@@ -173,12 +173,12 @@ def test_a_stale_settlement_census_cannot_repause_a_resumed_queued_root(tmp_path
 
 
 @pytest.mark.parametrize("tool,args", [
-    ("get_github_issue", {"number": 0}),
-    ("comment_on_issue", {"number": 3, "body": " "}),
-    ("close_github_issue", {"number": -1}),
-    ("get_github_pr", {"number": 0}),
-    ("comment_on_pr", {"number": 0, "body": "x"}),
-    ("create_github_issue", {"title": " "}),
+    ("github_read", {"method": "get", "kind": "issue", "target": 0}),
+    ("github_write", {"method": "comment", "target": 3, "body": " "}),
+    ("github_write", {"method": "update", "target": -1, "state": "closed"}),
+    ("github_read", {"method": "get", "kind": "pr", "target": 0}),
+    ("github_write", {"method": "review", "target": 0, "body": "x"}),
+    ("github_write", {"method": "create_issue", "title": " "}),
     ("start_service", {"cmd": ["sleep", "1"], "name": "bad name!"}),
     ("start_service", {"cmd": ["sleep", "1"], "readiness": {"timeout_sec": -1}}),
 ])
@@ -209,7 +209,7 @@ def test_returned_github_parse_error_does_not_keep_local_execution_alive(tmp_pat
     monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_kw: 5.0)
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
     monkeypatch.setattr(github, "_gh_run", lambda *_a, **_kw: github.GhResult(True, "{truncated", 0, None, ""))
-    result = registry.execute_result("get_github_issue", {"number": 5})
+    result = registry.execute_result("github_read", {"method": "get", "kind": "issue", "target": 5})
     assert "failed to parse issue JSON" in result.text
     assert result.meta.get("operation_outcome") != "completed_no_effect"
     assert not load_task_result(tmp_path, "root").get("launch_handoffs", {})

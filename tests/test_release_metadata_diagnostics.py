@@ -98,6 +98,28 @@ def test_sm1_committed_crlf_export_preserves_carrier_lines(candidate):
     assert release_carriers_desync_at(repo, "HEAD") == ""
 
 
+@pytest.mark.parametrize("reader", ["index", "preflight"])
+@pytest.mark.parametrize("delete_readme", [False, True])
+def test_numbered_release_needs_a_surviving_staged_readme(candidate, reader, delete_readme):
+    repo = candidate.repo_dir
+    _write(repo, _release("1.2.4"))
+    if delete_readme:
+        (repo / "README.md").unlink()
+    _git(repo, "add", "-A")
+    if reader == "index":
+        report = admission.release_metadata_diagnostics(repo, source="index")
+        assert report["form"] == "numbered"
+        message = admission.format_release_metadata_preflight(report)
+    else:
+        # The real preflight classifies active/deleted paths and supplies its index reader.
+        message = review._preflight_check("release", review._build_preflight_staged(str(repo)), repo)
+    if delete_readme:
+        assert "Missing from staged: README.md" in message
+        assert "PREFLIGHT_UNAVAILABLE" in message and "index:README.md" in message
+    else:
+        assert not message
+
+
 def test_unicode_worktree_discovery_is_not_locale_decoded(candidate):
     repo = candidate.repo_dir
     _git(repo, "config", "core.quotepath", "false")
@@ -235,6 +257,22 @@ def test_free_tool_json_reports_cumulative_books_with_an_explicit_byte_source(ca
 
 
 @pytest.mark.parametrize("source", ["worktree", "index"])
+def test_free_diagnostic_without_paths_measures_bible_and_the_prompts(candidate, source):
+    """Omitted paths mean every book and ruled text, so a grown prompt is never 'nothing owed'."""
+    repo = candidate.repo_dir
+    _write(repo, {"ouroboros/reference_books.py": "# book contract\n", "BIBLE.md": "# BIBLE\n",
+                  "prompts/SYSTEM.md": "system\n"})
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "texts")
+    _git(repo, "remote", "add", "official", "https://github.com/razzant/ouroboros.git")
+    _git(repo, "update-ref", "refs/remotes/official/ouroboros", "HEAD")
+    _write(repo, {"prompts/SYSTEM.md": "system, grown\n"})
+    note = _diagnose(candidate, source)["book_balance"]["note"]
+    assert "Prompts 14 B: +7 B vs HEAD" in note and "BIBLE.md 8 B: +0 B vs HEAD" in note
+    assert "nothing owed" not in note and "local commits are not blocked" in note
+
+
+@pytest.mark.parametrize("source", ["worktree", "index"])
 def test_free_book_diagnostic_distinguishes_foreign_and_unknown_baseline(candidate, source):
     # A foreign project can have the same docs paths without the body contract.
     assert _diagnose(candidate, source)["book_balance"]["note"] == ""
@@ -342,7 +380,7 @@ def test_git_discovery_failure_is_never_clean(candidate, monkeypatch, source):
     assert report["status"] == "unavailable" and report["unavailable"]
 
 
-def test_scope_preserves_contributor_doc_only_and_empty_paths(candidate):
+def test_scope_preserves_contributor_and_candidate_forms_and_empty_paths(candidate):
     repo = candidate.repo_dir
     empty = _diagnose(candidate, "index")
     assert empty["status"] == "not_applicable" and empty["form"] == "none"
@@ -350,7 +388,7 @@ def test_scope_preserves_contributor_doc_only_and_empty_paths(candidate):
     _git(repo, "add", ".")
     # Code with VERSION untouched is the version-neutral form. P9 admits it for a contribution
     # (the prepared index lane) and for a body candidate commit; a serving-checkout commit still
-    # needs the numbered release. A docs-only selection keeps the existing carve.
+    # needs the numbered release, including a documentation-only selection.
     staged = _diagnose(candidate, "index")
     assert staged["status"] == "not_applicable" and staged["form"] == "neutral"
     report = _diagnose(candidate, "worktree", paths=["change.py"])
@@ -360,7 +398,8 @@ def test_scope_preserves_contributor_doc_only_and_empty_paths(candidate):
     bound = admission.release_metadata_diagnostics(repo, ["change.py"], source="worktree", neutral_allowed=True)
     assert bound["status"] == "not_applicable" and bound["form"] == "neutral" and bound["findings"] == []
     docs = _diagnose(candidate, "worktree", paths=["docs/notes.md"])
-    assert docs["status"] == "not_applicable" and docs["form"] == "doc_only"
+    assert docs["status"] == "blocked" and docs["form"] == "neutral"
+    assert "VERSION is not in scope" in docs["findings"][0]
     assert _diagnose(candidate, "index", paths=["VERSION"])["status"] == "not_applicable"
 
 
@@ -400,10 +439,9 @@ def test_neutral_form_keeps_every_carrier_span_byte_identical_to_head(candidate,
 def test_neutral_form_reports_a_removed_carrier_file_through_every_consumer(candidate, change):
     """A carrier file the neutral diff deletes or renames away is a carrier change.
 
-    Consumers: commit_reviewed's preflight over the real staged name-status, the
+    Consumers: contribution preflight over the real staged name-status, the
     prepared index lane (its own staged discovery) and the bound-candidate worktree
-    diagnostic. Each lists surviving paths only, so the removed file must still reach
-    the comparison with HEAD.
+    diagnostic. The removed file must still reach the comparison with HEAD.
     """
     repo = candidate.repo_dir
     if change == "renamed_away":
@@ -424,12 +462,15 @@ def test_neutral_form_reports_a_removed_carrier_file_through_every_consumer(cand
         assert len(report["findings"]) == 1 and "pyproject.toml" in report["findings"][0], report
 
 
-def test_non_carrier_deletion_keeps_its_release_semantics(candidate):
+def test_non_carrier_deletion_is_a_real_neutral_change(candidate):
     repo = candidate.repo_dir
     _git(repo, "rm", "-q", "change.py")
     assert review._preflight_check("drop module", review._build_preflight_staged(str(repo)), repo) is None
     prepared = _diagnose(candidate, "index")
-    assert (prepared["status"], prepared["form"]) == ("not_applicable", "none")
+    assert (prepared["status"], prepared["form"]) == ("not_applicable", "neutral")
+    serving = admission.release_metadata_diagnostics(repo, source="index", neutral_allowed=False)
+    assert (serving["status"], serving["form"]) == ("blocked", "neutral")
+    assert "change.py" in serving["findings"][0]
     _write(repo, {"other.py": "value = 3\n"})
     _git(repo, "add", "-A")
     # Code with every carrier at HEAD's bytes stays the clean neutral form.
@@ -438,25 +479,23 @@ def test_non_carrier_deletion_keeps_its_release_semantics(candidate):
     assert (prepared["status"], prepared["form"]) == ("not_applicable", "neutral")
 
 
-def test_serving_refusal_needs_no_removal_probe_but_a_docs_only_survivor_does(candidate, tmp_path):
-    """On the serving checkout surviving code already refuses the neutral form, so an
-    unreadable removal probe (an unborn HEAD) must not mask that refusal as unavailable;
-    a docs-only survivor still needs the probe, or renaming a carrier into docs/ would
-    pass as a doc-only change."""
+def test_serving_refusal_needs_no_head_probe_even_for_documentation(candidate, tmp_path):
+    """An unreadable HEAD must not mask the known serving-checkout release refusal."""
     repo = candidate.repo_dir
     _git(repo, "mv", "pyproject.toml", "docs/pyproject.old.md")
     serving = admission.release_metadata_diagnostics(repo, source="worktree", neutral_allowed=False)
     assert (serving["form"], serving["status"]) == ("neutral", "blocked"), serving
-    assert "VERSION is not in scope" in serving["findings"][0] and "pyproject.toml" in serving["findings"][0]
+    assert "VERSION is not in scope" in serving["findings"][0] and "docs/pyproject.old.md" in serving["findings"][0]
 
     unborn = tmp_path / "unborn"
     unborn.mkdir()
     _git(unborn, "init", "-q")
     _write(unborn, {"change.py": "value = 2\n", "docs/notes.md": "notes\n"})
     _git(unborn, "add", "-A")
-    report = admission.release_metadata_diagnostics(unborn, ["change.py"], source="worktree", neutral_allowed=False)
-    assert (report["form"], report["status"], report["unavailable"]) == ("neutral", "blocked", []), report
-    assert "VERSION is not in scope" in report["findings"][0]
+    for path in ("change.py", "docs/notes.md"):
+        report = admission.release_metadata_diagnostics(unborn, [path], source="worktree", neutral_allowed=False)
+        assert (report["form"], report["status"], report["unavailable"]) == ("neutral", "blocked", []), report
+        assert "VERSION is not in scope" in report["findings"][0]
 
 
 _NEW_LOCK = ('{\n  "name": "ouroboros-web",\n  "version": "1.2.3",\n  "lockfileVersion": 3,\n'
@@ -464,7 +503,7 @@ _NEW_LOCK = ('{\n  "name": "ouroboros-web",\n  "version": "1.2.3",\n  "lockfileV
 
 
 def _three_consumers(ctx):
-    """commit_reviewed's preflight, the prepared index lane and the bound-candidate worktree."""
+    """Contribution preflight, the prepared index lane and the bound-candidate worktree."""
     repo = ctx.repo_dir
     return (review._preflight_check("neutral change", review._build_preflight_staged(str(repo)), repo),
             _diagnose(ctx, "index"),
@@ -602,6 +641,8 @@ def test_author_formatter_also_preserves_non_release_staged_checks(candidate, pa
     candidate._author_commit_source = SimpleNamespace(block_reason="critical_findings", status="reviewed")
     candidate._author_commit_decision = {"disposition": "accepted", "rationale": "Read the review."}
     candidate._author_commit_reference = {"attempt": 1}
+    candidate.serving_repo_dir = candidate.repo_dir.parent / "serving"
+    candidate.task_metadata = {"body_candidate": {"path": str(candidate.repo_dir)}}
     _write(candidate.repo_dir, {path: content})
     _git(candidate.repo_dir, "add", ".")
     result = bind_author_commit_candidate(candidate, "candidate", {"fingerprint": "current"})
@@ -651,20 +692,177 @@ def test_documentation_carriers_preserved_through_all_consumers(candidate, path,
     _git(repo, "add", "-A")
     staged, prepared, bound = _three_consumers(candidate)
     assert staged and "PREFLIGHT_BLOCKED" in staged and path in staged, staged
-    for report in (prepared, bound, admission.release_metadata_diagnostics(repo, source="worktree", neutral_allowed=False)):
+    for report in (prepared, bound):
         assert report["status"] == "blocked" and any(path in f for f in report["findings"]), report
+    serving = admission.release_metadata_diagnostics(repo, source="worktree", neutral_allowed=False)
+    assert serving["status"] == "blocked" and "VERSION is not in scope" in serving["findings"][0]
+    assert ("history.md" if change == "rename" else path) in serving["findings"][0]
 
 
-def test_documentation_prose_keeps_doc_only_exemption(candidate):
+def test_documentation_prose_uses_the_explicit_neutral_forms(candidate):
     repo = candidate.repo_dir
     for path in ("README.md", "docs/ARCHITECTURE.md"):
         target = repo / path
-        target.write_text(target.read_text() + "## Usage\n\nOrdinary prose.\n")
+        target.write_text(target.read_text(encoding="utf-8") + "## Usage\n\nOrdinary prose.\n", encoding="utf-8")
     _git(repo, "add", "-A")
     staged, prepared, bound = _three_consumers(candidate)
     assert staged is None
     for report in (prepared, bound):
-        assert (report["status"], report["form"]) == ("not_applicable", "doc_only"), report
+        assert (report["status"], report["form"]) == ("not_applicable", "neutral"), report
+    serving = admission.release_metadata_diagnostics(repo, source="worktree", neutral_allowed=False)
+    assert serving["status"] == "blocked" and "VERSION is not in scope" in serving["findings"][0]
+
+
+@pytest.mark.parametrize("consumer", ["commit", "author_continuation"])
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize("change", ["docs", "code", "delete_docs", "delete_code"])
+def test_actual_commit_consumers_require_release_unless_bound(candidate, monkeypatch, consumer, bound, change):
+    from ouroboros.tools import commit_gate
+
+    repo = candidate.repo_dir
+    _write(repo, {"docs/notes.md": "Original notes.\n"})
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "fixture notes")
+    if bound:
+        linked = repo.parent / "linked"
+        _git(repo, "worktree", "add", "-qb", "candidate/task", str(linked), "HEAD")
+        candidate.serving_repo_dir, candidate.repo_dir = repo, linked
+        candidate.task_metadata = {"body_candidate": {"path": str(linked)}}
+        repo = linked
+    candidate._author_commit_source = SimpleNamespace(block_reason="critical_findings", status="reviewed")
+    candidate._author_commit_decision = {"disposition": "accepted", "rationale": "Read the review."}
+    candidate._author_commit_reference = {"attempt": 1}
+    monkeypatch.setattr("ouroboros.tools.review_helpers.check_worktree_readiness", lambda *a, **kw: [])
+
+    def preflight():
+        if consumer == "commit":
+            return commit_gate.deterministic_preflight(candidate, "change", None)
+        return commit_gate.bind_author_commit_candidate(candidate, "change", {"fingerprint": "current"})
+
+    assert not preflight(), "An unchanged index is not a serving commit."
+    path = "docs/notes.md" if change.endswith("docs") else "change.py"
+    if change.startswith("delete"):
+        (repo / path).unlink()
+    else:
+        _write(repo, {path: "Changed notes.\n" if change == "docs" else "value = 2\n"})
+    _git(repo, "add", "-A")
+    result = preflight()
+    if bound:
+        assert not result
+    else:
+        assert result and "VERSION is not in scope" in result and path in result
+    prepared = _diagnose(candidate, "index")
+    assert (prepared["status"], prepared["form"]) == ("not_applicable", "neutral")
+    _write(repo, _release("1.2.4"))
+    _git(repo, "add", "-A")
+    assert not preflight(), "A coherent numbered release remains admitted in either checkout."
+
+
+@pytest.mark.parametrize("source", ["worktree", "index"])
+def test_deleting_version_is_not_a_numbered_release(candidate, source):
+    _git(candidate.repo_dir, "rm", "-q", "VERSION")
+    for allowed in (False, True):
+        report = admission.release_metadata_diagnostics(candidate.repo_dir, source=source, neutral_allowed=allowed)
+        assert (report["form"], report["status"]) == ("neutral", "blocked"), report
+        assert not report["unavailable"]
+        assert "VERSION" in " ".join(report["findings"])
+    error = review._preflight_check("delete version", review._build_preflight_staged(str(candidate.repo_dir)),
+                                   candidate.repo_dir, neutral_allowed=True)
+    assert error and "VERSION" in error
+
+
+@pytest.mark.parametrize("mode,enforcement", [("pro", "advisory"), ("cyber_pro", "advisory"),
+                                             ("cyber_pro", "blocking")])
+@pytest.mark.parametrize("path", ["docs/notes.md", "change.py"])
+def test_author_continuation_applies_mode_without_erasing_release_finding(candidate, monkeypatch, mode, enforcement, path):
+    from ouroboros.review_state import load_state
+    from ouroboros.tools import commit_gate, git
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    monkeypatch.setattr("ouroboros.tools.review_helpers.check_worktree_readiness", lambda *a, **kw: [])
+    repo = candidate.repo_dir
+    _write(repo, {path: "Updated notes.\n" if path.endswith(".md") else "value = 2\n"})
+    _git(repo, "add", "-A")
+    ctx = ToolContext(repo_dir=repo, drive_root=candidate.drive_root, task_id=candidate.task_id,
+                      emit_progress_fn=lambda *_a: None)
+    git._reset_commit_review_state(ctx)
+    fingerprint = git._fingerprint_staged_diff(repo)["fingerprint"]
+    git._record_commit_attempt(ctx, "change", "reviewing", pre_review_fingerprint=fingerprint, paid=True)
+    git._record_commit_attempt(ctx, "change", "reviewed", phase="review_only", pre_review_fingerprint=fingerprint)
+    source = load_state(ctx.drive_root).attempts[-1]
+    reference = {"surface": "commit", **{key: getattr(source, key) for key in
+        ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")}}
+    git._reset_commit_review_state(ctx)
+    ctx._author_commit_source, ctx._author_commit_reference = source, reference
+    ctx._author_commit_decision = {"disposition": "accepted", "rationale": "I accept the recorded facts."}
+    monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **kw: pytest.fail("metadata refusal did not run tests"))
+    monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **kw: pytest.fail("author continuation buys no panel"))
+    assert not commit_gate._neutral_commit_allowed(ctx), "Cyber changes action authority, never the release form."
+    assert "VERSION is not in scope" in commit_gate.deterministic_preflight(ctx, "change", [path])
+    head = _git(repo, "rev-parse", "HEAD")
+    outcome = git._run_reviewed_stage_cycle(ctx, "change", 0, paths=[path], require_release_tag=False)
+    if mode == "pro":
+        assert outcome["status"] == "blocked" and outcome["block_reason"] == "preflight", outcome
+        assert "VERSION is not in scope" in outcome["message"]
+    else:
+        assert outcome["status"] == "passed", outcome
+        assert ctx._commit_review_status == "author_continued"
+        assert "VERSION is not in scope" in " ".join(str(row) for row in ctx._review_advisory)
+        assert ctx._preflight_execution["status"] == "not_run"
+        assert "VERSION is not in scope" in ctx._preflight_execution["reason"]
+        events = [json.loads(line) for line in (ctx.drive_logs() / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert any(row.get("type") == "review_advisory_override" and row.get("decision_authority") == "cyber_pro"
+                   and row.get("block_reason") == "preflight" and "VERSION is not in scope" in row["message_head"]
+                   for row in events)
+    assert _git(repo, "rev-parse", "HEAD") == head, "A stage cycle authorizes; it does not itself commit."
+
+
+@pytest.mark.parametrize("consumer", ["commit", "author_continuation"])
+def test_managed_update_keeps_official_version_under_strict_resolver_authority(candidate, monkeypatch, consumer):
+    from ouroboros.tools import commit_gate
+    from supervisor import git_ops, update_merge
+
+    repo = candidate.repo_dir
+    branch, base = _git(repo, "branch", "--show-current"), _git(repo, "rev-parse", "HEAD")
+    monkeypatch.setattr(git_ops, "BRANCH_DEV", branch)
+    _git(repo, "checkout", "-qb", "official")
+    _write(repo, {"change.py": "value = 2\n"})
+    _git(repo, "commit", "-qam", "official change at the same release version")
+    target = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", branch)
+    _write(repo, {"change.py": "value = 3\n"})
+    _git(repo, "commit", "-qam", "local customization")
+    before = _git(repo, "rev-parse", "HEAD")
+    ok, message, baseline = update_merge.materialize_assisted_merge_live(branch, before, target, base)
+    assert ok and baseline, message
+    _write(repo, {"change.py": "value = 4\n"})
+    _git(repo, "add", "-A")
+    tx = {"phase": "assisted_resolution", "task_id": candidate.task_id, "pre_update_sha": before,
+          "target_sha": target, "m0_tree": baseline, "conflict_paths": ["change.py"]}
+    update_merge.write_update_tx(tx)
+    candidate.task_metadata = {"managed_update": {
+        "authority_fingerprint": update_merge.assisted_authority_fingerprint(tx)}}
+    candidate._author_commit_source = SimpleNamespace(block_reason="critical_findings", status="reviewed")
+    candidate._author_commit_decision = {"disposition": "accepted", "rationale": "Read the review."}
+    candidate._author_commit_reference = {"attempt": 1}
+    monkeypatch.setattr("ouroboros.tools.review_helpers.check_worktree_readiness", lambda *a, **kw: [])
+
+    def preflight():
+        if consumer == "commit":
+            return commit_gate.deterministic_preflight(candidate, "integrate update", None)
+        return commit_gate.bind_author_commit_candidate(candidate, "integrate update", {"fingerprint": "current"})
+
+    assert "VERSION" not in _git(repo, "diff", "--cached", "--name-only").splitlines()
+    assert _git(repo, "show", f"{target}:VERSION") == _git(repo, "show", "HEAD:VERSION") == "1.2.3"
+    assert not preflight(), "The authorized merge adopts the official version without inventing another release."
+    candidate.task_id = "unrelated-task"
+    assert "VERSION is not in scope" in preflight()
+    candidate.task_id = tx["task_id"]
+    _write(repo, {"pyproject.toml": '[project]\nversion = "1.2.4"\n'})
+    _git(repo, "add", "pyproject.toml")
+    assert "pyproject.toml" in preflight(), "Managed authority does not waive carrier-span coherence."
 
 
 @pytest.mark.parametrize("carrier", ["readme_badge", "readme_history", "readme_download_refs", "architecture_header"])

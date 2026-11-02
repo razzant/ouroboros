@@ -9,13 +9,29 @@ REPO = Path(__file__).resolve().parents[1]
 FORMULA = "--ui-hit-inset: min(0px, calc((100% - var(--touch-target-min)) / 2));"
 INSET = "inset: var(--ui-hit-inset);"
 CARRIERS = {
-    "web/modules/composer.js": ('class="chat-swarm ui-hit-area"', 'class="chat-plus-btn ui-hit-area"', 'class="chat-send-inline ui-hit-area"'),
+    "web/modules/composer.js": ('class="chat-plus-btn ui-hit-area"', 'class="chat-send-inline ui-hit-area"'),
+    "web/modules/composer_subagents.js": ('class="chat-capsule-head ui-hit-area chat-subagents-head"',
+                                          'class="chat-seg ui-hit-area"'),
+    # The one hint's action (Subagents' Open Settings when Settings has them off).
+    "web/modules/ui_hint.js": ('class="ui-hint-action ui-hit-area"',),
     "web/modules/voice_controls.js": ("className: 'voice-btn voice-mic ui-hit-area'",),
     "web/modules/message_actions.js": ("button.className = 'chat-message-action ui-hit-area';",),
     "web/modules/composer_chips.js": ("button.className = 'chat-composer-chip ui-hit-area';",
                                      "more.className = 'chat-composer-chip chat-chip-more ui-hit-area';"),
     "web/modules/chat_render_batch.js": ("button.className = 'chat-load-older-btn ui-hit-area';",),
-    "web/modules/composer_owner_controls.js": ('class="chat-capsule-head ui-hit-area ${headClass}"',),
+    "web/modules/composer_owner_controls.js": ('class="chat-capsule-head ui-hit-area ${headClass}"',
+                                               'class="chat-seg ui-hit-area"', 'class="chat-effort-strip ui-hit-area"'),
+    # A question's × and Send (no inset of their own: the × once reached 10px out, over the Project capsule above it).
+    "web/modules/question_presentation.js": ("closeButton.className = 'chat-quiz-close ui-hit-area';",
+                                             "send.className = 'chat-quiz-send ui-hit-area';"),
+    # A task card's doors and commands and ↓ latest reach a finger too (owner 29.10): the Reviews door draws its chevron
+    # as an element, so its ::after is the recipe's. (A question's recovery row wraps on a phone: its buttons take
+    # the touch minimum as their own height, as the send doubts' do, so no two hit areas overlap.)
+    "web/modules/chat.js": ('class="chat-live-review-summary ui-hit-area" data-live-review-summary aria-expanded="false" hidden>${CHEVRON}',
+                            'class="chat-scroll-bottom-btn ui-hit-area"', "btn.className = 'btn btn-sm btn-default ui-hit-area';"),
+    "web/modules/work_portal.js": ("btn.className = 'btn btn-sm btn-default ui-hit-area';",),
+    "web/modules/task_control_menu.js": ("button.className = 'btn btn-sm btn-primary ui-hit-area';",),
+    "web/modules/main_waiting.js": ("button.className = 'btn btn-xs btn-default ui-hit-area';",),
 }
 
 
@@ -47,6 +63,10 @@ def test_the_hit_extension_recipe_lives_once_in_ui_css_and_the_small_controls_ca
         source = _read(rel)
         for marker in markers:
             assert marker in source, f"{rel} lacks {marker}"
+    assert ".chat-quiz-close::after" not in _read("web/style.css"), "the question's × has no hit area of its own"
+    # One owner per pseudo-element: the Reviews door's ::after is its hit area, never its chevron as well (on touch the
+    # recipe once moved that chevron above the door's words and left the door 28px tall).
+    assert ".chat-live-review-summary::after" not in _read("web/style.css")
     # The composer rows part by --space-2 (8px): a 32px control's 6px overshoot never meets its neighbour's.
     css = _read("web/style.css")
     wrap = css.split(".chat-input-wrap {", 1)[1].split("}", 1)[0]

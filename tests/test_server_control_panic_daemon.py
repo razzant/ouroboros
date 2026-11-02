@@ -155,7 +155,7 @@ def test_panic_requests_the_held_restart_successor_in_its_request_phase(monkeypa
 def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, fault):
     """An accepted Panic keeps termination, independent requests and bounded writes.
 
-    The failed ingress races the restart watcher before invoking the real executor;
+    The failed ingress races Quit and the restart watcher before the real executor;
     OS stops are test-owned doubles, while the flag write and completion path are real.
     """
     import builtins
@@ -174,16 +174,18 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     def fail(*_args, **_kwargs):
         raise RuntimeError("injected " + fault)
 
-    def racing_restart():
+    def racing_exits():
         assert server_control._restart_stop_requested
         with monkeypatch.context() as patch:
-            patch.setattr(threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append("watcher-parked")))
-            server_control.exit_after_restart(42)
+            for exit_fn, code, name in ((server_control.exit_after_restart, 42, "watcher-parked"),
+                                        (server_control.exit_after_shutdown, 0, "quit-parked")):
+                patch.setattr(threading, "Event", lambda: SimpleNamespace(wait=lambda: calls.append(name)))
+                exit_fn(code)
         fail()
 
     def start(thread):
         if thread.name == "panic-ingress" and fault == "ingress-start":
-            racing_restart()
+            racing_exits()
         if thread.name == "panic-bounded-write" and (fault == "bounded-all" or
                                                      fault == "bounded-first" and not failed_writes):
             failed_writes.append(thread.name)
@@ -193,7 +195,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     def thread(*args, **kwargs):
         created_threads.append(kwargs.get("name"))
         if kwargs.get("name") == "panic-ingress" and fault == "ingress-construction":
-            racing_restart()
+            racing_exits()
         if kwargs.get("name") == "panic-commands" and fault == "request-thread":
             fail()
         return real_thread(*args, **kwargs)
@@ -232,7 +234,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     assert server_control._restart_stop_requested is True
     assert not {"panic-startup-audit", "panic-maintenance", "panic-storage-count", "panic-storage-free"} & set(created_threads)
     # The four native stops run synchronously first; one failing never skips the others.
-    first = 1 if fault.startswith("ingress-") else 0
+    first = 2 if fault.startswith("ingress-") else 0
     head = [name for name, broken in (("audit-stop", fault == "audit"), ("packer-stop", fault == "packer"),
                                       ("storage-stop", fault == "storage"), ("free-stop", fault == "free"))
             if not broken]
@@ -244,7 +246,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
     assert (tmp_path / "state/panic_stop.flag").exists() == (fault not in {"bounded-first", "bounded-all"})
     assert ("controls" in calls) == (fault != "bounded-all")
     if fault.startswith("ingress-"):
-        assert calls[0] == "watcher-parked"
+        assert calls[:2] == ["watcher-parked", "quit-parked"]
     if fault != "bounded-all":
         assert diagnostics[0]["flag_written"] is (fault != "bounded-first")
         assert diagnostics[0]["controls_written"] is True

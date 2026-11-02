@@ -22,7 +22,7 @@ def _source(task_id: str) -> dict:
 
 
 @pytest.mark.parametrize("result", ["Use the existing tower", "r" * 20_000, "\x00" * 6_000])
-def test_helper_brief_keeps_the_answer_source_and_conditions_across_rebuilds(result):
+def test_helper_brief_keeps_the_source_and_owner_words_across_rebuilds(result):
     from ouroboros.contracts.task_contract import build_task_contract
     from ouroboros.main_context_authority import project_helper_predecessor_authority
 
@@ -39,10 +39,11 @@ def test_helper_brief_keeps_the_answer_source_and_conditions_across_rebuilds(res
     if isinstance(envelope["result"], dict):
         assert len(json.dumps(envelope["result"], ensure_ascii=False)) > 15_000  # wrapper included
     brief = project_helper_predecessor_authority(envelope)
-    for key in ("task_id", "source", "status", "result", "task_contract", "origin_message_text",
+    for key in ("task_id", "source", "status", "origin_message_text",
                 "authority_sha256", "authority_chars", "digest_semantics"):
         assert brief[key] == before[key]
-    assert "predecessor_authority" not in brief["task_contract"]
+    assert "result" not in brief and "task_contract" not in brief
+    assert brief["omitted_fields"]["result"] > 0 and brief["omitted_fields"]["task_contract"] > 0
     assert "verification_receipts" not in brief
     assert brief["omitted_fields"]["verification_receipts"] == len(json.dumps(
         envelope["verification_receipts"], ensure_ascii=False, sort_keys=True))
@@ -52,7 +53,7 @@ def test_helper_brief_keeps_the_answer_source_and_conditions_across_rebuilds(res
     assert json.dumps(rebuilt, ensure_ascii=False, sort_keys=True) == wire
     assert project_helper_predecessor_authority(authority) == brief  # legacy normalization is shared
     assert envelope == before
-    brief["task_contract"]["delegation_budget"]["intent_note"] = "changed only in the copy"
+    brief["source"]["arguments"]["task_id"] = "changed only in the copy"
     assert envelope == before
 
 
@@ -90,9 +91,9 @@ def test_child_grandchild_and_external_session_keep_the_same_predecessor_brief(s
     for contract in (child, grandchild):
         leaf = compile_external_work_order({"task_contract": contract})
         assert "get_task_result" in leaf and "RECEIPT_BODY" not in leaf
-        for words in ("The tower stands", "Keep the old tower", "never use native/API fallback",
-                      "L1 asks L2 to spawn L3"):
-            assert (words in leaf) == (selection == "shared")
+        assert ("Keep the old tower" in leaf) == (selection == "shared")
+        for words in ("The tower stands", "never use native/API fallback", "L1 asks L2 to spawn L3"):
+            assert words not in leaf
     assert build_task_contract({"task_contract": grandchild}) == grandchild
     assert root == before
 
@@ -131,8 +132,8 @@ def _narrative(task_id: str, text: str, *, kind: str = "authored_root_summary") 
 def test_a_stored_legacy_narrative_is_the_notes_row_and_main_never_substitutes(tmp_path, kind, served):
     """Nothing writes an authored narrative any more; a record an earlier version wrote
     still serves it — as the foldable notes row after the assignment, never as a
-    stand-in for the answer inside the frozen prefix. The answer keeps the envelope's
-    whole-or-pointer form at every size; a terminal projection is not a narrative."""
+    stand-in for the answer inside the frozen prefix. The answer stays behind its
+    source at every size; a terminal projection is not a narrative."""
     from types import SimpleNamespace
 
     from ouroboros.agent_startup_checks import validate_task_authority_sources
@@ -149,7 +150,8 @@ def test_a_stored_legacy_narrative_is_the_notes_row_and_main_never_substitutes(t
             "predecessor_authority_source": _pull_source(task_id)}
     assert validate_task_authority_sources(SimpleNamespace(drive_root=tmp_path, budget_drive_root=tmp_path), task) == {}
     brief = task["predecessor_authority"]
-    assert brief["result"]["kind"] == "bounded_field_preview" and brief["result"]["full_chars"] == 200001
+    assert "result" not in brief and brief["omitted_fields"]["result"] > 0
+    assert brief["source"] == _pull_source(task_id)
     assert "continuation_narrative" in brief["omitted_fields"]
 
     projected = project_main_task_authority(task)["predecessor_authority"]
@@ -264,7 +266,7 @@ def test_main_projection_shows_the_brief_once_and_the_objective_once():
     """Main's provider copy is the materialized brief at the top level; the equal copy the
     contract spread nests is dropped, a different identity stays; a contract objective that
     IS the assignment becomes a typed reference, any other objective stays a string; and no
-    size threshold rewrites an answer (a 200001-char result rides exactly as the brief says)."""
+    answer body enters the prefix, even when a legacy envelope still carries it."""
     import hashlib
 
     from ouroboros.main_context_authority import project_main_task_authority
@@ -279,22 +281,97 @@ def test_main_projection_shows_the_brief_once_and_the_objective_once():
     projected = project_main_task_authority(task)
 
     assert task == before
-    assert projected["predecessor_authority"] == brief and "narrative_status" not in json.dumps(projected)
+    assert projected["predecessor_authority"]["source"] == brief["source"]
+    assert "result" not in projected["predecessor_authority"]
+    assert projected["predecessor_authority"]["omitted_fields"]["result"] > 0
+    assert "narrative_status" not in json.dumps(projected)
     assert "predecessor_authority" not in projected["task_contract"], "the brief appears once"
     assert projected["task_contract"]["context"] == "keep"
     assert projected["task_contract"]["objective"] == {
         "representation": "assignment", "chars": len(work_order),
         "sha256": hashlib.sha256(work_order.encode("utf-8")).hexdigest(),
-        "rule": "The objective is this task's assignment, the first user turn of this conversation; "
-                "it is not repeated here."}
+        "rule": "The objective is this task's assignment, the first user turn of this conversation; when the "
+                "whole input cannot fit a request, that turn is a pointer to its exact stored source instead. "
+                "It is not repeated here."}
     assert work_order not in json.dumps(projected), "the work order is not repeated inside the Runtime view"
 
     other = {**brief, "task_id": "older", "source": _source("older")}
     kept = project_main_task_authority({"id": "next", "text": "do it", "predecessor_authority": brief,
                                         "task_contract": {"objective": "A shorter title", "predecessor_authority": other}})
-    assert kept["task_contract"]["predecessor_authority"] == other, "a different identity is not a duplicate"
+    other_brief = kept["task_contract"]["predecessor_authority"]
+    assert other_brief["source"] == other["source"], "a different identity keeps its own reader"
+    assert "result" not in other_brief and other_brief["omitted_fields"]["result"] > 0
     assert kept["task_contract"]["objective"] == "A shorter title", "only the assignment itself is referenced"
 
+
+def test_main_projection_shows_a_line_broken_assignment_once():
+    """The contract strips its objective; a task text ending in a line break (a wake's rendered
+    template does) is still the one assignment, so the Runtime view references it instead of
+    delivering it a second time (28.10 19:20Z: 43,221 estimated tokens twice). A wake whose
+    observation is bound names that stored source, whichever way its first turn delivers it;
+    an objective that differs from the text stays whole."""
+    from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY
+    from ouroboros.contracts.task_contract import attach_task_contract
+    from ouroboros.main_context_authority import project_main_task_authority
+
+    observation = "[Wake-up · heartbeat]\nObserved since the last accepted wake:\n" + "- task t done\n" * 2_000
+    task = attach_task_contract({"id": "wake", "text": observation})
+    assert task["task_contract"]["objective"] == observation.strip() != observation
+    before = copy.deepcopy(task)
+    reference = project_main_task_authority(task)["task_contract"]["objective"]
+    assert task == before
+    assert reference["representation"] == "assignment" and reference["chars"] == len(observation.strip())
+    assert "source" not in reference and "- task t done" not in json.dumps(reference)
+
+    source = {"sha256": "a" * 64, "lines": 2_001, "path": "wake_observation.jsonl",
+              "read": {"tool": "read_file", "arguments": {"root": "runtime_data", "path": "w/o.jsonl", "start_line": 1}}}
+    bound = attach_task_contract({"id": "wake", "text": observation, "metadata": {
+        WAKE_OBSERVATION_KEY: {"source": source, "projection_text": "pointer"}}})
+    named = project_main_task_authority(bound)["task_contract"]["objective"]
+    assert named["source"] == {key: source[key] for key in ("read", "sha256", "lines")}
+    assert named["rule"].startswith(reference["rule"]) and "`source`" in named["rule"]
+    assert "- task t done" not in json.dumps(named)
+
+    for text, objective in ((observation, "Summarize the wake"), ("Fix the parser\n", "Fix the parser and the lexer"),
+                            ("Fix the parser\n", "fix the parser")):
+        kept = project_main_task_authority({"id": "t", "text": text, "task_contract": {"objective": objective}})
+        assert kept["task_contract"]["objective"] == objective, "a different objective stays whole"
+
+
+
+def test_main_projection_shows_an_equal_task_context_once():
+    """A contract context byte-identical to the task block's own ``context`` (an API or recovery root's packet,
+    20.10: 2 x 96,893 chars in every round) becomes a typed reference; a different or absent row context, and
+    any non-string, stay exactly as the contract holds them."""
+    import hashlib
+
+    from ouroboros.main_context_authority import project_main_task_authority
+
+    packet = "FULL RECOVERY PACKET " * 4_000 + " \n"
+    task = {"id": "root", "text": "Recover", "context": packet,
+            "task_contract": {"objective": "Recover the store", "context": packet}}
+    before = copy.deepcopy(task)
+
+    projected = project_main_task_authority(task)
+
+    assert task == before
+    assert projected["task_contract"]["context"] == {
+        "representation": "task_context", "chars": len(packet),
+        "sha256": hashlib.sha256(packet.encode("utf-8")).hexdigest(),
+        "rule": "The caller's context is the `context` field of the task block above; it is not repeated here."}
+    assert packet not in json.dumps(projected)
+    assert projected["task_contract"]["objective"] == "Recover the store"
+
+    child = project_main_task_authority({"id": "c", "text": "x", "context": "delegator orientation",
+                                         "task_contract": {"context": "inherited authority"}})
+    assert child["task_contract"]["context"] == "inherited authority", "different texts both stay"
+    spaced = project_main_task_authority({"id": "s", "text": "x", "context": "keep",
+                                          "task_contract": {"context": " keep\n"}})
+    assert spaced["task_contract"]["context"] == " keep\n", "equality is byte-exact, no strip"
+    for row_context, contract_context in ((None, "keep"), ("", ""), ("x", None), ({"k": 1}, {"k": 1})):
+        kept = project_main_task_authority({"id": "n", "text": "x", "context": row_context,
+                                            "task_contract": {"context": contract_context}})
+        assert kept["task_contract"]["context"] == contract_context
 
 def test_numeric_http_code_does_not_hide_response_body_overflow():
     from ouroboros.loop_llm_call import classify_llm_exception
@@ -424,7 +501,7 @@ def test_context_overflow_skips_cross_model_and_forced_provider_calls(tmp_path, 
         drive_root=tmp_path,
     )
     assert not fallback_calls
-    assert "context exceeded" in result
+    assert "Context-size recovery" in result and "no further provider call" in result
     assert usage["execution_status"] == "infra_failed"
     assert usage["reason_code"] == "llm_api_error"
     assert usage["_last_llm_error_kind"] == "context_overflow"
@@ -479,7 +556,7 @@ def test_continue_carries_an_unreadable_predecessor_plan_as_a_named_gap_through_
 
     env, memory = _make_env_and_memory(tmp_path)
     root, predecessor = env.drive_root, "plan-predecessor"
-    spec = _plan_predecessor(root, predecessor, damage)
+    _plan_predecessor(root, predecessor, damage)
     with open_store(root, write=False) as txn:
         row_text, revision = txn.body_text(predecessor), signature(root, predecessor, txn=txn)
     task = {"id": "plan-successor", "type": "task", "text": "continue", "budget_drive_root": str(root),
@@ -492,8 +569,8 @@ def test_continue_carries_an_unreadable_predecessor_plan_as_a_named_gap_through_
                      "task_id": predecessor, "error": error, "rule": _PLAN_GAP_RULE}
     envelope = task["predecessor_authority"]
     assert envelope.get("plan_review_source_gap") == gap
-    if not gap:  # the recorded address was restored in memory and the operative spec read whole
-        assert envelope["plan_review_state"]["decision_core"]["goal"] == spec["goal"]
+    if not gap:  # readable predecessor plans stay behind the same exact reader
+        assert "plan_review_state" not in envelope and envelope["omitted_fields"]["plan_review_state"] > 0
     rendered = json.dumps(build_llm_messages(env=env, memory=memory, task=task)[0], ensure_ascii=False)
     assert ("plan_review_source_gap" in rendered and _PLAN_GAP_RULE in rendered) == bool(gap)
     for declared in (False, True):

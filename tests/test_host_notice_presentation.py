@@ -1,5 +1,5 @@
-"""Owner-facing host notices (#1369): the provider terminal sentence through its real
-producer, and the readers of old late-review rows.
+"""Owner-facing host notices (#1369): the provider terminal sentence and the fallback
+notice (#2154) through their real producers, and the readers of old late-review rows.
 
 The record keeps its tokens — the exception repr, the provider's typed fields — in the
 ``llm_api_error`` event and Logs; the row a person reads says the same facts in words and
@@ -347,6 +347,159 @@ def test_a_usable_response_clears_stale_provider_fields(tmp_path):
     msg, _cost = _call(tmp_path, _Ok(), usage)
     assert msg["content"] == "fine" and "_last_llm_provider_fields" not in usage
     assert provider_failure_hint(usage) == ""
+
+
+# ---------------------------------------------------------------------------
+# The fallback notice: chain → task emitter → chat delivery → card and toast
+# ---------------------------------------------------------------------------
+
+# The card's line and the toast, painted by their own readers from the delivered rows.
+_CARD_READERS = """
+import { readFileSync } from 'node:fs';
+import { buildTimelineItemHtml } from './modules/chat_activity.js';
+import { showTaskIncidentToast } from './modules/chat_media.js';
+import { summarizeChatLiveEvent } from './modules/log_events.js';
+import { installDom, restoreDom } from './tests/chat_dom_fixture.js';
+const { live, replay } = JSON.parse(readFileSync(process.env.OURO_TEST_FALLBACK_ROWS, 'utf8'));
+const env = installDom();
+try {
+    const painted = live.map((row) => {
+        const view = summarizeChatLiveEvent(row);
+        const toast = showTaskIncidentToast(row);
+        const shown = toast && { text: toast.textContent, children: toast.children.length };
+        toast?.dispose();
+        return { full: view.fullHeadline, promote: view.promote, toast: shown,
+            line: buildTimelineItemHtml({ ...view, lineKey: 'k' }, { expandedLineKeys: new Set(['k']), groupId: 'g' }) };
+    });
+    process.stdout.write(JSON.stringify({ live: painted, replay: replay.map((row) => summarizeChatLiveEvent(row).fullHeadline) }));
+} finally { restoreDom(env.prior); }
+"""
+
+
+@pytest.mark.parametrize("last", ["answers", "refuses", "primary_answers_later"])
+def test_each_fallback_notice_reaches_the_card_in_its_own_routes_words(tmp_path, monkeypatch, last):
+    """The primary and two candidates refuse; the third answers, or refuses too, when the primary's later
+    call may still answer. Through the real loop, chain and call owner, the task's emitter, chat delivery,
+    history and the card's and toast's own readers, each attempt names the route that just failed with only
+    that route's class and sentence, before the next route is dialed; the outcome row, ordinary progress with
+    no toast, names the adopted route or only the last attempt. A refused route is never announced as the
+    answer. A provider's markup reaches the owner as inert text, its secret redacted; the record keeps the
+    typed kind; each attempt keeps its own toast key."""
+    import os
+    import pathlib
+    import queue
+    import shutil
+    from functools import partial
+
+    from ouroboros import fallback_cooldown, loop
+    from ouroboros.agent import OuroborosAgent
+    from ouroboros.dialogue_import import export_for_older_body
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.tools.registry import ToolRegistry
+    from supervisor import events_chat_delivery, message_bus
+    from tests.group_run import run_in_group
+
+    fallback_cooldown.reset_for_tests()
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "alt/a,alt/b,alt/c")
+    monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    # A bare loop has no agent-built context core, as in the chain's own tests.
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
+    secret = "sk-or-" + "fixture" * 6
+    refusals = {
+        "test-model": _BodyError("Error code: 400", status_code=400,
+                                 body={"error": {"message": "Upstream request failed."}}),
+        "alt/a": _BodyError("AuthenticationError('401 invalid_api_key')", status_code=401),
+        "alt/b": _BodyError("Error code: 400", status_code=400, body={"error": {
+            "message": f"Field <img src=x onerror=alert(1)> is not allowed for key {secret}."}}),
+    }
+    if last != "answers":
+        refusals["alt/c"] = _BodyError("Error code: 400", status_code=400, body={"error": {"message": "<b>No</b> route left."}})
+
+    class _Routes:
+        def __init__(self):
+            self.models = []
+
+        def default_model(self):
+            return "test-model"
+
+        def chat(self, **kwargs):
+            self.models.append(kwargs["model"])
+            if kwargs["model"] in refusals and (last != "primary_answers_later" or self.models.count("test-model") < 2):
+                raise refusals[kwargs["model"]]
+            return {"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1}
+
+    events, llm, work, room = queue.Queue(), _Routes(), tmp_path / "work", tmp_path / "room"
+    work.mkdir()
+    agent = SimpleNamespace(_last_progress_ts=None, _event_queue=events, _current_chat_id=1,
+                            _current_task_id="task-1", tools=SimpleNamespace(_ctx=SimpleNamespace(task_attempt=0)),
+                            _subagent_progress_meta=lambda _event: {})
+    # `loop_llm_call.time` is the process-wide `time` module: the sentinel guards the loop only, or a
+    # later child wait that polls (a reaped-after-EOF Node exit, the tree kill's own `ps`) trips it.
+    with monkeypatch.context() as during_loop:
+        during_loop.setattr("ouroboros.loop_llm_call.time.sleep", lambda _s: pytest.fail("a refusal is not retried"))
+        result, _usage, _trace = loop.run_llm_loop(
+            messages=[{"role": "user", "content": "go"}], tools=ToolRegistry(repo_dir=work, drive_root=work), llm=llm,
+            drive_logs=work, emit_progress=partial(OuroborosAgent._emit_progress, agent),
+            incoming_messages=queue.Queue(), task_id="task-1", drive_root=work)
+
+    assert (result == "done") is (last != "refuses") and llm.models[:4] == ["test-model", "alt/a", "alt/b", "alt/c"], "one call per route"
+    assert last != "primary_answers_later" or llm.models[4:] == ["test-model"], "the primary's own later call answered"
+    rows = [json.loads(line) for line in (work / "events.jsonl").read_text().splitlines()]
+    assert [(row["model"], row["error_kind"]) for row in rows if row["type"] == "llm_api_error"][:3] == [
+        ("test-model", "bad_request"), ("alt/a", "auth_error"), ("alt/b", "bad_request")], "the record keeps the kind"
+    expected = [
+        'Fallback: trying alt/a after a rejected request on test-model. The provider said: "Upstream request failed."',
+        "Fallback: trying alt/b after an authentication or authorization refusal on alt/a; "
+        "sign-in is still needed there.",
+        "Fallback: trying alt/c after a rejected request on alt/b. "
+        'The provider said: "Field <img src=x onerror=alert(1)> is not allowed for key ***REDACTED***."',
+        "Fallback: alt/c is now the active route; it answered." if last == "answers" else
+        "Fallback: the last attempt, on alt/c, ended without a usable reply after a rejected request. "
+        'The provider said: "<b>No</b> route left."',
+    ]
+    frames = [events.get_nowait() for _ in range(events.qsize())]
+    notes = [frame for frame in frames if frame["text"].startswith("💬 ⚡ Fallback: ")]
+    assert [frame["text"] for frame in notes] == [f"💬 ⚡ {text}" for text in expected]
+
+    (room / "logs").mkdir(parents=True)
+    (room / "logs" / "chat.jsonl").touch()
+    live, bridge = [], message_bus.LocalChatBridge()
+    bridge._broadcast_fn = live.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", room)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    monkeypatch.setattr(events_chat_delivery, "_bound_project_chat_id", lambda *_: 0)
+    delivery = SimpleNamespace(DRIVE_ROOT=room, RUNNING={"task-1": {"task": {"id": "task-1", "_attempt": 0}}},
+                               send_with_budget=message_bus.send_with_budget,
+                               append_jsonl=lambda *_: pytest.fail("delivery raised"))
+    for frame in notes:
+        events_chat_delivery._handle_send_message(frame, delivery)
+    assert [(row.get("task_incident"), row.get("toast_once")) for row in live] == [
+        *[("model_lane_attempt", f"task-1:model_lane_attempt:1:{name}") for name in ("alt/a", "alt/b", "alt/c")], (None, None)]
+    export_for_older_body(room)
+    response = asyncio.run(make_chat_history_endpoint(room)(SimpleNamespace(query_params={"limit": "10"})))
+    replay = [row for row in json.loads(response.body)["messages"] if row.get("is_progress")]
+    assert secret not in json.dumps([live, replay])
+
+    shown = tmp_path / "rows.json"
+    shown.write_text(json.dumps({"live": live, "replay": replay}), encoding="utf-8")
+    node = shutil.which("node")
+    assert node, "Node is required for the real card and toast consumer proof"
+    run = run_in_group([node, "--input-type=module", "-e", _CARD_READERS],
+                       cwd=pathlib.Path(__file__).resolve().parents[1] / "web",
+                       env={**os.environ, "OURO_TEST_FALLBACK_ROWS": str(shown)}, timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
+    painted = json.loads(run.stdout)
+    assert [view["full"] for view in painted["live"]] == expected == painted["replay"]
+    assert [view["toast"] for view in painted["live"]] == [{"text": text, "children": 0} for text in expected[:3]] + [None]
+    assert not any(view["promote"] for view in painted["live"]), "a host note never claims the card title"
+    assert all("<img" not in view["line"] for view in painted["live"])
+    assert "Field &lt;img src=x onerror=alert(1)&gt; is not allowed" in painted["live"][2]["line"]
+    assert last == "answers" or ("&lt;b&gt;No&lt;/b&gt; route left." in painted["live"][3]["line"]
+                                 and "<b>No" not in painted["live"][3]["line"])
+    assert not any(word in view["full"] for view in painted["live"] for word in ("→", " stays ", "selected")), "no switch or walk verdict"
 
 
 # ---------------------------------------------------------------------------

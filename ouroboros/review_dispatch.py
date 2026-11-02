@@ -1,6 +1,6 @@
 """Reviewer dispatch primitives: the row-identity mint (moved whole from
 ``review_substrate.py`` at the module-size gate, same split shape as
-``skill_review_cycles.py``) and the write-ahead PAID stamp seam (owner
+``tools/review_change_custody.py``) and the write-ahead PAID stamp seam (owner
 Q16/Q17; Max-Review-Cycles fix round).
 
 The ``paid`` fact of Max-Review-Cycles accounting is recorded at PHYSICAL
@@ -100,6 +100,26 @@ def invoke_review_paid_stamp(stamp: Any) -> None:
         if bool(getattr(stamp, "fail_closed", False)):
             raise
         log.debug("review paid dispatch stamp failed (fail-open)", exc_info=True)
+
+
+def invoke_late_review_paid_stamp(stamp: Any) -> bool:
+    """Stamp a send that already failed after dispatch; True when a strict stamp failed.
+
+    Only a transport that crossed the boundary without usage accounting's canonical
+    marker (a compatibility or test adapter) reaches this; the canonical lane stamps
+    before its claim. That send happened, so its own exception, with its capture and
+    attempt ids, stays the failure the caller raises for the retry rail, the native
+    cache and the failed-send observer (#1652). A strict stamp's failure is logged
+    here, never raised. The stamp keeps the failure for the canonical pre-send
+    marker; this fallback neither grants dispatch nor changes the retry policy.
+    """
+    try:
+        invoke_review_paid_stamp(stamp)
+    except Exception:
+        log.warning("review paid stamp failed after a dispatched send; the send's own failure stays raised",
+                    exc_info=True)
+        return True
+    return False
 
 
 @contextlib.contextmanager

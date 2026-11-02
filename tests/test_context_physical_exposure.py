@@ -132,8 +132,10 @@ def test_observation_reads_exact_physical_source_and_inspection_restores_it(tmp_
     assert len(observed["exposed_units"]) == 1
     inspected = json.loads(_compact_context(ctx, inspect=True))
     assert [unit["exposed"] for unit in inspected["units"]] == [True, False]
+    # The inventory always names the memory view's elements (C7); this context observed none.
     assert inspected["inventory"] == {"units": 2, "eligible": 2, "tokens": sum(u["tokens"] for u in inspected["units"]),
-                                      "by_kind": {"tool": {"units": 2, "tokens": sum(u["tokens"] for u in inspected["units"])}}}
+                                      "by_kind": {"memory": {"units": 0, "tokens": 0},
+                                                  "tool": {"units": 2, "tokens": sum(u["tokens"] for u in inspected["units"])}}}
     first = inspected["units"][0]
     restore = {"checkpoint_ref": inspected["restore_checkpoint"], "unit_id": first["unit_id"], "raw_sha256": first["raw_sha256"]}
     messages, _ = cc._restored_source_views([restore], drive_root=tmp_path, task_id="exposure",

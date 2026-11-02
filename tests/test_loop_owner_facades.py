@@ -33,8 +33,8 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_maybe_early_finalize _finalize_limit_ctx"
     ),
     "loop_nudges": (
-        "_skill_names_touched_by_trace _skill_finalization_message _force_plan_decision "
-        "_force_plan_reminder _force_plan_disclosure _maybe_inject_time_budget_milestone "
+        "_skill_names_touched_by_trace _skill_finalization_message _plan_gate_decision "
+        "_plan_gate_reminder _plan_gate_disclosure _maybe_inject_time_budget_milestone "
         "_maybe_inject_cost_budget_milestone "
         "_inject_round_checkpoints _forced_delegation_note _nanny_finalization_message "
         "_maybe_inject_finalization_nudges _answer_protocol_active"
@@ -72,7 +72,7 @@ LOOP_LEAF_OWNERS: dict[str, str] = {
         "_project_child_result_dispositions _record_forced_finalization "
         "_forced_orphan_note _claimed_child_dispositions _undispositioned_children "
         "_maybe_enforce_child_absorption_gate "
-        "_enforce_swarm_actions _finalize_forced_services _disclose_service_finalization "
+        "_enforce_plan_gate _finalize_forced_services _disclose_service_finalization "
         "_drain_forced_owner_directives "
         "_call_forced_model_once _publish_model_forced_candidate "
         "_publish_stale_forced_candidate _forced_fallback_result "

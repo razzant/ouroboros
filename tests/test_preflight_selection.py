@@ -92,14 +92,16 @@ def test_required_floor_cannot_silently_disappear(candidate, mode):
     assert candidate._preflight_test_proof is None
 
 
-def test_selected_receipt_is_refused_before_installation_probe(candidate, monkeypatch, tmp_path):
-    from ouroboros.preflight_receipts import FullGateReceipt
+def test_a_selected_run_of_uncommitted_bytes_is_refused_durability_before_installation_probe(candidate, monkeypatch,
+                                                                                               tmp_path):
+    from ouroboros.preflight_receipts import GateReceipt
     plan = selection.select_tests(candidate.repo_dir)
     proof = admission.capture_preflight_test_subject(candidate.repo_dir, selection=plan)
     passes = pr._preflight_pass_specs(probe_module="nonce")
     monkeypatch.setattr("ouroboros.preflight_receipts._installation_identity", lambda *a: pytest.fail("selected proof"))
-    receipt = FullGateReceipt.prepare(candidate, proof, passes, "nonce", "python", tmp_path, candidate.repo_dir)
+    receipt = GateReceipt.prepare(candidate, proof, passes, "nonce", "python", tmp_path, candidate.repo_dir)
     assert not receipt.covered() and receipt.path is None
+    assert receipt.reason == "a selected run is durable only as an exact commit"
 
 
 def test_undisclosed_execution_keeps_the_proofs_actual_tier(tmp_path, monkeypatch):
@@ -125,6 +127,11 @@ def test_adoption_accepts_a_full_receipt_of_exactly_the_named_commit(candidate):
     _commit_all(repo)
     sha = pr._run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
     assert pr.run_hermetic_pytest(repo, ctx=candidate) is None  # a full green run mints the durable receipt
+    [record] = [json.loads(path.read_text(encoding="utf-8")) for path in candidate.drive_root.glob(
+        "state/preflight_receipts/*.json")]
+    # A full record keeps exactly its historical shape, so receipts written before selected tiers still match.
+    assert record["schema"] == 1 and "selection" not in record
+    assert set(record["identity"]) == {"schema", "head", "tree", "index_tree", "workload", "installation", "source"}
     assert adoption_test_evidence(candidate.drive_root, repo, sha, ctx=candidate)["source"] == "proof"
     (repo / "leaf.py").write_text("value = 99\n", encoding="utf-8")  # later dirty bytes do not matter
     evidence = adoption_test_evidence(candidate.drive_root, repo, sha)
@@ -205,6 +212,41 @@ def test_durable_records_carry_counts_not_the_whole_inventory():
     assert len(json.dumps(compact)) < 2000  # repeated in events, exhibits, ledgers and handoffs
 
 
+@pytest.mark.parametrize("selected", [("tests/deep/test_b.py", "tests/test_a.py"), ("tests/node_modules/test_d.py",)],
+                         ids=["reached", "unreachable"])
+def test_a_selected_pass_walks_tests_once_and_collects_exactly_its_modules(tmp_path, selected):
+    """A selected pass points pytest at ``tests/`` once (a module named as an argument costs a walk of the
+    tree of its own) and keeps the selected modules before any is imported: it collects exactly their
+    nodes. A selected module the walk cannot reach fails the pass instead of vanishing from it."""
+    import os
+    import sys
+
+    from ouroboros import preflight_inventory as inventory
+    from tests.group_run import run_in_group
+
+    repo = tmp_path / "repo"
+    for path, text in {"pytest.ini": "[pytest]\n", "tests/test_a.py": "def test_one(): pass\ndef test_two(): pass\n",
+                       "tests/deep/test_b.py": "def test_three(): pass\n",
+                       "tests/node_modules/test_d.py": "def test_four(): pass\n",
+                       "tests/test_c.py": "raise AssertionError('an unselected module is never imported')\n"}.items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    first = inventory.selection_passes(SimpleNamespace(tier="selected", files=selected), temp_root=scratch)[0]
+    scope = first.args[:first.args.index("tests/") + 1]
+    assert scope == [f"--select-test={path}" for path in selected] + ["tests/"]
+    done = run_in_group([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", *scope,
+                         "-p", first.args[-1]], timeout=120, cwd=repo,
+                        env={**os.environ, "PYTHONPATH": str(pr._probe_dir(scratch))})
+    expected = inventory.read_inventory(scratch, "parallel")[0].get("expected")
+    if selected[0].startswith("tests/node_modules"):
+        assert done.returncode != 0 and "never reached" in done.stdout + done.stderr, done.stdout + done.stderr
+        assert not expected
+    else:
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert expected == ["tests/deep/test_b.py::test_three", "tests/test_a.py::test_one", "tests/test_a.py::test_two"]
+
+
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unfinished"])
 def test_inventory_rejects_incomplete_or_duplicate_execution(tmp_path, mutation):
     from ouroboros.preflight_inventory import read_inventory
@@ -219,3 +261,49 @@ def test_inventory_rejects_incomplete_or_duplicate_execution(tmp_path, mutation)
         rows.pop()
     (tmp_path / "inventory-parallel.jsonl").write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
     assert read_inventory(tmp_path, "parallel")[1]
+
+
+def _coherent(schema=1, **identity):
+    full = {"schema": schema, "head": "h", "tree": "t", "index_tree": "t", "workload": "w", "installation": "i",
+            "source": "s", **identity}
+    return {"schema": schema, "identity": full, "result": "passed", "authenticity": "unsigned",
+            "lanes": {"node": "absent", "parallel_workers": 2, "admitted_workers": 2, "serial": "passed"},
+            "pass_seconds": {"parallel": 1.0, "serial": 1.0}, "created_at": "now", "task_id": "t", "phase": "p"}
+
+
+SCOPE = {"base": "b", "policy": "p", "changed": ["x.py"], "extra_tests": [], "full_tests": False, "test_reason": ""}
+
+
+@pytest.mark.parametrize("document,problem", [
+    (_coherent(), ""),
+    (_coherent(2, tier="selected", scope=SCOPE), ""),
+    (_coherent(1, tier="selected", scope=SCOPE), "schema does not match"),  # a selected record relabelled full
+    (_coherent(2, scope=SCOPE), "schema does not match"),
+    (_coherent(2, tier="selected", scope={**SCOPE, "full_tests": True}), "the selection scope is incomplete"),
+    (_coherent(2, tier="selected", scope={k: v for k, v in SCOPE.items() if k != "base"}),
+     "the selection scope is incomplete"),
+    (_coherent(3, tier="selected", scope=SCOPE), "schema does not match"),
+])
+def test_record_coherence_keeps_the_tiers_apart(document, problem):
+    from ouroboros.preflight_receipts import _record_problem
+
+    assert _record_problem(document, document["identity"], False) == problem
+
+
+def test_a_selected_scope_qualifies_only_its_exact_base_policy_paths_and_declared_widening(tmp_path):
+    from ouroboros.preflight_qualification import _scope_gap
+
+    repo = _make_repo(tmp_path, {"tests/test_kept.py": "def test_k(): pass\n"})
+    sha = pr._run_git(repo, ["rev-parse", "HEAD"]).stdout.strip()
+    scope = {**SCOPE, "base": "serving", "policy": selection.policy_digest(), "changed": ["a.py", "b.py"],
+             "extra_tests": ["tests/test_kept.py"]}
+    local = {"onto": "serving", "paths": ["a.py"], "widening": {"extra_tests": ["tests/test_kept.py"]}}
+    assert _scope_gap(repo, sha, scope, local) == ""
+    assert "not the serving HEAD" in _scope_gap(repo, sha, {**scope, "base": "older"}, local)
+    assert "another selection policy" in _scope_gap(repo, sha, {**scope, "policy": "other"}, local)
+    assert "did not cover c.py" in _scope_gap(repo, sha, scope, {**local, "paths": ["a.py", "c.py"]})
+    assert "declared broad impact" in _scope_gap(repo, sha, scope, {**local, "widening": {"full_tests": True}})
+    assert "declared indirect consumers tests/test_kept.py" in _scope_gap(repo, sha, {**scope, "extra_tests": []}, local)
+    # A declared consumer the commit no longer carries has nothing left to run.
+    gone = {**local, "widening": {"extra_tests": ["tests/test_gone.py"]}}
+    assert _scope_gap(repo, sha, scope, gone) == ""

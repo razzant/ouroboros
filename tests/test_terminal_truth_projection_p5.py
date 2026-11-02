@@ -1,14 +1,14 @@
 """The cause line names the cause the record actually holds (owner item, spam B).
 
-``_apply_terminal_custody_outcome`` stamps ``delegated_custody_unreconciled`` as
-the row's reason_code while a delegated run is still unreconciled. The debt then
-heals from the WRITE side, and ``docs/ARCHITECTURE.md`` (the stored
-``delegated_runs_unreconciled`` projection is healed only from the write side)
-forbids that refresh rewriting reason_code - so the stored code outlives the
-fact and the owner keeps reading about a debt the same record shows as empty.
-Nine of fourteen terminal rows in the audited window did exactly that, and one
-of them repeated it twenty-one minutes later through the project summary, which
-shares this renderer.
+Rows written before #1583 carry ``delegated_custody_unreconciled`` as their
+reason_code (and objective warning) whenever a delegated run was unreconciled at
+the terminal. The debt then heals from the WRITE side, and ``docs/ARCHITECTURE.md``
+(the stored ``delegated_runs_unreconciled`` projection is healed only from the
+write side) forbids that refresh rewriting reason_code - so the stored code outlives
+the fact. Nine of fourteen terminal rows in the audited window named a debt the same
+record showed as empty, and one repeated it twenty-one minutes later through the
+project summary, which shares this renderer. New rows keep their own cause; these
+renderers read every row by its current list.
 
 New module rather than tests/test_terminal_truth_projection.py: that file is 986
 lines and would cross the 1000-line target here.
@@ -79,44 +79,87 @@ def test_every_other_reason_code_passes_through_untouched() -> None:
     assert _completion_verdict({"status": "completed"}, {}) == ""
 
 
-def test_a_healed_debt_is_never_resurrected_by_its_own_frozen_warning() -> None:
-    """Once the debt list is empty the code is gone, whatever the axes still say.
+def _legacy_axes(execution: dict, *other_warnings: str) -> dict:
+    """The exact objective bytes a pre-#1583 row kept: the custody stamp as its warning."""
+    warnings = [WARN_DELEGATED_CUSTODY_UNRECONCILED, *other_warnings]
+    return {"lifecycle": {"status": "completed"}, "execution": execution,
+            "objective": {"status": "not_evaluated", "source": "none",
+                          "warning": WARN_DELEGATED_CUSTODY_UNRECONCILED, "warnings": warnings}}
 
-    The overlay stamps BOTH the top-level reason code and an objective warning,
-    and the refresh may rewrite neither. That frozen warning is what keeps the
-    headline at "Done with warnings" after the debt heals, and it is NOT licence
-    to restore the code beside it: a Reason line naming a debt the same record
-    shows as empty is exactly the false statement this rule removes. The current
-    execution reason speaks when there is one; otherwise the row states no cause
-    and leaves the headline to the axis that owns it. Built through the real
-    overlay, not a hand-written axes dict.
+
+def test_a_healed_debt_is_never_resurrected_by_its_own_frozen_warning() -> None:
+    """Once the debt list is empty the debt is gone, whatever the old axes still say (#1583).
+
+    An older row keeps BOTH its stamped reason code and its custody warning: the
+    write-side refresh may rewrite neither. Neither is licence to name the debt
+    again: the headline reads the row's current list, so a known-empty list stops
+    the frozen custody warning from counting and the row reads Done; a Reason line
+    naming a debt the same record shows as empty is the false statement this rule
+    removes. The current execution reason speaks when there is one. Every other
+    warning, and the custody warning of a row carrying no list, keep their word.
     """
-    from ouroboros.outcomes import custody_debt_axes
     from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
 
-    axes = custody_debt_axes({"lifecycle": {"status": "completed"},
-                              "execution": {"status": "ok", "reason_code": ""}})
+    axes = _legacy_axes({"status": "ok", "reason_code": ""})
     healed = _row(outcome_axes=axes, delegated_runs_unreconciled=[])
-    # The frozen warning still heads the row; the healed debt says nothing.
-    assert OUTCOME_PHASE_HEADLINE[outcome_phase(healed, {})] == "Done with warnings"
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase(healed, {})] == "Done"
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase({}, healed)] == "Done", "the event carries the same list"
     assert _completion_verdict(healed, {}) == ""
+    assert healed["outcome_axes"] == _legacy_axes({"status": "ok", "reason_code": ""}), "history keeps its bytes"
 
     # While the debt is real the row names it, headline and cause agreeing.
     owed = _row(outcome_axes=axes, delegated_runs_unreconciled=["run-a1"])
     assert OUTCOME_PHASE_HEADLINE[outcome_phase(owed, {})] == "Done with warnings"
     assert _completion_verdict(owed, {}) == CUSTODY_SENTENCE
 
-    # A row whose axes healed too reads as clean and also states nothing.
-    clean = _row(outcome_axes={"execution": {"status": "ok"}},
-                 delegated_runs_unreconciled=[])
-    assert OUTCOME_PHASE_HEADLINE[outcome_phase(clean, {})] == "Done"
-    assert _completion_verdict(clean, {}) == ""
+    # No list is no proof of reconciliation: the stored warning keeps its word.
+    unknown = _row(outcome_axes=axes)
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase(unknown, {})] == "Done with warnings"
+
+    # Only the custody warning heals; another warning the row earned still heads it.
+    other = _row(outcome_axes=_legacy_axes({"status": "ok"}, "receipt_absent"), delegated_runs_unreconciled=[])
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase(other, {})] == "Done with warnings"
+    assert _completion_verdict(other, {}) == TASK_CAUSE_PHRASES["receipt_absent"]
+
+    # A new row keeps its own cause; its open debt alone warns, from the list.
+    fresh = {"status": "completed", "reason_code": "final_message", "delegated_runs_unreconciled": ["run-a1"],
+             "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}}}
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase(fresh, {})] == "Done with warnings"
+    assert OUTCOME_PHASE_HEADLINE[outcome_phase({**fresh, "delegated_runs_unreconciled": []}, {})] == "Done"
 
     # A current execution cause is what a healed row renders when it has one.
-    railed = _row(outcome_axes=custody_debt_axes(
-        {"execution": {"status": "failed", "reason_code": "provider_unavailable"}}),
-        delegated_runs_unreconciled=[])
+    railed = _row(outcome_axes=_legacy_axes({"status": "failed", "reason_code": "provider_unavailable"}),
+                  delegated_runs_unreconciled=[])
     assert _completion_verdict(railed, {}) == "The task could not get a usable model answer, so it could not finish."
+
+
+def test_a_legacy_stamp_is_never_read_back_as_its_own_cause() -> None:
+    """R1 QA: a stored older row (stamp, no typed execution cause, known-empty debt) used to read
+    back through ``normalize_outcome_axes`` with the stamp as its execution reason, so the card
+    named a debt the row shows as empty. The cause stays unrecorded; nothing is guessed."""
+    from ouroboros.outcomes import normalize_outcome_axes, recorded_cause
+
+    stamped = {"status": "failed", "reason_code": WARN_DELEGATED_CUSTODY_UNRECONCILED, "delegated_runs_unreconciled": [],
+               "outcome_axes": {"execution": {"status": "failed"}, "lifecycle": {"status": "failed"},
+                                "objective": {"warning": WARN_DELEGATED_CUSTODY_UNRECONCILED,
+                                              "warnings": [WARN_DELEGATED_CUSTODY_UNRECONCILED]}}}
+    axes = normalize_outcome_axes(stamped)
+    assert axes["execution"] == {"status": "failed", "reason_code": ""}
+    assert axes["objective"]["warning"] == WARN_DELEGATED_CUSTODY_UNRECONCILED, "raw history keeps its bytes"
+    assert _completion_verdict(stamped, {}) == ""
+    # A copy an earlier read already normalized carries the stamp as the execution reason: still no cause.
+    sent = {**stamped, "outcome_axes": {**stamped["outcome_axes"], "execution": {
+        "status": "failed", "reason_code": WARN_DELEGATED_CUSTODY_UNRECONCILED}}}
+    assert recorded_cause(sent) == "" and _completion_verdict({}, sent) == ""
+    owed = {**sent, "delegated_runs_unreconciled": ["run-a1"]}
+    assert _completion_verdict(owed, {}) == CUSTODY_SENTENCE, "a current debt still speaks"
+    # Other rows read as before: a recorded reason, or the status of a failed row without one.
+    assert normalize_outcome_axes({"status": "failed", "reason_code": "provider_failure"})["execution"][
+        "reason_code"] == "provider_failure"
+    assert normalize_outcome_axes({"status": "failed"})["execution"]["reason_code"] == "failed"
+    typed = {**stamped, "outcome_axes": {**stamped["outcome_axes"], "execution": {
+        "status": "failed", "reason_code": "provider_unavailable"}}}
+    assert normalize_outcome_axes(typed)["execution"]["reason_code"] == "provider_unavailable"
 
 
 _DEFERRED_BESIDE_PLAN = {

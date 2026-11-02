@@ -7,7 +7,8 @@ the boundary before starting the command. It installs nothing and is not a sandb
 
 Stage two retains complete raw output and declared diagnostics, reaps the
 contained command, then releases declared reproducible test scratch on green
-and red. Unknown command data, debug and unconfirmed teardown stay in place.
+and red, including a command that could not be launched (exit 2, `launch_error`
+in its result). Unknown command data, debug and unconfirmed teardown stay in place.
 The last stderr line names the root once: `SAFE_TEST_RETAINED` or
 `SAFE_TEST_RELEASED` describes that path, not every process anywhere.
 
@@ -37,14 +38,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-
-
-def _git_ancestor(path: Path):
-    """The nearest directory at or above ``path`` that Git would treat as a checkout."""
-    for directory in (path, *path.parents):
-        if (directory / ".git").exists():
-            return directory
-    return None
 
 
 def _wait_owning(argv: list[str], repo: Path, env: dict) -> int:
@@ -106,7 +99,7 @@ def main() -> int:
         # snapshots or resets its own temp path then operates on the
         # operator's source. Refuse instead of accepting a false boundary.
         parser.error("--temp-parent must be outside the repository working tree")
-    ancestor = _git_ancestor(parent)
+    ancestor = environment["git_ancestor"](parent)
     if ancestor is not None:
         # The same hazard one level up: any enclosing checkout, not only this one.
         parser.error(f"--temp-parent must not be inside a Git working tree ({ancestor})")
@@ -119,8 +112,9 @@ def main() -> int:
     if (git_dir / "ouroboros-body-adoption").exists():
         parser.error("source checkout has a pending body adoption; finish it before verification")
     # Short on purpose: server sockets live several levels below this root and
-    # macOS caps an AF_UNIX path at 104 bytes.
-    root = Path(tempfile.mkdtemp(prefix="ob-", dir=parent)).resolve()
+    # macOS caps an AF_UNIX path at 104 bytes. Born `.noindex`: Spotlight never
+    # registers the fixtures below it (fake `Ouroboros.app` bundles among them).
+    root = Path(tempfile.mkdtemp(prefix="ob-", suffix=".noindex", dir=parent)).resolve()
     try:
         env = boundary(root, repo, keep=(
             "OUROBOROS_RUN_UI_SMOKE", "OUROBOROS_EXPECT_BROWSER_ENGINES",
@@ -128,8 +122,10 @@ def main() -> int:
             # CI requires these test dependencies; without them a missing plugin or Node skips.
             "OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS", "OUROBOROS_PREFLIGHT_REQUIRE_NODE",
             "PLAYWRIGHT_BROWSERS_PATH", "OUROBOROS_E2E_DEEP",
-            # Opt-in native Windows desktop qualification (tests/test_windows_computer_use_native.py).
-            "OUROBOROS_WINDOWS_DESKTOP_QA",
+            # The run's shard weights (ci.yml `shard-plan`): tests/default_lane.py, tests/browser_lane.py.
+            "OUROBOROS_CI_DURATIONS",
+            # Opt-in native desktop qualification; ordinary runs remain skipped.
+            "OUROBOROS_WINDOWS_DESKTOP_QA", "OUROBOROS_MACOS_DESKTOP_QA",
             "OUROBOROS_TEST_EVIDENCE_ROOT", *environment["DIAGNOSTIC_OUTPUT_KEYS"],
         ))
         # Each pytest controller claims its own fresh basetemp beneath this owned

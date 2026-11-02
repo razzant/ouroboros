@@ -9,13 +9,13 @@
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working');"
+    "value": "const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working',"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "['failed', 'infra_failed'].includes(execution)"
+    "value": "((lifecycle === 'failed' || execution === 'failed') && !unanswered)\n        || execution === 'infra_failed'"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",
@@ -45,7 +45,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "Show details"
+    "value": "<span class=\"chat-live-toggle\" data-live-toggle>Details</span>"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -159,7 +159,7 @@
     "id": "test_chat_progress_updates_route_into_live_card",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "            const changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)"
+    "value": "                changed = placeReplayedEvidence(record, summary, metrics.tool_evidence, rawTs, normalizeLogTs)"
   },
   {
     "id": "test_chat_progress_updates_route_into_live_card",
@@ -237,7 +237,7 @@
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
     "path": "web/modules/chat.js",
     "kind": "contains",
-    "value": "const presentation = taskPresentation(phase || 'done');"
+    "value": "const presentation = taskPresentation(phase || 'done',"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
@@ -405,7 +405,7 @@
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-live-card[data-expanded=\"1\"] > .chat-live-summary-button .chat-live-chevron {"
+    "value": ".chat-live-summary-side[aria-expanded=\"true\"] > .chat-live-chevron {"
   },
   {
     "id": "test_styles_cover_chat_header_controls_and_grouped_cards",
@@ -518,8 +518,8 @@
   {
     "id": "test_live_card_timeline_body_renders_markdown",
     "path": "web/modules/chat_activity.js",
-    "kind": "not_contains",
-    "value": "escapeHtml(displayBody)"
+    "kind": "regex",
+    "value": "item\\.bodyFormat === 'text'\\s*\\?\\s*escapeHtml\\(displayBody\\)\\s*:\\s*renderMarkdown\\(displayBody, \\{ inlineHeadingBreaks: true \\}\\)"
   },
   {
     "id": "test_live_card_timeline_headline_renders_markdown_for_progress",
@@ -660,22 +660,70 @@
     "value": "bar.value"
   },
   {
-    "id": "test_evolution_tags_table_escapes_untrusted_tag_names",
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
     "path": "web/modules/evolution.js",
     "kind": "contains",
-    "value": "escapeHtmlText(p.tag || '')"
+    "value": "import { escapeHtmlAttr as esc } from './ui_primitives.js';"
   },
   {
-    "id": "test_evolution_tags_table_escapes_untrusted_tag_names",
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
     "path": "web/modules/evolution.js",
     "kind": "contains",
-    "value": "escapeHtmlText(dateStr)"
+    "value": "${esc(version.version)}"
   },
   {
-    "id": "test_evolution_tags_table_escapes_untrusted_tag_names",
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": "${esc(fullDate(version.t))}"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": "Source: ${esc(sourceLabel(version))}"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": ">${esc(words.title)}</h4>"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": ">${esc(words.body)}</p>"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "contains",
+    "value": ">${esc(label.text)}</text>"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
     "path": "web/modules/evolution.js",
     "kind": "not_contains",
-    "value": "<td><code>${p.tag}</code></td>"
+    "value": ">${words.title}<"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "not_contains",
+    "value": ">${words.body}<"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "not_contains",
+    "value": ">${label.text}<"
+  },
+  {
+    "id": "test_evolution_history_escapes_untrusted_tag_names_and_release_words",
+    "path": "web/modules/evolution.js",
+    "kind": "not_contains",
+    "value": ">${version.version}<"
   },
   {
     "id": "test_skill_lifecycle_terminal_progress_can_finish_live_card",
@@ -720,37 +768,37 @@
     "value": "const wasFirstLoad = !historyLoaded;"
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer.js",
     "kind": "contains",
-    "value": "id=\"chat-swarm\""
+    "value": "id=\"chat-subagents-mode\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "id=\"chat-context-mode\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
-    "path": "web/modules/composer.js",
+    "id": "test_subagents_and_context_dom_present",
+    "path": "web/modules/composer_subagents.js",
     "kind": "contains",
-    "value": "class=\"chat-composer-pills\""
+    "value": "role=\"radio\" tabindex=\"-1\" aria-checked=\"false\" data-mode=\"${mode}\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
     "value": "const CONTEXT_MODES = ['nano', 'low', 'max'];"
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer_owner_controls.js",
     "kind": "contains",
     "value": "role=\"radio\" tabindex=\"-1\" aria-checked=\"false\" data-mode=\"${mode}\""
   },
   {
-    "id": "test_swarm_and_context_dom_present",
+    "id": "test_subagents_and_context_dom_present",
     "path": "web/modules/composer.js",
     "kind": "contains",
     "value": "class=\"chat-send-group\""
@@ -774,52 +822,46 @@
     "value": "reviewingSkills.add(name);"
   },
   {
-    "id": "test_swarm_send_listener_uses_arrow_function",
+    "id": "test_one_shot_swarm_pill_is_gone",
     "path": "web/modules/composer.js",
-    "kind": "contains",
-    "value": "sendMessage(swarmArmed())"
+    "kind": "not_contains",
+    "value": "id=\"chat-swarm\""
   },
   {
-    "id": "test_swarm_send_listener_uses_arrow_function",
+    "id": "test_one_shot_swarm_pill_is_gone",
     "path": "web/modules/composer.js",
-    "kind": "contains",
-    "value": "sendBtn.addEventListener('click', () => sendMessage(swarmArmed()))"
+    "kind": "not_contains",
+    "value": "swarmArmed"
   },
   {
-    "id": "test_swarm_default_off",
+    "id": "test_one_shot_swarm_pill_is_gone",
     "path": "web/modules/composer.js",
-    "kind": "contains",
-    "value": "data-armed=\"false\""
+    "kind": "not_contains",
+    "value": "force_plan"
   },
   {
-    "id": "test_swarm_functions_exist",
+    "id": "test_one_shot_swarm_pill_is_gone",
     "path": "web/modules/composer.js",
-    "kind": "contains",
-    "value": "function swarmArmed()"
+    "kind": "not_contains",
+    "value": "planMode"
   },
   {
-    "id": "test_swarm_functions_exist",
-    "path": "web/modules/composer.js",
-    "kind": "contains",
-    "value": "function setSwarm(armed)"
-  },
-  {
-    "id": "test_swarm_one_shot_disarms_on_send",
-    "path": "web/modules/composer.js",
-    "kind": "contains",
-    "value": "if (planMode) setSwarm(false);"
+    "id": "test_one_shot_swarm_pill_is_gone",
+    "path": "web/style.css",
+    "kind": "not_contains",
+    "value": ".chat-swarm"
   },
   {
     "id": "test_context_segmented_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-context-mode .chat-seg {"
+    "value": ":is(.chat-context-mode, .chat-subagents-mode) .chat-seg {"
   },
   {
     "id": "test_context_segmented_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-context-mode .chat-seg[aria-checked=\"true\"]"
+    "value": ":is(.chat-context-mode, .chat-subagents-mode) .chat-seg[aria-checked=\"true\"]"
   },
   {
     "id": "test_context_segmented_css_exists",
@@ -828,31 +870,25 @@
     "value": ".chat-context-mode[data-context-mode=\"low\"] {"
   },
   {
-    "id": "test_swarm_armed_marker_css",
+    "id": "test_composer_capsules_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ".chat-swarm[data-armed=\"true\"]"
+    "value": ".chat-subagents-mode {"
   },
   {
-    "id": "test_composer_pills_css_exists",
-    "path": "web/style.css",
+    "id": "test_composer_capsules_css_exists",
+    "path": "web/ui.css",
     "kind": "contains",
-    "value": ".chat-composer-pills {"
+    "value": ".ui-hint {"
   },
   {
-    "id": "test_composer_pills_css_exists",
-    "path": "web/style.css",
-    "kind": "contains",
-    "value": ".chat-swarm {"
-  },
-  {
-    "id": "test_composer_pills_css_exists",
+    "id": "test_composer_capsules_css_exists",
     "path": "web/style.css",
     "kind": "contains",
     "value": ".chat-context-mode {"
   },
   {
-    "id": "test_composer_pills_css_exists",
+    "id": "test_composer_capsules_css_exists",
     "path": "web/style.css",
     "kind": "contains",
     "value": ".chat-send-group {"

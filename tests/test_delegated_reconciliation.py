@@ -39,6 +39,8 @@ def startup_owners(tmp_path, monkeypatch):
     from supervisor import active_activity, queue, workers
 
     monkeypatch.setattr(server_maintenance, "DATA_DIR", tmp_path)
+    # Not this fixture's duty: the real child's own thread would outlive the test (it has its own tests).
+    monkeypatch.setattr(server_maintenance, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(workers, "WORKERS", {})

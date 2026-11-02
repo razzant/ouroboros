@@ -167,6 +167,9 @@ def test_captured_timeout_job_closes_only_its_dead_local_invocation(timed_out, m
     else:
         with pytest.raises(StopAfterRetirement):
             task_reaper.reap_timed_out_task(t.job)
+        from ouroboros import custody_owed
+        assert load_task_result(t.root, "old-task")["launch_handoffs"] == {"op": claim}, "the locked door only owes"
+        assert custody_owed.drain() == 0
         row = load_task_result(t.root, "old-task")
         assert not row.get("launch_handoffs", {}), row
         assert row["retired_tool_invocations"]["op"]["effect_outcome"] == "unknown"

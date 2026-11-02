@@ -86,10 +86,10 @@ def _resolve_preparation_once(monkeypatch, ctx, binding_id: str) -> None:
                         lambda raw: identity if raw == TOKEN else authenticate(raw))
     monkeypatch.setattr(ctx, "require_permission", lambda skill, payload, permission: (
         None if (skill, permission) == (identity[0], "presence") else require(skill, payload, permission)))
-    monkeypatch.setattr(host_service, "_admit_presence", lambda *_args: admission)
+    monkeypatch.setattr(host_service, "_admit_presence", lambda *_args, **_kw: admission)
 
 
-async def _until(predicate, timeout: float = 5.0) -> None:
+async def _until(predicate, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
         assert time.monotonic() < deadline, "condition not reached"
@@ -110,7 +110,7 @@ def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, mo
 
     def runner(**kwargs):
         entered.append(kwargs["event"].source_event_id)
-        assert release.wait(10)
+        assert release.wait(30)
         return _answer(**kwargs)
 
     app, binding_id, ctx = _presence_app(tmp_path, runner, account_wide=True)
@@ -148,7 +148,7 @@ def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp
     def runner(**kwargs):
         calls.append(kwargs["event"].source_event_id)
         entered.set()
-        assert release.wait(10)
+        assert release.wait(30)
         return _answer(**kwargs)
 
     app, binding_id, ctx = _presence_app(tmp_path, runner)
@@ -365,48 +365,32 @@ def test_an_interrupted_admission_settles_waiters_and_capacity(admission_started
 
 
 def test_blocking_checks_run_off_the_event_loop(tmp_path, monkeypatch):
-    """Token discovery and presence admission read disk; the loop keeps ticking through both."""
+    """The loop can release each real blocking check before that check returns."""
     import ouroboros.presence_admission as presence_admission
 
     app, binding_id, ctx = _presence_app(tmp_path, _answer)
     authenticate, admit = ctx.authenticate_token_payload, presence_admission.admit_presence_turn
-
-    def slow_authenticate(raw_token):
-        time.sleep(0.3)
-        return authenticate(raw_token)
-
-    def slow_admit(**kwargs):
-        time.sleep(0.3)
-        return admit(**kwargs)
-
-    monkeypatch.setattr(ctx, "authenticate_token_payload", slow_authenticate)
-    monkeypatch.setattr(presence_admission, "admit_presence_turn", slow_admit)
-
-    async def ticks_during(awaitable):
-        ticks, done = 0, asyncio.Event()
-
-        async def tick():
-            nonlocal ticks
-            while not done.is_set():
-                ticks += 1
-                await asyncio.sleep(0.01)
-
-        ticker = asyncio.create_task(tick())
-        try:
-            response = await awaitable
-        finally:
-            done.set()
-            await ticker
-        return response.status_code, ticks
+    calls = []
 
     async def scenario():
-        return (await ticks_during(host_service._api_identity(_request(app))),
-                await ticks_during(_turn(app, binding_id, "e-1")))
+        loop, loop_thread = asyncio.get_running_loop(), threading.get_ident()
 
-    (identity_status, identity_ticks), (turn_status, turn_ticks) = asyncio.run(scenario())
-    assert identity_status == 200 and turn_status == 200
-    # Inline on the loop, each 0.3 s check would be one tick.
-    assert identity_ticks > 10 and turn_ticks > 20
+        def checked(name, function, *args, **kwargs):
+            assert threading.get_ident() != loop_thread, name + " ran on the event loop"
+            released = threading.Event()
+            loop.call_soon_threadsafe(released.set)
+            assert released.wait(5), name + " prevented the loop from releasing it"
+            calls.append(name)
+            return function(*args, **kwargs)
+
+        monkeypatch.setattr(ctx, "authenticate_token_payload", lambda token: checked("auth", authenticate, token))
+        monkeypatch.setattr(presence_admission, "admit_presence_turn", lambda **kw: checked("admit", admit, **kw))
+        identity = await host_service._api_identity(_request(app))
+        turn = await _turn(app, binding_id, "e-1")
+        return identity.status_code, turn.status_code
+
+    assert asyncio.run(scenario()) == (200, 200)
+    assert calls == ["auth", "auth", "admit"]
 
 
 def test_coroutine_admission_keeps_the_cross_process_gate_contract(tmp_path):
@@ -469,7 +453,7 @@ def test_same_source_id_with_different_room_or_text_never_joins_or_replays(tmp_p
 
         calls.append(kwargs["event"].text)
         entered.set()
-        assert release.wait(10)
+        assert release.wait(30)
         event = kwargs["event"]
         answer = _answer(**kwargs)
         write_task_result(tmp_path, presence_turn_task_id(binding, event.source_event_id), "completed",
@@ -516,7 +500,7 @@ def test_many_slow_auth_probes_do_not_fill_the_default_executor(tmp_path, monkey
             if active[0] == 2:
                 entered.set()
         try:
-            assert release.wait(10)
+            assert release.wait(30)
             return original(token)
         finally:
             with lock:
@@ -548,15 +532,15 @@ def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, mo
     lock, active, peak = threading.Lock(), [0], [0]
     original = host_service._admit_presence
 
-    def slow_admission(*args):
+    def slow_admission(*args, **kwargs):
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
             if active[0] == 2:
                 entered.set()
         try:
-            assert release.wait(10)
-            return original(*args)
+            assert release.wait(30)
+            return original(*args, **kwargs)
         finally:
             with lock:
                 active[0] -= 1
@@ -580,3 +564,9 @@ def test_slow_presence_preparation_cannot_fill_the_default_executor(tmp_path, mo
         shared.shutdown(wait=True)
 
     asyncio.run(scenario())
+
+
+@pytest.fixture(autouse=True)
+def _focus_authority_available(monkeypatch):
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})

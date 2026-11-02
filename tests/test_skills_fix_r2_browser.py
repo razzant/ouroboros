@@ -119,7 +119,7 @@ def test_publication_says_actual_visibility_through_confirmation_and_task(skills
         for index, target in enumerate(("origin", "hub", "public", "private"), start=1):
             card = _card(page, "rejected_newer")
             card.locator("[data-skill-menu-trigger]").click()
-            page.locator("body > .skills-card-menu-dialog .skills-submit-hub").click()
+            page.locator("body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub").click()
             dialog = page.locator(".skills-dialog")
             dialog.wait_for()
             disclosure = dialog.locator("[data-publication-disclosure]")

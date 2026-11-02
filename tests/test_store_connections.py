@@ -1,5 +1,6 @@
 """Persistent SQLite connections: cost, lifetime, durability and old-body compatibility."""
 import contextlib
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -164,12 +166,11 @@ def test_delete_and_persist_writers_interleave_with_full_durability(tmp_path, mo
 
 
 @pytest.mark.parametrize("wait_sec", [5.0, 0.0], ids=["budget", "no_budget"])
-def test_a_first_wal_open_waits_out_another_writer_within_its_budget(tmp_path, monkeypatch, wait_sec):
-    """A published store is a rollback-journal file until a first open turns it into WAL, and that
-    switch takes the write lock from inside a read transaction, where SQLite skips the busy handler.
-    Another connection writing at that moment (another thread's first open converting the same fresh
-    store, as on a Windows runner) failed it at once with "database is locked". The open now waits
-    out the writer within its own budget; with no budget it still refuses at once."""
+def test_an_explicit_wal_selection_waits_out_another_writer_within_its_budget(tmp_path, monkeypatch, wait_sec):
+    """Only a lifecycle owner turns an existing rollback-journal file into WAL (``store_journal``), and
+    that switch takes the write lock from inside a read transaction, where SQLite skips the busy handler:
+    another connection writing at that moment would fail it at once with "database is locked". The
+    selection waits out the writer within its own budget; with no budget it still refuses at once."""
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
     path = publish(tmp_path)
     store.close_connections()
@@ -182,10 +183,10 @@ def test_a_first_wal_open_waits_out_another_writer_within_its_budget(tmp_path, m
     try:
         if not wait_sec:
             with pytest.raises(sqlite3.OperationalError, match="locked"):
-                store.connect(path, store.TIER_ENFORCED, wait_sec=wait_sec)
+                store.connect(path, store.TIER_ENFORCED, wait_sec=wait_sec, journal_mode="WAL")
             assert time.monotonic() - started < 0.2, "no budget, no wait"
             return
-        conn = store.connect(path, store.TIER_ENFORCED, wait_sec=wait_sec)
+        conn = store.connect(path, store.TIER_ENFORCED, wait_sec=wait_sec, journal_mode="WAL")
         try:
             assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         finally:
@@ -196,12 +197,49 @@ def test_a_first_wal_open_waits_out_another_writer_within_its_budget(tmp_path, m
         writer.close()
 
 
-def test_a_first_wal_open_never_waits_past_its_budget(tmp_path, monkeypatch):
-    """The waits of a first WAL open add up to its budget, not more: retries that a writer refuses at
+def _trace_wal_waits(monkeypatch, budget):
+    """Observe the helper's clock and the timeout SQLite actually receives, without replacing waits."""
+    trace = {"clock": [], "sleeps": [], "attempts": []}
+
+    def clock():
+        sample = time.monotonic()
+        trace["clock"].append(sample)
+        return sample
+
+    def remaining():
+        return trace["clock"][0] + budget - trace["clock"][-1]
+
+    def sleep(seconds):
+        before = time.monotonic()
+        left = remaining()
+        time.sleep(seconds)
+        trace["sleeps"].append({"remaining": left, "granted": seconds,
+                                "elapsed": time.monotonic() - before})
+
+    class Connection(store._StoreConnection):
+        def execute(self, sql, *args, **kwargs):
+            if not sql.startswith("PRAGMA journal_mode = "):
+                return super().execute(sql, *args, **kwargs)
+            attempt = {"remaining": remaining(), "started": time.monotonic(),
+                       "timeout_ms": super().execute("PRAGMA busy_timeout").fetchone()[0]}
+            try:
+                return super().execute(sql, *args, **kwargs)
+            finally:
+                attempt["elapsed"] = time.monotonic() - attempt["started"]
+                trace["attempts"].append(attempt)
+
+    monkeypatch.setattr(store, "time", types.SimpleNamespace(monotonic=clock, sleep=sleep))
+    monkeypatch.setattr(store, "_StoreConnection", Connection)
+    return trace
+
+
+def test_an_explicit_wal_selection_never_waits_past_its_budget(tmp_path, monkeypatch):
+    """The waits of an explicit WAL selection add up to its budget, not more: retries that a writer refuses at
     once, then an attempt that a remaining reader holds in SQLite's busy handler, which may wait only
     for what is left (the connection's own busy timeout would allow the whole budget again). The writer
-    lets go halfway, so the bounded open fails near 4 s and the unbounded one near 6 s; the 5 s line
-    leaves a second each way for a slow runner and a coarse timer."""
+    lets go halfway. Check waits granted against the helper's sampled deadline: under macOS CPU
+    contention SQLite's busy handler can take much longer than the timeout it was given. Setup
+    and native scheduling time are diagnostics, not additional waits granted by the helper."""
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
     path = publish(tmp_path)
     store.close_connections()
@@ -214,14 +252,23 @@ def test_a_first_wal_open_never_waits_past_its_budget(tmp_path, monkeypatch):
     released_at = []
     released = threading.Timer(2.0, lambda: (writer.execute("ROLLBACK"), released_at.append(time.monotonic())))
     released.start()
-    budget, started = 4.0, time.monotonic()
+    budget = 4.0
+    trace = _trace_wal_waits(monkeypatch, budget)
+    started = time.monotonic()
     try:
         with pytest.raises(sqlite3.OperationalError, match="locked"):
-            store.connect(path, store.TIER_ENFORCED, wait_sec=budget)
+            store.connect(path, store.TIER_ENFORCED, wait_sec=budget, journal_mode="WAL")
         finished = time.monotonic()
+        phases = json.dumps({"setup_sec": trace["clock"][0] - started,
+                             "total_sec": finished - started, "released_at": released_at, **trace})
         # Only a writer that let go before the open ended put the reader's wait to the test.
-        assert released_at and released_at[0] < finished, "the writer was still holding when the open ended"
-        assert finished - started < budget + 1.0, "the open waited past its budget"
+        assert released_at and released_at[0] < finished, phases
+        assert len(trace["attempts"]) > 1 and trace["sleeps"], phases
+        assert all(0 < wait["granted"] <= wait["remaining"] for wait in trace["sleeps"]), phases
+        # SQLite's timeout is an integer millisecond; a final sub-ms remainder may grant 1 ms.
+        assert all(0 <= attempt["timeout_ms"] <= attempt["remaining"] * 1000 + 1
+                   for attempt in trace["attempts"]), phases
+        assert trace["attempts"][-1]["timeout_ms"] < budget * 1000, phases
     finally:
         released.join(10)
         writer.close()
@@ -231,7 +278,7 @@ def test_a_first_wal_open_never_waits_past_its_budget(tmp_path, monkeypatch):
 
 def test_leaving_wal_with_another_wal_connection_open_still_refuses_at_once(tmp_path, monkeypatch):
     """Only the switch INTO WAL waits. Leaving WAL needs every other WAL connection gone, and each keeps its
-    shared lock for its life, so an open asking for PERSIST on a WAL store (an older SQLite, an unknown
+    shared lock for its life, so a lifecycle request for PERSIST on a WAL store (an older SQLite, an unknown
     filesystem) with another connection idle in it refuses at once, instead of waiting out its whole budget
     for the same refusal. The 1 s line sits far below the 4 s budget and far above a refusal at once."""
     monkeypatch.setattr(store, "_journal_mode", lambda *_: "PERSIST")
@@ -243,7 +290,7 @@ def test_leaving_wal_with_another_wal_connection_open_still_refuses_at_once(tmp_
         idle.execute("SELECT * FROM meta").fetchall()  # and its connection, idle and open for its life
         started = time.monotonic()
         with pytest.raises(sqlite3.OperationalError, match="locked"):
-            store.connect(path, store.TIER_ENFORCED, wait_sec=4.0)
+            store.connect(path, store.TIER_ENFORCED, wait_sec=4.0, journal_mode="PERSIST")
         assert time.monotonic() - started < 1.0, "leaving WAL refuses at once"
     finally:
         idle.close()
@@ -452,3 +499,219 @@ for lease in (store.open_store(root, write=True), usage_store.hold(root)):
     for lease in (store.open_store(tmp_path, write=False), usage_store.read(tmp_path)):
         with lease as txn:
             assert txn.meta("exit_check") is True
+
+
+def _dialogue_root(root):
+    from ouroboros import dialogue_store
+
+    dialogue_store.append(root, "chat", {"ts": "2026-10-25T00:00:00Z", "chat_id": 1, "type": "message"})
+    return dialogue_store
+
+
+def _tiers_leased(monkeypatch) -> list:
+    leased, real = [], store.connection
+    monkeypatch.setattr(store, "connection", lambda path, tier, **kwargs: leased.append(tier) or real(path, tier, **kwargs))
+    return leased
+
+
+@pytest.mark.parametrize("kind", ["dialogue", "current"])
+def test_a_warm_read_lease_states_its_file_outside_the_pool_guard_and_reads_no_header(tmp_path, monkeypatch, kind):
+    """A warm read pays its stats before the process-wide pool guard, reads the header tier once per file
+    identity, and issues the lease budget, BEGIN, the snapshot's SELECT 1, its query and COMMIT, nothing
+    else: on a busy server every syscall and statement is a GIL hand-off."""
+    if kind == "dialogue":
+        dialogue_store = _dialogue_root(tmp_path)
+        lease, query = (lambda: dialogue_store.transaction(tmp_path, write=False)), "SELECT count(*) FROM dialogue"
+        tier = dialogue_store.header_tier(tmp_path)
+        stats_wanted = [True] if tier == store.TIER_ENFORCED else [True, True]  # a name-tier lease states it behind its lock
+    else:
+        publish(tmp_path)
+        lease, query = (lambda: store.open_store(tmp_path, write=False)), "SELECT count(*) FROM tasks"
+        tier, stats_wanted = store.TIER_ENFORCED, [True, True]  # the probe's and the lease's
+    with lease() as held:
+        warm = held if kind == "dialogue" else held.conn
+    stats, reads, statements = [], [], []
+    real_identity, real_read = store.file_identity, store._read_header
+
+    def guard_free() -> bool:
+        free = []
+
+        def attempt():
+            if store._CONNECTION_GUARD.acquire(blocking=False):
+                store._CONNECTION_GUARD.release()
+                free.append(True)
+        helper = threading.Thread(target=attempt)
+        helper.start()
+        helper.join(5)
+        return bool(free)
+
+    monkeypatch.setattr(store, "file_identity", lambda path: stats.append(guard_free()) or real_identity(path))
+    monkeypatch.setattr(store, "_read_header", lambda *args, **kwargs: reads.append(args) or real_read(*args, **kwargs))
+    warm.set_trace_callback(statements.append)
+    try:
+        with lease() as held:
+            conn = held if kind == "dialogue" else held.conn
+            assert conn is warm
+            conn.execute(query).fetchone()
+    finally:
+        warm.set_trace_callback(None)
+    assert stats == stats_wanted and reads == []
+    budget = f"PRAGMA busy_timeout = {int(store.STORE_WAIT_SEC * 1000) if tier == store.TIER_ENFORCED else 0}"
+    expected = [budget, "BEGIN", "SELECT 1 FROM meta LIMIT 1", query, "COMMIT"]
+    assert [text for text in statements if not text.startswith("SELECT value FROM meta")] == expected
+
+
+def test_a_read_takes_its_snapshot_when_its_lease_begins_not_at_its_first_query(tmp_path):
+    """The read's ``SELECT 1`` is its snapshot moment: a commit another connection attempts after the lease
+    began is refused under the rollback journal (the read's shared lock) or kept out of the read under WAL,
+    so the read's first query answers the state at entry; the next read sees the commit. The other
+    connection is this install's (``store.connect``: the file's journal, as every writer keeps it): a raw
+    DELETE-mode one could not commit on Windows while this thread's cached PERSIST handle keeps the
+    journal open (SQLITE_IOERR_DELETE; test_delete_and_persist_writers_interleave_with_full_durability)."""
+    dialogue_store = _dialogue_root(tmp_path)
+    if dialogue_store.header_tier(tmp_path) != store.TIER_ENFORCED:
+        pytest.skip("kernel locks are what a foreign connection meets here")
+    write = "INSERT OR REPLACE INTO meta (key, value) VALUES ('entry_probe', '1')"
+    probe = "SELECT value FROM meta WHERE key='entry_probe'"
+    outcome = []
+    with dialogue_store.transaction(tmp_path, write=False) as conn:
+        with contextlib.closing(store.connect(dialogue_store.path(tmp_path), store.TIER_ENFORCED)) as other:
+            try:
+                other.execute(write)
+                outcome.append("committed")
+            except sqlite3.OperationalError as exc:
+                assert store.busy(exc), exc
+                outcome.append("refused")
+        assert conn.execute(probe).fetchone() is None, outcome
+    if outcome == ["refused"]:
+        with contextlib.closing(store.connect(dialogue_store.path(tmp_path), store.TIER_ENFORCED, wait_sec=5)) as other:
+            other.execute(write)
+    with dialogue_store.transaction(tmp_path, write=False) as conn:
+        assert conn.execute(probe).fetchone()["value"] == "1"
+
+
+@pytest.mark.parametrize("kind", ["dialogue", "current"])
+def test_a_nested_lease_that_fails_rolls_back_only_itself(tmp_path, kind):
+    """A nested access on the same thread runs on a temporary connection: its exception ends its own
+    transaction and leaves the caller's open, which then commits what it wrote."""
+    if kind == "dialogue":
+        dialogue_store = _dialogue_root(tmp_path)
+        outer_lease = lambda: dialogue_store.transaction(tmp_path, write=True)  # noqa: E731
+        inner_lease = lambda: dialogue_store.transaction(tmp_path, write=False)  # noqa: E731
+        conn_of = lambda held: held  # noqa: E731
+    else:
+        publish(tmp_path)
+        outer_lease = lambda: store.open_store(tmp_path, write=True)  # noqa: E731
+        inner_lease = lambda: store.open_store(tmp_path, write=False)  # noqa: E731
+        conn_of = lambda held: held.conn  # noqa: E731
+    with outer_lease() as outer:
+        conn_of(outer).execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('outer', '1')")
+        with pytest.raises(ValueError, match="inner"):
+            with inner_lease() as inner:
+                assert conn_of(inner) is not conn_of(outer)
+                raise ValueError("inner")
+        assert conn_of(outer).in_transaction
+    with inner_lease() as held:
+        assert conn_of(held).execute("SELECT value FROM meta WHERE key='outer'").fetchone()["value"] == "1"
+
+
+@pytest.mark.parametrize("finish", ["fails_after_the_header", "commits"])
+def test_a_retier_in_place_never_leaves_the_old_tier_kept_for_its_file(tmp_path, monkeypatch, finish):
+    """A header changes under one file identity only by a retier in place (the boot's). It marks the file
+    read-every-time before it writes and records the new tier once it committed: after a retier that failed
+    past its header write the next leases follow the header, and after a committed one they use the new
+    tier without reading the header again."""
+    dialogue_store = _dialogue_root(tmp_path)
+    with dialogue_store.transaction(tmp_path, write=False):
+        pass  # the tier is kept for this file now
+    before = dialogue_store.header_tier(tmp_path)
+    after = store.TIER_NAME if before == store.TIER_ENFORCED else store.TIER_ENFORCED
+    monkeypatch.setattr(dialogue_store, "probed_tier", lambda _root: after)
+    if finish == "commits":
+        assert dialogue_store.retier(tmp_path) == before
+    else:
+        def commit_fails(conn):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(store, "commit", commit_fails)  # the header is written before the meta row's commit
+            with pytest.raises(store.StoreError, match="disk I/O error"):
+                dialogue_store.retier(tmp_path)
+    assert dialogue_store.header_tier(tmp_path) == after
+    leased, reads, real_read = _tiers_leased(monkeypatch), [], store._read_header
+    monkeypatch.setattr(store, "_read_header", lambda *args, **kwargs: reads.append(args) or real_read(*args, **kwargs))
+    for _ in range(2):
+        with dialogue_store.transaction(tmp_path, write=False) as conn:
+            assert conn.execute("SELECT count(*) FROM dialogue").fetchone()[0] == 1
+    assert leased == [after, after]
+    assert len(reads) == (0 if finish == "commits" else 2)
+
+
+def test_a_released_drive_moves_and_the_files_that_take_its_path_bring_their_own_tier(tmp_path, monkeypatch):
+    """The tier kept per file holds no handle and answers for that file only: once the worker that read a
+    drive released its idle handles (``_release_drive_stores``; Windows moves no folder with an open file
+    below it), the drive moves, its files keep their tier there, and the stores that later take the old
+    path are new files whose own headers name theirs."""
+    from ouroboros import dialogue_store
+    from supervisor.worker_process import _release_drive_stores
+
+    drive, moved = tmp_path / "drive", tmp_path / "moved"
+    publish(drive)
+    dialogue_store.create(drive, tier=store.TIER_ENFORCED)
+    with store.open_store(drive, write=False), dialogue_store.transaction(drive, write=False):
+        pass  # both tiers are kept for these files now
+    _release_drive_stores(drive)
+    os.replace(drive, moved)
+    publish(drive, tier=store.TIER_NAME)
+    dialogue_store.create(drive, tier=store.TIER_NAME)
+    leased = _tiers_leased(monkeypatch)
+    for root in (drive, moved):
+        with store.open_store(root, write=False) as txn:
+            assert txn.meta("lock_tier") == leased[-1]
+        with dialogue_store.transaction(root, write=False) as conn:
+            assert conn.execute("SELECT count(*) FROM dialogue").fetchone()[0] == 0
+    assert leased == [store.TIER_NAME, store.TIER_NAME, store.TIER_ENFORCED, store.TIER_ENFORCED]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows replaces no file a cached connection holds open")
+def test_a_name_tier_lease_states_its_file_after_the_lock_it_waited_for(tmp_path, monkeypatch):
+    """A name-tier read waits for the name lock; its holder may replace the store meanwhile (a lifecycle
+    owner publishing a new file by rename). The lease states the file once it holds the lock, so it reads
+    the file that is there now and not the one its thread's idle cached connection still has open."""
+    from ouroboros import dialogue_store
+
+    old, new = tmp_path / "root", tmp_path / "staged"
+    for root, text in ((old, "old"), (new, "new")):
+        dialogue_store.create(root, tier=store.TIER_NAME)
+        with dialogue_store.transaction(root, write=True) as conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('which', ?)", (json.dumps(text),))
+    warmed, holding, waiting = threading.Event(), threading.Event(), threading.Event()
+    seen, failures, real_lock = [], [], store.name_lock
+
+    def name_lock(*args, **kwargs):  # the reader asks for the lock only after its lease's first stat
+        if threading.current_thread() is worker and holding.is_set():
+            waiting.set()
+        return real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(store, "name_lock", name_lock)
+
+    def reader():
+        try:
+            with dialogue_store.transaction(old, write=False) as conn:  # warm: an idle cached connection stays
+                seen.append(json.loads(conn.execute("SELECT value FROM meta WHERE key='which'").fetchone()["value"]))
+            warmed.set()
+            assert holding.wait(10)
+            with dialogue_store.transaction(old, write=False) as conn:  # waits for the lock held below
+                seen.append(json.loads(conn.execute("SELECT value FROM meta WHERE key='which'").fetchone()["value"]))
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=reader)
+    worker.start()
+    assert warmed.wait(10)
+    with real_lock(old, dialogue_store.LOCK_NAME, timeout_sec=10):
+        holding.set()
+        assert waiting.wait(10)  # the reader stated its file and now waits for this lock
+        os.replace(dialogue_store.path(new), dialogue_store.path(old))
+    worker.join(30)
+    assert not worker.is_alive() and failures == [] and seen == ["old", "new"]

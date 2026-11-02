@@ -566,16 +566,9 @@ def test_lifecycle_finish_writes_compact_provenance_to_chat_jsonl(tmp_path, monk
     assert "Skill review round 1" in row["text"]
     assert long_reason not in row["text"]
     assert raw_failure not in row["text"]
-
-    history = [
-        json.loads(line)
-        for line in (drive_root / "state" / "skills" / "alpha" / "review_history.jsonl")
-        .read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(history) == 1
-    assert history[0]["job_id"] == row["job_id"]
-    assert history[0]["presentation_owner_task_id"] == "root-task"
-    assert history[0]["raw_actor_records"][0]["raw_text"] == raw_failure
+    # No per-skill history row is appended any more: a real wave's durable record is its review ledger
+    # record (surface="skill"); a stubbed review writes none, and the chat row stays the compact summary.
+    assert not (drive_root / "state" / "skills" / "alpha" / "review_history.jsonl").exists()
 
 
 def test_lifecycle_finish_keeps_raw_only_review_private(tmp_path, monkeypatch):
@@ -619,17 +612,11 @@ def test_lifecycle_finish_keeps_raw_only_review_private(tmp_path, monkeypatch):
 
     rows = chat_rows(drive_root)
     assert rows[-1]["type"] == "skill_review"
-    assert raw_text not in rows[-1]["text"]
-    history = [
-        json.loads(line)
-        for line in (drive_root / "state" / "skills" / "alpha" / "review_history.jsonl")
-        .read_text(encoding="utf-8").splitlines()
-    ]
-    assert len(history) == 1
-    assert history[0]["raw_actor_records"][0]["raw_text"] == raw_text
+    assert raw_text not in json.dumps(rows[-1])
+    assert not (drive_root / "state" / "skills" / "alpha" / "review_history.jsonl").exists()
 
 
-def test_lifecycle_history_redacts_secret_shaped_reviewer_prose(tmp_path, monkeypatch):
+def test_lifecycle_chat_summary_never_carries_secret_shaped_reviewer_prose(tmp_path, monkeypatch):
     import json
 
     _reset_queue()
@@ -673,12 +660,10 @@ def test_lifecycle_history_redacts_secret_shaped_reviewer_prose(tmp_path, monkey
         ctx, "alpha", source="test", review_impl=fake_review, repo_path=str(skills_root),
     )
 
-    history_path = drive_root / "state" / "skills" / "alpha" / "review_history.jsonl"
-    raw_history = history_path.read_text(encoding="utf-8")
-    history = [json.loads(line) for line in raw_history.splitlines()]
-    assert candidate not in raw_history
-    assert "***REDACTED***" in history[0]["fail_findings"][0]["reason_excerpt"]
-    assert "***REDACTED***" in history[0]["raw_actor_records"][0]["raw_text"]
+    rows = [row for row in chat_rows(drive_root) if row.get("type") == "skill_review"]
+    assert len(rows) == 1 and rows[0]["status"] == "blockers"
+    assert candidate not in json.dumps(rows, ensure_ascii=False)
+    assert not (drive_root / "state" / "skills" / "alpha" / "review_history.jsonl").exists()
 
 
 def test_self_authored_review_requires_configured_requested_keys(tmp_path, monkeypatch):
@@ -846,22 +831,15 @@ def test_review_rebinds_snapshot_hash_after_waiting_for_lifecycle_lock(tmp_path,
         )
     )
     assert job["content_hash"] == rebound_hash
-    rows = [
-        json.loads(line)
-        for line in (
-            drive_root / "state" / "skills" / "alpha" / "review_history.jsonl"
-        ).read_text(encoding="utf-8").splitlines()
-    ]
-    assert [(row["content_hash"], row["review_round"], row["snapshot_attempt"]) for row in rows] == [
-        (rebound_hash, 1, 1),
-    ]
+    assert (job["review_round"], job["snapshot_attempt"]) == (1, 1)
+    [row] = [row for row in chat_rows(drive_root) if row.get("type") == "skill_review"]
+    assert (row["content_hash"], row["review_round"], row["snapshot_attempt"]) == (rebound_hash, 1, 1)
 
 
 def test_legacy_history_ordinals_are_computed_without_rewrite(tmp_path):
     import json
 
-    from ouroboros.skill_review import _load_skill_review_history
-    from ouroboros.skill_review_history import review_history_path
+    from ouroboros.skill_review_history import load_history, review_history_path
 
     drive_root = tmp_path / "drive"
     path = review_history_path(drive_root, "alpha")
@@ -873,7 +851,7 @@ def test_legacy_history_ordinals_are_computed_without_rewrite(tmp_path):
     )
     before = path.read_bytes()
 
-    history = _load_skill_review_history(drive_root, "alpha", limit=10)
+    history = load_history(drive_root, "alpha", limit=10)
 
     assert [(row["review_round"], row["snapshot_attempt"]) for row in history] == [(1, 1), (2, 1)]
     assert history[1]["snapshot_revised"] is True
@@ -882,7 +860,6 @@ def test_legacy_history_ordinals_are_computed_without_rewrite(tmp_path):
 
 
 def test_started_failure_consumes_one_round_and_one_terminal_row(tmp_path, monkeypatch):
-    import json
 
     _reset_queue()
     drive_root = tmp_path / "drive"
@@ -908,13 +885,13 @@ def test_started_failure_consumes_one_round_and_one_terminal_row(tmp_path, monke
     else:  # pragma: no cover - lifecycle must propagate the runner failure
         raise AssertionError("expected lifecycle failure")
 
-    history_path = drive_root / "state" / "skills" / "alpha" / "review_history.jsonl"
-    rows = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["review_round"] == 1
-    assert rows[0]["snapshot_attempt"] == 1
-    assert rows[0]["job_status"] == "failed"
-    assert "RuntimeError" in rows[0]["terminal_reason"]
+    from ouroboros.skill_review_runner import _read_review_job, review_job_state_path
+
+    job = _read_review_job(review_job_state_path(drive_root, "alpha"))
+    assert (job["review_round"], job["snapshot_attempt"], job["status"]) == (1, 1, "failed")
+    assert "RuntimeError" in job["terminal_reason"]
+    [row] = [row for row in chat_rows(drive_root) if row.get("type") == "skill_review"]
+    assert row["job_id"] == job["job_id"] and row["job_status"] == "failed" and "RuntimeError" in row["terminal_reason"]
 
 
 def test_skill_review_ui_projection_is_group_scoped_bounded_and_sanitized(tmp_path):
@@ -1020,14 +997,13 @@ def test_cancel_and_timeout_each_write_one_idempotent_terminal_row(tmp_path):
         ("alpha", "cancelled", "cancel-job"),
         ("beta", "timeout", "timeout-job"),
     ):
-        path = drive_root / "state" / "skills" / skill / "review_history.jsonl"
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-        assert len(rows) == 1
-        assert rows[0]["status"] == expected_status
-        assert rows[0]["job_id"] == expected_job
+        job = json.loads(review_job_state_path(drive_root, skill).read_text(encoding="utf-8"))
+        assert (job["status"], job["job_id"]) == (expected_status, expected_job)
+        rows = [row for row in chat_rows(drive_root) if row.get("type") == "skill_review" and row.get("skill") == skill]
+        assert len(rows) == 1 and (rows[0]["status"], rows[0]["job_id"]) == (expected_status, expected_job)
 
 
-def test_success_without_typed_verdict_stays_pending_in_history(tmp_path):
+def test_success_without_typed_verdict_stays_pending(tmp_path):
     """Lifecycle success is not a review verdict when the result omits one."""
     import json
 
@@ -1054,12 +1030,8 @@ def test_success_without_typed_verdict_stays_pending_in_history(tmp_path):
     state = json.loads(review_job_state_path(drive_root, "alpha").read_text())
     assert state["status"] == "completed"
     assert state["review_status"] == "pending"
-    history = [
-        json.loads(line)
-        for line in (drive_root / "state/skills/alpha/review_history.jsonl").read_text().splitlines()
-    ]
-    assert history[0]["status"] == "pending"
-    assert history[0]["job_status"] == "succeeded"
+    [row] = [row for row in chat_rows(drive_root) if row.get("type") == "skill_review"]
+    assert row["status"] == "pending" and row["job_status"] == "succeeded"
 
 
 def _passing_review_fixture(tmp_path, monkeypatch):
@@ -1095,8 +1067,10 @@ def _review_records(drive_root):
     def rows(path):
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
+    from ouroboros.tools.review_skill import skill_record_rows
+
     return (
-        rows(drive_root / "state" / "skills" / "alpha" / "review_history.jsonl"),
+        skill_record_rows(drive_root, "alpha"),  # a stubbed review_impl runs no wave: no ledger record
         [row["type"] for row in rows(drive_root / "logs" / "events.jsonl") if row["type"].startswith("skill_review_")],
         [row for row in chat_rows(drive_root) if row.get("type") == "skill_review"],
     )
@@ -1129,13 +1103,13 @@ def test_leftover_pending_job_file_does_not_block_a_new_review(tmp_path, monkeyp
     )
 
     job = json.loads(job_path.read_text(encoding="utf-8"))
-    history, events, chat = _review_records(drive_root)
+    records, events, chat = _review_records(drive_root)
     assert payload["status"] == "clean"
     assert job["status"] == "completed"
     assert job["review_status"] == "clean"
     assert job["job_id"] != "skill-job-leftover"
     assert job["review_predecessor_job_id"] == "skill-job-leftover"
-    assert [row["job_id"] for row in history] == [job["job_id"]]
+    assert records == []
     assert [row["job_id"] for row in chat] == [job["job_id"]]
     assert events == ["skill_review_started", "skill_review_completed"]
 
@@ -1229,18 +1203,19 @@ def test_duplicate_review_points_at_the_live_job_and_persists_nothing(tmp_path, 
         key: live[key] for key in ("job_id", "status", "review_round", "snapshot_attempt")
     }
     assert records_during == ([], ["skill_review_started"], [])
-    history, events, chat = _review_records(drive_root)
-    assert [row["job_id"] for row in history] == [live["job_id"]]
+    records, events, chat = _review_records(drive_root)
+    assert records == []
     assert [row["job_id"] for row in chat] == [live["job_id"]]
     assert events == ["skill_review_started", "skill_review_completed"]
     assert json.loads(job_path.read_text(encoding="utf-8"))["status"] == "completed"
 
 
 def test_skill_review_response_typedef_carries_qualified_reconcile_fields():
-    api_types = (
-        pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
-    ).read_text(encoding="utf-8")
-    review_declaration = api_types.split("@typedef {Object} SkillReviewResponse", 1)[1].split(
+    modules = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
+    api_types = (modules / "api_types.js").read_text(encoding="utf-8")
+    assert "import('./management_contract_types.js').SkillReviewResponse" in api_types
+    management_types = (modules / "management_contract_types.js").read_text(encoding="utf-8")
+    review_declaration = management_types.split("@typedef {Object} SkillReviewResponse", 1)[1].split(
         "*/", 1
     )[0]
     grant_declaration = api_types.split("@typedef {Object} SkillGrantResponse", 1)[1].split(

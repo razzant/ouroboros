@@ -118,7 +118,7 @@ def test_early_reply_guidance_preserves_profile_topics_and_completion(tmp_path):
     assert "then continue the work" in guidance
     assert "queued is not delivered" in guidance
     assert "early acknowledgement is not the final result" in guidance
-    assert "presence_finish" in rendered["completion"]
+    assert "finish_task" in rendered["completion"]
     assert value["instructions"] in section and "Current working knowledge." in section
     assert rendered["profile"]["profile_fingerprint"] == "a" * 64
 

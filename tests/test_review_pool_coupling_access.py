@@ -86,7 +86,6 @@ def test_historical_readonly_identity_survives_explicit_catalog_lowering(monkeyp
     from ouroboros.review_custody import _attempt_key
     from ouroboros.review_dispatch import review_reconciliation_identity
     from ouroboros.review_records import ReviewRequest
-    from ouroboros.skill_review_cycles import skill_review_contract_fingerprint
 
     set_review_pool(monkeypatch, pool_roster(pool_seat(
         "session", "fake-review=fake-small", kind="agent_session", access="readonly")))
@@ -96,12 +95,6 @@ def test_historical_readonly_identity_survives_explicit_catalog_lowering(monkeyp
     assert _attempt_key(request, slot) == _attempt_key(request, historical)
     assert review_reconciliation_identity(request, [slot], root_task_id="original-task") == (
         review_reconciliation_identity(request, [historical], root_task_id="original-task"))
-    delivery = commit_triad_delivery()
-    fingerprints = {access: skill_review_contract_fingerprint(
-        delivery["models"], delivery={**delivery, "session_accesses": [access]})
-        for access in ("", "readonly", "workspace_write", "full")}
-    assert fingerprints[""] == fingerprints["readonly"]
-    assert len({fingerprints["readonly"], fingerprints["workspace_write"], fingerprints["full"]}) == 3
 
 
 def test_commit_contract_identity_carries_writable_seat_rights(monkeypatch):

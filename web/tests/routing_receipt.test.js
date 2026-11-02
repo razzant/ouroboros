@@ -35,6 +35,36 @@ test('a relay receipt names the work by its title and the room by its reference,
     } finally { env.restore(); }
 });
 
+test('a stored work name shows compact, any cut said by an ellipsis, and nothing keeps a hidden copy of it', () => {
+    const env = installDomDouble();
+    try {
+        // Shaped like the reported rows: an older host stored a nameless work's whole assignment (6417 characters on
+        // 39 lines) and an owner's 824-character one-line message as the work's title.
+        const order = ['# Community watch — one six-hourly GitHub pass', '',
+            ...Array.from({ length: 37 }, (_, n) => `${n}. Read the current thread and its source before acting.`)].join('\n').padEnd(6417, ' x');
+        const message = 'Проверь пожалуйста обработку длинных сообщений и покажи понятный краткий результат '.repeat(12).slice(0, 824);
+        // Every word the line carries anywhere: its text, its attributes and data, a tooltip (`title`).
+        const everything = (el) => [el.textContent, ...el.attrs.values(), ...Object.values(el.dataset), el.title || '',
+            ...el.children.flatMap(everything)].join('\n');
+        const lead = (titles) => {
+            const bubble = owner(env);
+            renderRoutingAnnotation(bubble, { action: 'steer_task', status: 'delivered', project_id: 'p-1', project_name: 'community-watch',
+                target_task_ids: titles.map((_, n) => `t-${n}`), target_titles: titles }, 1);
+            const line = note(bubble);
+            assert.equal(line.children[1].getAttribute('aria-label'), 'Open project community-watch', 'the room reference stays');
+            assert.ok(!everything(line).includes('Read the current thread') && !everything(line).includes(message.slice(200, 260)),
+                'no tooltip, label or attribute keeps the stored text');
+            return line.children[0].textContent;
+        };
+        assert.equal(lead(['Fix duplicate posts in the RSS import']), 'Passed on to «Fix duplicate posts in the RSS import» in');
+        assert.equal(lead([order]), 'Passed on to «Community watch — one six-hourly GitHub pass…» in', 'its heading, then the cut');
+        const cut = lead([message]).slice('Passed on to «'.length, -'» in'.length);
+        assert.ok(cut.endsWith('…') && cut.length <= 81 && message.startsWith(cut.slice(0, -1)), cut);
+        assert.equal(lead(['Fix CI', order]), 'Passed on to «Fix CI», «Community watch — one six-hourly GitHub pass…» in');
+        assert.equal(lead([]), 'Passed on to the work in', 'a nameless work keeps the anonymous words');
+    } finally { env.restore(); }
+});
+
 test('the work reading the relayed words keeps the receipt\'s work title and room reference', () => {
     const env = installDomDouble();
     try {

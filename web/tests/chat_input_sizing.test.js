@@ -213,6 +213,34 @@ test('the measured fallback fits its text below the computed cap and scrolls at 
     assert.equal(field.dataset.sizing, 'fit', 'no max-height never caps');
 });
 
+test('the row around the measured field keeps its height while the field is measured, then gets its own back', (t) => {
+    const engine = installEngine();
+    t.after(engine.restore);
+    // Where the composer is in flow (the phone's keyboard is up), the field's one-row instant would lengthen the feed
+    // and WebKit clamps the feed's scroll to it: the newest message stays under the field (owner 20.10).
+    const props = new Map([['min-height', '20px']]);
+    const row = { offsetHeight: 57, style: { setProperty: (n, v) => props.set(n, v), removeProperty: (n) => props.delete(n),
+        getPropertyValue: (n) => props.get(n) || '' } };
+    const field = new Field();
+    field.parentElement = row;
+    const seen = [];
+    const measured = Object.getOwnPropertyDescriptor(Field.prototype, 'scrollHeight').get;
+    Object.defineProperty(field, 'scrollHeight', { get() { seen.push(props.get('min-height')); return measured.call(this); } });
+    const sizing = attachChatInputSizing(field);
+    field.type(lines(3));
+    sizing.sync();
+    assert.equal(seen[0], '57px', 'the measuring read happens while the row is held at its height');
+    assert.equal(props.get('min-height'), '20px', 'its own min-height is back');
+    props.delete('min-height');
+    field.type(lines(4));
+    sizing.sync();
+    assert.equal(props.has('min-height'), false, 'a row without one gets none');
+    // A field with no row (a detached measure) still measures.
+    const alone = new Field();
+    attachChatInputSizing(alone).sync();
+    assert.equal(alone.dataset.sizing, 'fit');
+});
+
 test('the measured height converts to the declared box', (t) => {
     const engine = installEngine();
     t.after(engine.restore);

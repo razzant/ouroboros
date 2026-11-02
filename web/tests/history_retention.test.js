@@ -48,7 +48,7 @@ test('details and Logs show every grouped failure reason instead of a circular p
     assert.match(historyRetentionView({ history_retention: { status: 'problem' } }).body, /No failure reason was recorded/);
 });
 
-test('Show details hydrates retention on the real finished card and live retry clears its problem', async () => {
+test('Details hydrates retention on the real finished card and live retry clears its problem', async () => {
     const id = 'history-task';
     const detail = { task_id: id, status: 'completed', history_retention: { status: 'pending' } };
     const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>

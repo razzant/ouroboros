@@ -5,7 +5,6 @@ feed (a census-only one is mounted at its own date by the waiting pill) and a ta
 owner is one System message there, with the task's own controls.
 """
 import json
-import re
 import socket
 
 import pytest
@@ -14,7 +13,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests._shared import producer_evidence_dir
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
-    _wait_state_reads_quiescent,
+    _wait_state_reads_quiescent, state_reads,
 )
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -63,7 +62,7 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
             const fetch = window.fetch;
             window.__stateCallers = [];
             window.fetch = (url, init) => {
-                if (String(url).endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
+                if (String(url).split('?')[0].endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
                 return fetch(url, init);
             };
         })();""")
@@ -75,7 +74,7 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
                 response = route.fetch()
                 route.fulfill(response=response, json={**response.json(), **census})
 
-        page.route("**/api/state", state_read)
+        page.route(state_reads, state_read)
         # A Main copy that lost its authority re-reads its canonical task before it takes
         # answers again; serve that existing read too, rather than treating an unknown
         # synthetic task as a confirmed question.
@@ -225,11 +224,11 @@ def test_project_panel_read_failure_reaches_main_without_overwriting_newer_quest
             const fetch = window.fetch;
             window.__stateCallers = [];
             window.fetch = (url, init) => {
-                if (String(url).endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
+                if (String(url).split('?')[0].endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
                 return fetch(url, init);
             };
         })();""")
-        page.route("**/api/state", lambda route: held.append(route) if holding else admit(route))
+        page.route(state_reads, lambda route: held.append(route) if holding else admit(route))
         page.route("**/api/tasks/question-task", lambda route: route.fulfill(json={
             "task_id": "question-task", "project_id": "build", "question_rooms": {
                 row["quiz_id"]: {"state": "known", "chat_id": 12, "project_id": "build"} for row in [question, newer]}, "owner_quiz": {
@@ -382,7 +381,7 @@ def test_genuine_socket_close_withdraws_main_authority_until_a_fresh_census(dire
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script("window.__windowErrors = []; addEventListener('error', e => window.__windowErrors.push(String(e.message)));")
         page.add_init_script(f"({_OBSERVE_STATE_READS})(); ({_REAL_SOCKET_DROP})({json.dumps(refused_url)});")
-        page.route("**/api/state", state_read)
+        page.route(state_reads, state_read)
         page.route("**/api/tasks/question-task", lambda route: route.fulfill(json={
             "task_id": "question-task", "project_id": "build", "question_rooms": {
                 row["quiz_id"]: {"state": "known", "chat_id": 12, "project_id": "build"} for row in [question, newer]}, "owner_quiz": {
@@ -499,7 +498,9 @@ def test_genuine_socket_close_withdraws_main_authority_until_a_fresh_census(dire
             census["current_questions_complete"] = True
             page.evaluate("window.__refuseSockets = true; window.__ouroWs.ws.close()")
             expect(status).to_have_text("Reconnecting…")
-            expect(page.locator("#reconnect-overlay")).to_have_class(re.compile(r"\bvisible\b"))
+            # The room says it in its own bar; no veil covers the app (owner 20.10, 4A): drafts stay in sight.
+            expect(page.locator("#reconnect-overlay")).to_have_count(0)
+            expect(composer).to_be_visible()
             expect(resume).to_be_disabled()
             expect(stop).to_be_disabled()
             expect(cached).to_have_attribute("data-state", "unknown")
@@ -550,7 +551,6 @@ def test_genuine_socket_close_withdraws_main_authority_until_a_fresh_census(dire
             assert page.evaluate("window.__closesAtOpen") == closes, \
                 "a close fell between the offline body and the reopen"
             expect(status).not_to_have_text("Reconnecting…")
-            expect(page.locator("#reconnect-overlay")).not_to_have_class(re.compile(r"\bvisible\b"))
             page.wait_for_timeout(1_500)
             views["reopened_census_held"] = authority()
             page.screenshot(path=str(evidence / "reopened-census-held.png"))

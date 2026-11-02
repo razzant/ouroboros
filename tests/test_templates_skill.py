@@ -9,7 +9,7 @@ def test_templates_are_instruction_contributions_that_project_to_drafts():
     from ouroboros.extension_ui_validation import validate_contributions
 
     directory = Path(__file__).resolve().parents[1] / "skills" / "templates"
-    manifest = parse_skill_manifest_text((directory / "SKILL.md").read_text())
+    manifest = parse_skill_manifest_text((directory / "SKILL.md").read_text(encoding="utf-8"))
     assert manifest.validate() == []
     assert manifest.type == "instruction"
     entries, problems = validate_contributions(manifest, skill_dir=directory)

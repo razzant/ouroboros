@@ -1,14 +1,14 @@
 """Retire review checking copies whose review is over; the same pass migrates older copies.
 
 A copy goes only on positive evidence that its run ended: a receipt of its operation, or
-custody, read fresh for that seat, showing that a run started in this copy settled and none
+custody, read fresh for that seat, showing that a run started in this copy is terminal and none
 still runs or is pending there. Each seat is decided under its cross-process lock, which
 workers also take to prepare, refresh and capture it, so a review that starts or ends during
-a pass is never deleted under itself. A thread's copy lives while its task is live. A failed
-capture (counted from its receipt), a seat whose run never started and a seat without a
-marker go once older than the GC retention period; a refresh's staging goes once its seat's
-lock is free, and an older body's staging inside a seat at once (a pristine copy). A run
-whose capture saved nothing keeps its copy. Evidence and markers stay.
+a pass is never deleted under itself. A thread's copy lives while its task is live. Failed
+captures retry; marked copies without a complete receipt stay regardless of age. Only
+unmarked materialization leftovers expire; a refresh's staging goes once its seat's lock
+is free, and an older body's staging inside a seat at once (a pristine copy). Evidence,
+markers and the frozen views needed by uncaptured copies stay.
 
 The views pass runs once per process (``views_since``: when the process began), under the
 lock (``.views.lock`` beside ``views/``) a freeze takes to reuse or publish a view. It removes
@@ -41,17 +41,18 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from ouroboros.owner_keep import OWNER_KEEP, gate, is_kept
 from ouroboros.review_checking import (
     VIEWS_LOCK_NAME,
     _RECEIPTED,
     _capture_locked,
     _checking_area_present,
     _receipt,
-    _receipt_path,
     _release_area,
     _seat_locked,
     seat_dir,
 )
+from ouroboros.unindexed import unindexed
 
 _PASS_LOCK = threading.Lock()
 
@@ -80,10 +81,11 @@ def _started_after(started: Any, since: Any) -> bool:
 
 
 def _copy_runs_over(data_root: Any, task_id: str, area: pathlib.Path, created_at: Any) -> Optional[bool]:
-    """From one custody read: False while a run may still execute in ``area`` (unsettled or
-    pending), True when a run started in this copy (after ``created_at``) settled, None when no
+    """From one custody read: False while a run may still execute in ``area`` (unknown or
+    pending), True when a run started in this copy (after ``created_at``) is terminal, None when no
     run proves anything. A thread's earlier turns ran in the same folder and prove nothing."""
     from ouroboros import delegate_custody_current as current
+    from ouroboros.delegate_custody import TERMINAL_STATES
 
     snapshot = current.task_snapshot(data_root, task_id)
     target = str(area.resolve(strict=False))
@@ -93,7 +95,7 @@ def _copy_runs_over(data_root: Any, task_id: str, area: pathlib.Path, created_at
 
     runs = [entry for entry in snapshot["runs"].values() if names(entry.execution_root)]
     if any(names(row.get("execution_root")) for row in snapshot["pending"]) or not all(
-            entry.settled for entry in runs):
+            entry.terminal_state in TERMINAL_STATES for entry in runs):
         return False
     return True if any(_started_after(entry.started_ts, created_at) for entry in runs) else None
 
@@ -139,9 +141,11 @@ def _checkout_hold(data_root: Any, entry: pathlib.Path, *, rounds: tuple, source
     if marker is not None and (not isinstance(marker, dict) or marker.get("schema_version") != 1):
         return "marker_unreadable"
     task_id = str(marker.get("task_id") or "") if marker is not None else owners.get(entry.name, "")
-    repo = (entry / "repo").resolve(strict=False)
+    repo = unindexed(entry, "repo").resolve(strict=False)
     if not task_id:
         return "owner_unknown"
+    if is_kept(data_root, task_id):
+        return OWNER_KEEP
     if entry.name in active:
         return "review_custody_active"
     if any(root == repo or root.is_relative_to(repo) for root in sources):
@@ -171,12 +175,24 @@ def _checkout_registration_gone(repo: pathlib.Path) -> bool:
     return False
 
 
+def _remove_unless_kept(data_root: Any, entry: pathlib.Path, rounds: tuple) -> str:
+    """The removal under the keep gate of the checkout's task, read as ``_checkout_hold`` reads it."""
+    from ouroboros.tools.review_subject import CHECKOUT_MARKER
+
+    try:
+        task_id = str(json.loads((entry / CHECKOUT_MARKER).read_text(encoding="utf-8")).get("task_id") or "")
+    except (OSError, ValueError, AttributeError):
+        task_id = rounds[1].get(entry.name, "")
+    with gate(data_root, task_id, timeout_sec=0) as why:
+        return f"{entry.name}: {why}" if why else _remove_checkout(entry)
+
+
 def _remove_checkout(entry: pathlib.Path) -> str:
     """Remove this checkout after Git unregisters it or its registration is already gone."""
     from ouroboros.subagent_worktrees import _force_rmtree
     from ouroboros.tools.review_subject import _git_bytes
 
-    repo, common = entry / "repo", None
+    repo, common = unindexed(entry, "repo"), None
     if (repo / ".git").is_file():
         rc, out, err = _git_bytes(repo, ["rev-parse", "--git-common-dir"])
         text = out.decode("utf-8", "replace").strip()
@@ -207,7 +223,7 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
             return
         try:
             hold = _checkout_hold(data_root, entry, rounds=rounds, sources=sources, live=live, cutoff=cutoff)
-            error = "" if hold else _remove_checkout(entry)
+            error = "" if hold else _remove_unless_kept(data_root, entry, rounds)
         except Exception as exc:  # an unreadable marker, row or tree keeps the checkout
             hold, error = "", f"{entry.name}: {type(exc).__name__}: {exc}"
         if error:
@@ -216,6 +232,141 @@ def _retire_checkouts(data_root: Any, entries: list, live: Callable[[], Any], cu
             report["checkouts_kept"] += 1
         else:
             report["checkouts_removed"] += 1
+
+
+class _Probed:
+    """``task_id in live()`` over the supervisor's probe: live or unknown counts as live."""
+
+    def __init__(self, probe: Callable[[str], Any]) -> None:
+        self._probe = probe
+
+    def __contains__(self, task_id: object) -> bool:
+        return self._probe(str(task_id)) is not False
+
+
+def finished_seat_homes(data_root: Any, live: Callable[[str], Any], stopped: Callable[[], bool],
+                        proven: Optional[Dict[str, bool]] = None, only: Optional[Any] = None) -> list:
+    """For the owner's Storage -> Free and the ``record_compression`` job: ``(home, verdict, task_id)`` per
+    seat home (``only``: these home names), ``offer`` when its copy is gone and its task is proven over
+    (``proven`` caches that per task), else ``in_use`` or ``unreadable``.
+    Pure: markers and task rows are read, no seat lock is taken (a lock writes a file)."""
+    from ouroboros.subagent_worktrees import _task_proven_over
+
+    seats, proven, found = pathlib.Path(data_root) / "state" / "review_checkouts" / "seats", {} if proven is None else proven, []
+    for home in sorted(seats.iterdir()) if seats.is_dir() else ():
+        if stopped():
+            break
+        if home.name.startswith(".") or home.is_symlink() or not home.is_dir() or only is not None and home.name not in only:
+            continue
+        try:
+            task_id = str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("task_id") or "")
+        except (OSError, ValueError, AttributeError):
+            found.append((home, "unreadable", ""))
+            continue
+        if task_id not in proven:
+            proven[task_id] = _task_proven_over(task_id, data_root, live)
+        bare = proven[task_id] and not _checking_area_present(unindexed(home, "area"))  # its copy is gone
+        found.append((home, "offer" if bare else "in_use", task_id))
+    return found
+
+
+@contextlib.contextmanager
+def finished_home_held(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool]):
+    """HOME under its seat lock (a thread seat's is its thread's; never waits): yields ``""`` while the home
+    is still finished (its copy gone, its task proven over), else ``busy`` or ``in_use``; the lock is held
+    until the caller's block ends, so no worker prepares, refreshes or captures it meanwhile."""
+    from ouroboros.subagent_worktrees import _task_proven_over
+
+    marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+    task_id, thread = str(marker.get("task_id") or ""), str(marker.get("thread_seat") or "")
+    with _seat_locked(seat_dir(data_root, task_id, f"thread:{thread}") if thread else home, wait=False) as held:
+        if not held:
+            yield "busy"
+            return
+        if task_id not in proven:
+            proven[task_id] = _task_proven_over(task_id, data_root, live)
+        yield "in_use" if _checking_area_present(unindexed(home, "area")) or not proven[task_id] else ""
+
+
+def retire_seat_home(data_root: Any, home: pathlib.Path, live: Callable[[str], Any], proven: Dict[str, bool]) -> str:
+    """Move one finished seat home (its evidence and marker) into the custody trash the maintenance child
+    empties, after re-checking it under the seat lock; returns why it stayed, or ``""``. Its task is proven
+    over before the owner's keep gate (the probe takes the supervisor's queue lock, which drive settlement
+    holds while it waits for custody); inside, only the recorded terminal status is read again."""
+    from ouroboros.body_candidate import _recorded_terminal
+    from ouroboros.subagent_worktrees import _task_proven_over
+
+    task_id = str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("task_id") or "")
+    if task_id not in proven:
+        proven[task_id] = _task_proven_over(task_id, data_root, live)
+    with gate(data_root, task_id, timeout_sec=0) as kept:  # outside the seat lock's file: it covers the move too
+        if kept:
+            return kept
+        if proven[task_id] and not _recorded_terminal(task_id, data_root):
+            return "in_use"  # continued since it was proven over: no stale proof deletes it
+        with finished_home_held(data_root, home, live, proven) as why:
+            if why:
+                return why
+        trash = pathlib.Path(data_root) / "state" / "custody_trash" / f"{home.name}-{uuid.uuid4().hex[:12]}"
+        trash.parent.mkdir(parents=True, exist_ok=True)
+        home.replace(trash)  # outside the seat lock: Windows moves no folder with an open file
+    return ""
+
+
+def orphan_review_checkouts(data_root: Any, live: Callable[[str], Any], homes: Optional[list] = None) -> list:
+    """For the owner's Storage -> Free: ``(checkout, verdict)`` per isolated review checkout, ``offer``
+    when no task owns it (made before the marker, named by no recorded round) or the background pass
+    would retire it now, else ``owner_keep``, ``in_use`` or ``unreadable``. Pure, like ``finished_seat_homes``."""
+    entries = _checkout_entries(pathlib.Path(data_root) / "state" / "review_checkouts")
+    if not entries:
+        return []
+    try:
+        rounds = _review_rounds(data_root)
+    except Exception:  # unknown custody: every checkout is shown, never offered
+        return [(entry, "unreadable") for entry in entries]
+    sources = set()
+    for home, verdict, _task in finished_seat_homes(data_root, live, lambda: False) if homes is None else homes:
+        try:
+            root = json.loads((home / "checking.json").read_text(encoding="utf-8")).get("source", {}).get("root")
+        except (OSError, ValueError, AttributeError):
+            root = None
+        if verdict != "offer" and root:  # a seat that may still run can read the checkout it came from
+            sources.add(pathlib.Path(str(root)).resolve(strict=False))
+    found = []
+    for entry in entries:
+        try:  # an active round first: its marker may name no task yet
+            hold = "review_custody_active" if entry.name in rounds[0] else _checkout_hold(
+                data_root, entry, rounds=rounds, sources=sources, live=lambda: _Probed(live), cutoff=float("inf"))
+        except Exception:
+            hold = "marker_unreadable"
+        found.append((entry, "offer" if hold in ("", "owner_unknown") else OWNER_KEEP if hold == OWNER_KEEP else
+                      "unreadable" if hold == "marker_unreadable" else "in_use"))
+    return found
+
+
+def retire_orphan_checkouts(data_root: Any, chosen: list, live: Callable[[str], Any],
+                            stop: Callable[[], bool]) -> Dict[pathlib.Path, str]:
+    """Remove the listed checkouts ``chosen`` still offered, re-judged once under the pass lock: each
+    attempted one's reason for staying, ``""`` once removed (a stop leaves the rest unattempted)."""
+    if not _PASS_LOCK.acquire(blocking=False):
+        return {entry: "busy" for entry in chosen}
+    try:
+        verdicts, outcome = dict(orphan_review_checkouts(data_root, live)), {}
+        rounds: Optional[tuple] = None
+        for entry in chosen:
+            if stop():
+                break
+            verdict = verdicts.get(entry, "other")
+            if verdict == "offer" and rounds is None:
+                try:  # once, for a checkout with no marker; unknown custody keeps every checkout, as the listing does
+                    rounds = _review_rounds(data_root)
+                except Exception:
+                    rounds = ()
+            verdict = "unreadable" if verdict == "offer" and not rounds else verdict
+            outcome[entry] = verdict if verdict != "offer" else "other" if _remove_unless_kept(data_root, entry, rounds) else ""
+        return outcome
+    finally:
+        _PASS_LOCK.release()
 
 
 def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: Optional[float] = None,
@@ -267,24 +418,25 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                 report["kept"] += 1
                 return True
             receipt = _receipt(data_root, task_id, operation) if operation else {}
-            if over and operation and receipt.get("status") not in (*_RECEIPTED, "capture_failed"):
+            if (over or receipt.get("status") == "capture_failed") and operation and receipt.get("status") not in _RECEIPTED:
                 _capture_locked(data_root, task_id, operation)  # the run ended unobserved
                 receipt = _receipt(data_root, task_id, operation)  # only a durable receipt counts
                 if not receipt:  # nothing was saved (a full volume): the copy waits for a later pass
                     report["capture_failed"] += 1
                     return True
             if receipt.get("status") in _RECEIPTED:
-                receipt = _release_area(area, receipt)
+                with gate(data_root, task_id, timeout_sec=0) as held:  # the owner's keep holds a captured copy too
+                    if held:
+                        report["kept"] += 1
+                        return True
+                    receipt = _release_area(area, receipt, marker.get("git"))
                 if receipt.get("cleanup_error"):
                     report["errors"].append(receipt["cleanup_error"])
                     return True
                 report["released"] += 1
                 return False
-            # A failed capture counts from its receipt; a run that never started from the marker.
-            clock = _receipt_path(data_root, task_id, operation) if receipt else home / "checking.json"
-            if _last_use(clock) < cutoff:
-                remove(area)
-                return False
+            # Age proves neither execution completion nor retention of unique
+            # work. A failed or unknown capture keeps the copy and its basis.
             report["capture_failed" if receipt else "kept"] += 1
             return True
 
@@ -296,14 +448,20 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
 
         def seat(home: pathlib.Path) -> set:
             """One seat home; returns the views it still needs."""
-            area = home / "area"
+            area = unindexed(home, "area")
             if home.is_symlink():  # never followed; it names no copy this pass could own
                 if views:
                     report["errors"].append(f"{home.name}: the seat home is a link")
                 return set()
             if not views and not _checking_area_present(area):
                 return set()  # a periodic pass reads only seats that still hold a copy
-            with _seat_locked(home, wait=False) as held:  # read under it: Windows refuses to replace an open marker
+            try:
+                marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+                thread, task_id = marker.get("thread_seat"), marker.get("task_id")
+            except (OSError, ValueError, AttributeError):
+                thread, task_id = "", ""
+            lock_home = seat_dir(data_root, task_id, f"thread:{thread}") if thread else home
+            with _seat_locked(lock_home, wait=False) as held:  # same owner for active and relocated thread turns
                 if not held:  # a worker is changing it; the views it needs are read in a later pass
                     report["busy"] += 1
                     busy.append(home.name)
@@ -316,11 +474,7 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
                     for leftover in home.glob(".next-*"):  # an older body's staging: never a reviewer's work
                         remove(leftover)
                     return set()
-                except (OSError, ValueError, AttributeError):  # AttributeError: JSON that is not an object
-                    if _last_use(home / "checking.json") < cutoff:  # torn longer than retention
-                        if views:
-                            report["errors"].append(f"{home.name}: checking marker unreadable")
-                        return set()
+                except (OSError, ValueError, AttributeError):  # unknown basis must keep the possible frozen views too
                     raise
                 views_of = _view_containers(view_root, source)
                 named.update(views_of)

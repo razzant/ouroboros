@@ -183,7 +183,7 @@ def test_cancellation_and_missing_sender_context_still_refuse(tmp_path, monkeypa
 @pytest.mark.parametrize("foreign", [True, False])
 def test_presence_sender_ceiling_and_binding_are_not_widened(tmp_path, foreign):
     from tests.test_presence_own_work import BINDING, OTHER, _ceiling, _registry
-    from ouroboros.presence_capabilities import PresenceToolTarget
+    from tests.frozen_presence_capabilities import PresenceToolTarget
 
     tid = _inline(tmp_path, metadata={"presence": {"binding_id": OTHER if foreign else BINDING},
                                      "presence_event_identity": "event-identity"})

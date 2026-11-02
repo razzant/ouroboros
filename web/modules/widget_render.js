@@ -9,7 +9,7 @@
 // `patchWidgetChildren` (a data update never detaches a retained control) and keeps its charts with `syncWidgetCharts`.
 import { cleanExtensionRoute } from './api_client.js';
 import { chartConfig, formatNumber, getPath, renderChartDataTable, renderTableCell } from './widget_chart.js';
-import { applyChartTheme } from './theme_palette.js';
+import { applyChartTheme, paintChartSeries } from './theme_palette.js';
 import { escapeHtmlAttr as escapeHtml, renderMarkdownSafe } from './utils.js';
 import { normalizeTone, renderSafeField } from './ui_helpers.js';
 
@@ -428,6 +428,10 @@ export function syncWidgetCharts(mount, instances, shapes) {
             const config = JSON.parse(canvas.dataset.widgetChartConfig || '{}');
             const existing = instances.get(chartKey);
             const shape = JSON.stringify({ type: config.type, options: config.options || {} });
+            // widget_chart.js is DOM-free by contract, so its serialized config
+            // carries neutral colours; the live theme is layered on here, where
+            // the document is readable: new data and a new chart land in it.
+            paintChartSeries(config.data?.datasets);
             if (existing && existing.canvas === canvas && shapes.get(chartKey) === shape) {
                 existing.data = config.data;
                 existing.update();
@@ -435,9 +439,6 @@ export function syncWidgetCharts(mount, instances, shapes) {
             }
             if (existing) existing.destroy();
             const chart = new Chart(canvas, config);
-            // widget_chart.js is DOM-free by contract, so its serialized
-            // config carries neutral chrome; the live theme is layered on
-            // here, where the document is actually readable.
             applyChartTheme(chart);
             instances.set(chartKey, chart);
             shapes.set(chartKey, shape);

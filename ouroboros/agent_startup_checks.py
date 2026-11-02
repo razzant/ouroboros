@@ -131,7 +131,9 @@ def task_result_authority_projection(
             promotion=row.get("child_ref_promotion"))
         # Beside the recorded state, never inside it: every projection keeps this small field whole.
         authority.update({"plan_review_source_gap": gap} if gap else {})
-    return authority
+    from ouroboros.delegate_output import project_task_output_readers
+
+    return project_task_output_readers(authority)
 
 
 def valid_task_result_authority_source(source: Any, task_id: Any) -> bool:
@@ -148,6 +150,8 @@ def valid_task_result_authority_source(source: Any, task_id: Any) -> bool:
         and isinstance(arguments, dict)
         and str(arguments.get("task_id") or "") == selected_id
         and arguments.get("include_authority") is True
+        and arguments.get("authority_fields") is None
+        and arguments.get("source_only") is not True
     )
 
 
@@ -351,11 +355,13 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
     A read only: it takes no optional index lock and removes none, since a lock's
     age says nothing about whether its writer is still running.
     """
+    from ouroboros.git_observation import host_git_env
+
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", "status", "--porcelain"],
             cwd=str(env.repo_dir),
-            capture_output=True, text=True, timeout=10, check=True
+            capture_output=True, text=True, timeout=10, check=True, env=host_git_env()
         )
         dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
         if dirty_files:
@@ -587,6 +593,33 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
         return {"status": "error", "error": str(e)}, 1
 
 
+# The stray scan reads command lines with one ``ps`` per batch of pids (BSD and procps both take a comma
+# list for ``-p``); a technical bound on argv length, not a judgment about which process counts.
+_PS_BATCH = 256
+
+
+def _commands_of(pids: list[int]) -> dict[int, str]:
+    """Each pid's command line, as ``process_command`` reads it: one ``ps`` per batch, and a pid the batch
+    did not answer (it exited, or the batch failed) read on its own as before, so no answer differs."""
+    import subprocess as _subprocess
+
+    from ouroboros.platform_layer import process_command
+
+    commands: dict[int, str] = {}
+    for start in range(0, len(pids), _PS_BATCH):
+        batch = set(pids[start:start + _PS_BATCH])
+        try:
+            out = _subprocess.run(["ps", "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, sorted(batch)))],
+                                  capture_output=True, text=True, timeout=5)
+        except Exception:
+            continue
+        for line in (out.stdout or "").splitlines():
+            head, _sep, command = line.strip().partition(" ")
+            if head.isdigit() and int(head) in batch:
+                commands[int(head)] = command.strip()
+    return {pid: commands[pid] if pid in commands else process_command(pid) for pid in pids}
+
+
 def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
     """Report ouroboros-server processes that belong to NO current install (v6.70.0).
 
@@ -611,7 +644,7 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
     import subprocess as _subprocess
 
     try:
-        from ouroboros.platform_layer import IS_WINDOWS, process_command
+        from ouroboros.platform_layer import IS_WINDOWS
 
         if IS_WINDOWS:
             return {"status": "skipped", "reason": "non-posix"}, 0
@@ -666,29 +699,35 @@ def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
             same_install_paths = set()
             _names_our_server = None
         stray: list[dict[str, Any]] = []
+        candidates: list[int] = []
         for line in (out.stdout or "").splitlines():
             try:
                 pid = int(line.strip())
             except ValueError:
                 continue
-            if pid in known:
-                continue
-            command = process_command(pid)
+            if pid not in known:
+                candidates.append(pid)
+        commands = _commands_of(candidates)
+        known_groups: set[int] | None = None
+        for pid in candidates:
+            command = commands[pid]
             if not server_shape.search(command or ""):
                 continue
-            # Same process group as a known pid => part of a known tree.
+            # Same process group as a known pid => part of a known tree, the known groups read once.
             # (Per-pid defensiveness: most ledger pids are dead, and one
             # ProcessLookupError must not disable the exclusion entirely.)
             try:
                 from ouroboros.platform_layer import process_group_id
 
-                known_groups = set()
-                for k in known:
-                    if k > 0:
-                        try:
-                            known_groups.add(process_group_id(k))
-                        except Exception:
-                            continue
+                if known_groups is None:
+                    groups = set()
+                    for k in known:
+                        if k > 0:
+                            try:
+                                groups.add(process_group_id(k))
+                            except Exception:
+                                continue
+                    known_groups = groups
                 if process_group_id(pid) in known_groups:
                     continue
             except Exception:
@@ -747,11 +786,21 @@ def verify_system_state(env: Any, git_sha: str) -> None:
 
     identity_ok = identity_path.exists() and identity_path.stat().st_size > 0
     scratchpad_ok = scratchpad_path.exists()
+    # The map's measured block is the host's: refresh it in place at every start, keeping
+    # the text the mind wrote around it (a missing file is generated).
+    try:
+        from ouroboros.world_profiler import refresh_world_profile
+
+        world_refreshed = refresh_world_profile(
+            str(world_path), str(getattr(env, "repo_dir", "") or ""), str(memory_dir.parent))
+    except Exception:
+        log.debug("WORLD.md measured block refresh failed", exc_info=True)
+        world_refreshed = False
     world_ok = world_path.exists()
 
     checks["identity"] = {"exists": identity_path.exists(), "non_empty": identity_ok}
     checks["scratchpad"] = {"exists": scratchpad_ok}
-    checks["world_profile"] = {"exists": world_ok}
+    checks["world_profile"] = {"exists": world_ok, "measured_refreshed": world_refreshed}
 
     if not identity_ok:
         issues += 1

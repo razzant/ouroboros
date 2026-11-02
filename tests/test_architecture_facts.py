@@ -46,6 +46,12 @@ def reexports(manifest):
     return facade_reexports(REPO, manifest)
 
 
+@pytest.fixture(scope="module")
+def add_usage_rows(reexports):
+    # The injected-map answer both add_usage tests read, computed once.
+    return facade_consumers(REPO, "add_usage", reexports=reexports)
+
+
 # ---------------------------------------------------------------------------
 # owner_of
 # ---------------------------------------------------------------------------
@@ -81,10 +87,14 @@ def test_owner_of_outside_the_population_is_ownerless_not_an_error():
     assert owner_of(REPO, "docs/ARCHITECTURE.md") == ()
 
 
-def test_owner_of_covers_every_manifest_module(manifest):
+def test_owner_of_covers_every_manifest_module(manifest, monkeypatch):
     """Completeness against the manifest: every population row answers with
     exactly its pinned domain."""
+    from ouroboros import code_intelligence_architecture
+
     assert len(manifest.modules) >= 400  # the whole runtime population, not a sample
+    # Reuse this test's real manifest; other tests keep the default loader.
+    monkeypatch.setattr(code_intelligence_architecture, "load_domain_manifest", lambda repo_root: manifest)
     for path, domain in manifest.modules.items():
         rows = owner_of(REPO, path)
         assert [(r.module, r.domain) for r in rows] == [(path, domain)], path
@@ -149,8 +159,8 @@ def test_facade_module_query_lists_its_import_consumers(reexports):
     assert all(r.facade == "ouroboros/llm.py" and r.line > 0 for r in rows)
 
 
-def test_facade_symbol_query_narrows_to_the_reexported_name(reexports):
-    rows = facade_consumers(REPO, "add_usage", reexports=reexports)
+def test_facade_symbol_query_narrows_to_the_reexported_name(reexports, add_usage_rows):
+    rows = add_usage_rows
     assert rows, "add_usage is a re-exported facade binding with real consumers"
     for row in rows:
         assert row.name == "add_usage"
@@ -158,11 +168,11 @@ def test_facade_symbol_query_narrows_to_the_reexported_name(reexports):
     assert "ouroboros/loop_llm_call.py" in {r.consumer for r in rows}
 
 
-def test_injected_reexports_answer_exactly_as_the_self_built_map(reexports):
+def test_injected_reexports_answer_exactly_as_the_self_built_map(add_usage_rows):
     """The kwarg is reuse, never a different question: an injected map answers with
     exactly the rows the query builds for itself. The two teaching refusals are pinned
     on the injected path by the test below."""
-    assert facade_consumers(REPO, "add_usage", reexports=reexports) == facade_consumers(REPO, "add_usage")
+    assert add_usage_rows == facade_consumers(REPO, "add_usage")  # cold: builds its own map
 
 
 def test_facade_query_on_a_non_facade_is_a_teaching_refusal(reexports):

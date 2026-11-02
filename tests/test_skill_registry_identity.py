@@ -11,7 +11,7 @@ from ouroboros.skill_identity import PER_INSTALL_NOTE_BUCKETS
 from ouroboros.skill_install_record import read_install_record
 from ouroboros.skill_loader import find_skill, load_skill
 from ouroboros.skill_publish_snapshot import capture_skill_publish_candidate
-from ouroboros.skill_review_packs import _build_skill_file_packs
+from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
 
 
 def _registry(tmp_path, monkeypatch, dependencies):
@@ -100,4 +100,5 @@ def test_loader_review_and_publication_agree_for_bucket_notes(tmp_path, note, bu
     loaded = load_skill(directory, tmp_path / 'data')
     assert loaded and not loaded.load_error
     assert capture_skill_publish_candidate(loaded).content_hash == loaded.content_hash
-    assert _build_skill_file_packs(directory, expected_content_hash=loaded.content_hash, split=False)
+    assert payload_pack(frozen_payload_files(directory, manifest_entry=loaded.manifest.entry,
+                                             manifest_scripts=loaded.manifest.scripts))

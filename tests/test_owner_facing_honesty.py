@@ -8,7 +8,6 @@ resend and owner cause line left with the acceptance machine.)"""
 from __future__ import annotations
 
 import logging
-import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -166,12 +165,10 @@ def test_stray_server_check_reports_foreign_pid(tmp_path, monkeypatch):
     env = SimpleNamespace(drive_root=str(tmp_path))
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
-    real_run = subprocess.run
-
     def fake_run(cmd, **kwargs):
         if cmd and cmd[0] == "pgrep":
             return SimpleNamespace(stdout="424242\n", returncode=0)
-        return real_run(cmd, **kwargs)
+        return SimpleNamespace(stdout="", returncode=1)  # the batch reads nothing: a live 424242 elsewhere is not this pid
 
     monkeypatch.setattr("subprocess.run", fake_run)
     monkeypatch.setattr(
@@ -238,6 +235,63 @@ def test_stray_server_check_annotates_same_install_scope(tmp_path, monkeypatch):
     assert issues == 1
     scopes = {row["pid"]: row["scope"] for row in result["processes"]}
     assert scopes == {616161: "same_install", 626262: "foreign"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")
+def test_stray_scan_reads_every_command_line_with_one_ps(tmp_path, monkeypatch):
+    """A machine full of test workers and editors whose argv names ouroboros: one ps for all of them,
+    and only a pid that exited between pgrep and ps is read on its own."""
+    from ouroboros import agent_startup_checks as checks
+
+    env = SimpleNamespace(drive_root=str(tmp_path))
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    rows = {101: "/usr/bin/python3 -m pytest /w/ouroboros/tests/test_x.py",
+            102: "/opt/o/python/bin/python3 /opt/o/Ouroboros/repo/server.py", 103: "vim /w/ouroboros/notes.md"}
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd[0])
+        if cmd[0] == "pgrep":
+            return SimpleNamespace(stdout="101\n102\n103\n104\n", returncode=0)
+        assert cmd[:4] == ["ps", "-ww", "-o", "pid=,command="]
+        asked = [int(pid) for pid in cmd[-1].split(",")]
+        return SimpleNamespace(stdout="".join(f"{pid:>6} {rows[pid]}\n" for pid in asked if pid in rows), returncode=1)
+
+    alone = []
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("ouroboros.platform_layer.process_command", lambda pid: alone.append(pid) or "")
+    monkeypatch.setattr("ouroboros.platform_layer.process_group_id", lambda pid: pid)
+    result, issues = checks.check_stray_server_processes(env)
+    assert issues == 1 and [row["pid"] for row in result["processes"]] == [102]
+    assert calls == ["pgrep", "ps"] and alone == [104]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")
+def test_stray_scan_reads_the_known_groups_once(tmp_path, monkeypatch):
+    import json
+
+    from ouroboros import agent_startup_checks as checks
+
+    env = SimpleNamespace(drive_root=str(tmp_path))
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "process_ledger.jsonl").write_text(
+        "".join(json.dumps({"pid": pid}) + "\n" for pid in (7001, 7002, 7003)), encoding="utf-8")
+    server = "/opt/o/python/bin/python3 /opt/o/Ouroboros/repo/server.py"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "pgrep":
+            return SimpleNamespace(stdout="201\n202\n203\n", returncode=0)
+        return SimpleNamespace(stdout="".join(f"{pid} {server}\n" for pid in (201, 202, 203)), returncode=0)
+
+    looked = []
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("ouroboros.platform_layer.process_group_id",
+                        lambda pid: looked.append(pid) or (7002 if pid == 202 else pid))
+    result, issues = checks.check_stray_server_processes(env)
+    # 202 shares a known pid's process group and stays out; the other two servers are reported.
+    assert issues == 1 and [row["pid"] for row in result["processes"]] == [201, 203]
+    known_reads = [pid for pid in looked if pid not in (201, 202, 203)]
+    assert known_reads and len(known_reads) == len(set(known_reads))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pgrep/getuid semantics")

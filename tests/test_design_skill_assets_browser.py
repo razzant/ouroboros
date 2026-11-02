@@ -70,14 +70,14 @@ def _frame(variant: str, scene: str, spacer: int) -> str:
 <div class="subject">{variant} in {scene}</div><div style="height:1400px">below</div></div></body></html>"""
 
 
-def sample_page(tmp_path: Path) -> Path:
+def sample_page(tmp_path: Path, ids=("now", "a", "b")) -> Path:
     """A two-scene, three-variant comparison page copied alone into an empty folder."""
-    variants = [("now", "Now", "Today's screen."), ("a", "A", LONG_NOTE), ("b", "B", "A tray with the controls.")]
+    variants = list(zip(ids, ("Now", "A", "B"), ("Today's screen.", LONG_NOTE, "A tray with the controls.")))
     scenes = [("draft", "Draft"), ("long", "Long question")]
-    spacers = {"now": 300, "a": 380, "b": 450}
+    spacers = dict(zip(ids, (300, 380, 450)))
     data = {
         "title": "Which header reads more calmly?", "lang": "en", "viewport": {"width": 600, "height": 560},
-        "variants": [{"id": v, "label": label, "note": note, "recommended": v == "a"} for v, label, note in variants],
+        "variants": [{"id": v, "label": label, "note": note, "recommended": v == ids[1]} for v, label, note in variants],
         "scenes": [{"id": s, "label": label, "note": f"{label} scene"} for s, label in scenes],
         "frames": {f"{v}/{s}": _frame(v, s, spacers[v] + (40 if s == "long" else 0)) for v, *_ in variants for s, _l in scenes},
         "subject": ".subject", "scrollers": ["#list"],
@@ -86,7 +86,7 @@ def sample_page(tmp_path: Path) -> Path:
                       {"text": "Keep the Clear button?", "options": [{"key": "A", "text": "Remove it", "recommended": True}]}],
         "source": "Fixture frames.",
     }
-    folder = tmp_path / "alone"
+    folder = tmp_path / "-".join(("alone", *ids))
     folder.mkdir()
     page = folder / "compare.html"
     page.write_text(fill_compare(data), encoding="utf-8")
@@ -253,3 +253,41 @@ def test_freeze_output_renders_alone_with_state_kept_and_scripts_gone(engine, tm
         frozen_box = page.locator("#made").bounding_box()
         assert abs(frozen_box["x"] - box["x"]) <= 1 and abs(frozen_box["y"] - box["y"]) <= 1
         assert_nothing_fetched(page)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_clean_view_hides_every_author_word_and_keeps_the_scene(engine, tmp_path):
+    """C hides the title, names, notes, recommendation and questions; the frames, the switch and the scroll stay."""
+    path = sample_page(tmp_path)
+    with browser(engine) as instance:
+        page = open_page(instance, path.as_uri())
+        wait_shown(page, "now", "draft")
+        authored = ["#notes", "#scene-note", "#more", '[data-variant="a"] .lab', '[data-variant="a"] .rec']
+        visible = lambda selector: page.locator(selector).first.is_visible()
+        assert all(visible(selector) for selector in authored), "the normal view shows them"
+        title = page.evaluate("document.getElementById('title').textContent")
+        page.keyboard.press("c")
+        wait_shown(page, "now", "draft")
+        assert not any(visible(selector) for selector in authored), "the clean view hides every author word"
+        assert page.locator('[data-variant="a"] .num').inner_text() == "2"
+        assert page.evaluate("document.getElementById('title').textContent") != title
+        assert page.evaluate("location.hash") == "#scene=draft&v=1&clean=1", "the link names the variant by number"
+        names = page.evaluate("[...document.querySelectorAll('#stage iframe')].map(f => f.title)")
+        assert names and all(name.isdigit() for name in names), names
+        page.keyboard.press("2")
+        wait_shown(page, "a", "draft")
+        assert page.evaluate("location.hash") == "#scene=draft&v=2&clean=1"
+        page.keyboard.press("s")
+        wait_shown(page, "a", "draft", side=True)
+        captions = page.locator("#stage .cap").all_inner_texts()
+        assert captions == ["1", "2", "3"], "side by side names the variants by number only"
+        page.keyboard.press("c")
+        page.wait_for_timeout(150)
+        assert visible("#more") and page.evaluate("location.hash").find("clean") < 0, "C brings the author's words back"
+        assert_nothing_fetched(page)
+        shared = open_page(instance, path.as_uri() + "#scene=draft&v=2&clean=1")
+        wait_shown(shared, "a", "draft")
+        assert shared.evaluate("document.body.classList.contains('clean')"), "a clean link opens clean, on its variant"
+        numeric = sample_page(tmp_path, ids=("now", "1", "2"))  # ids that read as numbers: the link's kind decides
+        wait_shown(open_page(instance, numeric.as_uri() + "#scene=draft&v=2&clean=1"), "1", "draft")
+        wait_shown(open_page(instance, numeric.as_uri() + "#scene=draft&v=2"), "2", "draft")

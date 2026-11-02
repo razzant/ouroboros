@@ -8,6 +8,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from tests.test_onboarding_process_controls import startup_controls as startup_controls
+from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 
 pytestmark = pytest.mark.serial
 

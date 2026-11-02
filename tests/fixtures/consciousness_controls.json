@@ -1,0 +1,273 @@
+{
+  "_comment": "Synthetic settings/place inputs retained from the original client contract tests; wake rows are generated separately from the real stored record.",
+  "state": {
+    "bg_consciousness_enabled": true,
+    "bg_consciousness_state": {
+      "enabled": true,
+      "status": "sleeping",
+      "detail": "Sleeping until 17:30.",
+      "level": "act",
+      "next_wake_at": "2026-10-20T14:30:00+00:00",
+      "last_wake_at": "2026-10-20T12:40:00+00:00",
+      "last_wake_outcome": "completed",
+      "live_wake_task_id": "",
+      "spent_24h_usd": 2.32,
+      "daily_usd": 20,
+      "unknown_unmetered": 0,
+      "integrity_degraded": false,
+      "allowance_resets_at": "",
+      "tasks_running": 1,
+      "max_tasks": 2,
+      "spend_by_cause": [
+        {
+          "cause": "own",
+          "label": "own thoughts",
+          "usd": 0.62,
+          "unmetered_calls": 0
+        },
+        {
+          "cause": "place:slack-acme",
+          "label": "Slack · Acme",
+          "usd": 0.88,
+          "unmetered_calls": 0
+        },
+        {
+          "cause": "started",
+          "label": "started work",
+          "usd": 0.48,
+          "unmetered_calls": 3
+        }
+      ],
+      "counted_roots": [
+        {
+          "task_id": "t-notes",
+          "title": "Release notes draft",
+          "cause": "place:slack-acme",
+          "cause_label": "Slack · Acme"
+        }
+      ],
+      "places_brief": [
+        {
+          "place_id": "slack-acme",
+          "label": "Slack · Acme",
+          "state": "active",
+          "unanswered": 2
+        },
+        {
+          "place_id": "tg-community",
+          "label": "Telegram · Ouroboros community",
+          "state": "silent",
+          "unanswered": 0
+        }
+      ]
+    }
+  },
+  "places": {
+    "places": [
+      {
+        "place_id": "slack-acme",
+        "connector": "slack-bridge",
+        "provider": "slack",
+        "account_id": "T024BE7LD",
+        "conversation_id": "",
+        "label": "Slack · Acme",
+        "state": "active",
+        "destination": "vendor:Slack",
+        "icon": {
+          "name": "",
+          "svg": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h16\"/></svg>"
+        },
+        "wakes": [
+          {
+            "fact": "direct_message",
+            "author": "connector"
+          },
+          {
+            "fact": "mention",
+            "author": "connector"
+          },
+          {
+            "fact": "reply_to_me",
+            "author": "owner"
+          }
+        ],
+        "wake_suggestions": [
+          "direct_message",
+          "group_dm",
+          "mention",
+          "my_thread",
+          "reply_to_me"
+        ],
+        "notes": [
+          {
+            "note_id": "n1",
+            "text": "Отвечай коротко и по делу.",
+            "author": "owner",
+            "at": "2026-10-12T09:00:00+00:00"
+          },
+          {
+            "note_id": "n2",
+            "text": "Лена ведёт релизы.",
+            "author": "ouroboros",
+            "at": "2026-10-19T09:00:00+00:00"
+          }
+        ],
+        "owner_accounts": [
+          {
+            "platform_actor_id": "U01ANTON",
+            "label": "@anton.r",
+            "confirmed_at": "2026-10-12T09:00:00+00:00"
+          }
+        ],
+        "working_folder": "~/work/acme",
+        "model": "",
+        "unanswered": 2,
+        "last_activity_at": "2026-10-20T13:04:00+00:00",
+        "spent_24h_usd": 0.88,
+        "revision": 4,
+        "readiness": {
+          "text": "Connector on",
+          "tone": "ok"
+        }
+      },
+      {
+        "place_id": "tg-community",
+        "connector": "telegram-bot",
+        "provider": "telegram",
+        "account_id": "ouroboros_bot",
+        "conversation_id": "-100123",
+        "label": "Telegram · Ouroboros community",
+        "state": "silent",
+        "destination": "vendor:Telegram",
+        "icon": {
+          "name": "chat"
+        },
+        "wakes": [
+          {
+            "fact": "mention",
+            "author": "connector"
+          }
+        ],
+        "wake_suggestions": [
+          "mention",
+          "reply_to_me"
+        ],
+        "notes": [],
+        "owner_accounts": [],
+        "working_folder": "",
+        "model": "",
+        "unanswered": 0,
+        "last_activity_at": "",
+        "spent_24h_usd": null,
+        "revision": 5
+      },
+      {
+        "place_id": "mail-inbox",
+        "connector": "email-presence",
+        "provider": "imap",
+        "account_id": "me@example.org",
+        "conversation_id": "",
+        "label": "Mail · inbox",
+        "state": "paused",
+        "destination": "vendor:Email",
+        "icon": null,
+        "wakes": [
+          {
+            "fact": "any_message",
+            "author": "migration"
+          }
+        ],
+        "wake_suggestions": [
+          "any_message"
+        ],
+        "notes": [
+          {
+            "note_id": "n9",
+            "text": "Только счета.",
+            "author": "migration",
+            "at": ""
+          }
+        ],
+        "owner_accounts": [],
+        "working_folder": "",
+        "model": "anthropic/claude-sonnet-5.5",
+        "unanswered": 0,
+        "last_activity_at": "",
+        "spent_24h_usd": 0,
+        "revision": 6
+      }
+    ],
+    "connectors": [
+      {
+        "connector": "slack-bridge",
+        "icon": {
+          "name": "chat"
+        },
+        "destination": "vendor:Slack",
+        "wakes": [
+          "direct_message",
+          "mention"
+        ],
+        "connected": true,
+        "label": "Slack"
+      },
+      {
+        "connector": "agentrq-bridge",
+        "icon": null,
+        "destination": "vendor:AgentRQ",
+        "wakes": [
+          "direct_message"
+        ],
+        "connected": false,
+        "label": "AgentRQ"
+      }
+    ]
+  },
+  "settings": {
+    "OUROBOROS_SAFETY_MODE": "light",
+    "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "light",
+    "OUROBOROS_SAFETY_OWNER_RULES": "Никогда не публикуй ничего из моих личных папок.",
+    "OUROBOROS_MODEL_SAFETY": "",
+    "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-5.5",
+    "OUROBOROS_MODEL_CONSCIOUSNESS": "",
+    "OUROBOROS_SUBAGENTS": {
+      "enabled": true,
+      "items": [
+        {
+          "subagent_id": "packet_checker",
+          "recommended_use": "Checks flags.",
+          "route": {
+            "kind": "api_model",
+            "target_id": "openai::gpt-5.6"
+          },
+          "review_eligible": true,
+          "delivery": "packet",
+          "rechecks_flags": true
+        }
+      ]
+    },
+    "_meta": {
+      "policy_state": {
+        "supervisor": {
+          "configured": "light",
+          "effective": "light",
+          "current_process": "light",
+          "next_task": "light"
+        },
+        "supervisor_consciousness": {
+          "configured": "light",
+          "effective": "light",
+          "current_process": "light",
+          "next_task": "light"
+        },
+        "safety_recheck": {
+          "row_id": "packet_checker",
+          "eligible_rows": [
+            "packet_checker"
+          ],
+          "measured": false
+        }
+      }
+    }
+  }
+}

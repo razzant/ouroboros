@@ -60,10 +60,10 @@ def test_body_absence_requires_owning_store_and_closes_once(tmp_path, monkeypatc
             observer.tick()
             observer.tick()
             assert not submits, "unchanged unknown 404 must not poll every tick"
-            observer.request(entry.run_id)
+            observer._drop_observer_gateway()
             observer.tick()
-            assert submits == [True], "explicit observation can recheck the gap"
-    assert bool(closed) is (kind == "timeout")
+            assert submits == [True], "a changed transport can recheck the gap"
+    assert bool(closed) is (kind in {"timeout", "replaced_store"})
     assert observer.observation(entry.run_id)["answered"] is (kind != "timeout")
     observer._drop_observer_gateway()
 

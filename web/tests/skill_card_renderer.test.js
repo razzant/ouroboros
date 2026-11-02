@@ -28,7 +28,7 @@ function skill(overrides = {}) {
 
 test('one head: the name opens the detail sheet, marks stay beside it, the who line names the source', () => {
     const html = renderInstalledSkillCard(row('weather'));
-    assert.match(html, /<button type="button" class="skills-card-name" data-skill="weather" data-skill-action="open_detail">weather<span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
+    assert.match(html, /<button type="button" class="skills-card-name" data-skill="weather" data-skill-action="open_detail"><span data-i18n-authored>weather<\/span><span class="skills-card-name-more" aria-hidden="true">›<\/span><\/button>/);
     assert.match(html, /data-official-mark[^>]*>[\s\S]*?Official<\/button>/, 'Official comes from the install record');
     assert.match(installedWhoHtml(row('weather')), /^Ouroboros · v0\.3\.1 · installed .* by Ouroboros$/);
     assert.match(installedWhoHtml(row('telegram')), /^Built in · v1\.3\.0 · came with Ouroboros /);
@@ -59,7 +59,7 @@ test('the run state is one status chip: On, Off, Needs access, Reviewing…, Rev
 
 test('each attention tray is one sentence with its own actions, visible without hover', () => {
     const access = traysOf(renderInstalledSkillCard(row('zoom_meeting')));
-    assert.match(access, /Wants your permission to talk with other people for you\./);
+    assert.match(access, /Wants your permission to live in a place for you: hear, speak and act there\./);
     assert.match(access, /data-skill-action="grant" data-keys="presence"[^>]*>Grant access</);
 
     const problems = traysOf(renderInstalledSkillCard(row('minecraft-widget')));
@@ -279,17 +279,25 @@ test('Details keep the record: review sentence and verdict, what it can use, the
     assert.match(worker, />Loaded · worker</);
 });
 
-test('Presence runtime keeps the working folder and its reset, inside Details', () => {
+test('a place is the owner\'s choice on its sheet: no Presence runtime form on the card, even from an old listing', () => {
     const html = renderInstalledSkillCard(skill({
         presence_runtime: {
             defaults: { model_slot: 'main', inline_max_rounds: 10 }, overrides: { model_slot: 'light', inline_max_rounds: 7 },
             workspace_root: '/work/reports & notes', state_fingerprint: 'a'.repeat(64),
         },
     }));
-    assert.match(html, /name="workspace_root"[^>]+value="\/work\/reports &amp; notes"/);
-    assert.match(html, /Memory stays shared/);
-    assert.match(html, /data-presence-runtime-reset/);
-    assert.doesNotMatch(renderInstalledSkillCard(skill()), /skills-presence-runtime/);
+    assert.doesNotMatch(html, /presence-runtime|name="workspace_root"|Inline rounds/);
+});
+
+test('a connector card wears its icon and «Connects …»; a chat writer without a place says whose its messages are', () => {
+    const connector = renderInstalledSkillCard(skill({ connects: ['Slack'], icon: { name: 'chat' } }));
+    assert.match(connector, /<span class="skills-card-icon" aria-hidden="true"><svg/);
+    assert.match(connector, /data-tone="neutral">Connects Slack</);
+    assert.doesNotMatch(renderInstalledSkillCard(skill()), /skills-card-icon|Connects /);
+    const bridge = renderInstalledSkillCard(skill({ permissions: ['net', 'inject_chat'] }));
+    assert.match(bridge, /<p class="skills-card-facts">Messages from here count as yours<\/p>/);
+    const place = renderInstalledSkillCard(skill({ permissions: ['inject_chat', 'presence'], connects: ['A2A'] }));
+    assert.doesNotMatch(place, /count as yours/, 'a place declaration speaks for its messages instead');
 });
 
 test('findings are built on first open from the rows in memory, once', () => {
@@ -314,4 +322,15 @@ test('made here means created on this computer without an install record', () =>
     assert.equal(isMadeHere(row('zoom_meeting')), true);
     assert.equal(isMadeHere(row('weather')), false);
     assert.equal(isMadeHere(row('telegram')), false);
+});
+
+test('skill titles prefer the optional title, then connector label, then canonical id', () => {
+    const connector = { connects: ['Mail'], contributes: [{ provides: 'place', label: 'Mailbox' }] };
+    for (const [fields, expected] of [[{ ...connector, title: 'Email tools' }, 'Email tools'],
+        [connector, 'Mailbox'], [{ connects: ['Mail'] }, 'demo'], [{}, 'demo']]) {
+        const html = renderInstalledSkillCard(skill(fields));
+        assert.ok(html.includes(`<span data-i18n-authored>${expected}</span>`));
+        assert.match(html, /data-skill="demo"/);
+        assert.match(html, /skills-detail-label">ID<\/span><span class="skills-detail-value"><code data-i18n-authored>demo<\/code><\/span>/);
+    }
 });

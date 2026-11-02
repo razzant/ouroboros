@@ -31,10 +31,10 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
     factory = lambda: client
     factory.supports_response_format = lambda *args, **kwargs: False
     monkeypatch.setattr(safety, "LLMClient", factory)
-    monkeypatch.setattr(safety, "get_light_model", lambda: MODEL)
+    monkeypatch.setattr(safety, "get_safety_model", lambda: MODEL)
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "get_runtime_mode", lambda: mode)
-    monkeypatch.setattr(safety, "get_safety_mode", lambda: "full")
+    monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": "full")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "full")
     repo, work = tmp_path / "repo", tmp_path / "work"
@@ -55,7 +55,7 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
         result = registry.execute_result("run_command", command)
         assert result.status == "ok" and "SAFETY_ADVICE" in result.text
         assert (work / "once.txt").read_text() == "x" and not waits
-        events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text().splitlines()]
+        events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
         advisory = next(row for row in events if row["type"] == "safety_advisory")
         assert advisory["assessment_allowed"] is False and code in advisory["assessment"]
     assert len(transport.accepted_operations) == 1
@@ -70,5 +70,5 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
 
 def test_explicit_local_safety_keeps_precedence_over_subscription_name(monkeypatch):
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
-    monkeypatch.setattr(safety, "get_light_model", lambda: MODEL)
+    monkeypatch.setattr(safety, "get_safety_model", lambda: MODEL)
     assert safety._resolve_safety_routing() == (True, False, None)

@@ -234,7 +234,13 @@ def fetch_cloudru_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Option
     import logging
     log = logging.getLogger("ouroboros.llm")
 
-    api_key = (runtime_setting("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip()
+    from ouroboros.llm_routing import resolve_target
+
+    try:
+        target = resolve_target("cloudru::")  # the built-in connection's key and endpoint, as dispatch reads them
+    except Exception:
+        return {}  # a switched-off built-in connection prices nothing
+    api_key, base_url = str(target.get("api_key") or "").strip(), str(target.get("base_url") or "")
     if not api_key:
         return {}
     try:
@@ -242,9 +248,6 @@ def fetch_cloudru_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Option
     except ImportError:
         return {}
 
-    base_url = (
-        runtime_setting("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or ""
-    ).strip() or "https://foundation-models.api.cloud.ru/v1"
     try:
         rate = float(runtime_setting("OUROBOROS_RUB_USD_RATE", ""))
     except (TypeError, ValueError):

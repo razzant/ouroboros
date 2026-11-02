@@ -81,7 +81,7 @@ def test_the_drawer_opens_from_the_edge_from_the_chrome_and_keeps_the_finger(chr
         header = page.locator(f'{scope} .app-page-header').first.bounding_box()
         feed = page.locator(feed_selector).first.bounding_box()
         field = page.locator(f'{scope} textarea').first.bounding_box()
-        capsule = page.locator(f'{scope} .chat-toolbar-row .chat-swarm').first.bounding_box()
+        capsule = page.locator(f'{scope} .chat-toolbar-row .chat-subagents-mode').first.bounding_box()
         mid = feed['y'] + feed['height'] / 2
         starts = {
             'edge': (3, mid),
@@ -123,7 +123,7 @@ MENU = """scope => {
     const shown = (el) => Boolean(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
     const menu = [...room.querySelectorAll('[data-mobile-nav-toggle]')].find(shown);
     const row = room.querySelector('.chat-toolbar-row');
-    const swarm = row?.querySelector('.chat-swarm');
+    const first = row?.querySelector('.chat-subagents-mode');
     const box = (el) => el ? (({x, y, width, height}) => ({x, y, w: width, h: height}))(el.getBoundingClientRect()) : null;
     const b = menu?.getBoundingClientRect();
     const at = (dx, dy) => document.elementFromPoint(b.x + b.width / 2 + dx, b.y + b.height / 2 + dy)
@@ -131,7 +131,7 @@ MENU = """scope => {
     const area = menu ? getComputedStyle(menu, '::after') : null;
     return {inRow: Boolean(menu && menu.parentElement === row && row.firstElementChild === menu),
             inHeader: [...room.querySelectorAll('.app-page-header [data-mobile-nav-toggle]')].some(shown),
-            menu: box(menu), swarm: box(swarm),
+            menu: box(menu), first: box(first),
             // The finger's target is the touch minimum, centred on the button: 21px from its centre is still the
             // button, 30px is not (not the composer around it either).
             inside: b ? [[0, -21], [0, 21], [-21, 0]].map(([dx, dy]) => at(dx, dy)) : [],
@@ -174,8 +174,8 @@ def test_a_rooms_menu_is_the_composers_first_control(shell_ui, tmp_path, room, h
         page.close()
     assert facts['theme'] == theme, facts
     assert facts['inRow'] is True and facts['inHeader'] is False, facts
-    assert facts['menu']['x'] + facts['menu']['w'] <= facts['swarm']['x'], ('left of Swarm', facts)
-    assert facts['menu']['h'] == facts['swarm']['h'] == 32, ('as tall as the capsules', facts)
+    assert facts['menu']['x'] + facts['menu']['w'] <= facts['first']['x'], ('left of the first capsule, Subagents', facts)
+    assert facts['menu']['h'] == facts['first']['h'] == 32, ('as tall as the capsules', facts)
     assert facts['inside'] == [True, True, True] and facts['outside'] == [False, False, False], (
         'the touch minimum, centred on the button, is its finger target', facts)
     assert facts['area'] == {'w': '44px', 'h': '44px'}, facts
@@ -301,16 +301,19 @@ def test_the_drawer_and_its_scrim_settle_smoothly_and_a_drifting_thumb_keeps_it(
         facts['fling_state'] = page.evaluate(DRAWER)
         page.evaluate('window.__ouroLayers.pop()')
         page.wait_for_timeout(500)
-        # A thumb that drifts down 120px over the second half of the drag.
+        # A thumb that drifts down 120px over the second half of the drag. The drawer follows from where the axis
+        # locked (Chromium drops the first move inside its touch slop), so the drag ends well past half open and the
+        # release opens it as a slow one too: a CI runner sends these steps ~50 ms apart, too slow for a fling.
         top = page.evaluate(FEED_TOP, '#chat-messages')
         cdp = page.context.new_cdp_session(page)
         try:
-            path = [(40 + 12 * i, y + (0 if i < 8 else 15 * (i - 8))) for i in range(17)]
+            path = [(40 + 14 * i, y + (0 if i < 8 else 15 * (i - 8))) for i in range(17)]
             for i, (px, py) in enumerate(path):
                 cdp.send('Input.dispatchTouchEvent', {'type': 'touchStart' if i == 0 else 'touchMove',
                                                       'touchPoints': [{'x': px, 'y': py, 'id': 1}]})
                 page.wait_for_timeout(16)
             facts['drift_mid'] = page.evaluate(DRAWER)
+            facts['drift_held'] = page.evaluate(PULLED)
             cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
         finally:
             cdp.detach()
@@ -337,6 +340,8 @@ def test_the_drawer_and_its_scrim_settle_smoothly_and_a_drifting_thumb_keeps_it(
     settles = {f['settle'] for f in facts['fling'] if f['settle']}
     assert settles and all(s.endswith('ms') for s in settles), ('a fling settles at the finger\'s speed', facts['fling'])
     assert facts['fling_state']['open'] is True, facts
+    assert facts['drift_held']['dragging'] and facts['drift_held']['p'] > 0.5, (
+        'at the end of the drift the drawer is still under the finger, past half open', facts)
     assert facts['drift_mid']['open'] is False and facts['drift']['open'] is True, ('the drifting thumb keeps the drawer', facts)
     assert facts['feed_top'][0] == facts['feed_top'][1], ('the feed under the dragged drawer did not scroll', facts)
 
@@ -375,6 +380,10 @@ def test_a_pull_past_fully_open_shows_the_drawer_at_the_edge_not_the_room(chromi
             cdp.send('Input.dispatchTouchEvent', {'type': 'touchMove', 'touchPoints': [{'x': width - 110, 'y': y, 'id': 1}]})
             page.wait_for_timeout(32)
             facts['back'] = page.evaluate(PULLED)
+            # Then the finger rests and lets go: a release, not a fling back (drawer_drag.js reads no speed from a
+            # finger that stopped longer than DRAG.sampleWindow, 100 ms, before it lifted). Lifted at once, the 100 px
+            # stroke back is a fling whose speed depends on how long the 1x1 screenshot above took.
+            page.wait_for_timeout(150)
             cdp.send('Input.dispatchTouchEvent', {'type': 'touchEnd', 'touchPoints': []})
         finally:
             cdp.detach()
@@ -487,3 +496,57 @@ def test_the_room_is_the_card_the_drawer_pushes_aside(chromium_ui, tmp_path, roo
     assert abs(past['veil'] - 0.42) < 0.01, past
     assert facts['after']['open'] is True and abs(facts['after']['x'] - opened['x']) < 1, (
         'released past open, it settles back open', facts['after'])
+
+
+PINCH_FACTS = """() => ({scale: visualViewport.scale, vvWidth: visualViewport.width, innerWidth, innerHeight,
+    vvh: getComputedStyle(document.documentElement).getPropertyValue('--vvh').trim(),
+    app: Math.round(document.getElementById('app').getBoundingClientRect().height)})"""
+
+
+def pinch(page):
+    """Chromium's synthetic two-finger pinch to x2 at the room's centre."""
+    cdp = page.context.new_cdp_session(page)
+    try:
+        cdp.send('Input.synthesizePinchGesture', {'x': 195, 'y': 420, 'scaleFactor': 2, 'relativeSpeed': 800,
+                                                  'gestureSourceType': 'touch'})
+    finally:
+        cdp.detach()
+    page.wait_for_timeout(600)
+
+
+def test_a_pinch_magnifies_the_room_and_never_shrinks_it_or_moves_the_drawer(chromium_ui, tmp_path):
+    """A two-finger pinch only magnifies (docs/DESIGN.md "Touch and containment"): the room keeps its height, where
+    the stack layout's height once followed the shrinking visual viewport and halved at ×2 with the composer adrift,
+    and a sideways finger then pans the magnified page instead of opening the drawer. Chromium's synthetic pinch, not
+    a claim about an iPhone."""
+    page = seed_page(chromium_ui, 390, 844)
+    facts = {}
+    try:
+        boot(page, chromium_ui)
+        page.wait_for_timeout(300)
+        facts['before'] = page.evaluate(PINCH_FACTS)
+        pinch(page)
+        facts['pinched'] = page.evaluate(PINCH_FACTS)
+        swipe_with(page, (60, 420), (320, 428))
+        facts['drawer'] = page.evaluate(DRAWER)
+    finally:
+        evidence(tmp_path, 'shell-pinch', facts)
+        page.close()
+    before, pinched = facts['before'], facts['pinched']
+    if pinched['scale'] == 1:
+        # Linux headless Chromium applied no synthetic touch pinch at all (CI 40682936207); a plain page tells an engine
+        # that cannot pinch from a room that refuses to be magnified.
+        probe = chromium_ui['new_page'](viewport={'width': 390, 'height': 844}, has_touch=True)
+        try:
+            probe.set_content('<meta name="viewport" content="width=device-width, initial-scale=1.0">'
+                              '<div style="height:3000px"></div>')
+            pinch(probe)
+            plain = probe.evaluate('visualViewport.scale')
+        finally:
+            probe.close()
+        if plain == 1:
+            pytest.skip('this Chromium applies no synthetic touch pinch, not even to a plain page')
+    assert pinched['scale'] > 1.5 and pinched['vvWidth'] < pinched['innerWidth'] - 1, facts  # the pinch took
+    assert before['app'] == before['innerHeight'] and pinched['app'] == before['app'], facts
+    assert pinched['vvh'] == before['vvh'], facts
+    assert not facts['drawer']['open'], facts

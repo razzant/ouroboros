@@ -15,12 +15,12 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests._work_projection_shared import work_fields
-from tests.test_design_system_gate_browser import PROJECTS, save_evidence, seed_page, settle
+from tests.test_design_system_gate_browser import PROJECTS, rest, save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 CHATS = {p['id']: p['chat_id'] for p in PROJECTS}
-MENU = 'body > .project-row-menu'
+MENU = 'body > .project-row-menu:not([data-leaving])'  # the open one: a closed menu's picture fades a moment
 
 
 @pytest.fixture(params=['webkit', 'chromium'])
@@ -134,7 +134,7 @@ def test_the_menu_button_says_what_waits_behind_it_in_both_places(nav_ui, tmp_pa
         page.locator('#page-chat [data-mobile-nav-toggle]').click()
         page.locator('#primary-sidebar [data-nav-page="files"]').click()
         page.locator('#page-files.active').wait_for()
-        settle(page)
+        rest(page)  # the card has come home: its ☰ is measured at its own size, not mid-glide
         facts['header_owner'] = toggle(header)
         # Main's own new messages (its room revision past the shared cursor), away from Main, light the ☰ too.
         sync(snapshot(main_revision=1))
@@ -160,6 +160,34 @@ def test_the_menu_button_says_what_waits_behind_it_in_both_places(nav_ui, tmp_pa
         assert button['right'] - 9 <= mark['box']['right'] <= button['right'] + 1, (case, mark, button)
         assert button['top'] - 1 <= mark['box']['top'] <= button['top'] + 9, (case, mark, button)
     assert facts['unread']['fill'] == facts['crimson'] and facts['owner']['fill'] == facts['amber'], facts
+
+
+def test_the_closed_drawer_rests_its_moving_dots_and_opening_it_starts_them(nav_ui, tmp_path):
+    """On a phone the room card covers the closed drawer: its rows' moving dots rest instead of running unseen, and
+    run again, on the page's one wave, while the drawer is open. Docked they always run."""
+    ui = nav_ui
+    working = PROJECTS[0]['id']
+    page, _sync = open_app(ui, 390, 844, snapshot(work=[working]))
+    dots = f'#primary-sidebar [data-project-id="{working}"] .status-mark > i'
+    running = f"""() => [...document.querySelectorAll('{dots}')].map((i) => getComputedStyle(i).animationName)"""
+    facts = {'engine': ui['engine']}
+    try:
+        page.wait_for_function(f"() => document.querySelector('{dots}')?.parentElement.dataset.shape === 'moving'")
+        facts['closed'] = page.evaluate(running)
+        page.locator('#page-chat [data-mobile-nav-toggle]').click()
+        page.wait_for_function("() => document.getElementById('primary-sidebar').classList.contains('open')")
+        settle(page)
+        facts['open'] = page.evaluate(running)
+        page.set_viewport_size({'width': 1280, 'height': 844})
+        page.wait_for_function("() => document.documentElement.dataset.layout === 'docked'")
+        settle(page)
+        facts['docked'] = page.evaluate(running)
+    finally:
+        save_evidence(tmp_path, f'nav-drawer-dots-{ui["engine"]}', facts)
+        page.close()
+    assert facts['closed'] == ['none'] * 3, facts
+    assert facts['open'] == ['status-mark-bounce'] * 3, facts
+    assert facts['docked'] == ['status-mark-bounce'] * 3, facts
 
 
 def test_a_closed_project_whose_row_the_collapse_hides_gives_the_focus_to_the_toggle(nav_ui, tmp_path):
@@ -344,6 +372,7 @@ def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_pa
         page.locator('#nav-projects-toggle').click()
         settle(page)
         facts['collapsed'] = [page.evaluate(expanded), page.evaluate(rows)]
+        ui['errors'].watch(page)  # the reload may cut off this page's own reads; the other pages stay strict
         page.reload()
         page.wait_for_selector('#nav-projects-list [data-project-id]', state='attached')
         settle(page)
@@ -373,7 +402,7 @@ def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_pa
     assert facts['collapsed'] == facts['reloaded'] == ['false', len(pins)], facts
     assert facts['other'] == ['true', everything], facts
     assert facts['locked'] == ['true', everything] and facts['locked_collapsed'] == ['false', len(pins)], facts
-    assert not ui['errors'], ui['errors']
+    assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
 STATUS = """menu => {
@@ -489,6 +518,9 @@ def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(c
         with page.expect_request(lambda request: request.url.endswith(update)) as pressed:
             page.locator(f'{MENU} [data-prm="pin"]').tap()
         facts['pressed'] = pressed.value.post_data_json
+        # The shared fake returns {} for this POST, so the save settles as unconfirmed.
+        # While it is pending, Pin is disabled and Rename correctly receives the menu's focus.
+        expect()(page.locator('#toast-stack')).to_contain_text('Pin state was not confirmed')
         # The keyboard still has the ⋯: focused, it is drawn again with its column.
         kebab = page.locator(f'[data-nav-project-id="{sending}"] .nav-project-kebab')
         kebab.focus()
@@ -499,6 +531,7 @@ def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(c
         # It opens the menu by the keyboard and stays drawn under it while the focus is in the menu.
         page.keyboard.press('Enter')
         page.locator(MENU).wait_for()
+        expect()(kebab).to_have_attribute('aria-expanded', 'true')  # the menu can paint a frame before its trigger says so
         facts['kebab_under_menu'] = {**kebab.evaluate(drawn), 'expanded': kebab.get_attribute('aria-expanded'),
                                      'focus': page.evaluate("() => document.activeElement.dataset.prm || ''")}
     finally:
@@ -521,16 +554,22 @@ def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(c
     assert under['size'] == [44, 44] and under['expanded'] == 'true' and under['focus'] == 'pin', facts
 
 
-def test_the_more_capsule_shows_a_mode_by_its_tone_alone(nav_ui, tmp_path):
+def test_the_consciousness_chip_says_a_campaign_by_its_word_and_paints_no_tone(nav_ui, tmp_path):
     ui = nav_ui
-    page, _sync = open_app(ui, 1280, 800, {**snapshot(), 'evolution_enabled': True})
+    # The host's own sentence for this state (consciousness_view.py): the chip's label says it.
+    body = {**snapshot(), 'evolution_enabled': True, 'bg_consciousness_enabled': False,
+            'bg_consciousness_state': {'status': 'disabled', 'detail': 'Background consciousness is off.'}}
+    page, _sync = open_app(ui, 1280, 800, body)
     try:
-        summary = page.locator('.chat-header-more > summary')
-        expect()(summary).to_have_class(re.compile(r'\bhas-active\b'))
-        facts = summary.evaluate("""el => ({after: getComputedStyle(el, '::after').content,
-            background: getComputedStyle(el).backgroundColor})""")
+        chip = page.locator('#page-chat .cx-chip')
+        expect()(chip).to_contain_text('Evolving')
+        facts = chip.evaluate("""el => ({after: getComputedStyle(el, '::after').content,
+            background: getComputedStyle(el).backgroundColor, mark: el.querySelector('.status-mark').dataset.shape,
+            label: el.getAttribute('aria-label')})""")
     finally:
         page.close()
     assert facts['after'] in ('none', 'normal', ''), facts
-    assert facts['background'] not in ('rgba(0, 0, 0, 0)', 'transparent'), facts
+    assert facts['background'] not in ('rgba(0, 0, 0, 0)', 'transparent'), 'a capsule of the bar'
+    assert facts['mark'] == 'none', 'a campaign that goes on by itself draws no mark, never amber'
+    assert facts['label'] == 'Consciousness: Background consciousness is off. · evolution campaign running', facts
     print(json.dumps(facts))

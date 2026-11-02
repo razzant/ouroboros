@@ -118,8 +118,9 @@ def test_real_body_cold_terminal_wakes_before_money_and_saved_carrier_is_not_orp
         assert sc.reconcile(env.q, direct=[saved], runtime=runtime) == {"sleeper"}
         assert bp.budget_pause_row(tmp_path, "sleeper")["external_custody"] == row["external_custody"]
         env.workers.PENDING.append(task)
+        assert wake_ready_sleepers(env.q) == [], "a running leaf does not wake its sleeper"
         finished.set()
-        runtime.request("run-one")
+        assert runtime.ensure_runs(row["external_custody"]["runs"], task_id="sleeper")
         _until(lambda: current.run(tmp_path, "run-one").terminal_state)
         runtime.tick()
         _until(lambda: current.run(tmp_path, "run-one").output_complete)

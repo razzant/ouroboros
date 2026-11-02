@@ -11,6 +11,8 @@ import {
     HARNESS_MARKS,
     META_PART_SEPARATOR,
     executorIdentityMarkup,
+    formatCoordinatorProvenance,
+    executorModelText,
     harnessAccountIdentityMarkup,
     harnessIdentityMarkup,
     harnessPresentation,
@@ -107,7 +109,8 @@ test('Chat renders the executor evidence chip through the shared identity SSOT',
     const activitySource = readFileSync(new URL('../modules/chat_activity.js', import.meta.url), 'utf8');
     const logSource = readFileSync(new URL('../modules/log_events.js', import.meta.url), 'utf8');
     assert.match(chatSource, /renderLiveCardMeta/);
-    assert.match(activitySource, /executorIdentityMarkup\(record\.executorChip/);
+    assert.match(activitySource, /const chip = record\.executorChip;/);
+    assert.match(activitySource, /executorIdentityMarkup\(chip, \{ model \}\)/);
     const identitySource = readFileSync(new URL('../modules/harness_presentation.js', import.meta.url), 'utf8');
     assert.match(identitySource, /harnessIdentityMarkup\(chip\.harness/);
     assert.match(logSource, /harnessPresentation\(harness\)\.label/);
@@ -308,24 +311,23 @@ test('#516 the card meta line separates its parts with real text, not a CSS gap'
     } }) };
     t.after(() => { globalThis.document = priorDocument; });
     const chip = { harness: 'claudexor', label: 'Claudexor', title: 'route', observedModels: ['opus'] };
-    const markup = executorIdentityMarkup(chip, { agentModel: 'sonnet' });
-    // Chip, coordinator model and observed models are three parts of one line,
-    // and every boundary between them carries the separator itself — a copied
-    // line and a screen reader get it, which a flex gap never provided. The
-    // chip's detail sentence (#360 A) is a fourth part whose separator lives
-    // inside its own wrapper, shown only on the expanded card.
-    assert.equal([...markup.matchAll(/ · /g)].length, 3);
-    assert.match(markup, /<\/span><span class="chat-live-executor-detail"> · <span class="chat-live-meta-text">route<\/span><\/span> · /);
-    assert.match(markup, /<\/span> · <span class="chat-live-meta-text">Coordinator: sonnet<\/span> · /);
-    // No detail sentence, no wrapper; a detail is escaped text, never markup, in the
-    // text serializer's own form (quotes stay quotes), so the line round-trips.
-    assert.doesNotMatch(executorIdentityMarkup({ harness: 'codex', label: 'Codex' }), /executor-detail/);
+    const markup = executorIdentityMarkup(chip, { model: executorModelText(chip) });
+    // The chip and the executor's own model are two parts of one line, and the
+    // boundary between them carries the separator itself — a copied line and a
+    // screen reader get it, which a flex gap never provided. The chip's detail
+    // sentence (#360 A) is the `Executor` row of the card's details, so the line
+    // never reflows when the card opens; the coordinating model is a details row too.
+    assert.equal([...markup.matchAll(/ · /g)].length, 1);
+    assert.match(markup, /<\/span><\/span> · <span class="chat-live-meta-text">opus<\/span>$/);
+    assert.doesNotMatch(markup, /executor-detail|Coordinator|Agent model|sonnet/);
+    // The chip's title stays escaped attribute text; a model is text-mode escaped, so the line round-trips.
     assert.match(executorIdentityMarkup({ harness: 'codex', label: 'Codex', title: '<b>x</b> & "y"' }),
-        /executor-detail"> · <span class="chat-live-meta-text">&lt;b&gt;x&lt;\/b&gt; &amp; "y"<\/span>/);
-    // A missing part takes its separator with it: no leading or doubled dots.
-    assert.equal(executorIdentityMarkup(null, { agentModel: 'sonnet' }),
-        '<span class="chat-live-meta-text">Agent model: sonnet</span>');
-    assert.equal(executorIdentityMarkup(null, {}), '');
+        /title="&lt;b&gt;x&lt;\/b&gt; &amp; &quot;y&quot;"/);
+    assert.match(executorIdentityMarkup({ harness: 'codex', label: 'Codex' }, { model: 'a "quoted" <id>' }),
+        /<span class="chat-live-meta-text">a "quoted" &lt;id&gt;<\/span>$/);
+    // A missing part takes its separator with it: no leading or doubled dots, and no chip, no block.
+    assert.doesNotMatch(executorIdentityMarkup({ harness: 'codex', label: 'Codex' }), / · /);
+    assert.equal(executorIdentityMarkup(null, { model: 'sonnet' }), '');
     assert.equal(joinMetaParts(['a', '', 'b']), `a${META_PART_SEPARATOR}b`);
     assert.equal(META_PART_SEPARATOR, ' · ');
 
@@ -336,10 +338,38 @@ test('#516 the card meta line separates its parts with real text, not a CSS gap'
         activitySource.indexOf('export function renderLiveCardMeta'),
         activitySource.indexOf('export function ownLiveActionsEl'),
     );
-    assert.match(renderer, /metaLineHtml\(\[\s*executorIdentityMarkup\(/);
+    assert.match(renderer, /metaLineHtml\(\[\s*chip \? executorIdentityMarkup\(/);
     assert.doesNotMatch(renderer, /\.join\(' · '\)/);
     // The visual-only spacing that stood in for the separator is gone.
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     const chipRule = css.slice(css.indexOf('.chat-live-executor-chip {'), css.indexOf('.chat-live-executor-chip {') + 400);
     assert.doesNotMatch(chipRule, /margin-right/);
+
+    // S2: Coordinator provenance comes from the recorded snapshot only (inherited / chosen by the
+    // delegator (<row>) / parent's fallback); a bare role or model records nothing. The chip line
+    // never carries it: it is the Coordinator row of the card details (chat_activity.renderLiveCardMeta).
+    assert.equal(formatCoordinatorProvenance('inherited'), 'inherited');
+    assert.equal(formatCoordinatorProvenance({ parent_cognitive_route: {
+        model: 'sonnet', chosen_by: 'delegator', supervisor_subagent_id: 'claude=sonnet' } }),
+    'chosen by the delegator (claude=sonnet)');
+    assert.equal(formatCoordinatorProvenance({ parent_cognitive_route: {
+        model: 'sonnet', source_role: 'fallback', chosen_by: 'parent_fallback' } }), "parent's fallback");
+    assert.equal(formatCoordinatorProvenance({ parent_cognitive_route: { model: 'sonnet', source_role: 'fallback' } }), '');
+    assert.doesNotMatch(executorIdentityMarkup(chip, { model: 'sonnet' }), /Coordinator|inherited|fallback/);
+});
+
+// Requested, observed and unknown executor models never collapse (refined A, 21.10): settled observed models are
+// listed as such, a progress report keeps its source, an unconfirmed model is absent, and no id is renamed.
+test('the executor model fact keeps observed, requested and unknown apart', () => {
+    assert.equal(executorModelText(null), '');
+    assert.equal(executorModelText({ harness: 'claude', observedModels: ['claude-opus-5-5[1m]'] }), 'claude-opus-5-5[1m]');
+    assert.equal(executorModelText({ harness: 'codex', observedModels: ['gpt-6-astra', 'gpt-6.1-sol'] }), 'gpt-6-astra, gpt-6.1-sol');
+    const report = (model, source) => ({ harness: 'cursor', observation: { model, model_source: source } });
+    assert.equal(executorModelText(report('cursor-grok-4.6-xhigh-fast', 'observed')), 'cursor-grok-4.6-xhigh-fast');
+    assert.equal(executorModelText(report('cursor-grok-4.6-xhigh-fast', 'requested')), 'requested cursor-grok-4.6-xhigh-fast');
+    assert.equal(executorModelText(report('cursor-grok', 'inferred')), '', 'an unconfirmed source names no model');
+    assert.equal(executorModelText(report('', 'observed')), '');
+    assert.equal(executorModelText(report('openai/gpt-6', 'observed'), (id) => id.split('/').pop()), 'gpt-6',
+        'the caller\'s compactor only drops a provider prefix');
+    assert.equal(executorModelText({ harness: 'codex', label: 'Codex' }), '', 'a dispatch alone proves no model');
 });

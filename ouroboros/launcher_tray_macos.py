@@ -30,7 +30,9 @@ def _classes(base):
 
             def applicationShouldTerminate_(self, sender):
                 _shared["background"].quit.set()  # Cmd+Q, Dock Quit, logout: never cancelled, never asked
-                return objc.super(OuroborosAppDelegate, self).applicationShouldTerminate_(sender)
+                reply = objc.super(OuroborosAppDelegate, self).applicationShouldTerminate_(sender)
+                # NO: the window kept its loop because the quit's closer owns the exit; a logout waits for it.
+                return reply if reply else AppKit.NSTerminateLater
 
         class OuroborosMenuTarget(AppKit.NSObject):
             def openWindow_(self, sender):

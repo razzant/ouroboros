@@ -96,8 +96,8 @@ def test_tree_census_and_graceful_stop_read_only_their_selected_bodies(tmp_path,
     for derived in (False, True):
         if derived:
             hot.run_hot_facts(root)
-        members, counts = _measure(root, monkeypatch, lambda r: owner_pause.tree_member_results(r, "root"))
-        assert set(members) == {"root", "mid", "leaf", "bridge-leaf", "legacy"}
+        census, counts = _measure(root, monkeypatch, lambda r: owner_pause.tree_member_results(r, "root"))
+        assert set(census.members) == {"root", "mid", "leaf", "bridge-leaf", "legacy"} and census.unresolved == {}
         assert counts["unrelated_bytes"] == 0
         text, counts = _measure(root, monkeypatch, lambda r: _child_result_projection(SimpleNamespace(DRIVE_ROOT=r), "mid"))
         assert "leaf answer" in text and "legacy answer" not in text and "middle" not in text

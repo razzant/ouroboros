@@ -167,11 +167,10 @@ def test_project_panel_composer_and_welcome_contracts():
     assert "addMessage" not in welcome_js
     assert "padding: 10px 292px" not in css
     assert "right: 8px;\n    bottom: 6px" not in send_group_css
-    assert ".chat-text-row:focus-within" in css
+    # The field is one object under the row of capsules: it takes the focus ring, the text row inside it none.
+    assert ".chat-field:focus-within" in css and ".chat-text-row:focus-within" not in css
     assert ".chat-toolbar-row {\n    order: 1;" in css
-    assert ".chat-text-row {\n    order: 2;" in css
-    assert "chat-header-more" in chat_js
-    assert "chat-header-menu" in css
+    assert ".chat-field {\n    order: 2;" in css
     # The Project is a reading surface, not a particular blur implementation.
     # Its rendered CLOSED/OPEN backing and transparent falsifier are exercised by
     # test_status_sheet_and_shade_geometry_light_dark_and_screenshots.
@@ -192,34 +191,31 @@ def test_project_panel_composer_and_welcome_contracts():
     assert "/api/projects/from-task" in _read("web/modules/api_client.js")
 
 
-def test_chat_header_controls_reorg_and_more_autodismiss():
+def test_room_bars_hold_states_and_panic_without_more():
     chat_js = _read("web/modules/chat.js")
-    # Main's header actions are declared once in chat_header.js; chat.js mounts them.
+    app_js = _read("web/app.js")
+    # A room's bar is declared once in chat_header.js; chat.js mounts Main's, app.js the Project panel's.
     header_markup = _read("web/modules/chat_header.js")
     assert "actionsHtml: mainHeaderActionsHtml()," in chat_js
-    # Restart and Panic are header buttons; Panic always in the row, Restart visible in the row on a desk and
-    # inside the ⋯ menu in the stack layout, where the budget joins it (owner Q4=A): the same two nodes, placed by
-    # layout, so each keeps its one handler (confirmAndSendRestart; the budget's Dashboard → Costs click).
+    # Restart and Panic are bar buttons, each one node with one handler; Panic stands in every room's bar.
     assert 'class="chat-header-btn ui-chrome-control" type="button" data-chat-command="restart"' in header_markup
     assert 'class="chat-header-btn danger ui-chrome-control" type="button" data-chat-command="panic"' in header_markup
     assert (chat_js + header_markup).count('type="button" data-chat-command="restart"') == 1, "one Restart node, never a second copy"
+    assert 'trailingHtml: `${panicButtonHtml()}<button id="project-panel-close"' in app_js
+    assert "await confirmAndSendRestart({ openConfirmDialog, ws });" in header_markup
+    # No More and no ⋯ on any width: a state has its own control (the consciousness chip), a command lives in the
+    # Shade of the state it changes, and Evolve and Review stay in Dashboard and Settings.
+    for gone in ("chat-header-more", "chat-header-menu", 'data-chat-command="bg"', 'data-chat-command="evolve"',
+                 'data-chat-command="review"', "SHELL_ICONS.more"):
+        assert gone not in header_markup and gone not in chat_js, gone
+    assert "createConsciousnessStatus(" in header_markup
+    # A narrow bar moves the same Restart and budget nodes into the room status's Shade.
     header_js = _read("web/modules/page_header.js")
     placement = header_js.split("export function bindHeaderControlPlacement(", 1)[1].split("\n}\n", 1)[0]
-    assert "if (next === 'menu') {" in placement and "menu.prepend(budgetPill);" in placement and "menu.append(restart);" in placement
+    assert "if (next === 'shade') {" in placement and "extras.append(restart);" in placement
     assert "headerActions.insertBefore(restart, panic);" in placement
     # Driven by the layout AND the bar's own measured width, so a narrow docked column keeps one row too.
     assert "layout === 'stack'" in placement and "bar.clientWidth < HEADER_FULL_ROW_MIN_WIDTH" in placement
     assert "onLayoutChange(place)" in placement and "observer?.observe(bar);" in placement
-    assert "bindHeaderControlPlacement({ headerActions, budgetPill })" in chat_js
-    assert "disposeHeaderPlacement();" in chat_js
-    assert "await confirmAndSendRestart({ openConfirmDialog, ws });" in chat_js
-    # The stack layout's summary is the one ⋯ glyph; a desk keeps the word.
-    assert 'class="chat-header-more-word">More</span>' in header_markup and "${SHELL_ICONS.more}" in header_markup
-    # ...and Consciousness / Evolve / Review live in the More overflow menu.
-    menu = header_markup.split('class="chat-header-menu"', 1)[1].split("</details>", 1)[0]
-    assert 'data-chat-command="bg"' in menu
-    assert 'data-chat-command="evolve"' in menu
-    assert 'data-chat-command="review"' in menu
-    # The More <details> auto-collapses on an outside click or Escape (never sticks).
-    assert "details.chat-header-more[open]" in chat_js
-    assert "event.key === 'Escape'" in chat_js
+    assert "createRoomHeader({ bar: pageHeader, ws, shade: roomWork," in chat_js
+    assert "header?.destroy();" in chat_js

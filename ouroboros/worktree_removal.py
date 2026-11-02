@@ -41,6 +41,10 @@ def record_failure(row: Dict[str, Any]) -> Dict[str, Any]:
             "removal_failed_identity": identity}
 
 
-def forget(row: Dict[str, Any]) -> None:
-    """A retired checkout no longer needs process-local retry evidence."""
+def retired(row: Dict[str, Any], data_root: Any) -> None:
+    """A retired checkout no longer needs process-local retry evidence, and the bytecode its sources
+    left under the data root's prefix is owed to retirement now (``maintenance_retirement``)."""
+    from ouroboros.maintenance_retirement import artifact_changed
+
     _failed_here.pop(str(row.get("path") or ""), None)
+    artifact_changed(data_root, immediate=True)

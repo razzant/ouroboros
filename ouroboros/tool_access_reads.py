@@ -17,6 +17,20 @@ def _access():
     return tool_access
 
 
+def canonical_runtime_reader(ctx: Any, canonical_root: pathlib.Path, rel: str) -> str:
+    """Address canonical bytes through existing READ aliases; dispatch owns admission.
+
+    Relative runtime paths keep execution-drive bytes. This recipe predicts no
+    permission, existence or freshness and reads no file to construct its address.
+    """
+    source = (canonical_root / rel).resolve(strict=False)
+    if ctx is None:
+        return f"{source} (no tool context here, so whether this actor can open it is unknown)"
+    path = rel if pathlib.Path(ctx.drive_root).resolve(strict=False) == canonical_root.resolve(strict=False) else str(source)
+    return (f"read_file(root='runtime_data', path={path!r})"
+            " (reader address, subject to this task's tool/resource restrictions and Presence grants; see Runtime context)")
+
+
 def capture_parent_workspace(ctx: Any) -> dict[str, str]:
     """Capture the parent's actual focus before choosing the child's folder."""
     from ouroboros.tools.tool_resolution import active_repo_dir_for

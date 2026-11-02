@@ -12,9 +12,199 @@ import pytest
 from ouroboros import consciousness_wake as wake, dialogue_store as ds
 from tests._dialogue import import_all
 from tests._store_shared import read_result, result_exists, seed_result
+from tests._wake_summary_shared import seed_wake
+from tests import test_consciousness as clock_tests
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 T0 = 1_800_000_000.0
+clock = clock_tests.clock
+
+
+@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
+@pytest.mark.parametrize("callback", ["own_clock", "focus", "other-task"])
+def test_finished_wake_publishes_its_own_title_once(clock, monkeypatch, summary, callback):
+    from supervisor import worker_chat_lane
+
+    row = seed_wake(clock.root, **({"wake_summary": summary, "suggested_name": summary} if summary else {}))
+    task_id = row["task_id"]
+    clock.clock._own_wake = {"task_id": task_id, "wake_cause": "own_clock", "initiator": "consciousness"}
+    frames = []
+    monkeypatch.setattr(worker_chat_lane, "_broadcast_task_named", frames.append)
+    for _ in range(2):
+        clock.clock._wake_finished("other" if callback == "other-task" else task_id, True,
+            metadata={"wake_cause": callback, "initiator": "consciousness"})
+    assert frames == ([{"type": "task_named", "task_id": task_id, "suggested_name": summary}]
+                      if summary and callback == "own_clock" else [])
+
+
+@pytest.mark.parametrize("summary", ["Проверил состояние системы.", ""])
+def test_previous_wake_reads_one_document_and_keeps_the_whole_note(tmp_path, monkeypatch, summary):
+    from ouroboros import task_store
+
+    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}))
+    row["result"] += "\n\n" + "Своя мысль с {daily_usd}. " * 3000 + "\nLast whole line."
+    seed_result(tmp_path, row["task_id"], row)
+    reads, original = [], task_store.read_document
+
+    def read(root, task_id):
+        reads.append(task_id)
+        return original(root, task_id)
+
+    monkeypatch.setattr(task_store, "read_document", read)
+    now = wake._parse_iso(row["terminal_time"]["occurred_at"]) + 3600
+    previous = wake.previous_wake_text(tmp_path, row["task_id"], now=now)
+    assert reads == [row["task_id"]]
+    assert previous == (f"{row['task_id']}, Done 1 h 0 min ago; its line: "
+        + (f"«{summary}»" if summary else "no line") + f"; its note: «{row['result']}»")
+    text = wake.render_wake_message(REPO, drive_root=tmp_path, reason="heartbeat", last_wake_at=now - 3600, now=now,
+        level="act", disabled_tools=[], spent_usd=0, daily_usd=20, running=0, max_tasks=2,
+        interval=3600, events="nothing new", previous_wake=previous)
+    assert f"- previous wake: {previous}\n" in text
+    assert row["result"] in text and "{daily_usd}" in text, "authored placeholders are not rendered again"
+
+
+@pytest.mark.parametrize("status,word", [("completed", "Done"), ("failed", "Failed"),
+                                        ("cancelled", "Stopped"), ("interrupted", "Interrupted")])
+def test_previous_wake_uses_card_outcome_words_and_never_guesses_completion_time(tmp_path, status, word):
+    row = seed_wake(tmp_path, status=status, outcome_axes={}, terminal_time=None)
+    previous = wake.previous_wake_text(tmp_path, row["task_id"], now=T0)
+    assert previous.startswith(f"{row['task_id']}, {word} at an unknown time; its line: no line;")
+    assert previous.endswith(f"its note: «{row['result']}»")
+
+
+def test_previous_wake_distinguishes_absence_and_unreadability(tmp_path, monkeypatch):
+    from ouroboros import task_store
+    from ouroboros.store import StoreError
+
+    assert wake.previous_wake_text(tmp_path, "missing", now=T0) == "unreadable"
+    reads = []
+
+    def broken(root, task_id):
+        reads.append(task_id)
+        raise StoreError("unreadable task")
+
+    monkeypatch.setattr(task_store, "read_document", broken)
+    assert wake.previous_wake_text(tmp_path, "", now=T0) == "none"
+    assert reads == []
+    assert wake.previous_wake_text(tmp_path, "previous", now=T0) == "unreadable"
+    assert reads == ["previous"]
+
+
+@pytest.mark.parametrize("failure", ["read", "projection", "none"])
+def test_previous_wake_failure_does_not_block_launch(clock, monkeypatch, caplog, failure):
+    from ouroboros import task_store, terminal_time
+
+    row = seed_wake(clock.root, result="The whole previous note.\nLast line.")
+    clock.clock._last_wake_task_id = row["task_id"]
+    clock.root.joinpath("repo/prompts/CONSCIOUSNESS.md").write_text(
+        "- previous wake: {previous_wake}\n", encoding="utf-8")
+
+    def broken(*args, **kwargs):
+        raise ValueError("previous wake unavailable")
+
+    if failure == "read":
+        monkeypatch.setattr(task_store, "read_document", broken)
+    elif failure == "projection":
+        monkeypatch.setattr(terminal_time, "terminal_time_fact", broken)
+    with caplog.at_level("DEBUG", logger="ouroboros.consciousness_wake"):
+        assert clock.clock.tick(clock.clock.next_wake_at) == "launched"
+    text = clock.launches[-1]["text"]
+    if failure == "none":
+        assert row["result"] in text and "unreadable" not in text
+    else:
+        assert "- previous wake: unreadable\n" in text
+        assert any(row["task_id"] in record.message and record.exc_info for record in caplog.records)
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("failure", ["write", "readback"])
+def test_next_wake_reads_last_admitted_note_even_when_its_input_source_failed(clock, monkeypatch, failure, restart):
+    from ouroboros import artifacts, chat_chain
+    from ouroboros.consciousness import BackgroundConsciousness, OBSERVATION_STATE_KEY, OWN_WAKE_STATE_KEY
+
+    template = REPO.joinpath("prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8")
+    clock.root.joinpath("repo/prompts/CONSCIOUSNESS.md").write_text(template, encoding="utf-8")
+    assert clock.clock.tick(T0 + clock_tests.FLOOR) == "launched"
+    accepted_a = clock.store[OBSERVATION_STATE_KEY]
+    seed_wake(clock.root, task_id="wake0001", result="A's whole note.", wake_summary="A's line.")
+    clock.clock._wake_finished("wake0001", True)
+    clock.receipt["task_id"] = "wake0002"
+    clock.clock._next_wake_at = T0 + 2 * clock_tests.FLOOR
+    with monkeypatch.context() as fault:
+        if failure == "write":
+            def failed_write(*a, **kw):
+                raise OSError("input source write failed")
+            fault.setattr(chat_chain, "retain_memory_source", failed_write)
+        else:
+            read = artifacts.read_actor_source_bytes
+            fault.setattr(artifacts, "read_actor_source_bytes", lambda root, task, ref:
+                          read(root, task, ref) if task == "wake0001" else b"bad readback")
+        assert clock.clock.tick(T0 + 2 * clock_tests.FLOOR) == "launched"
+    assert clock.store[OBSERVATION_STATE_KEY] == accepted_a
+    assert clock.store[OWN_WAKE_STATE_KEY]["task_id"] == "wake0002"
+    seed_wake(clock.root, task_id="wake0002", status="interrupted", outcome_axes={}, terminal_time=None,
+              result="B's whole note.\n\nStill unfinished.", wake_summary="B's line.")
+    seed_wake(clock.root, task_id="newer-foreign", result="Never use the newest task's note.")
+    clock.clock._wake_finished("wake0002", True)
+    if restart:
+        clock.clock = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: 7,
+                                              now=T0 + 2 * clock_tests.FLOOR)
+        assert clock.clock._last_wake_task_id == "wake0002"
+    clock.receipt["task_id"] = "wake0003"
+    now = T0 + 3 * clock_tests.FLOOR
+    clock.clock._next_wake_at = now
+    expected = wake.previous_wake_text(clock.root, "wake0002", now=now)
+    assert "Interrupted" in expected and "B's whole note.\n\nStill unfinished." in expected
+    assert clock.clock.tick(now) == "launched"
+    launch = clock.launches[-1]
+    for rendered in (launch["text"], launch["task"]["metadata"]["wake_observation"]["projection_text"]):
+        assert f"- previous wake: {expected}\n" in rendered
+        assert "A's whole note." not in rendered and "Never use the newest task's note." not in rendered
+
+
+@pytest.mark.parametrize("has_previous", [True, False])
+def test_launch_captures_previous_wake_before_binding_the_new_id(clock, has_previous):
+    row = seed_wake(clock.root, wake_summary="Проверил состояние системы.") if has_previous else None
+    clock.clock._last_wake_task_id = row["task_id"] if row else ""
+    template = REPO.joinpath("prompts/CONSCIOUSNESS.md").read_text(encoding="utf-8")
+    clock.root.joinpath("repo/prompts/CONSCIOUSNESS.md").write_text(template, encoding="utf-8")
+    now = clock_tests.T0 + clock_tests.FLOOR
+    expected = wake.previous_wake_text(clock.root, clock.clock._last_wake_task_id, now=now)
+    assert clock.clock.tick(now=now) == "launched"
+    launch = clock.launches[-1]
+    assert clock.clock._last_wake_task_id == clock.receipt["task_id"]
+    assert f"- previous wake: {expected}\n" in launch["text"]
+    assert f"- previous wake: {expected}\n" in launch["task"]["metadata"]["wake_observation"]["projection_text"]
+
+
+@pytest.mark.parametrize("announced", [True, False])
+@pytest.mark.parametrize("summary", ["Проверил состояние системы: всё спокойно.", ""])
+def test_only_direct_turns_with_authored_lines_join_the_observation_text(tmp_path, announced, summary):
+    row = seed_wake(tmp_path, **({"wake_summary": summary} if summary else {}))
+    now = wake._parse_iso(row["terminal_time"]["occurred_at"]) + 60
+    if announced:
+        _chat(tmp_path, _summary(row["task_id"], now - 30))
+    observation = wake.observe_wake(tmp_path, boundary=None, since=now - 3600, now=now, reason="heartbeat")
+    line = next(line for kind, _, line in observation.events if kind.startswith("direct_turn"))
+    assert (line in observation.full_text()) is bool(summary)
+    if summary:
+        assert line.endswith(": " + summary)
+    else:
+        assert "its line" not in line and row["result"] not in line
+    assert row["result"] not in observation.full_text(), "the whole note has its separate previous-wake slot"
+
+
+@pytest.mark.parametrize("summary", ["Checked the disk: 30 GiB free.", ""])
+def test_a_scheduled_runs_sentence_joins_its_terminal_line_and_its_note_stays_out(tmp_path, summary):
+    since = T0 - 3600
+    seed_result(tmp_path, "sched1", {"task_id": "sched1", "status": "completed", "ts": _iso(since + 5),
+        "updated_at": _iso(since + 5), "_schema_version": 1, "description": "Daily check", "metadata": {},
+        "result": "Private note.", "wake_silent": True, **({"wake_summary": summary} if summary else {})})
+    _chat(tmp_path, _summary("sched1", since + 10))
+    observation = _observe(tmp_path)
+    line = next(line for kind, _, line in observation.events if kind == "task_terminal" and "sched1" in line)
+    assert line.endswith(": Daily check" + (f": {summary}" if summary else ""))
+    assert "Private note." not in observation.full_text()
 
 
 def _iso(ts):
@@ -454,32 +644,33 @@ def test_render_substitutes_every_placeholder_and_keeps_every_event(tmp_path, mo
     _chat(tmp_path, *[_summary(f"t{index:02d}", T0 - 100 + index) for index in range(15)])
     observation = _observe(tmp_path, since=T0 - 5400)
     text = wake.render_wake_message(
-        repo, reason="heartbeat", last_wake_at=T0 - 5400, now=T0,
+        repo, drive_root=tmp_path, reason="heartbeat", last_wake_at=T0 - 5400, now=T0,
         level="act", disabled_tools=["toggle_evolution", "request_restart"], spent_usd=4.0, daily_usd=20.0,
         running=1, max_tasks=2, interval=3300, events=observation.full_text())
     for key in wake.PLACEHOLDERS:
         assert "{" + key + "}" not in text, key
     assert text.startswith("You are Ouroboros. No one has asked for a task")
-    assert "1 h 30 min ago" in text and "autonomy: act — everything your runtime mode allows except" in text
+    assert "1 h 30 min ago" in text and "autonomy: Acts — Also acts on its own:" in text
     assert "toggle_evolution, request_restart" in text
-    assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "tasks running: 1/2" in text
+    assert "allowance known spend (last 24 h): 4.00 / 20.00 USD" in text and "own tasks: 1/2" in text
     assert "next interval: 3300 s" in text
+    assert "previous_wake" in wake.PLACEHOLDERS and "- previous wake: none" in text
     assert "- wake cause: the scheduled wake time; events never move it, they are listed as observed" in text
     assert text.count("- task t") == 15 and "more; see" not in text  # every terminal stays an event
     quiet = wake.render_wake_message(
-        repo, reason="heartbeat", last_wake_at=0.0, now=T0, level="full",
+        repo, drive_root=tmp_path / "empty", reason="heartbeat", last_wake_at=0.0, now=T0, level="full",
         disabled_tools=[], spent_usd=None, daily_usd=0, running=0, max_tasks=0, interval=900,
         events=_observe(tmp_path / "empty", since=T0 + 1).full_text())
     assert "no wake since this process started" in quiet and "wake cause: the scheduled wake time" in quiet
     assert "unavailable tools: none" in quiet and "allowance known spend (last 24 h): unknown / 0.00 USD" in quiet
-    assert "including evolution" in quiet
+    assert "Also changes itself: its own code, its settings, connecting new places." in quiet
 
 
 def test_render_survives_a_missing_template_and_an_unreadable_task_store(tmp_path):
     (tmp_path / "task_results").mkdir()
     (tmp_path / "task_results" / "broken.json").write_text("{not json", encoding="utf-8")
     text = wake.render_wake_message(
-        tmp_path / "no-repo", reason="heartbeat", last_wake_at=0.0, now=T0, level="act",
+        tmp_path / "no-repo", drive_root=tmp_path, reason="heartbeat", last_wake_at=0.0, now=T0, level="act",
         disabled_tools=[], spent_usd=0.0, daily_usd=20.0, running=0, max_tasks=2, interval=3300,
         events=_observe(tmp_path, since=T0 - 1).full_text())
     assert text.startswith("[Wake-up · heartbeat]") and "{" not in text
@@ -495,6 +686,12 @@ def test_template_names_only_its_placeholders_and_the_wake_hints():
         assert hint in template, hint
     assert "a heartbeat, a task that finished, a project digest" not in template
     assert "up to 10 rounds" not in template and "300 seconds" not in template
+    assert template.splitlines(keepends=True)[0].encode() == (
+        b"You are Ouroboros. No one has asked for a task; this turn is yours. What matters to you now, "
+        b"and what would be worth understanding, continuing, or changing?\n")
+    assert "no message is sent; the summary still names the wake" in template
+    assert "Finish with summary: one plain sentence in your human's language" in template
+    assert "what you heard and did here" in (REPO / "prompts/FOCUS.md").read_text(encoding="utf-8")
 
 
 # --- the server projection --------------------------------------------------------
@@ -503,8 +700,10 @@ def test_template_names_only_its_placeholders_and_the_wake_hints():
 @pytest.fixture
 def describe(monkeypatch):
     import server
+    from ouroboros import consciousness_view
 
     holder = {}
+    monkeypatch.setattr(consciousness_view, "time", SimpleNamespace(time=lambda: wake._parse_iso("2027-01-15T12:00:00Z")))
     monkeypatch.setattr(server, "_consciousness", SimpleNamespace(status_snapshot=lambda: dict(holder)))
     return lambda snapshot, enabled=True: (holder.clear(), holder.update(snapshot), server._describe_bg_consciousness_state(enabled))[2]
 
@@ -567,11 +766,11 @@ def test_render_substitutes_placeholders_in_one_pass(tmp_path):
     _result(tmp_path, "odd01", ts=since + 10, status="completed", cost=0.1, description="check {daily_usd} later")
     _chat(tmp_path, _summary("odd01", since + 10))
     events = _observe(tmp_path, since=since).full_text()
-    text = wake.render_wake_message(repo, reason="heartbeat", last_wake_at=since, now=T0, level="act",
+    text = wake.render_wake_message(repo, drive_root=tmp_path, reason="heartbeat", last_wake_at=since, now=T0, level="act",
                                     disabled_tools=[], spent_usd=1.0, daily_usd=20.0, running=0, max_tasks=2,
                                     interval=900, events=events)
     assert text.startswith("spent 1.00 / 20.00;") and "check {daily_usd} later" in text
-    floor = wake.render_wake_message(repo, reason="heartbeat", last_wake_at=since, now=T0, level="act",
+    floor = wake.render_wake_message(repo, drive_root=tmp_path, reason="heartbeat", last_wake_at=since, now=T0, level="act",
                                      disabled_tools=[], spent_usd=1.0, daily_usd=20.0, running=0, max_tasks=2,
                                      interval=900, events=events, spent_is_floor=True)
     assert floor.startswith("spent at least 1.00 / 20.00;")

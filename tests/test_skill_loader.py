@@ -826,7 +826,7 @@ def test_vcs_cache_dirs_are_not_hashed(tmp_path):
 def test_symlink_escape_excluded_from_pack(tmp_path):
     """Phase 3 round 10 regression: a symlink inside ``skill_dir`` whose
     target resolves outside the tree must NOT be hashed — otherwise
-    ``compute_content_hash`` + ``_build_skill_file_packs`` would exfiltrate
+    ``compute_content_hash`` + ``skill_review_packs.payload_pack`` would exfiltrate
     arbitrary local file contents to external reviewer models."""
     import platform
     if platform.system() == "Windows":
@@ -1577,9 +1577,9 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
 def test_save_skill_grants_merges_partial_approvals(tmp_path):
     """A subsequent partial-key grant must not silently revoke
     previously-approved keys. The merge is bound to the same
-    content_hash + requested_keys; any change to either resets the
-    persisted state because the owner has not consented to the new
-    shape yet."""
+    content_hash; new bytes reset the persisted state because the
+    owner has not consented to them yet (a request grown by saved
+    Settings: tests/test_skill_grant_request_growth.py)."""
     from ouroboros.skill_loader import (
         load_skill_grants,
         save_skill_grants,

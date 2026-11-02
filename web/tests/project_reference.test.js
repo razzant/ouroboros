@@ -53,8 +53,10 @@ test('one intent, one control: both forms are the same node with the same name a
         const inline = projectReference(project);
         const footer = projectReference(project, { layout: 'footer' });
         // The callers pick one of two forms; the classes are the door's own business.
-        assert.equal(inline.className, 'chat-live-project-card-btn chat-quiz-project');
-        assert.equal(footer.className, 'chat-live-project-card-btn chat-live-bound-pointer');
+        // The capsule keeps a finger's target wherever its row makes it shorter (a question's voice line, a work
+        // portal's action row).
+        assert.equal(inline.className, 'chat-live-project-card-btn chat-quiz-project ui-hit-area');
+        assert.equal(footer.className, 'chat-live-project-card-btn chat-live-bound-pointer ui-hit-area');
         assert.deepEqual(shape(inline), shape(footer));
         assert.deepEqual(shape(inline), {
             tag: 'BUTTON', type: 'button', intent: 'open-project',
@@ -70,10 +72,12 @@ test('one intent, one control: both forms are the same node with the same name a
             assert.equal(node.attributes['aria-label'], 'Open project OpenClaw 2.0 <b>x</b>');
             assert.equal(node.title, node.attributes['aria-label']);
         }
-        for (const node of [inline, footer]) node.listeners.get('click')();
-        assert.deepEqual(sent, Array(2).fill({
-            type: 'ouro:open-project', detail: { project, task_id: '', quiz_id: '' },
-        }));
+        // A key's click has no detail; a pointer's counts its press, and the room it opens stays quiet.
+        inline.listeners.get('click')({ detail: 0 });
+        footer.listeners.get('click')({ detail: 1 });
+        assert.deepEqual(sent, [false, true].map((pointer) => ({
+            type: 'ouro:open-project', detail: { project, task_id: '', quiz_id: '', pointer },
+        })));
     });
 });
 
@@ -81,15 +85,25 @@ test('a question reference opens that exact question; any other layout or a stat
     withDom((sent) => {
         const node = projectReference({ id: 'launch', name: 'Launch', chat_id: 7 }, { taskId: 't1', quizId: 'q1' });
         assert.equal(node.attributes['aria-label'], 'Open this question in Launch');
-        node.listeners.get('click')();
-        assert.deepEqual(sent[0].detail, { project: { id: 'launch', name: 'Launch', chat_id: 7 }, task_id: 't1', quiz_id: 'q1' });
+        node.listeners.get('click')({ detail: 1 });
+        assert.deepEqual(sent[0].detail, { project: { id: 'launch', name: 'Launch', chat_id: 7 }, task_id: 't1', quiz_id: 'q1',
+            pointer: true });
         // Two forms only: the retired `bar` layout and `background` words, or any other, read as the inline capsule.
         for (const [layout, state] of [['bar', 'background'], ['sidebar', 'paused']]) {
             const odd = projectReference({ id: 'launch', name: 'Launch' }, { layout, state });
-            assert.equal(odd.className, 'chat-live-project-card-btn chat-quiz-project');
+            assert.equal(odd.className, 'chat-live-project-card-btn chat-quiz-project ui-hit-area');
             assert.equal(odd.children[2].textContent, '↗');
             assert.equal(odd.attributes['aria-label'], 'Open project Launch');
             assert.equal(odd.dataset.state, undefined);
+        }
+    });
+});
+
+test('the host and the reference share one never-named rule (project_display_name_parity.json)', () => {
+    const { cases } = JSON.parse(fs.readFileSync(path.join(WEB, 'tests/fixtures/project_display_name_parity.json'), 'utf8'));
+    withDom(() => {
+        for (const { id, name, expected } of cases) {
+            assert.equal(projectReference({ id, name }).children[1].textContent, expected || 'Project', `${id}/${name}`);
         }
     });
 });
@@ -110,8 +124,40 @@ test('a Project that was never named reads Project, and a name that arrives late
         assert.equal(late.children[1].textContent, 'Launch');
         assert.equal(late.title, 'Open this question in Launch');
         assert.equal(late.attributes['aria-label'], 'Open this question in Launch');
-        late.listeners.get('click')();
+        late.listeners.get('click')({ detail: 0 });
         assert.deepEqual(sent[0].detail.project, { id: 'launch', chat_id: 3, name: 'Launch' });
+    });
+});
+
+test('beside a title that already says the Project\'s name the capsule shows Project; the title\'s owner names it again (owner 26.10, B)', () => {
+    withDom(() => {
+        const made = [];
+        const prior = globalThis.MutationObserver;
+        globalThis.MutationObserver = class { constructor() { made.push(this); } observe() {} disconnect() {} };
+        try {
+            const title = new NodeStub('span');
+            title.textContent = 'Audit  the projects';
+            const node = projectReference({ id: 'p-1', name: 'audit the Projects' }, { layout: 'footer', taskId: 't-1', beside: title });
+            assert.equal(node.children[1].textContent, 'Project', 'the same words, case and spacing aside, are not said twice');
+            // What the glyph and the arrow say, words say in full: the tooltip and the accessible name keep the name.
+            assert.equal(node.attributes['aria-label'], 'Open project audit the Projects');
+            assert.equal(node.title, node.attributes['aria-label']);
+            // No watch on the title, so nothing to dispose (DEVELOPMENT "UI resources carry a disposer"): whoever renames
+            // the title names the reference again, from the reference's own target.
+            assert.equal(made.length, 0, 'the reference acquires no observer');
+            title.textContent = 'Audit the projects again';
+            nameProjectReference(node);
+            assert.equal(node.children[1].textContent, 'audit the Projects', 'a title that says something else leaves the name');
+            assert.equal(node.attributes['aria-label'], 'Open project audit the Projects');
+            title.textContent = 'Audit the Projects';
+            nameProjectReference(node);
+            assert.equal(node.children[1].textContent, 'Project');
+            // A Project named apart from its work, and any reference with no title beside it, shows its name.
+            assert.equal(projectReference({ id: 'p-2', name: 'Audit room' }, { layout: 'footer', beside: title }).children[1].textContent,
+                'Audit room');
+            assert.equal(projectReference({ id: 'p-1', name: 'Audit the Projects' }).children[1].textContent, 'Audit the Projects');
+            assert.equal(made.length, 0);
+        } finally { globalThis.MutationObserver = prior; }
     });
 });
 
@@ -145,8 +191,10 @@ test('one recipe in two forms: no outline, hairline, ring or tile, no width of i
         assert.doesNotMatch(body, /text-decoration\s*:\s*underline/, `${sel}: no underline-only state`);
         if (sel.includes('chat-live-project-icon')) assert.doesNotMatch(body, /background/, `${sel}: one fill, no tile`);
     }
-    // Only the recipe's own selectors size the capsule: no ancestor restyles it.
-    assert.deepEqual([...new Set(rules.map(({ sel }) => sel).filter((sel) => /^\.(system-message-actions|msg-routing-annotation|chat-bubble)/.test(sel)))], []);
+    // Only the recipe's own selectors size the capsule; the one placement that does is a question's voice line,
+    // whose 28px row and meta size it takes beside `Ouroboros` (owner 19.10, A). No other ancestor restyles it.
+    assert.deepEqual([...new Set(rules.map(({ sel }) => sel).filter((sel) => /^\.(system-message-actions|msg-routing-annotation|chat-bubble)/.test(sel)))],
+        ['.chat-bubble-voice > .chat-quiz-project.chat-live-project-card-btn', '.chat-bubble-voice > .chat-quiz-project .chat-live-project-name']);
     for (const { index } of css.matchAll(/\.(chat-live-project-card-btn|chat-quiz-project|chat-live-bound-pointer)[^{},]*:hover/g)) {
         const before = css.slice(0, index);
         const media = before.lastIndexOf('@media');

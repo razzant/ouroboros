@@ -8,7 +8,6 @@ fork) and a manifest with a configured ``managed_remote_url``.
 
 from __future__ import annotations
 
-import json
 import pathlib
 import subprocess
 
@@ -160,16 +159,16 @@ def test_an_install_without_a_managed_url_is_still_the_body_by_dir_and_common_gi
 
 
 def test_a_registered_copy_is_judged_by_its_recorded_source(system, tmp_path):
+    from ouroboros import subagent_worktrees
+
     data_dir = tmp_path / "data"
     body_copy = _repo(tmp_path / "copy-of-body")
     foreign_copy = _repo(tmp_path / "copy-of-other")
-    (data_dir / "state").mkdir(parents=True)
-    (data_dir / "state" / "subagent_worktrees.json").write_text(json.dumps({"worktrees": [
-        {"path": str(body_copy), "repo_dir": str(system), "source_is_system_repo": True,
-         "base_sha": "a" * 40, "kind": "self_worktree"},
-        {"path": str(foreign_copy), "repo_dir": str(tmp_path / "elsewhere"),
-         "source_is_system_repo": False, "base_sha": "b" * 40, "kind": "self_worktree"},
-    ]}), encoding="utf-8")
+    for row in ({"path": str(body_copy), "repo_dir": str(system), "source_is_system_repo": True,
+                 "base_sha": "a" * 40, "kind": "self_worktree"},
+                {"path": str(foreign_copy), "repo_dir": str(tmp_path / "elsewhere"),
+                 "source_is_system_repo": False, "base_sha": "b" * 40, "kind": "self_worktree"}):
+        subagent_worktrees._put_record(row, data_dir)  # each copy's own record file
 
     body = _fact(body_copy, system, data_dir=data_dir)
     other = _fact(foreign_copy, system, data_dir=data_dir)

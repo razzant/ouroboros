@@ -49,9 +49,9 @@ def test_question_batch_and_lineage_generations_preserve_full_forms(tmp_path, mo
         opened.append(args[0])
         return real_open(*args, **kwargs)
 
-    def lineage(root, ids):
+    def lineage(root, ids, **kwargs):
         generations.append(set(ids))
-        return real_lineage(root, ids)
+        return real_lineage(root, ids, **kwargs)
 
     def resolver(*args, **kwargs):
         resolvers.append(kwargs)

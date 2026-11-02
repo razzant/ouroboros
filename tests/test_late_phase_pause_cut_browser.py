@@ -1,8 +1,9 @@
 """The owner's Pause of an answered root's upkeep in the browser: it ends at once, nothing to resume.
 
 The real SPA (served static) talks to the REAL history and Pause endpoints and the
-real activity census; the upkeep is the real post-task coordinator and consolidation
-with the deterministic Light transport of ``test_late_phase_pause_cut``.
+real activity census; the upkeep is the real post-task coordinator and its fallback-draft
+stage (a two-send Light operation since the scratchpad pass is retired, #918) with the
+deterministic Light transport of ``test_late_phase_pause_cut``.
 Screenshots: ``OUROBOROS_UI_EVIDENCE_DIR``, else ``<tmp>/screenshots`` (retained by
 ``scripts/safe_test.py``).
 """
@@ -63,7 +64,7 @@ def test_browser_pause_ends_the_upkeep_at_once_with_the_delivered_answer_intact(
                            Route("/api/tasks/{task_id}/pause", api_task_pause, methods=["POST"])])
     app.state.drive_root = f.root
     entered, release, posts = threading.Event(), threading.Event(), []
-    f.light.hooks["scratchpad"] = [lambda: (entered.set(), release.wait(30))]
+    f.light.hooks["draft"] = [lambda: (entered.set(), release.wait(30))]
     threads = _start(f)
     try:
         assert entered.wait(10)
@@ -105,8 +106,8 @@ def test_browser_pause_ends_the_upkeep_at_once_with_the_delivered_answer_intact(
             release.set()
             _join(threads)
             checkpoint = load_task_result(f.root, ROOT)["root_phase_checkpoint"]
-            assert _phase(f) == "degraded" and f.light.kinds() == ["scratchpad"]
-            assert checkpoint["post_task_stop_reason"] == "owner_pause:skipped=scratchpad_consolidation,promotion"
+            assert _phase(f) == "degraded" and f.light.kinds() == ["draft"]
+            assert checkpoint["post_task_stop_reason"] == "owner_pause:skipped=memory_fallback_draft,promotion"
             assert read_fence(f.root, ROOT)["state"] == "released"
             # Nothing is saved to resume: the card settles on its answer, never Paused, no Resume.
             page.wait_for_function(

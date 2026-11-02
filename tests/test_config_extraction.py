@@ -13,16 +13,26 @@ from ouroboros import (
     runtime_limits,
     settings_defaults,
     settings_scales,
+    safety_config,
 )
 
 REPO = pathlib.Path(__file__).parents[1]
 PACKAGE = REPO / "ouroboros"
 
-_LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes, runtime_limits)
+_LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes, runtime_limits, safety_config)
 
 # New subscription capabilities belong to the same leaves, but did not exist on
 # the historical extraction's facade and need not add compatibility re-exports.
 _ADDED_OWNERS = {
+    "VALID_SUBAGENTS_MODES": settings_scales,
+    "normalize_subagents_mode": settings_scales,
+    "_safety_values": safety_config,
+    "_resolved_safety_configuration": safety_config,
+    "safety_configuration_requires_owner": safety_config,
+    "normalize_consciousness_safety": safety_config,
+    "OWNER_RULES_KEY": safety_config,
+    "_RULES_ADDRESS": safety_config,
+    "owner_rules_section": safety_config,
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
@@ -33,6 +43,8 @@ _ADDED_OWNERS = {
     "BUDGET_PROJECTION_RETRY_SEC": runtime_limits,
     # The usage store display read's short wait (then the fact is reported unavailable).
     "USAGE_DISPLAY_LOCK_TIMEOUT_SEC": runtime_limits,
+    # The kill-and-reap bound of one captured local Git read (vcs_read history and identity).
+    "GIT_READ_CAPTURE_TIMEOUT_SEC": runtime_limits,
     "IMMEDIATE_SETTINGS": settings_scales,
     "RESTART_REQUIRED_SETTINGS": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
@@ -117,8 +129,7 @@ _ADDED_OWNERS = {
     "defaults_for_settings_document": settings_scales,
     "_optional_bound_setting": runtime_limits,
     "get_max_rounds": runtime_limits,
-    "OPERATION_WINDOW_FALLBACK_SEC": runtime_limits,
-    "operation_window_sec": runtime_limits,
+    "IDLE_LEASE_MAX_SEC": runtime_limits,
     # #939: the numeric duration resolver is a leaf; config supplies its settings seam.
     "_CURRENT_TASK_CEILING": runtime_limits,
     "explicit_execution_timeout_sec": runtime_limits,
@@ -126,6 +137,11 @@ _ADDED_OWNERS = {
 }
 
 _MOVED_OWNERS = {
+    "get_safety_mode": safety_config,
+    "safety_configuration": safety_config,
+    "_guard_safety_configuration": safety_config,
+    "_migrate_consciousness_safety": safety_config,
+    "get_safety_model": model_slots,
     "WORKER_SPAWN_GRACE_SEC": runtime_limits,
     "ARTIFACT_COMPRESSION_TIMEOUT_SEC": runtime_limits,
     "WORKER_READY_WINDOW_SEC": runtime_limits,
@@ -232,8 +248,6 @@ _MOVED_OWNERS = {
     "get_max_active_subagents_per_root": runtime_limits,
     "get_max_subagent_depth": runtime_limits,
     "get_max_workers": runtime_limits,
-    "get_per_call_timeout_ceiling_sec": runtime_limits,
-    "get_plan_task_deadline_min_sec": runtime_limits,
     "get_post_task_evolution_budget_usd": runtime_limits,
     "get_restart_drain_max_sec": runtime_limits,
     "get_safety_call_timeout_sec": runtime_limits,
@@ -243,7 +257,6 @@ _MOVED_OWNERS = {
     "get_task_abs_ceiling_sec": runtime_limits,
     "get_task_idle_timeout_sec": runtime_limits,
     "get_vision_caption_timeout_sec": runtime_limits,
-    "get_update_letter_timeout_sec": runtime_limits,
     "get_ui_translation_timeout_sec": runtime_limits,
     "get_websearch_timeout_sec": runtime_limits,
 }
@@ -258,7 +271,7 @@ _PARENT_RETAINED = (
     "_settings_flag_enabled", "_settings_lock_path", "_acquire_settings_lock",
     "_release_settings_lock", "_coerce_setting_value", "load_settings",
     "load_settings_lock_held", "save_settings", "prepare_settings_for_persist",
-    "apply_settings_to_env", "get_runtime_mode", "get_safety_mode", "get_context_mode",
+    "apply_settings_to_env", "get_runtime_mode", "get_context_mode",
     "get_owner_context_mode", "initialize_runtime_mode_baseline",
     "_guard_context_mode_lowering", "_guard_safety_mode_lowering",
 )
@@ -377,5 +390,7 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     # (+ its shared «migrated» line) the read seam, the RC auditor and the boot notice read.
     # 538 -> 560: the main-interface key (OUROBOROS_UI_DIR) with its export exclusion and the
     # saved-choice precedence the config read and persist seams share.
-    assert counts["ouroboros.settings_defaults"] <= 560
+    # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
+    # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
+    assert counts["ouroboros.settings_defaults"] <= 568
     assert (PACKAGE / "config.py").is_file()

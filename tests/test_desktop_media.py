@@ -143,7 +143,7 @@ def test_non_linux_shells_keep_native_prompt(monkeypatch):
         assert media.attach_media_permissions(window, ORIGIN) is window
 
 
-def test_macos_bundle_declares_microphone_and_signed_audio_entitlement():
+def test_macos_bundle_declares_microphone_camera_and_signed_entitlements():
     spec = ast.parse((ROOT / "Ouroboros.spec").read_text())
     bundle = next(n for n in ast.walk(spec) if isinstance(n, ast.Call)
                   and isinstance(n.func, ast.Name) and n.func.id == "BUNDLE")
@@ -151,10 +151,10 @@ def test_macos_bundle_declares_microphone_and_signed_audio_entitlement():
     fields = {ast.literal_eval(k): v for k, v in zip(info.keys, info.values)}
     assert "microphone" in ast.literal_eval(fields["NSMicrophoneUsageDescription"]).lower()
     assert "speech recognition" in ast.literal_eval(fields["NSSpeechRecognitionUsageDescription"]).lower()
-    assert "NSCameraUsageDescription" not in fields
+    assert "camera" in ast.literal_eval(fields["NSCameraUsageDescription"]).lower()
     entitlements = plistlib.loads((ROOT / "entitlements.plist").read_bytes())
     assert entitlements["com.apple.security.device.audio-input"] is True
-    assert "com.apple.security.device.camera" not in entitlements
+    assert entitlements["com.apple.security.device.camera"] is True
 
 
 def test_launcher_keeps_display_probe_alias_and_origin_bound_hook():
@@ -163,3 +163,34 @@ def test_launcher_keeps_display_probe_alias_and_origin_bound_hook():
     source = (ROOT / "launcher.py").read_text()
     assert "attach_media_permissions(background.attach(window), url)" in source
     assert "def _on_closing()" in source  # Background owns the existing shutdown callback.
+
+
+def test_linux_bundle_restores_resource_paths_after_frozen_hooks(tmp_path, monkeypatch):
+    import os
+
+    # XDG uses ':' separators: keep the fixture free of Windows drive letters.
+    monkeypatch.chdir(tmp_path)
+    bundle = Path('.')
+    native = bundle / 'linux-gtk'
+    native.mkdir()
+    (native / 'manifest.json').write_text('{}')
+    monkeypatch.setattr(os, 'environ', {'GI_TYPELIB_PATH': '/frozen/gi_typelibs',
+                                      'PYWEBVIEW_GUI': 'qt', 'XDG_DATA_DIRS': '/session/share'})
+    media.prepare_linux_bundle(bundle)
+    assert Path.cwd() == tmp_path / native
+    assert os.environ['PYWEBVIEW_GUI'] == 'gtk'
+    assert os.environ['GI_TYPELIB_PATH'] == str(native / 'lib/x86_64-linux-gnu/girepository-1.0')
+    assert os.environ['GIO_MODULE_DIR'].startswith(str(native))
+    monkeypatch.chdir(tmp_path)
+    media.prepare_linux_bundle(bundle)
+    assert os.environ['XDG_DATA_DIRS'] == f'{native / "share"}:/session/share'
+
+
+def test_source_install_without_bundle_keeps_backend_environment(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(os, 'environ', {'PYWEBVIEW_GUI': 'qt'})
+    media.prepare_linux_bundle(tmp_path)
+    assert Path.cwd() == tmp_path
+    assert dict(os.environ) == {'PYWEBVIEW_GUI': 'qt'}

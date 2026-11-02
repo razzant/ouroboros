@@ -38,6 +38,7 @@ from ouroboros.loop_llm_call import (
     provider_no_call_source,
     transient_retry_max,
 )
+from tests._shared import saved_settings
 
 MESSAGES = [{"role": "user", "content": "work"}]
 OK_RESPONSE = ({"role": "assistant", "content": "done"}, {"prompt_tokens": 1, "completion_tokens": 1})
@@ -303,20 +304,20 @@ def test_exhaustion_adds_one_host_fact_and_the_next_ordinary_round_answers(tmp_p
         assert key not in usage
 
 
-def test_repeated_exhaustion_runs_to_the_existing_round_limit(tmp_path, loop_env, no_sleep, monkeypatch):
-    """No separate counter: every exhausted round leaves one fact and the loop goes on until an
-    existing limit (here the round limit, whose own forced call reads every fact) ends it."""
-    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "3")
+def test_repeated_exhaustion_ends_without_purchasing_a_recap(tmp_path, loop_env, no_sleep, monkeypatch):
+    """The owner chose finite recovery, not repeated ordinary rounds. No eligible source
+    view or configured reserve here: two empty replies hand back the saved work."""
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     llm = _ScriptedLLM(*[_incident_reply(index) for index in range(6)])
     result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
 
-    assert llm.calls == 4  # rounds 1-3, then the round-limit rail's forced call
-    assert [len(_host_facts(request["messages"])) for request in llm.requests] == [0, 1, 2, 3]
-    assert [row["round"] for row in _events(tmp_path, "llm_empty_response")] == [1, 2, 3, 4]
+    assert llm.calls == 2
+    assert [len(_host_facts(request["messages"])) for request in llm.requests] == [0, 1]
+    assert [row["round"] for row in _events(tmp_path, "llm_empty_response")] == [1, 2]
     assert _events(tmp_path, "provider_incomplete_response") == []
-    assert usage["reason_code"] == "round_limit" and usage.get("execution_status") != "infra_failed"
-    assert trace["forced_finalization"]["reason_code"] == "round_limit"
-    assert result.startswith("⚠️ Task exceeded MAX_ROUNDS (3)")
+    assert usage["reason_code"] == "output_recovery_exhausted" and usage["execution_status"] == "infra_failed"
+    assert trace["forced_finalization"]["source"] == "output_exhaustion_no_recap"
+    assert "Work is incomplete" in result
 
 
 def test_exhaustion_over_an_unresolved_attempt_starts_no_new_generation(tmp_path, loop_env, no_sleep):
@@ -410,7 +411,7 @@ def test_an_exhausted_candidate_ends_the_walk_before_the_next_configured_route(t
                                              fallbacks="other/model,third/model")
     assert result == "done" and llm.calls == 3
     primary, fallback, next_round = llm.requests
-    assert fallback["model"] == "other/model" and next_round["model"] == primary["model"]
+    assert fallback["model"] == next_round["model"] == "other/model"  # informed chance stays on the answering route
     assert len(_host_facts(next_round["messages"])) == 1
 
 

@@ -14,6 +14,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests._work_projection_shared import work_fields
+from tests.test_design_system_gate_browser import rest
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -179,8 +180,8 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
             assert (dot['width'], dot['height']) == size, (project, dot)
             assert dot['animation'] == ('status-mark-bounce' if shape == 'moving' and not reduced else 'none')
             if shape == 'moving' and not reduced:
-                assert dot['duration'] == '1.4s'
-                assert float(dot['delay'].removesuffix('s')) == pytest.approx(index * .2)
+                assert dot['duration'] == '1.15s'
+                assert float(dot['delay'].removesuffix('s')) == pytest.approx(index * .15)
 
     def capture(suffix):
         setup_browser.capture(page, f'sidebar-{theme}-{width}-{reduced}-{suffix}')
@@ -248,11 +249,11 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     kebab = page.locator(WORK).locator('..').locator('.nav-project-kebab')
     kebab.focus()
     page.keyboard.press('Enter')
-    menu = page.locator('body > .project-row-menu')
+    menu = page.locator('body > .project-row-menu:not([data-leaving])')
     menu.wait_for()
     page.keyboard.press('End')
     page.evaluate("""() => { window.sidebarKept = {
-        row:document.querySelector('[data-project-id="p-work"]'), menu:document.querySelector('.project-row-menu'),
+        row:document.querySelector('[data-project-id="p-work"]'), menu:document.querySelector('.project-row-menu:not([data-leaving])'),
         focus:document.activeElement, marker:document.querySelector('[data-project-id="p-work"] .status-mark')}; }""")
     owner_wait = activity('work', 'p-work', required_question=dict(wait_for_answer=True, owner_wait_state='waiting'))
     refresh(active_chat_activities=[owner_wait])
@@ -268,7 +269,7 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     assert page.locator(WORK).get_attribute('aria-label').endswith(
         'Finalizing… · A question waits for your answer · new messages')
     assert page.evaluate("""() => sidebarKept.row === document.querySelector('[data-project-id="p-work"]')
-        && sidebarKept.menu === document.querySelector('.project-row-menu') && sidebarKept.focus === document.activeElement
+        && sidebarKept.menu === document.querySelector('.project-row-menu:not([data-leaving])') && sidebarKept.focus === document.activeElement
         && sidebarKept.marker === document.querySelector('[data-project-id="p-work"] .status-mark')""")
     assert page.locator('.nav-project-row').evaluate_all('els => els.map(el=>el.dataset.projectId)') == order
     capture('mixed-menu')
@@ -388,6 +389,8 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     assert empty.get_attribute('aria-current') == 'page'
     assert page.locator('#project-panel-title').inner_text() == 'Empty room'
     if width < 700:
+        # The drawer stays painted for one beat while the room changes inside the card, then closes (owner 4A).
+        rest(page)
         assert not page.locator('#primary-sidebar').evaluate("el=>el.classList.contains('open')")
     page.locator('#project-panel-close').click()
     page.locator('#project-panel').wait_for(state='hidden')
@@ -413,7 +416,15 @@ RAIL = """() => {
             active: row.classList.contains('active'), row: rect(row), label: rect(label),
             ellipsized: label.scrollWidth > label.clientWidth, marker: rect(mark),
             drawn: style.display !== 'none' && style.visibility !== 'hidden', opacity: style.opacity,
-            dots: dots.map((dot) => rect(dot).left - rect(mark).left),
+            // Where each dot lies in the column: a moving dot's wave lifts and scales it for a moment, so its place
+            // is read with the wave suspended (restoring it restarts the wave in the page's one phase).
+            dots: dots.map((dot) => {
+                const wave = dot.style.animation;
+                dot.style.animation = 'none';
+                const left = rect(dot).left - rect(mark).left;
+                dot.style.animation = wave;
+                return left;
+            }),
             // A hollow ring (unconfirmed) draws its ink in its border.
             dotColor: (({ backgroundColor: fill, borderTopColor: ring }) => (fill === 'rgba(0, 0, 0, 0)' ? ring : fill))(
                 getComputedStyle(mark.firstElementChild)), rowColor: getComputedStyle(row).color,
@@ -551,11 +562,11 @@ def test_sidebar_activity_rail_geometry(subscription_ui, width, theme, reduced):
     kebab.focus()
     same_rail(reference, assert_rail(page, rail_rows(page), states))
     page.keyboard.press('Enter')
-    page.locator('body > .project-row-menu').wait_for()
+    page.locator('body > .project-row-menu:not([data-leaving])').wait_for()
     same_rail(reference, assert_rail(page, rail_rows(page), states))
     capture('menu')
     page.keyboard.press('Escape')
-    page.locator('body > .project-row-menu').wait_for(state='detached')
+    page.locator('body > .project-row-menu:not([data-leaving])').wait_for(state='detached')
 
     # An incomplete census retains every observed room as an unconfirmed ring; new messages keep their crimson.
     refresh(active_chat_activities=[], active_chat_activities_complete=False)

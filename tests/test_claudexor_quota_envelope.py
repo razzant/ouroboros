@@ -62,7 +62,9 @@ def _spent(subject_id: str) -> dict:
     }
 
 
-def test_route_health_contradictory_same_subject_absence_fails_open():
+def test_route_health_same_subject_absence_cannot_mask_a_dated_block():
+    """OB1851: a refresh gap beside the subject's own dated, unexpired block is a
+    constraint on that subject, not an alternative; the block's reset is the recheck."""
     class Gateway:
         reads = 0
 
@@ -85,7 +87,7 @@ def test_route_health_contradictory_same_subject_absence_fails_open():
             raise AssertionError("route health must not perform a second quota read")
 
     gateway = Gateway()
-    assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (False, "")
+    assert _exhausted_window(gateway, "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
     assert gateway.reads == 1
 
 
@@ -126,7 +128,7 @@ def test_real_gateway_route_health_performs_one_physical_quota_get():
             transport=httpx.MockTransport(handler),
         )
         assert _exhausted_window(
-            gateway, "claude", pinned_profile="proton4") == (False, "")
+            gateway, "claude", pinned_profile="proton4") == (True, "2099-01-01T00:00:00Z")
 
     assert requests == ["GET /v2/quota"]
 

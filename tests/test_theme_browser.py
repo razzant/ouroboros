@@ -59,6 +59,7 @@ def test_theme_choice_reload_and_main_surfaces(subscription_ui):
         page.locator(f'[data-nav-page="{name}"]').click()
         page.wait_for_selector(f'#page-{name}.active')
         capture(page, f'theme-light-{name}')
+    ui['errors'].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     assert page.locator('html').get_attribute('data-theme') == 'light'
@@ -150,6 +151,7 @@ def test_the_desktop_caption_hears_only_the_top_document(subscription_ui):
     # The page names itself by when it began; the reload that replaces it began later.
     began = page.evaluate('performance.timeOrigin')
     assert {token for _path, _theme, token, _sequence in calls} == {began}
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     page.evaluate("window.dispatchEvent(new CustomEvent('pywebviewready'))")
@@ -184,7 +186,8 @@ def test_light_contrast_and_mounted_views_follow_the_theme(subscription_ui):
         node.textContent='graph TD; A[Readable] --> B[Theme]';root.append(node);
         const chart=document.createElement('div');chart.className='md-chart';
         chart.textContent=JSON.stringify({type:'line',data:{labels:['a','b'],
-            datasets:[{label:'series',data:[1,2]}]}});root.append(chart);
+            datasets:[{label:'series',data:[1,2]},{label:'authored',data:[2,1],borderColor:'#123456',
+            backgroundColor:'#654321',ouroSeries:0}]}});root.append(chart);
         document.querySelector('#chat-messages').append(root);enhanceChatMarkdown(root);
     }""")
     page.locator('[data-nav-page="chat"]').click()
@@ -193,6 +196,15 @@ def test_light_contrast_and_mounted_views_follow_the_theme(subscription_ui):
     assert '#f3e8ec' in page.locator('#mounted-views').inner_html().lower()
     before = page.evaluate(
         "() => globalThis.Chart.getChart(document.querySelector('#mounted-views canvas')).data.datasets[0].data")
+    # An author's chart keeps its own series colours: the host's default series never reach it,
+    # even when its source names the host's mark (chat_markdown.js keeps only its own keys).
+    authored_series = """() => {
+        const c = globalThis.Chart.getChart(document.querySelector('#mounted-views canvas'));
+        return [c.data.datasets.map((d) => [d.borderColor ?? null, d.backgroundColor ?? null, 'ouroSeries' in d]),
+            [...new Set(c.getDatasetMeta(1).data.map((el) => `${el.options.borderColor} ${el.options.backgroundColor}`))]];
+    }"""
+    series_before = page.evaluate(authored_series)
+    assert series_before == [[[None, None, False], ['#123456', '#654321', False]], ['#123456 #654321']], series_before
     open_appearance(page).locator('[data-theme-choice="dark"]').click()
     page.wait_for_function("() => document.documentElement.dataset.theme === 'dark'")
     dark_primary = page.evaluate(
@@ -207,6 +219,7 @@ def test_light_contrast_and_mounted_views_follow_the_theme(subscription_ui):
     assert after['data'] == before, 'a repaint must not rebuild the chart'
     assert after['color'] == page.evaluate(
         "getComputedStyle(document.documentElement).getPropertyValue('--chart-text').trim()")
+    assert page.evaluate(authored_series) == series_before
 
 
 # Owns-a-listener accounting: which `ouro:theme-changed` subscriptions a widget
@@ -242,20 +255,93 @@ WIDGET_CHART = """() => {
     };
 }"""
 
+# The default series the owner approved (#474, 27.10), in order; a fifth series takes the first again.
+APPROVED_SERIES = {'light': ['#c0284c', '#2c68d0', '#1e9c76', '#bd6a00'],
+                   'dark': ['#ee6780', '#60a5fa', '#3fdca3', '#fbbf24']}
+
+# A settled host chart's series as Chart.js draws them (the line and every point or bar), and its
+# canvas against a fresh chart of the same data drawn in the approved colours: a colour left
+# behind anywhere differs in pixels. Also counts which approved colours the canvas shows at all.
+SERIES_RENDER = """async ({ selector, approved }) => {
+    const canvas = document.querySelector(selector);
+    const chart = canvas && globalThis.Chart.getChart(canvas);
+    if (!chart || globalThis.Chart.animator.running(chart)) return null;
+    const theme = document.documentElement.dataset.theme;
+    const rgb = (hex) => [16, 8, 0].map((shift) => (parseInt(hex.slice(1), 16) >> shift) & 255);
+    const want = chart.data.datasets.map((_, index) => {
+        const hex = approved[theme][index % 4];
+        return [hex, `rgba(${rgb(hex).join(', ')}, 0.22)`];
+    });
+    const drawn = chart.data.datasets.map((dataset, index) => {
+        const meta = chart.getDatasetMeta(index);
+        return { declared: [dataset.borderColor, dataset.backgroundColor], line: meta.dataset?.options.borderColor ?? null,
+                 marks: [...new Set(meta.data.map((el) => `${el.options.borderColor} ${el.options.backgroundColor}`))] };
+    });
+    const { applyChartTheme } = await import('/static/modules/theme_palette.js');
+    const box = canvas.parentElement.getBoundingClientRect();
+    const twin = document.createElement('div');
+    twin.style.cssText = `position:fixed;left:-20000px;top:0;width:${box.width}px;height:${box.height}px`;
+    const twinCanvas = twin.appendChild(document.createElement('canvas'));
+    document.body.append(twin);
+    const data = JSON.parse(JSON.stringify(chart.data));
+    data.datasets.forEach((dataset, index) => { [dataset.borderColor, dataset.backgroundColor] = want[index]; delete dataset.ouroSeries; });
+    const options = { ...JSON.parse(canvas.dataset.widgetChartConfig).options, animation: false };
+    const reference = new globalThis.Chart(twinCanvas, { type: chart.config.type, data, options });
+    applyChartTheme(reference);
+    const pixels = (c) => c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const live = pixels(canvas), fresh = pixels(twinCanvas);
+    let differing = live.length === fresh.length ? 0 : -1;
+    for (let i = 0; differing >= 0 && i < live.length; i += 4) {
+        if ([0, 1, 2, 3].some((k) => Math.abs(live[i + k] - fresh[i + k]) > 8)) differing += 1;
+    }
+    reference.destroy();
+    twin.remove();
+    const shown = Object.fromEntries([...approved.light, ...approved.dark].map((hex) => [hex, 0]));
+    for (let i = 0; i < live.length; i += 4) {
+        if (live[i + 3] < 200) continue;
+        for (const hex of Object.keys(shown)) {
+            const [r, g, b] = rgb(hex);
+            if (Math.abs(live[i] - r) + Math.abs(live[i + 1] - g) + Math.abs(live[i + 2] - b) <= 18) shown[hex] += 1;
+        }
+    }
+    return { theme, type: chart.config.type, want, drawn, differing, shown };
+}"""
+
+
+def assert_series(page, selector):
+    """The settled chart under ``selector`` draws exactly the approved series of the painted theme."""
+    page.wait_for_function('(selector) => { const c = globalThis.Chart.getChart(document.querySelector(selector)); '
+                           'return Boolean(c) && !globalThis.Chart.animator.running(c); }', arg=selector, polling=100)
+    facts = page.evaluate(SERIES_RENDER, {'selector': selector, 'approved': APPROVED_SERIES})
+    for (stroke, inner), drawn in zip(facts['want'], facts['drawn']):
+        assert drawn['declared'] == [stroke, inner], facts
+        assert drawn['line'] in (None, stroke), facts
+        assert drawn['marks'] == [f'{stroke} {inner}'], facts
+    assert facts['differing'] == 0, facts
+    other = 'dark' if facts['theme'] == 'light' else 'light'
+    assert not [hex for hex in APPROVED_SERIES[other] if facts['shown'][hex]], facts
+    assert all(facts['shown'][stroke] for stroke, _ in facts['want']), facts
+    return facts
+
 
 def test_widget_chart_repaints_in_place_and_releases_its_theme_listener(subscription_ui):
-    """A declarative Widgets chart through the real page: mount, data update,
-    OS appearance switch while visible, dispose on leave, remount after a switch."""
+    """A declarative Widgets chart through the real page: mount, data update with
+    a fifth series, OS appearance switch while visible and again while new data
+    animates, dispose on leave, remount after a switch. Its series follow the
+    painted theme as drawn, not only as declared (#474)."""
     ui = subscription_ui
     page = ui['page']
-    first, refreshed = [3, 5, 4], [6, 2, 7]
-    series = {'data': first}
+    first, refreshed, later = [3, 5, 4], [6, 2, 7], [1, 8, 3]
+    payloads = iter([refreshed, later])
+    series = {'data': first, 'count': 3}
 
     def extension(route):
         if route.request.method == 'POST':
-            series['data'] = refreshed
+            series['data'], series['count'] = next(payloads), 5
         route.fulfill(content_type='application/json', body=json.dumps({'chart': {
-            'labels': ['Mon', 'Tue', 'Wed'], 'datasets': [{'label': 'Requests', 'data': series['data']}]}}))
+            'labels': ['Mon', 'Tue', 'Wed'], 'datasets': [
+                {'label': f'Requests {index + 1}', 'data': [value + index for value in series['data']]}
+                for index in range(series['count'])]}}))
 
     page.route('**/api/widgets', lambda r: r.fulfill(content_type='application/json', body=json.dumps({'ui_tabs': [{
         'skill': 'theme_probe', 'tab_id': 'traffic', 'title': 'Traffic',
@@ -285,46 +371,123 @@ def test_widget_chart_repaints_in_place_and_releases_its_theme_listener(subscrip
         assert chart['grid'] == [chart['line']] * 2, chart
 
     # Mount: the chart is born in the palette that is painted right now.
+    canvas = '#page-widgets canvas[data-widget-chart-key]'
     page.locator('[data-nav-page="widgets"]').click()
     page.wait_for_selector('#page-widgets.active')
     dark = chart_when(f'c.data.join() === "{",".join(map(str, first))}" && c.settled')
     assert_themed(dark)
+    assert_series(page, canvas)
     assert page.evaluate('widgetThemeListeners()') == 1
-    page.evaluate("window.widgetChart = globalThis.Chart.getChart("
-                  "document.querySelector('#page-widgets canvas[data-widget-chart-key]'))")
-    # Update: a widget action feeds new data into the SAME instance.
-    page.locator('#page-widgets [data-widget-action]').click()
-    updated = chart_when(f'c.data.join() === "{",".join(map(str, refreshed))}" && c.settled')
-    assert updated['probe'], 'a data update must reuse the mounted chart'
-    assert_themed(updated)
+    page.evaluate(f"window.widgetChart = globalThis.Chart.getChart(document.querySelector('{canvas}'))")
     capture(page, 'theme-dark-widget-chart')
     # The OS turns light while Widgets is on screen: repaint, not rebuild.
     page.emulate_media(color_scheme='light')
     page.wait_for_function("document.documentElement.dataset.theme === 'light'")
     light = chart_when('c.color === c.text && c.settled')
     assert light['probe'], 'a theme switch must not replace the mounted chart'
-    assert light['data'] == refreshed, 'a theme switch must keep the plotted data'
+    assert light['data'] == first, 'a theme switch must keep the plotted data'
     assert_themed(light)
+    assert_series(page, canvas)
     assert (light['text'], light['line']) != (dark['text'], dark['line'])
     assert page.evaluate('widgetThemeListeners()') == 1
+    # Update: a widget action feeds new data, five series now, into the SAME instance, in Light.
+    page.locator('#page-widgets [data-widget-action]').click()
+    updated = chart_when(f'c.data.join() === "{",".join(map(str, refreshed))}" && c.settled')
+    assert updated['probe'], 'a data update must reuse the mounted chart'
+    assert_themed(updated)
+    assert len(assert_series(page, canvas)['want']) == 5
     capture(page, 'theme-light-widget-chart')
+    # New data still animating when the OS turns dark again: the same instance lands in Dark.
+    page.locator('#page-widgets [data-widget-action]').click()
+    chart_when(f'c.data.join() === "{",".join(map(str, later))}" && !c.settled')
+    page.emulate_media(color_scheme='dark')
+    redark = chart_when(f'c.text === {json.dumps(dark["text"])} && c.settled')
+    assert redark['probe'] and redark['data'] == later, redark
+    assert_themed(redark)
+    assert_series(page, canvas)
 
     # Dispose: leaving Widgets destroys the chart and releases its subscription,
     # so a later switch reaches nothing that belonged to the old mount.
     control = open_appearance(page)
     assert page.evaluate('widgetThemeListeners()') == 0
     assert page.evaluate('window.widgetChart.canvas === null'), 'leaving must destroy the chart'
-    control.locator('[data-theme-choice="dark"]').click()
-    assert page.locator('html').get_attribute('data-theme') == 'dark'
+    control.locator('[data-theme-choice="light"]').click()
+    assert page.locator('html').get_attribute('data-theme') == 'light'
     assert page.evaluate('widgetThemeListeners()') == 0
     # Remount after the switch: a fresh instance, already in the new palette.
     page.locator('[data-nav-page="widgets"]').click()
     remounted = chart_when('!c.probe && c.settled')
-    assert remounted['data'] == refreshed
-    assert (remounted['text'], remounted['line']) == (dark['text'], dark['line'])
+    assert remounted['data'] == later
+    assert (remounted['text'], remounted['line']) == (light['text'], light['line'])
     assert_themed(remounted)
+    assert_series(page, canvas)
     assert page.evaluate('widgetThemeListeners()') == 1
     assert not [path for path, _ in ui['posts'] if path == '/api/settings']
+
+
+CARD_CANVAS = '.chat-card[data-card-id="card-plan"] canvas[data-widget-chart-key]'
+CARD_THEME_LISTENERS = WIDGET_THEME_LISTENERS.replace('widgets\\.js', 'card_components\\.js')
+assert CARD_THEME_LISTENERS != WIDGET_THEME_LISTENERS
+
+
+def test_living_card_chart_series_follow_the_theme_and_a_new_revision(subscription_ui):
+    """A living card's bar chart through the real chat feed (chat_cards.js, card_components.js):
+    born in the painted theme with its fifth series in the first colour, repainted in place when
+    the OS switches while it is on screen, drawn again for a new revision with another series
+    count, and the replaced mount's chart and theme listener released (#474)."""
+    ui = subscription_ui
+    page = ui['page']
+    sockets, shown = [], {'revision': 1}
+    sports = ['Running', 'Cycling', 'Swimming', 'Strength', 'Stretching']
+
+    def body(revision):
+        count = 5 if revision == 1 else 3
+        return {'card_id': 'card-plan', 'kind': 'components', 'title': 'Training plan', 'chat_id': 1,
+                'fallback_text': 'Training plan by week', 'revision': revision, 'pinned': False,
+                'submissions_summary': [],
+                'components': [{'type': 'chart', 'id': 'plan', 'label': 'Training plan', 'chart_type': 'bar',
+                                'unit': 'min', 'path': 'plan'}],
+                'data': {'plan': {'labels': ['Week 1', 'Week 2', 'Week 3', 'Week 4'], 'datasets': [
+                    {'label': sport, 'data': [30 + 10 * index + revision, 40, 35 + index, 20]}
+                    for index, sport in enumerate(sports[:count])]}}}
+
+    card = {'card_id': 'card-plan', 'kind': 'components', 'title': 'Training plan'}
+    page.route('**/api/chat/history*', lambda r: r.fulfill(content_type='application/json', body=json.dumps({
+        'messages': [{'role': 'user', 'text': 'Plan my November training by week.', 'ts': '2026-10-27T10:00:00Z'},
+                     {'role': 'assistant', 'msg_type': 'card', 'card': {**card, 'revision': 1},
+                      'fallback_text': 'Training plan by week', 'text': 'Training plan by week',
+                      'ts': '2026-10-27T10:00:01Z'}], 'progress': []})))
+    page.route('**/api/cards/card-plan', lambda r: r.fulfill(content_type='application/json',
+                                                             body=json.dumps(body(shown['revision']))))
+    page.route_web_socket('**/ws', lambda ws: (sockets.append(ws), ws.send(json.dumps({'type': 'heartbeat'}))))
+    page.add_init_script(CARD_THEME_LISTENERS)
+    page.emulate_media(color_scheme='dark')
+    page.goto(ui['url'])
+    page.wait_for_selector('#chat-input')
+    page.wait_for_selector(CARD_CANVAS)
+    born = assert_series(page, CARD_CANVAS)
+    assert born['type'] == 'bar' and len(born['want']) == 5 and born['want'][4] == born['want'][0], born
+    assert page.evaluate('widgetThemeListeners()') == 1
+    page.evaluate(f"window.cardChart = globalThis.Chart.getChart(document.querySelector('{CARD_CANVAS}'))")
+    capture(page, 'theme-dark-card-chart')
+    page.emulate_media(color_scheme='light')
+    page.wait_for_function("document.documentElement.dataset.theme === 'light'")
+    assert_series(page, CARD_CANVAS)
+    assert page.evaluate(f"globalThis.Chart.getChart(document.querySelector('{CARD_CANVAS}')) === window.cardChart"), \
+        'a theme switch must repaint the card chart, not rebuild it'
+    capture(page, 'theme-light-card-chart')
+    # A new revision: the feed draws the card again, three series now, and the old mount lets go.
+    shown['revision'] = 2
+    sockets[-1].send(json.dumps({'type': 'card_state', 'card': {**card, 'revision': 2}, 'submissions_summary': [],
+                                 'submissions_dropped': 0, 'ts': '2026-10-27T10:01:00Z'}))
+    page.wait_for_function(f"() => {{ const c = globalThis.Chart.getChart(document.querySelector('{CARD_CANVAS}')); "
+                           "return Boolean(c) && c !== window.cardChart && c.data.datasets.length === 3; }")
+    assert page.evaluate('window.cardChart.canvas === null'), 'the replaced mount must destroy its chart'
+    assert len(assert_series(page, CARD_CANVAS)['want']) == 3
+    assert page.evaluate('widgetThemeListeners()') == 1
+    page.emulate_media(color_scheme='dark')
+    page.wait_for_function("document.documentElement.dataset.theme === 'dark'")
+    assert_series(page, CARD_CANVAS)
 
 
 def test_module_widget_theme_retains_state_when_hidden_and_releases_on_stop(subscription_ui):

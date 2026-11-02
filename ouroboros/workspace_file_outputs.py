@@ -121,26 +121,6 @@ def _archive_files(records, cap_dir):
     return files
 
 
-def copy_snapshot_file_inputs(source, destination, paths):
-    """Copy selected inputs outside Git's object database and retain their identities."""
-    from ouroboros.artifacts import copy_artifact_file
-    baseline = {}
-    for relative in paths:
-        original, copied = _path(source, relative), _path(destination, relative)
-        before = _side(original)
-        if before is None:
-            raise OSError(f"snapshot input disappeared before copy: {relative}")
-        if before["kind"] == "file":
-            copy_artifact_file(original, copied, expected=before)
-        else:
-            copied.parent.mkdir(parents=True, exist_ok=True)
-            copied.symlink_to(before["link_target"])
-        if not _matches(_side(copied), before, exact_mode=True):
-            raise OSError(f"snapshot input changed during copy: {relative}")
-        baseline[relative] = before
-    return baseline
-
-
 def changed_file_inputs(root, file_baseline):
     """Compare only materialized inputs, including files subsequently deleted."""
     changed = []
@@ -208,6 +188,30 @@ def file_output_changes(manifest, cap_dir):
 def verify_file_outputs(rows, target):
     """Verify already-applied shared-workspace results without preparing another apply."""
     return all(_matches(_side(_path(target, row["path"])), row["after"], exact_mode=True) for row in rows)
+
+
+def file_output_states(rows, target):
+    """Each file result's state now against its exact captured postimage (bytes, kind, mode).
+
+    ``unchanged``, ``changed`` (another kind now included: a directory, FIFO, socket or device),
+    ``removed`` (captured present, now absent), ``recreated`` (captured absent, now present) or
+    ``unknown`` when the path cannot be read; never a postimage taken from the live tree.
+    """
+    states = {}
+    for row in rows:
+        path = None
+        try:
+            path = _path(target, row["path"])
+            current = _side(path)
+        except ValueError:  # not a path in the target (unknown), or no file or symlink now (a type change)
+            states[row["path"]] = ("unknown" if path is None else "recreated" if row["after"] is None else "changed")
+            continue
+        except OSError:
+            states[row["path"]] = "unknown"
+            continue
+        states[row["path"]] = ("unchanged" if _matches(current, row["after"], exact_mode=True) else
+                               "recreated" if row["after"] is None else "removed" if current is None else "changed")
+    return states
 
 
 class PreparedFileOutputs:
@@ -298,15 +302,19 @@ def _directory_direct_artifacts(
     root: Path, artifact_dir: Path, task: dict, existing: dict,
 ) -> tuple[list[dict], dict] | None:
     """Record direct folder effects without inventing a before-image or scanning the tree."""
-    from ouroboros.headless_status import ARTIFACT_STATUS_READY
+    from ouroboros.headless_status import ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_READY
     from ouroboros.workspace_patch_capture import _acting_constraint_from_task, _preflight_head_from_task
     from ouroboros.utils import atomic_write_json, utc_now_iso
     from ouroboros.workspace_admission import has_git_metadata
 
     root = root.resolve(strict=False)
+    meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    # Admitted while missing (#1799) and still absent: no tree to diff, and nothing remains there.
+    absent = (not root.exists() and not root.is_symlink()
+              and (meta.get("workspace_availability") or {}).get("state") == "missing")
     constraint = _acting_constraint_from_task(task)
     surface = str((task.get("task_constraint") or {}).get("surface") or "")
-    if (not root.is_dir() or surface in {"self_worktree", "genesis"}
+    if (not (root.is_dir() or absent) or surface in {"self_worktree", "genesis"}
             or (constraint and constraint.base_sha) or _preflight_head_from_task(task)
             or has_git_metadata(root)):
         return None
@@ -333,6 +341,11 @@ def _directory_direct_artifacts(
                 "bytes; other shell, GUI or external effects and the full changed-file set are unknown. "
                 "No full rollback is available.",
     }
+    if absent:
+        manifest.update(status=ARTIFACT_STATUS_READY if outputs else ARTIFACT_STATUS_MISSING, before="absent",
+                        note="The selected folder was missing when this work was admitted and is still absent, "
+                             "so nothing remains there to capture. Registered outputs retain their captured "
+                             "bytes; other shell, GUI or external effects are unknown.")
     path = artifact_dir / "workspace_patch.json"
     atomic_write_json(path, manifest, trailing_newline=True)
     return [*outputs, artifact_record(path, kind="workspace_patch_manifest")], manifest

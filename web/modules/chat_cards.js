@@ -8,11 +8,15 @@
 //                declarative host, module/iframe in a frame under the message's size policy; never registered on
 //                the Widgets page, so leaving that page disposes nothing here: the feed disposes it with its row;
 //   app        → card_frames.js, an opaque frame that cannot fetch or load; its submit fills the owner's draft.
-// Frames mount lazily near the viewport, at most three live at once; a far one becomes a static face with Open.
-import { apiClient, fetchJson } from './api_client.js';
+// Frames mount lazily near the viewport, at most three live at once; a far one becomes a static face with Open. A
+// running frame has Close; a closed card, and one whose last start the page did not outlive (the start ledger,
+// holds.js), rests as its face until Open, on this device.
+import { apiClient, apiFetch, fetchJson } from './api_client.js';
 import { createCardPresses, mountCardComponents, setCardPinned } from './card_components.js';
 import { createInlineFit, mountCardApp } from './card_frames.js';
+import { getHolds, HELD_LINES, settleAfterFrameLoad, START_SETTLE_MS } from './holds.js';
 import { escapeHtmlText as escapeHtml } from './utils.js';
+import { widgetPublication } from './widget_list.js';
 import { frameHeight, mountModuleWidget, mountRouteIframeWidget } from './widget_module.js';
 import { mountDeclarativeWidget } from './widgets.js';
 
@@ -45,7 +49,7 @@ export function readCardBody(cardId, revision = 0, read = (url) => fetchJson(url
 
 function readAppText(url, sha256) {
     if (!appTexts.has(sha256)) {
-        appTexts.set(sha256, fetch(url, { cache: 'no-store' }).then((response) => {
+        appTexts.set(sha256, apiFetch(url, { cache: 'no-store' }).then((response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.text();
         }).catch((error) => { appTexts.delete(sha256); throw error; }));
@@ -59,6 +63,11 @@ function liveWidgetTabs() {
     return widgetTabs;
 }
 
+/** What a skill's widget card draws from; another value draws it again (the board's rule, widget_list.js). */
+function chatWidgetSignature(tab) {
+    return JSON.stringify([tab.revision, widgetPublication(tab), tab.render]);
+}
+
 const pressLedger = (cardId) => {
     if (!presses.has(cardId)) presses.set(cardId, createCardPresses({ cardId }));
     return presses.get(cardId);
@@ -66,10 +75,10 @@ const pressLedger = (cardId) => {
 
 /**
  * At most `max` live frames: `near(record, isNear)` follows the viewport (a frame that drifts far unmounts, a near
- * one mounts while there is room), `open(record)` mounts one at the owner's request (the oldest other live frame
- * makes room), `forget(record)` drops a released row.
+ * one mounts while there is room and `canStart(record)` allows it), `open(record)` mounts one at the owner's request
+ * (the oldest other live frame makes room), `forget(record)` drops a released row.
  */
-export function createFrameBudget({ max = MAX_LIVE_CARD_FRAMES, mount, unmount }) {
+export function createFrameBudget({ max = MAX_LIVE_CARD_FRAMES, mount, unmount, canStart = () => true }) {
     const live = new Set();
     const nearby = new Set();
     const start = (record) => {
@@ -82,7 +91,7 @@ export function createFrameBudget({ max = MAX_LIVE_CARD_FRAMES, mount, unmount }
         unmount(record);
     };
     const fill = () => {
-        for (const record of nearby) if (live.size < max) start(record);
+        for (const record of nearby) if (live.size < max && canStart(record)) start(record);
     };
     return {
         live: () => [...live],
@@ -104,16 +113,29 @@ const button = (label, data) => `<button type="button" class="btn btn-default bt
 /**
  * One room's card rows. `frameNode(msg, node)` wraps a node in an Ouroboros bubble (sender, time, row address);
  * `decorate(bubble, msg, text)` gives it Copy (the fallback text) and Reply; `composer()` is the room's composer, whose
- * draft an app's submit and "Make it a skill" fill; `onDomWrite(write)` keeps the reading position.
+ * draft an app's submit and "Make it a skill" fill; `onDomWrite(write)` keeps the reading position; `holds` is the
+ * start ledger and `settleMs` its settle second (a test seam).
  */
-export function createChatCards({ frameNode, decorate = () => {}, composer = () => null, onDomWrite = (write) => write() }) {
+export function createChatCards({ frameNode, decorate = () => {}, composer = () => null, onDomWrite = (write) => write(),
+    holds = getHolds(), settleMs = START_SETTLE_MS }) {
     const records = new Map();
     const byBubble = new WeakMap();
     const messageHandlers = new Set();
     let destroyed = false;
+    // The owner's Close is this card's; a start hold belongs to the code (an app's bytes, a skill widget's revision).
+    const closeKey = (record) => `card:${record.id}`;
+    const codeHold = (record) => (record.framedKind === 'app'
+        ? { key: `app:${record.id}`, rev: String(record.data?.app?.sha256 || '') }
+        : { key: `widget:${record.tab?.skill}:${record.tab?.tab_id}`, rev: String(record.tab?.revision ?? '') });
+    const heldReason = (record) => {
+        if (holds.reason(closeKey(record)) === 'owner') return 'owner';
+        const code = codeHold(record);
+        return holds.reason(code.key, code.rev);
+    };
     const budget = createFrameBudget({
-        mount: (record) => { record.framed = startFrame(record); },
-        unmount: (record) => { record.framed?.(); record.framed = null; showFace(record); },
+        mount: (record) => { record.framed = startFrame(record); write(() => paintActions(record)); },
+        unmount: (record) => { record.framed?.(); record.framed = null; showFace(record); write(() => paintActions(record)); },
+        canStart: (record) => !heldReason(record),
     });
     const observer = typeof IntersectionObserver === 'function'
         ? new IntersectionObserver((entries) => entries.forEach((entry) => {
@@ -166,6 +188,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
                 ? `<span class="ui-status" data-tone="ok">Kept on Widgets</span> ${button(justPinned ? 'Undo' : 'Remove', 'data-card-unpin')}`
                 : button('Keep on Widgets', 'data-card-pin');
         } else if (body?.kind === 'app') html = button('Make it a skill', 'data-card-make-skill');
+        if (record.framed) html = `${html} ${button('Close', 'data-card-close')}`.trim();
         record.actions.innerHTML = html;
     }
 
@@ -184,9 +207,11 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
     }
 
     function showFace(record) {
+        const line = HELD_LINES[heldReason(record)] || '';
         write(() => {
             record.body.innerHTML = `<div class="chat-card-face"><p class="chat-card-fallback">${escapeHtml(record.fallback)}</p>${button('Open', 'data-card-open')}</div>`;
             record.toggle.hidden = true;
+            setStatus(record, line);
         });
     }
 
@@ -204,12 +229,23 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         const fit = { fit: untilStopped((height) => write(() => sizing.fit(height))), dispose: () => sizing?.dispose() };
         record.fit = fit;
         let dispose = null;
-        const done = (fn) => { if (controller.signal.aborted) fn?.(); else dispose = fn; };
-        const fail = (text) => { if (!controller.signal.aborted) showFallback(record, text, 'danger', true); };
+        // The ledger entry stands before the frame's first byte runs; the frame's load and one host second clear it.
+        const code = codeHold(record);
+        const settle = holds.starting(code.key, code.rev);
+        let cancelSettle = () => {};
+        const done = (fn) => {
+            if (controller.signal.aborted) { fn?.(); return; }
+            dispose = fn;
+            cancelSettle = settleAfterFrameLoad(host, settle, { delay: settleMs });
+        };
+        const fail = (text) => { settle(); if (!controller.signal.aborted) showFallback(record, text, 'danger', true); };
+        const fault = untilStopped((text) => write(() => setStatus(record, text, 'danger')));
         const body = record.data;
+        const fresh = record.fresh === true;
+        record.fresh = false;
         if (record.framedKind === 'app') {
             readAppText(body.app.url, body.app.sha256).then((html) => done(write(() => mountCardApp(host, {
-                cardId: record.id, title: body.title, sha256: body.app.sha256, html, fit,
+                cardId: record.id, title: body.title, sha256: body.app.sha256, html, fit, fresh, onFault: fault,
                 onSubmit: (line) => insertLine(line),
                 onLeave: () => {
                     budget.forget(record);
@@ -218,10 +254,10 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             }))), (error) => fail(`The app could not be read: ${error.message || error}`));
         } else {
             const { tab } = record;
-            const hooks = { fit: fit.fit, fault: untilStopped((text) => write(() => setStatus(record, text, 'danger'))) };
+            const hooks = { fit: fit.fit, fault };
             Promise.resolve().then(() => (tab.render.kind === 'module'
                 ? mountModuleWidget(host, tab, tab.render, controller.signal, messageHandlers, hooks)
-                : mountRouteIframeWidget(host, tab, tab.render))).then((fn) => {
+                : mountRouteIframeWidget(host, tab, tab.render, controller.signal, hooks, messageHandlers))).then((fn) => {
                 if (tab.render.kind !== 'module') {
                     host.querySelector('iframe')?.style.removeProperty('--widget-frame-height');
                     fit.fit(frameHeight(tab.render));
@@ -231,8 +267,10 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         }
         return () => {
             controller.abort();
-            const settle = dispose?.();
-            if (settle?.then) settle.catch(() => {});
+            cancelSettle();
+            settle();
+            const stopping = dispose?.();
+            if (stopping?.then) stopping.catch(() => {});
             fit.dispose();
             if (record.fit === fit) record.fit = null;
         };
@@ -251,7 +289,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         if (!current()) return;
         if (!tab) { showFallback(record, 'This skill is off.'); return; }
         record.tab = tab;
-        record.widgetSignature = JSON.stringify([tab.revision, tab.render]);
+        record.widgetSignature = chatWidgetSignature(tab);
         if (tab.render?.kind === 'declarative') {
             // Under the message's size policy like a frame: the content is measured, its box is capped, Expand
             // lifts the cap. The declarative host paints its first frame synchronously: inside this write.
@@ -351,8 +389,17 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
             disposeBody(record);
             showFallback(record, 'Loading the card…');
             load(record, record.revision);
-        } else if (target.hasAttribute('data-card-open')) budget.open(record);
-        else if (target.hasAttribute('data-card-pin')) setPinned(record, true);
+        } else if (target.hasAttribute('data-card-open')) {
+            // A card held after a start the page did not outlive starts without the state it saved: that may be the cause.
+            const reason = heldReason(record);
+            holds.release(closeKey(record));
+            holds.release(codeHold(record).key);
+            record.fresh = reason === 'start' || reason === 'all';
+            budget.open(record);
+        } else if (target.hasAttribute('data-card-close')) {
+            holds.stop(closeKey(record));
+            budget.forget(record);
+        } else if (target.hasAttribute('data-card-pin')) setPinned(record, true);
         else if (target.hasAttribute('data-card-unpin')) setPinned(record, false);
         else if (target.hasAttribute('data-card-make-skill')) insertLine(MAKE_SKILL(record.title));
     }
@@ -430,7 +477,7 @@ export function createChatCards({ frameNode, decorate = () => {}, composer = () 
         liveWidgetTabs().then((tabs) => shown.forEach((record) => {
             const ref = record.data?.widget;
             const tab = tabs.find((item) => item.skill === ref?.skill && item.tab_id === ref?.tab_id && !item.pinned_card);
-            if (records.get(record.id) !== record || (tab && JSON.stringify([tab.revision, tab.render]) === record.widgetSignature)) return;
+            if (records.get(record.id) !== record || (tab && chatWidgetSignature(tab) === record.widgetSignature)) return;
             drawBody(record);
         }), () => {});
     }

@@ -6,6 +6,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,7 @@ from tests.test_host_service_api import FakeBridge, _seed_presence_behavior, _se
 from tests._store_shared import seed_result
 from tests._dialogue import chat_rows, import_all
 from ouroboros import dialogue_store as ds
+from tests.test_place_focus import focus as focus, task_for
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +84,10 @@ def test_http_records_exact_facts_with_nonterminal_history_type(tmp_path, state,
     export_for_older_body(tmp_path)  # Transition (unit H): history endpoint still owns the file reader.
     request = Request({"type": "http", "method": "GET", "path": "/api/chat/history", "query_string": b"", "headers": []})
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(request))
+    assert not [item for item in json.loads(response.body)["messages"] if item.get("text") == payload["text"]]
+    request = Request({"type": "http", "method": "GET", "path": "/api/chat/history",
+                       "query_string": f"chat_id={row['chat_id']}".encode(), "headers": []})
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(request))
     projected = [item for item in json.loads(response.body)["messages"] if item.get("text") == payload["text"]]
     assert len(projected) == 1
     assert projected[0]["system_type"] == "presence_delivery"
@@ -92,6 +98,7 @@ def test_http_records_exact_facts_with_nonterminal_history_type(tmp_path, state,
     {"part_id": 0}, {"part_id": "part-0"}, {"account_id": ""}, {"text": None},
     {"origin": {"kind": "tool", "authority": "owner"}}, {"message": []},
     {"profile": "caller-cannot-supply-authority"},
+    {"sends_as": {"id": "forged", "label": "Forged", "kind": "user"}}, {"sends_as_owner": True},
 ])
 def test_invalid_wire_is_400_without_chat_mutation(tmp_path, change):
     response = _post(_client(tmp_path), _payload(**change))
@@ -272,6 +279,47 @@ def test_task_lineage_requires_stored_task_owned_by_reporting_transport(tmp_path
     assert ("presence_provenance" in row["transport"]["delivery"]) is (owner == "transport")
 
 
+@pytest.mark.parametrize("reporter", ["bridge", "other-bridge"])
+@pytest.mark.parametrize("sends_as_owner", [False, True])
+@pytest.mark.parametrize("identity", [None, {"reads_as": []}, {
+    "sends_as": {"id": "account", "label": "Mailbox café", "kind": "user"},
+}])
+def test_receipt_keeps_focus_identity_snapshot_without_changing_v1(focus, identity, sends_as_owner, reporter):
+    root, _, _, _ = focus
+    task = task_for(focus)
+    task["metadata"]["focus"].update(identity=identity, identity_owner=sends_as_owner)
+    seed_result(root, task["id"], {**task, "status": "running"})
+    payload = _payload(provider="chat", account_id="a", conversation_id="r", thread_id="",
+                       origin={"kind": "automatic", "task_id": task["id"], "source_event_id": "event1"})
+    recorder = delivery.PresenceDeliveryRecorder(root)
+    assert recorder.record(reporter, payload)["duplicate"] is False
+    row, = _rows(root)
+    sends_as = (identity or {}).get("sends_as")
+    if sends_as and reporter == "bridge":
+        assert row["transport"]["sends_as"] == sends_as
+        assert row["transport"]["sends_as_owner"] is sends_as_owner
+    else:
+        assert "sends_as" not in row["transport"] and "sends_as_owner" not in row["transport"]
+    assert delivery._payload_from_row(row) == (reporter, payload)
+    # Receipt replay uses its original snapshot even after task metadata changes.
+    task["metadata"]["focus"].update(identity={"sends_as": {"id": "new", "label": "New", "kind": "bot"}},
+                                      identity_owner=not sends_as_owner)
+    seed_result(root, task["id"], {**task, "status": "running"})
+    assert delivery.PresenceDeliveryRecorder(root).record(reporter, payload)["duplicate"] is True
+    assert _rows(root) == [row]
+
+
+def test_own_clock_receipt_has_no_focus_identity(tmp_path):
+    wake = json.loads((Path(__file__).parent / "fixtures/wake_document_214a31b6.json").read_text(encoding="utf-8"))
+    assert "finished_at" not in wake and wake["terminal_time"]["occurred_at"] and wake["wake_silent"]
+    seed_result(tmp_path, wake["task_id"], wake)
+    payload = _payload(origin={"kind": "tool", "task_id": wake["task_id"]})
+    delivery.PresenceDeliveryRecorder(tmp_path).record("transport", payload)
+    row, = _rows(tmp_path)
+    assert "sends_as" not in row["transport"] and "sends_as_owner" not in row["transport"]
+    assert delivery._payload_from_row(row) == ("transport", payload)
+
+
 def _turn_payload(binding_id):
     return {"binding_id": binding_id, "event": {
         "source_event_id": "event-1", "provider": "telegram", "account_id": "bot-1",
@@ -332,9 +380,10 @@ def test_deferred_work_echoes_original_persisted_mode(tmp_path, status, version)
 
 
 def test_inbound_initiated_and_receipt_paths_derive_one_conversation_identity(tmp_path, monkeypatch):
-    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint, new_presence_binding_id, save_presence_binding
+    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
+    from tests.frozen_presence_bindings import new_presence_binding_id, save_presence_binding
     from ouroboros.presence_runner import _stable_numeric_id
-    from ouroboros.tools.presence import get_tools
+    from tests.presence_legacy_helpers import legacy_tools as get_tools
     from ouroboros.tools.registry import ToolContext
 
     _seed_token(tmp_path, skill="telegram-bot", token="receipt-token",
@@ -352,13 +401,16 @@ def test_inbound_initiated_and_receipt_paths_derive_one_conversation_identity(tm
     client = TestClient(create_host_service_app(tmp_path, presence_runner=runner))
     initiate = next(item for item in get_tools() if item.name == "initiate_presence")
     identities = {}
+    bindings = {}
+    for thread in ("", "topic-1"):
+        endpoint = PresenceEndpoint("telegram", "bot-1", "room-1", thread)
+        bindings[thread] = save_presence_binding(tmp_path, PresenceBinding(
+            new_presence_binding_id(), "telegram-bot", "community-helper", endpoint, endpoint))
     for thread in ("", "topic-1"):
         payload = _turn_payload(inbound_binding)
         payload["event"].update(source_event_id=f"in-{thread}", thread_id=thread)
         assert client.post("/presence/turn", json=payload, headers={"X-Skill-Token": "receipt-token"}).status_code == 200
-        endpoint = PresenceEndpoint("telegram", "bot-1", "room-1", thread)
-        binding = save_presence_binding(tmp_path, PresenceBinding(
-            new_presence_binding_id(), "telegram-bot", "community-helper", endpoint, endpoint))
+        binding = bindings[thread]
         ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
         assert json.loads(initiate.handler(ctx, binding.binding_id, "Say hello.", f"wake-{thread}"))["ok"] is True
         receipt = _payload(provider="telegram", account_id="bot-1", conversation_id="room-1", thread_id=thread,
@@ -464,3 +516,9 @@ def test_receipt_and_turn_slots_return_on_success_and_on_exceptions(tmp_path, mo
     monkeypatch.setattr(ctx.presence_deliveries, "record", failing_record)
     assert [_post(client, _payload(part_id="9")).status_code for _ in range(7)] == [503] * 7
     assert not any(ctx._inflight.values())
+
+
+@pytest.fixture(autouse=True)
+def _focus_admission_enabled(monkeypatch):
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})

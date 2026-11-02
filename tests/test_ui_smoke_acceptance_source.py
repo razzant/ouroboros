@@ -60,11 +60,12 @@ def test_old_applied_review_download_appears_when_its_reference_refreshes_the_ca
             card = page.locator(f'.chat-live-card[data-task-id="{task_id}"]')
             card.wait_for(state="visible")
             card.locator("[data-live-disclosure]").click()
-            card.locator("[data-review-section-toggle]").click()
+            card.locator("[data-live-review-summary]").click()
             card.locator("[data-review-group-toggle]").click()
-            card.locator("[data-review-attempt-toggle]").click()
-            detail = card.locator("[data-review-attempt-detail]")
-            assert "Full applied review unavailable." in detail.inner_text()
+            card.locator("[data-review-facts] > summary").click()
+            unavailable = card.locator('.review-seat-meta')
+            assert unavailable.inner_text() == 'full applied review unavailable'
+            assert card.locator('[data-review-read-url]').count() == 0
 
             # The record and its panel, as the retired publisher stored them.
             record = {**run, "applied_decision": {"status": "accepted", "reason": "clean_pass"}}
@@ -84,11 +85,11 @@ def test_old_applied_review_download_appears_when_its_reference_refreshes_the_ca
             _emit_ws_frame(page, {"type": "chat", "role": "system", "system_type": "review_reference",
                                  "surface": "task_acceptance", "task_id": task_id,
                                  "chat_id": 1, "state_revision": "b" * 64})
-            link = detail.get_by_role("link", name="Download full applied review")
-            link.wait_for(state="visible")
-            assert card.locator("[data-review-attempt-toggle]").get_attribute("aria-expanded") == "true"
-            assert "Full applied review unavailable." not in detail.inner_text()
-            href = link.get_attribute("href")
+            read = card.get_by_role("button", name="Read the saved applied review", exact=True)
+            read.wait_for(state="visible")
+            assert card.locator("[data-review-facts]").get_attribute("open") is not None
+            assert card.locator('.review-seat-meta', has_text='full applied review unavailable').count() == 0
+            href = read.get_attribute("data-review-read-url")
             response = page.request.get(direct_server_with_data["url"] + href)
             assert response.status == 200
             raw = response.body()
@@ -97,8 +98,14 @@ def test_old_applied_review_download_appears_when_its_reference_refreshes_the_ca
             assert len(full["actors"][0]["parsed"]["findings"]) == 80
             assert full["applied_decision"]["status"] == "accepted"
             assert load_task_result(root, task_id)["status"] == "running"
-            link.scroll_into_view_if_needed()
-            card.screenshot(path=str(evidence / "applied-review-link.png"))
+            read.click()
+            reader = page.locator("dialog[open]:has(.document-reader-panel)")
+            reader.wait_for(state="visible")
+            page.wait_for_function("() => document.querySelector('dialog[open] .document-reader-body')?.textContent.includes('full finding 79')")
+            reader_text = reader.locator('.document-reader-body').inner_text()
+            assert "full finding 0" in reader_text and "full finding 79" in reader_text
+            link = reader.locator('[data-reader-action="download"]')
+            reader.screenshot(path=str(evidence / "applied-review-reader.png"))
             with page.expect_download() as downloaded:
                 link.click()
             download = downloaded.value

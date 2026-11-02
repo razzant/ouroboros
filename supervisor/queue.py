@@ -30,14 +30,12 @@ from ouroboros.config import (
     DATA_DIR,
     FINALIZATION_GRACE_DEFAULT_SEC,
     get_finalization_grace_sec,
-    get_per_call_timeout_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
     get_task_abs_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
     get_task_idle_timeout_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
 )
 from ouroboros.consciousness_authority import apply_consciousness_authority, is_consciousness_origin
 from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources  # noqa: F401
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug  # noqa: F401
-from ouroboros.skill_loader import skill_identity_collision_names  # noqa: F401
 from ouroboros.outcomes import terminal_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso  # noqa: F401
 from supervisor.evolution_lifecycle import (  # noqa: F401 -- public queue API and lazy scheduler dependencies
@@ -275,7 +273,7 @@ def prepared_root_billing(task: Dict[str, Any], *, resolved: Any = _UNRESOLVED):
 def enqueue_task(
     task: Dict[str, Any], front: bool = False, *, restoring_snapshot: bool = False,
     consciousness_window: Optional[Dict[str, Any]] = None, continuation: bool = False,
-    project_admission: Optional[Dict[str, Any]] = None, timeout_retry: bool = False,
+    project_admission: Optional[Dict[str, Any]] = None, durable: bool = False,
 ) -> Dict[str, Any]:
     """Add task to PENDING (thread-safe: HTTP handlers enqueue concurrently
     with the supervisor main loop, so the mutation must hold the queue lock).
@@ -287,14 +285,23 @@ def enqueue_task(
     ``consciousness_window``: an allowance the caller already read OFF the queue lock
     (the scheduler). ``continuation``: host-derived only (a follow-up row's own
     ``continuation_of``) — a named continuation is not a spontaneous start, so it is
-    outside the consciousness concurrency cap; money (the allowance) still applies.
-    ``timeout_retry``: the reaper's own retry admission (``apply_budget_root_admission_fence``)."""
+    outside the consciousness concurrency cap; money (the allowance) still applies."""
     t = dict(task)
+    from ouroboros.consciousness_authority import work_kind
+    from ouroboros.server_restart import agent_restart_pending
+    metadata = t.get("metadata") if isinstance(t.get("metadata"), dict) else {}
+    metadata["work_kind"] = work_kind({"origin_message_ref": t.get("origin_message_ref"), **metadata})
+    t["metadata"] = metadata
     if not restoring_snapshot:
         t.pop("_project_scope_none", None)  # Only this host admission can attest absence.
         t.pop("_consciousness_continuation", None)  # never a caller-supplied marker
         if continuation:
             t["_consciousness_continuation"] = True
+    subagents_settings = None
+    if (not restoring_snapshot and not (t.get("parent_task_id") or metadata.get("parent_task_id"))
+            and "subagents_mode" not in metadata):
+        from ouroboros.config import load_settings
+        subagents_settings = load_settings()
     attach_task_contract(apply_consciousness_authority(t))
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(t)
@@ -325,6 +332,11 @@ def enqueue_task(
         admission_token = str(t.pop("_admission_token", "") or "")
         task_id = str(t.get("id") or "").strip()
         reserved_token = str(ADMISSION_RESERVATIONS.get(task_id) or "")
+        if agent_restart_pending() and RETURNS_NAMED and not restoring_snapshot:
+            if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
+                ADMISSION_RESERVATIONS.pop(task_id, None)
+            t["_admission_blocked"] = "restart_intake_closed"
+            return t
         if reserved_token and admission_token != reserved_token:
             # A reservation owns this id until its request either enqueues or releases it.
             # Tokenless internal callers and competing ingress must not consume/collide with it.
@@ -386,8 +398,7 @@ def enqueue_task(
             t["_admission_blocked"] = "admission_reservation_lost"
             return t
         root_id = str(t.get("root_task_id") or "").strip()
-        if root_id and not restoring_snapshot and apply_budget_root_admission_fence(
-                t, root_id, timeout_retry=timeout_retry):
+        if root_id and not restoring_snapshot and apply_budget_root_admission_fence(t, root_id):
             if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
                 ADMISSION_RESERVATIONS.pop(task_id, None)
             return t
@@ -411,7 +422,10 @@ def enqueue_task(
         _att = t.get("_attempt")
         t.setdefault("_attempt", int(_att) if _att is not None else 1)
         t["_queue_seq"] = -seq if front else seq
-        t["queued_at"] = utc_now_iso()
+        if restoring_snapshot:  # restored work keeps its saved queue time; a lost one stays unknown (#1805)
+            t.setdefault("queued_at", None)
+        else:
+            t["queued_at"] = utc_now_iso()
         if admission_token:
             t["_admission_owner_token"] = admission_token
         from contextlib import nullcontext
@@ -465,17 +479,18 @@ def enqueue_task(
                 if not allowed:
                     t["_admission_blocked"] = "followup_control_wait"
                     return t
-                if project_id:
-                    with project_admission_guard(DRIVE_ROOT, project_admission):
+                with (project_admission_guard(DRIVE_ROOT, project_admission) if project_id else nullcontext(None)) as project:
+                    if project_id:
                         # Recovery keeps the resource actually admitted, without a
                         # transient derived-selection census or current-folder substitution.
                         t["_project_admission"] = {key: value for key, value in project_admission.items()
                                                    if key != "workspace_claims"}
                         t["_project_admission"]["frozen"] = True
-                        PENDING.append(t)
-                else:
-                    if not restoring_snapshot and not has_project_admission:
+                    elif not restoring_snapshot and not has_project_admission:
                         t["_project_scope_none"] = True
+                    if subagents_settings is not None:
+                        from ouroboros.settings_integrity import record_subagents_admission
+                        record_subagents_admission(t, DRIVE_ROOT, settings=subagents_settings, project=project)
                     PENDING.append(t)
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             from supervisor.schedule_occurrence import contention
@@ -500,6 +515,13 @@ def enqueue_task(
             ) else "none"
         if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
             ADMISSION_RESERVATIONS.pop(task_id, None)
+        if not restoring_snapshot and (durable or agent_restart_pending()):
+            if persist_queue_snapshot(reason="agent_restart_admission") is not True:
+                # No accepted reply and no dispatch. A partial disk publication
+                # is outside the named return set and boots held for Resume.
+                PENDING[:] = [row for row in PENDING if row is not t]
+                persist_queue_snapshot(reason="agent_restart_admission_unconfirmed")
+                return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
     return t
 
 
@@ -528,7 +550,7 @@ def ensure_control_task_result(task_id: str) -> Dict[str, Any]:
         fields = {key: task[key] for key in (
             "type", "chat_id", "metadata", "task_contract", "root_task_id", "parent_task_id",
             "delegation_role", "project_id", "workspace_root", "workspace_mode", "memory_mode",
-            "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
+            "drive_root", "child_drive_root", "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
             "origin_message_text", "origin_message_ref", "objective", "title", "suggested_name",
             "original_task_id", "timeout_retry_from", "deadline_at", "execution_timeout_sec", "root_cost_ceiling_usd",
             "billing_group", "task_constraint", "objective_author", "owner_corpus", "task_group_id", "task_group",
@@ -547,25 +569,44 @@ def ensure_control_task_result(task_id: str) -> Dict[str, Any]:
 
 
 def live_consciousness_root_count() -> int:
-    """Live PENDING+RUNNING roots that consciousness started (its origin marker on the
-    task metadata; subagents are their root's business). Sibling of ``queue_has_task_type``."""
-    def _counts(task: Any) -> bool:
-        return (
-            isinstance(task, dict)
-            and str(task.get("delegation_role") or "root") == "root"
-            and is_consciousness_origin(task.get("metadata"))
-            and not task.get("_consciousness_continuation")  # a named continuation is not spontaneous
-        )
+    """Count exactly the independent autonomous roots shown to the mind."""
+    return len(live_consciousness_roots())
 
-    live = sum(1 for task in PENDING if _counts(task))
-    return live + sum(
-        1 for meta in RUNNING.values() if isinstance(meta, dict) and _counts(meta.get("task"))
-    )
+
+def counts_as_consciousness_root(task: Dict[str, Any]) -> bool:
+    """A root consciousness itself started (its origin mark), still its own work.
+
+    Unknown provenance is checked at the consciousness level, but only work the
+    mind started takes one of its task slots and its allowance: an owner-commissioned
+    root (confirmed owner account) and unmarked system or owner work never do. Wakes,
+    children and technical continuations take no slot either.
+    """
+    from ouroboros.consciousness_authority import WORK_KIND_CONSCIOUSNESS, wake_cause, work_kind
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return (is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
+            and str(task.get("delegation_role") or "root") == "root" and not task.get("parent_task_id")
+            and not wake_cause(metadata))
+
+
+def live_consciousness_roots() -> list[dict]:
+    """Live roots by provenance; wakes, children and technical continuations consume no slot."""
+    with _queue_lock:
+        tasks = [*PENDING, *(meta.get("task") or {} for meta in RUNNING.values())]
+        counted = {}
+        for task in tasks:
+            metadata = task.get("metadata") or {}
+            task_id = str(task.get("id") or "")
+            if not task_id or task.get("_consciousness_continuation") or not counts_as_consciousness_root(task):
+                continue
+            counted[task_id] = {"task_id": task_id, "title": str(task.get("title") or task.get("suggested_name") or task_id),
+                                "consciousness_cause": str(metadata.get("consciousness_cause") or "started"),
+                                "origin_wake_task_id": str(metadata.get("origin_wake_task_id") or "")}
+        return list(counted.values())
 
 
 def _consciousness_root(task: Dict[str, Any]) -> bool:
-    return (is_consciousness_origin(task.get("metadata"))
-            and str(task.get("delegation_role") or "root") == "root")
+    return counts_as_consciousness_root(task)
 
 
 def consciousness_admission_window(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -902,8 +943,6 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
 # v7next F1 (D08): moved spans live in their owner leaves; re-exported here
 # so this facade stays the single import surface for callers and tests.
 from supervisor.queue_schedules import (  # noqa: E402, F401 -- intentional public re-exports
-    _SKILL_SCHEDULE_SYNC_INTERVAL_SEC,
-    _last_skill_schedule_sync,
     _schedule_running_or_queued,
     _scheduled_tasks_path,
     _task_from_schedule,
@@ -915,16 +954,14 @@ from supervisor.queue_schedules import (  # noqa: E402, F401 -- intentional publ
     check_scheduled_tasks,
     list_scheduled_tasks,
     load_schedule_store,
-    resync_skill_schedules,
     schedule_activity_projection,
     schedule_tool_projection,
     schedule_lifecycle_status,
     schedule_transaction,
-    sync_skill_schedules,
 )
 from supervisor.schedule_lifecycle import (  # noqa: E402, F401 -- intentional public re-exports
     mutate_scheduled_task,
-    remove_scheduled_task,
+    patch_scheduled_task,
     upsert_scheduled_task,
 )
 from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional public re-exports
@@ -937,7 +974,6 @@ from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional publi
 from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports
     _enforce_task_timeouts_locked,
     _expire_pending_deadlines_locked,
-    _has_live_descendant,
     _has_pending_descendant,
     _is_descendant_of,
     _subtree_progressing,

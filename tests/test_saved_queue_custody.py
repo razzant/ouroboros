@@ -95,7 +95,8 @@ def test_a_restore_that_did_not_finish_grants_no_custody_of_the_saved_queue(tmp_
     read it (a transient error), leaves the snapshot to the next generation, whose Resume finds it."""
     import threading
 
-    from supervisor import queue_snapshot, restart_retention
+    from supervisor import queue_snapshot
+    from ouroboros import delegate_recovery
 
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(state, "budget_remaining", lambda _st, **_k: 5.0)
@@ -112,7 +113,7 @@ def test_a_restore_that_did_not_finish_grants_no_custody_of_the_saved_queue(tmp_
 
     if boundary == "stopped_during_the_restore":
         entered, release = threading.Event(), threading.Event()
-        real_hold = restart_retention.saved_sleep_hold_reason
+        real_door = delegate_recovery.boot_door
 
         class Stopped(BaseException):
             pass
@@ -122,9 +123,9 @@ def test_a_restore_that_did_not_finish_grants_no_custody_of_the_saved_queue(tmp_
                 entered.set()
                 assert release.wait(10)
                 raise Stopped()  # the process exits before any row is adopted
-            return real_hold(root, **kwargs)
+            return real_door(root, **kwargs)
 
-        monkeypatch.setattr(restart_retention, "saved_sleep_hold_reason", held)
+        monkeypatch.setattr(delegate_recovery, "boot_door", held)
 
         def restore():
             try:
@@ -140,7 +141,7 @@ def test_a_restore_that_did_not_finish_grants_no_custody_of_the_saved_queue(tmp_
         finally:
             release.set()
             thread.join(10)
-        monkeypatch.setattr(restart_retention, "saved_sleep_hold_reason", real_hold)
+        monkeypatch.setattr(delegate_recovery, "boot_door", real_door)
     else:
         real_read = pathlib.Path.read_text
 

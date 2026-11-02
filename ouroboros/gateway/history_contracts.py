@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ouroboros.gateway.attachment_contracts import ChatAttachmentView
+from ouroboros.gateway.reference_contracts import ChatReplyReference
 
 try:
     from typing import Literal, Required, TypedDict
@@ -26,6 +27,28 @@ class ChatHistoryPosition(TypedDict):
     offset: int
 
 
+class PresenceContact(TypedDict, total=False):
+    """Host-retained source of a private Main contact; external context, never owner authority."""
+
+    task_id: Required[str]
+    binding_id: Required[str]
+    source_event_id: Required[str]
+    label: Required[str]
+    conversation_key: Required[str]
+    transport_skill: str
+    behavior_skill: str
+    profile_fingerprint: str
+    state_fingerprint: str
+    selection_fingerprint: str
+    provider: str
+    account_id: str
+    conversation_id: str
+    thread_id: str
+    actor_id: str
+    place_id: str
+    url: str
+
+
 class ChatHistoryQuiz(TypedDict, total=False):
     """The question card of a ``msg_type: "quiz"`` row (the question itself is the row's ``text``).
     ``state`` is the durable lifecycle merged at read time: open, answered, closed,
@@ -38,6 +61,7 @@ class ChatHistoryQuiz(TypedDict, total=False):
     state: str
     wait_for_answer: bool
     wait_ended_at: str
+    presence_contact: PresenceContact
     host_facts: str
     answered_index: int
     comment: str
@@ -54,6 +78,44 @@ class ChatHistoryCard(TypedDict):
     kind: Literal["components", "widget", "app"]
     title: str
     revision: int
+
+
+class PlaceHistoryAttention(TypedDict, total=False):
+    decision: Required[Literal['heard', 'focus_started']]
+    reason: str  # retained heard reason; no inferred matched wake
+
+
+class PlaceHistoryImport(TypedDict):
+    """An earlier message its connector imported: who sent it on the platform and when the Host
+    received it; the row's ``ts`` is the provider's send time."""
+
+    authorship: Literal['participant', 'platform_account']
+    received_at: str
+
+
+class PlaceHistoryReaction(TypedDict):
+    """The host's English words for a row's typed reaction, never speech; words the row sent stay its ``text``."""
+
+    summary: str
+
+
+class PlaceHistoryFacts(TypedDict, total=False):
+    """Retained room speech/notices only. Absence is unknown, never delivered or woken."""
+
+    kind: Required[Literal['message', 'notice', 'delivery']]
+    delivery_state: Literal['authored', 'accepted', 'delivered', 'failed', 'uncertain']
+    attention: PlaceHistoryAttention
+    owner_confirmed: bool  # current stored account confirmation, never inferred from role=user
+    facts: List[str]  # a heard row's declared event facts ([] when none were declared)
+    identity: Dict[str, Any]  # captured incoming rows: the connector's declared identity at that moment
+    sends_as: Dict[str, Any]  # receipt rows: {id, label, kind} frozen from the delivering focus
+    sends_as_owner: bool
+    held_text: str  # hold notices: the whole reply the hold kept back
+    held: bool
+    checked: bool  # False on holds: the hold precedes the Safety check
+    historical_import: PlaceHistoryImport  # never owner confirmation or attention
+    sent_at: str  # the provider send time its arrival recorded (``source_order``); absent: unknown, never inferred
+    reaction: PlaceHistoryReaction  # a typed reaction arrival or receipt; absent: not one
 
 
 class ChatHistoryMessage(TypedDict, total=False):
@@ -73,16 +135,22 @@ class ChatHistoryMessage(TypedDict, total=False):
     is_progress: Required[bool]
     system_type: Required[str]  # the row's kind; "" for an ordinary message
     task_id: Required[str]
+    presence_contact: PresenceContact
+    place_history: PlaceHistoryFacts
+    wait_ended_at: str
     row_address: str
-    reply_to: Dict[str, Any]
+    row_client_message_id: str  # a row's own saved name (outgoing rows; host-fact ingress such as a call's opening)
+    reply_to: ChatReplyReference
     relay: Dict[str, Any]
     reply_to_relay: str
+    room_revisions: Dict[str, int]  # a row shown in several rooms: the revision it took in each room it counted in
     history_id: str  # "<source>:<offset>": the stored row's identity in this core's retained history
     history_position: ChatHistoryPosition
     markdown: bool
     source: str
     sender_label: str
     sender_session_id: str
+    subagents_mode: Literal["swarm"]  # Effective room mode at owner-message acceptance.
     client_message_id: str  # correlation id; owner rows have role=user, quiz publications also use it
     ingress_accepted: bool
     ingress_dispatched: bool
@@ -143,16 +211,20 @@ class ChatHistoryMessage(TypedDict, total=False):
 
 
 class ChatHistoryCoverage(TypedDict):
-    """``coverage`` v1: which stored coordinates this response delivered, per stream. A span is
+    """``coverage`` v1: which coordinates this response delivered, per stream. A span is
     ``{from, to, chain, gaps}``: the coordinate range ``[from, to)`` of the stream, the chain
-    witness (one constant: the store's coordinates are durable) and the gaps inside it (a line the
-    import could not store, a segment it could not import); null when the stream was not read.
-    Coverage is delivery, never chronology or proof of the conversation's start."""
+    witness and the gaps inside it (a line the import could not store, a segment it could not
+    import); null when the stream was not read. Stored order counts bytes under the one chain
+    ``dialog``. A room with imported history counts its chat rows in time order under
+    ``dialog-chrono-<end>`` (``-at-<position>`` around a row), and its span adds ``keys``
+    ``{from, to, frozen}``: the reading key ``[time, order, position]`` of the first frozen row above
+    each cut (null: the beginning or the present) and the frozen end (CLIENT_CONTRACT §5). Coverage
+    never proves the conversation's start."""
 
     v: int
     view: str
-    upper: Dict[str, int]  # per stream: the frozen end of this read
-    spans: Dict[str, Optional[Dict[str, Any]]]  # per stream: {from, to, chain, gaps} or null
+    upper: Dict[str, int]  # per stream: the end coordinate of this read's frozen rows
+    spans: Dict[str, Optional[Dict[str, Any]]]  # per stream: {from, to, chain, gaps, keys?} or null
 
 
 class ChatHistoryWindow(TypedDict, total=False):
@@ -208,6 +280,7 @@ class ChatHistoryResponse(TypedDict, total=False):
 
 
 __all__ = [
-    "ChatHistoryPosition", "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
+    "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
+    "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
 ]

@@ -1,0 +1,62 @@
+<!doctype html><html><head><meta charset="utf-8">
+<!-- The real chat instance over a stubbed transport, for tests/test_chat_history_paging_browser.py's layout count: eight
+     older pages of ?n= rows each, thirds of quoted answers, long Project answers with code, and task progress cards
+     (?kind=shared reuses the same cards on every page). -->
+<script>
+for (const css of ['style.css', 'ui.css', 'room_work.css']) document.write(`<link rel="stylesheet" href="/static/${css}">`);
+for (const js of ['marked.min.js', 'purify.min.js', 'highlight.min.js']) document.write(`<script src="/static/${js}"><\/script>`);
+</script>
+<style>
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+#mount { width: 800px; height: 720px; position: relative; margin: auto; }
+.chat-instance-panel { height: 720px; display: flex; flex-direction: column; position: relative; }
+#chat-messages { overflow-anchor: none; height: 600px; flex: 1; min-height: 0; overflow: auto; }
+</style></head><body><div id="mount"></div>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const n = +(params.get('n') || 24);
+const kind = params.get('kind') || 'mixed';
+const rows = (page) => Array.from({ length: n }, (_, i) => {
+    const id = page * n + i, ts = new Date(Date.UTC(2026, 8, 12) - page * 86400000 + i * 1000).toISOString();
+    const base = { role: 'assistant', text: `Message ${id} ` + 'Words for an actual passage. '.repeat(10), ts,
+        history_id: `chat:${id}`, history_position: { source: 'chat:r1', offset: 10000 - id } };
+    if (i % 3 === 0) {
+        return { ...base, reply_to: { address: 'chat:quoted', chat_id: 2, role: 'user',
+            snippet: 'A quoted question and its context. '.repeat(30) } };
+    }
+    if (i % 3 === 1) {
+        return { ...base, markdown: true, system_type: 'project_completion_summary',
+            completion_answer: 'Paragraph with an answer. '.repeat(120) + '\n```js\nconst answer = 42;\n```',
+            project_id: `project-${id}`, project_name: `Project ${id}` };
+    }
+    return { ...base, history_id: `progress:${id}`, history_position: { source: 'progress:r1', offset: 10000 - id },
+        text: 'Inspecting the history batch and its focused passage. '.repeat(30),
+        task_id: `task-${kind === 'shared' ? i : id}`, is_progress: true, task_terminal_status: 'completed' };
+});
+window.__reads = [];
+window.fetch = async (input) => {
+    const url = new URL(String(input), location.href);
+    let body = {};
+    if (url.pathname === '/api/chat/history') {
+        const page = +(url.searchParams.get('cursor') || 0);
+        body = { messages: rows(page), page_cursor: String(page), next_cursor: String(page + 1), has_more: page < 7,
+            window: { complete: false, truncated_by: ['page'] } };
+        window.__reads.push(page);
+    } else if (url.pathname === '/api/state') {
+        body = { active_direct_turns: [], active_chat_activities: [], supervisor_ready: true };
+    } else if (url.pathname.includes('/api/tasks/')) {
+        body = { status: 'completed', task: { status: 'completed' } };
+    }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+};
+const { createChatInstance } = await import('/static/modules/chat.js');
+window.__instance = createChatInstance({
+    ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
+    state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 },
+    stateSnapshots: { gate: async () => null, latest: () => null },
+    chatId: 2, idPrefix: 'chat', mountEl: document.querySelector('#mount'), asPanel: true,
+});
+await window.__instance.refreshHistory({ revision: 1 });
+await document.fonts.ready;
+window.__ready = true;
+</script></body></html>

@@ -1,9 +1,11 @@
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { escapeHtmlAttr as escapeHtml, lastAppVersion, watchAppVersion } from './utils.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { verifiedUpdatePlan } from './update_status.js';
+import { UPDATE_STAGE_LABELS, afterUpdateRows, attemptTime, bindPreflightDescription, preflightDescription, preflightEvidenceRows, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
+import { updateEffectsText } from './update_effects.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
@@ -59,20 +61,10 @@ function statusReadFailed(data) {
         && data.warnings.some((warning) => String(warning).startsWith('status_error:'));
 }
 
-const UPDATE_STAGE_LABELS = {
-    draining_writers: 'Finishing current work…',
-    stopping_workers: 'Stopping worker processes…',
-    stopping_services: 'Stopping services…',
-    preparing: 'Preparing the update…',
-    applying: 'Applying the update…',
-    checking: 'Checking the update and dependencies…',
-    rolling_back: 'Restoring the previous version…',
-    restart_requested: 'Restart requested…',
-};
 
 function progressVerdict(data, base) {
     const progress = data.update_progress;
-    if (!progress?.operation_id) return null;
+    if (!progress?.operation_id || progress.current_generation === false) return null;
     if (progress.active || progress.result === 'restart_requested') {
         return {
             ...base, state: progress.result === 'restart_requested' ? 'restarting' : 'updating',
@@ -88,13 +80,12 @@ function progressVerdict(data, base) {
             hint: progress.error || 'Restart Ouroboros to finish.',
             action: { id: 'restart', label: 'Restart now' } };
     }
-    if (progress.result === 'failed') {
-        return { ...base, state: progress.restart_required ? 'restart_needed' : 'update_failed', tone: 'error',
-            headline: 'The update did not complete.', hint: progress.error || 'Check the update status before trying again.',
-            action: progress.restart_required ? { id: 'restart', label: 'Restart now' }
-                : { id: 'check', label: 'Check for updates' } };
+    if (progress.result === 'failed' && progress.restart_required) {
+        return { ...base, state: 'restart_needed', tone: 'error',
+            headline: 'The update did not complete.', hint: progress.error || 'Restart Ouroboros before trying again.',
+            action: { id: 'restart', label: 'Restart now' } };
     }
-    return null; // Assisted work and boot recovery have their existing durable owner.
+    return null; // Retained conclusions do not hide the next explicitly requested action.
 }
 
 export function applyFailureText(err) {
@@ -120,10 +111,11 @@ export function applyFailureText(err) {
 // humanizeCheckedAt reads Date.now for the "checked N ago" age). The button is always a real next action; facts
 // travel as status line, hint, and chips (ARCHITECTURE §3: unavailable,
 // divergent, dirty, unsafe, failed-check, rollback, and restart-required
-// states stay visible — they are just not buttons).
-export function updateVerdict(data = {}, phase = '') {
+// states stay visible — they are just not buttons). `appVersion` is the app (host) version About shows: the
+// headline names the code an update changes, the App chip the app that a new download changes.
+export function updateVerdict(data = {}, phase = '', appVersion = '') {
     const checkedAgo = humanizeCheckedAt(data.checked_at);
-    const chips = [];
+    const chips = appVersion ? [{ label: 'App', value: appVersion }] : [];
     if (data.official_repo_url) chips.push({ label: 'Official repo', value: repoSlug(data.official_repo_url) });
     if (data.target_ref) chips.push({ label: 'Target', value: data.target_ref });
     if (data.update_channel) chips.push({ label: 'Channel', value: data.update_channel, link: 'settings-advanced' });
@@ -294,27 +286,32 @@ export function updateVerdict(data = {}, phase = '') {
     };
 }
 
-// --- The update letter -----------------------------------------------------
+// --- The update description -------------------------------------------------
 //
-// Ouroboros writes ONE short markdown paragraph about the update the panel is
-// offering, and the backend hands it to the client inside the ordinary status
-// payload as the additive `letter` key. It is never deleted once the update
-// lands: the same text, relabelled, becomes "What changed in this version".
-// Refresh uses the existing fetching check. Description work and its failures
+// Ouroboros writes the description of the update the panel is offering as
+// ordinary work: when the owner presses Write/Rewrite here (one ordinary Main
+// task, whose status the backend reads from its task result) or on its own
+// initiative. A check never writes it. The backend hands it to the client
+// inside the ordinary status payload as the additive `letter` key. It is never
+// deleted once the update lands: the same text, relabelled, becomes "What
+// changed in this version", and a text written for an older range keeps that
+// range's label when a newer target appears. Description work and its failures
 // stay separate from the primary installation action.
 
-// Hidden where the letter could only mislead: a checkout that managed updates
-// do not own (unmanaged), an unknown status, a target no fetching check has
-// named yet (unchecked), and the
-// restart phase, whose served-SHA reload owns the card. Loading and checking
-// KEEP it: the paragraph is still the last known fact, and a passive refresh
-// or a failed/running check must not blank it — that is what the letter renderer's
-// content key is for.
+// Hidden where the description could only mislead: a checkout that managed
+// updates do not own (unmanaged), an unknown status, a target no fetching check
+// has named yet (unchecked), and the restart phase, whose served-SHA reload owns
+// the card. Loading and checking KEEP it: the text is still the last known fact,
+// and a passive refresh or a failed/running check must not blank it — that is
+// what the renderer's content key is for.
 const LETTER_HIDDEN_VERDICTS = new Set(['unmanaged', 'unknown', 'unchecked']);
 const LETTER_HIDDEN_PHASES = new Set(['restarting']);
+const LETTER_BUSY_PHASES = new Set(['preflighting', 'updating', 'restarting']);
 const LETTER_RELATIONS = new Set(['pending', 'applied', 'superseded', 'other']);
+// The request's own ordinary task statuses during which it may still save.
+const LIVE_REQUEST_STATUSES = new Set(['requested', 'scheduled', 'running', 'interrupted', 'cancel_requested']);
 // `applied` is the one relation whose label changes: the running version IS
-// the letter's target, so the paragraph is history, not a preview.
+// the description's target, so the text is history, not a preview.
 const LETTER_LABELS = {
     pending: "What's new",
     applied: 'What changed in this version',
@@ -331,56 +328,106 @@ function noLetterView() {
         failure: null,
         label: '',
         note: '',
+        covers: '',
+        write: null,
+        request: null,
     };
 }
 
+const shortRange = (key) => (key?.base_sha && key?.target_sha
+    ? `${String(key.base_sha).slice(0, 8)} → ${String(key.target_sha).slice(0, 8)}` : '');
+const sameRange = (a, b) => Boolean(a?.base_sha && a?.target_sha
+    && a.base_sha === b?.base_sha && a.target_sha === b?.target_sha);
+
+function requestView(letter) {
+    const request = letter?.request;
+    if (!request?.task_id) return null;
+    const status = String(request.status || 'unknown');
+    return { taskId: String(request.current_task_id || request.task_id), mode: String(request.mode || ''), key: request.key || {},
+        requestedAt: String(request.requested_at || ''), status, saved: request.saved === true,
+        live: LIVE_REQUEST_STATUSES.has(status) };
+}
+
+// What a finished request that saved nothing leaves to say; a saved one says nothing.
+function endedRequestNote(request) {
+    if (!request || request.live || request.saved) return '';
+    const how = { completed: 'finished', failed: 'failed', cancelled: 'was stopped' }[request.status];
+    return how ? `The last writing task ${how} without saving a description.`
+        : 'The last writing task left no readable result; nothing was saved.';
+}
+
 /**
- * Letter projector: durable server state × transient client phase → one
+ * Description projector: durable server state × transient client phase → one
  * presentation descriptor, pure but for the clock `relativeAge` reads.
  *
- * `state: 'none'` means the section is hidden. A failed letter still renders
- * when the backend kept the previous good text for the same range (the
- * failure travels as a note line), and renders as the bare reason when it did
- * not — a letter that silently disappeared would look like an update with
- * nothing to say.
+ * `state: 'none'` hides the section; `'empty'` shows it without text, offering
+ * Write for the update on offer. `write` is the one authoring control: Write
+ * for a range nothing describes yet, Rewrite for the shown text's own range
+ * (an applied one included), disabled while a requested task still runs.
  */
 export function updateLetterView(data = {}, phase = '') {
-    const letter = data?.letter && typeof data.letter === 'object' ? data.letter : null;
-    if (!letter) return noLetterView();
+    // No record yet still offers Write for an update on offer: the server checks the range.
+    const letter = data?.letter && typeof data.letter === 'object' ? data.letter : {};
+    if (data.preflight_range && letter.text && (letter.key?.base_sha !== data.preflight_range.base_sha
+        || letter.key?.target_sha !== data.preflight_range.target_sha)) return noLetterView();
     if (LETTER_HIDDEN_PHASES.has(phase)) return noLetterView();
     if (LETTER_HIDDEN_VERDICTS.has(updateVerdict(data, phase).state)) return noLetterView();
 
-    const state = letter.state === 'failed' ? 'failed' : (letter.state === 'ready' ? 'ready' : '');
     const markdown = String(letter.text || '').trim();
-    // An unnamed state, or a "ready" letter with nothing in it, has no honest
-    // rendering; the panel stays exactly as it was without one.
-    if (!state || (state === 'ready' && !markdown)) return noLetterView();
+    const state = letter.state === 'failed' ? 'failed' : (markdown ? 'ready' : 'empty');
+    const runningBase = String(data.running_sha || data.current_sha || '');
+    const latestTarget = String(data.checked_target_sha || data.latest_sha || '');
+    const offered = data.available && runningBase && latestTarget && runningBase !== latestTarget
+        && (!letter.checked_key || sameRange(letter.checked_key, { base_sha: runningBase, target_sha: latestTarget }))
+        ? { ...(letter.checked_key || {}), base_sha: runningBase, target_sha: latestTarget } : null;
+    const request = requestView(letter);
+    if (!markdown && !offered && !request?.live && state !== 'failed') return noLetterView();
 
-    const relation = LETTER_RELATIONS.has(letter.relation) ? letter.relation : 'other';
+    const relation = markdown && LETTER_RELATIONS.has(letter.relation) ? letter.relation : (markdown ? 'other' : '');
     const meta = {
         authorVersion: String(letter.author_version || ''),
         targetVersion: String(letter.target_version || ''),
         writtenAt: String(letter.written_at || ''),
         ageText: relativeAge(letter.written_at),
     };
-    const runningBase = String(data.running_sha || '');
-    const latestTarget = String(data.checked_target_sha || data.latest_sha || '');
-    // The server compares the successful body's complete source range. Neither
-    // the version label nor mutable checkout HEAD proves server adoption here.
+    // The server compares the shown text's complete source range. Neither the
+    // version label, a newer post-merge run nor mutable checkout HEAD moves it.
     const descriptionCurrent = letter.description_current === true;
     const failedKey = letter.latest_failed_key;
     const failure = state === 'failed' && !descriptionCurrent && (!failedKey
         || (failedKey.base_sha === runningBase && failedKey.target_sha === latestTarget))
         ? { kind: String(letter.error_kind || ''), text: String(letter.error_text || ''),
             failedAt: String(letter.failed_at || ''), key: failedKey || null } : null;
-    let note = descriptionCurrent || (relation === 'applied' && !data.available) ? '' : data.available
-        ? 'Description needs refreshing.'
-        : 'This description was written for an earlier update.';
-    if (failure) {
-        const when = letterTimestamp(failure.failedAt);
+    // Write targets the update on offer; with none, Rewrite rephrases the shown text's own range.
+    const writeKey = offered || (markdown && letter.key?.base_sha ? letter.key : null);
+    const rewriting = Boolean(writeKey && markdown && sameRange(letter.key, writeKey));
+    const write = writeKey ? {
+        mode: rewriting ? 'rewrite' : 'write',
+        key: writeKey,
+        label: request?.live ? 'Writing…' : (rewriting ? 'Rewrite' : 'Write description'),
+        disabled: Boolean(request?.live) || LETTER_BUSY_PHASES.has(phase),
+    } : null;
+    let note = '';
+    if (request?.live) {
+        // Once its own save landed, the shown text is no longer the one waiting to be replaced. The time
+        // is the owner's press, a fixed fact: the task's own card (the note's door) shows what it does.
+        const asked = attemptTime(request.requestedAt);
+        note = request.saved ? `Ouroboros saved the description; its task (${request.taskId}) is still running.`
+            : `Ouroboros is writing the description${asked ? ` you asked for on ${asked}` : ''} (task ${request.taskId}).${
+                markdown ? ' The current text stays until the new one is saved.' : ''}`;
+    } else if (failure) {
+        const when = attemptTime(failure.failedAt);
         note = `Refresh failed${when ? ` on ${when}` : ''}. ${markdown
             ? 'Previous description kept.' : 'No description is available yet.'}`;
+    } else if (!markdown) {
+        note = endedRequestNote(request) || 'No description of this update yet.';
+    } else if (offered && !descriptionCurrent) {
+        note = `This description covers an earlier update (${shortRange(letter.key)}).`;
+    } else if (!offered && !descriptionCurrent && relation !== 'applied') {
+        note = 'This description was written for an earlier update.';
     }
+    const ended = request && sameRange(request.key, writeKey) ? endedRequestNote(request) : '';
+    if (ended && markdown && !request.live) note = note ? `${note} ${ended}` : ended;
 
     return {
         state,
@@ -389,22 +436,17 @@ export function updateLetterView(data = {}, phase = '') {
         meta,
         failure,
         descriptionCurrent,
-        label: LETTER_LABELS[relation],
+        label: LETTER_LABELS[relation] || "What's new",
         note,
+        covers: markdown ? shortRange(letter.key) : '',
+        write,
+        request,
     };
 }
 
-function letterTimestamp(value) {
-    const date = new Date(value);
-    if (!value || Number.isNaN(date.getTime())) return '';
-    return new Intl.DateTimeFormat('en-GB', {
-        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
-    }).format(date);
-}
-
-/** Content identity of a rendered letter: re-render only when this changes.
- *  The markdown itself, never a length proxy — two different paragraphs of equal length
- *  are a different letter, and one paragraph is small enough to compare outright. */
+/** Content identity of a rendered description: re-render only when this changes.
+ *  The markdown itself, never a length proxy — two different texts of equal length
+ *  are a different description. */
 function letterContentKey(view) {
     // Status and provenance updates must not replace the text being read.
     return view.markdown;
@@ -433,8 +475,9 @@ export function restartStatusCanSettle(data, { afterBootNotice = false } = {}) {
 // Updates is mounted for the SPA lifetime. Keep its reconnect episode local:
 // update_status_ready is transient and can arrive from the old generation, so
 // it may reconcile a restart only after the socket has actually reopened.
-export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadStatus }) {
+export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadStatus, getRequestTaskId = () => '' }) {
     let restartReconnected = false;
+    let continuedTaskId = ''; // Event correlation only; the status response owns liveness.
     const disposers = [];
     const listen = (event, handler) => {
         const dispose = ws?.on?.(event, handler);
@@ -457,6 +500,22 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
             loadStatus({ fetchRemote: false, preservePhase: true });
         }
     });
+    // The requested description task ends through the ordinary task lifecycle;
+    // its own task_done (saved or not) is the one cue to read the status again.
+    // A host retry ends under its own id, naming the request as its root.
+    listen('log', (msg) => {
+        const evt = msg?.data;
+        const taskId = getRequestTaskId();
+        // Continue may be pressed in another window or through another owner interface.
+        // Its existing host log reaches every socket; the status reader resolves the new author.
+        if (!evt || evt._historical || !taskId || getPhase() === 'restarting') return;
+        const matches = (id) => id === taskId || (continuedTaskId && id === continuedTaskId);
+        const continued = evt.type === 'owner_continue_admitted' && matches(evt.predecessor_task_id);
+        const ended = evt.type === 'task_done'
+            && (matches(evt.task_id) || (matches(evt.root_task_id) && !evt.parent_task_id));
+        if (continued && typeof evt.task_id === 'string') continuedTaskId = evt.task_id;
+        if (continued || ended) loadStatus({ fetchRemote: false, preservePhase: true });
+    });
     listen('update_status_ready', () => {
         const phase = getPhase();
         if (phase === 'restarting') {
@@ -472,6 +531,12 @@ export function bindUpdateRefreshEvents({ ws, getPhase, reconcileRestart, loadSt
     };
 }
 
+// The App chip follows the health read About uses: one that lands after a status rendered re-renders the panel;
+// a panel still loading keeps its loading line until its own status render. Returns the disposer.
+export function bindAppVersionRender({ getStatus, render }) {
+    return watchAppVersion(() => { if (getStatus()) render(); });
+}
+
 export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const page = document.createElement('div');
     page.id = 'page-updates';
@@ -485,6 +550,24 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     <span class="updates-headline" id="updates-summary">Loading update status...</span>
                 </div>
                 <div class="updates-hint" id="updates-hint" hidden></div>
+                <section class="updates-attempt" id="updates-attempt" aria-labelledby="updates-attempt-headline" hidden>
+                    <div class="updates-status">
+                        <span class="updates-status-dot" id="updates-attempt-dot" data-tone="neutral"></span>
+                        <span class="updates-attempt-headline" id="updates-attempt-headline"></span>
+                    </div>
+                    <div class="updates-hint" id="updates-attempt-text"></div>
+                    <div class="updates-attempt-foot">
+                        <details class="updates-attempt-details" id="updates-attempt-details">
+                            <summary><time id="updates-attempt-time">Last attempt</time></summary>
+                            <dl class="updates-attempt-facts" id="updates-attempt-facts"></dl>
+                            <details class="updates-raw" id="updates-attempt-raw" hidden>
+                                <summary id="updates-attempt-raw-label">Raw record</summary>
+                                <pre class="updates-raw-text" id="updates-attempt-raw-text"></pre>
+                            </details>
+                        </details>
+                        <button type="button" class="btn btn-default btn-sm" id="updates-attempt-restore" hidden>Restore previous version</button>
+                    </div>
+                </section>
                 <div class="updates-meta" id="updates-meta"></div>
                 <div class="settings-action-row updates-action-row">
                     <span class="updates-action-note" id="updates-action-note"></span>
@@ -494,20 +577,24 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     <div class="updates-letter-head">
                         <div class="updates-letter-heading">
                             <h4 class="updates-letter-label" id="updates-letter-label"></h4>
-                            <time class="updates-letter-meta" id="updates-letter-meta"></time>
+                            <span class="updates-letter-meta"><time id="updates-letter-meta"></time><span id="updates-letter-covers"></span></span>
                         </div>
-                        <button type="button" class="btn btn-ghost btn-sm updates-letter-refresh" id="updates-letter-refresh"
-                            aria-label="Refresh description" aria-describedby="updates-letter-resources">
-                            <span aria-hidden="true">↻</span><span id="updates-letter-refresh-label">Refresh</span>
-                        </button>
+                        <div class="updates-letter-actions">
+                            <button type="button" class="btn btn-ghost btn-sm updates-letter-refresh" id="updates-letter-refresh"
+                                aria-label="Check for updates" aria-describedby="updates-letter-resources">
+                                <span aria-hidden="true">↻</span><span id="updates-letter-refresh-label">Check</span>
+                            </button>
+                            <button type="button" class="btn btn-default btn-sm updates-letter-write" id="updates-letter-write"
+                                aria-describedby="updates-letter-resources" hidden></button>
+                        </div>
                     </div>
-                    <div class="updates-letter-note" id="updates-letter-note" role="status" aria-live="polite" hidden></div>
+                    <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
                     <details class="updates-letter-details" id="updates-letter-details">
                         <summary>Details</summary>
                         <p id="updates-letter-provenance"></p>
                         <p id="updates-letter-error" hidden></p>
-                        <p id="updates-letter-resources">Refresh checks for changes. A new description uses your configured model and may use subscription limits, local resources, or API budget.</p>
+                        <p id="updates-letter-resources">Check reads the official channel and never writes a description. Writing runs one ordinary Ouroboros task on your Main model, which can read the changes themselves; it may use subscription limits, local resources, or API budget.</p>
                     </details>
                 </section>
                 <details class="updates-recovery">
@@ -535,6 +622,16 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const dot = page.querySelector('#updates-dot');
     const summary = page.querySelector('#updates-summary');
     const hint = page.querySelector('#updates-hint');
+    const attemptSection = page.querySelector('#updates-attempt');
+    const attemptDot = page.querySelector('#updates-attempt-dot');
+    const attemptHeadline = page.querySelector('#updates-attempt-headline');
+    const attemptWhen = page.querySelector('#updates-attempt-time');
+    const attemptText = page.querySelector('#updates-attempt-text');
+    const attemptFacts = page.querySelector('#updates-attempt-facts');
+    const attemptRestore = page.querySelector('#updates-attempt-restore');
+    const attemptRaw = page.querySelector('#updates-attempt-raw');
+    const attemptRawLabel = page.querySelector('#updates-attempt-raw-label');
+    const attemptRawText = page.querySelector('#updates-attempt-raw-text');
     const meta = page.querySelector('#updates-meta');
     const actionNote = page.querySelector('#updates-action-note');
     const current = page.querySelector('#updates-current');
@@ -543,7 +640,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const letterSection = page.querySelector('#updates-letter');
     const letterLabel = page.querySelector('#updates-letter-label');
     const letterMeta = page.querySelector('#updates-letter-meta');
+    const letterCovers = page.querySelector('#updates-letter-covers');
+    const letterWrite = page.querySelector('#updates-letter-write');
     const letterNote = page.querySelector('#updates-letter-note');
+    const letterNoteLine = page.querySelector('#updates-letter-note-line');
+    const letterTask = page.querySelector('#updates-letter-task');
     const letterBody = page.querySelector('#updates-letter-body');
     const letterRefresh = page.querySelector('#updates-letter-refresh');
     const letterRefreshLabel = page.querySelector('#updates-letter-refresh-label');
@@ -551,8 +652,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     const letterError = page.querySelector('#updates-letter-error');
     let letterRefreshing = false;
     let letterRefreshError = null;
+    let letterRequesting = false;
+    let letterRequestError = null;
     let letterDisposer = null;
     let letterKey = null;
+    let letterDoor = '';
     let latestStatus = null;
     let phase = 'loading';
     let restartReconcileInFlight = false;
@@ -565,6 +669,14 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             return `<button type="button" class="updates-chip updates-chip-link" data-open-settings-advanced title="Change in Settings -> Advanced">${body}</button>`;
         }
         return `<span class="updates-chip">${body}</span>`;
+    }
+
+    // One row of the Last attempt list: a group heading spans both columns; an exact stamp sits under its value.
+    function factRowHtml(row) {
+        if (row.head) return `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`;
+        const exact = row.exact
+            ? `<time class="updates-fact-raw" datetime="${escapeHtml(row.exact)}">${escapeHtml(row.exact)}</time>` : '';
+        return `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}${exact}</dd>`;
     }
 
     // The letter body hosts rendered markdown, so its enhancement owns real
@@ -580,8 +692,23 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     }
 
     /** The letter is a fact: no control the markdown pipeline adds may survive in it. */
-    function stripLetterControls() {
-        letterBody.querySelectorAll('button').forEach((control) => control.remove());
+    function stripLetterControls(root = letterBody) {
+        root.querySelectorAll('button').forEach((control) => control.remove());
+    }
+
+    /** The Apply confirmation's copy of the description: the same pipeline and scrub as the panel. */
+    function mountDescription(container, markdown) {
+        const heading = document.createElement('h4');
+        heading.className = 'updates-letter-label';
+        heading.textContent = "What's new";
+        const body = document.createElement('div');
+        body.className = 'updates-letter-body ui-rich-content';
+        container.append(heading, body);
+        mountChatMarkdown(body, markdown);
+        stripLetterControls(body);
+        const dispose = enhanceChatMarkdown(body, { onDomWrite: (mutate) => { mutate(); stripLetterControls(body); } });
+        stripLetterControls(body);
+        return () => (typeof dispose === 'function' ? dispose() : destroyChatMarkdown(body));
     }
 
     // Called from render() on every phase change and status load. The head is
@@ -600,35 +727,50 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             return;
         }
         letterSection.hidden = false;
-        letterSection.setAttribute('aria-busy', String(letterRefreshing));
+        letterSection.setAttribute('aria-busy', String(letterRefreshing || letterRequesting || Boolean(view.request?.live)));
         letterLabel.textContent = view.label;
-        const written = letterTimestamp(view.meta.writtenAt);
+        const written = view.markdown ? attemptTime(view.meta.writtenAt) : '';
         letterMeta.textContent = written ? `Written ${written}` : '';
         letterMeta.dateTime = view.meta.writtenAt;
         letterMeta.hidden = !written;
-        letterRefresh.disabled = letterRefreshing || ['preflighting', 'updating', 'restarting'].includes(phase);
-        letterRefreshLabel.textContent = letterRefreshing ? 'Refreshing…' : 'Refresh';
-        letterRefresh.setAttribute('aria-label', letterRefreshing ? 'Refreshing description' : 'Refresh description');
-        const note = letterRefreshing ? (view.markdown
-            ? 'Previous description shown while refreshing.' : 'Writing description…')
-            : letterRefreshError ? 'Could not refresh description. Previous description kept.' : view.note;
+        letterCovers.textContent = view.covers ? `${written ? ' · ' : ''}covers ${view.covers}` : '';
+        letterCovers.hidden = !view.covers;
+        // One control per intent: when the primary action already checks, the section adds none.
+        letterRefresh.hidden = updateVerdict(latestStatus || {}, phase).action?.id === 'check';
+        letterRefresh.disabled = letterRefreshing || LETTER_BUSY_PHASES.has(phase);
+        letterRefreshLabel.textContent = letterRefreshing ? 'Checking…' : 'Check';
+        letterRefresh.setAttribute('aria-label', letterRefreshing ? 'Checking for updates' : 'Check for updates');
+        letterWrite.hidden = !view.write;
+        letterWrite.disabled = !view.write || view.write.disabled || letterRequesting || letterRefreshing;
+        letterWrite.textContent = letterRequesting ? 'Requesting…' : (view.write?.label || '');
+        const note = letterRefreshing ? (view.markdown ? 'Checking the official channel; the description stays as it is.' : 'Checking the official channel…')
+            : letterRequestError ? `Could not request a description: ${letterRequestError.text}`
+                : letterRefreshError ? 'Could not check for updates. The description is unchanged.' : view.note;
         letterNote.textContent = note;
-        letterNote.hidden = !note;
+        letterNoteLine.hidden = !note;
+        // A running request's own note opens its task's card in Main; rewritten only when the task changes,
+        // so a passive refresh keeps focus on it.
+        const door = note === view.note && view.request?.live ? taskReferenceHtml(view.request.taskId) : '';
+        if (door !== letterDoor) {
+            letterTask.innerHTML = door;
+            letterDoor = door;
+        }
         const letter = latestStatus?.letter || {};
-        const source = letter.key?.base_sha && letter.key?.target_sha
-            ? ` Changes ${letter.key.base_sha.slice(0, 8)} → ${letter.key.target_sha.slice(0, 8)}.` : '';
-        letterProvenance.textContent = `Written by Ouroboros${view.meta.authorVersion
-            ? ` ${view.meta.authorVersion}` : ''}${view.meta.targetVersion
-            ? ` about ${view.meta.targetVersion}` : ''}.${source}`;
+        const author = letter.author?.task_id ? ` in task ${letter.author.task_id}${letter.author.model
+            ? ` (${letter.author.model})` : ''}${letter.author.requested ? ', at your request' : ''}` : '';
+        letterProvenance.textContent = view.markdown ? `Written by Ouroboros${view.meta.authorVersion
+            ? ` ${view.meta.authorVersion}` : ''}${author}${view.meta.targetVersion
+            ? ` about ${view.meta.targetVersion}` : ''}.${view.covers ? ` Changes ${view.covers}.` : ''}`
+            : (view.write ? `The update on offer: changes ${shortRange(view.write.key)}.` : '');
+        letterProvenance.hidden = !letterProvenance.textContent;
         const lastFailure = letterRefreshError?.text || letter.error_text || letter.error_kind || '';
-        const failedAt = letterTimestamp(letterRefreshError?.at || letter.failed_at);
+        const failedAt = attemptTime(letterRefreshError?.at || letter.failed_at);
         // Failed-attempt provenance must never borrow the shown
         // body's range, which may describe an earlier, already-applied update.
         const failedKey = letterRefreshError ? null : letter.latest_failed_key;
-        const failedRange = failedKey?.base_sha && failedKey?.target_sha
-            ? ` for changes ${failedKey.base_sha.slice(0, 8)} → ${failedKey.target_sha.slice(0, 8)}` : '';
+        const failedRange = failedKey?.base_sha && failedKey?.target_sha ? ` for changes ${shortRange(failedKey)}` : '';
         letterError.textContent = lastFailure
-            ? `Last refresh failed${failedAt ? ` on ${failedAt}` : ''}${failedRange}: ${lastFailure}` : '';
+            ? `${letterRefreshError ? 'Last check failed' : 'Last failure'}${failedAt ? ` on ${failedAt}` : ''}${failedRange}: ${lastFailure}` : '';
         letterError.hidden = !lastFailure;
         const nextKey = letterContentKey(view);
         if (nextKey === letterKey) return;
@@ -653,12 +795,15 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         stripLetterControls();
     }
 
-    // One fetching-check seam coalesces this with ordinary status refreshes.
-    // The backend reuses successful exact ranges; installation stays independent.
+    letterTask.addEventListener('click', openTaskReference);
+
+    // Check is the ordinary fetching check: it records range facts and never
+    // writes prose, so an unchanged description stays exactly as it was.
     letterRefresh.addEventListener('click', async () => {
         if (letterRefreshing || letterRefresh.disabled) return;
         letterRefreshing = true;
         letterRefreshError = null;
+        letterRequestError = null;
         renderLetter();
         const previous = latestStatus?.letter;
         const previousView = updateLetterView(latestStatus || {}, phase);
@@ -678,8 +823,62 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     });
 
+    // Write/Rewrite is the owner's explicit request: one ordinary Main task
+    // reads the range and saves a description; nothing repeats on its own.
+    letterWrite.addEventListener('click', async () => {
+        const view = updateLetterView(latestStatus || {}, phase);
+        if (letterRequesting || letterWrite.disabled || !view.write || view.write.disabled) return;
+        letterRequesting = true;
+        letterRequestError = null;
+        renderLetter();
+        try {
+            await apiClient.updateDescription(view.write.mode, view.write.key);
+        } catch (err) {
+            // A request still running is shown by the status read below, not as an error.
+            if (!(err?.status === 409 && err?.body?.task_id)) {
+                letterRequestError = { text: String(err?.body?.error || err?.message || err) };
+            }
+        } finally {
+            letterRequesting = false;
+        }
+        await loadStatus({ fetchRemote: false, preservePhase: true });
+    });
+
+    // The retained last attempt (#1818), apart from the primary action and kept until the next attempt.
+    // While this server's attempt runs or awaits its restart, the headline above already names it.
+    function renderAttempt(verdict) {
+        const view = updateAttemptView(latestStatus?.update_progress);
+        const above = !view?.terminal && ['updating', 'restarting', 'restart_required'].includes(verdict.state);
+        attemptSection.hidden = !view || (above && !view.text);
+        if (attemptSection.hidden) return;
+        attemptDot.dataset.tone = view.tone;
+        attemptHeadline.textContent = view.headline;
+        attemptHeadline.hidden = above || view.headline === verdict.headline;
+        attemptDot.hidden = attemptHeadline.hidden;
+        const when = attemptTime(view.when);
+        attemptWhen.textContent = when ? `Last attempt · ${when}` : 'Last attempt';
+        attemptWhen.dateTime = view.when;
+        attemptText.textContent = view.text;
+        attemptText.hidden = !view.text;
+        // The retained samples (after_update) join the rows only of the attempt they name, so they appear with this
+        // section, which stays hidden while an update runs (owner 25.10: A). A record of another operation is never
+        // read as this attempt's: it keeps only its exact text below, labelled so.
+        const observed = latestStatus?.after_update || null;
+        const own = Boolean(observed) && String(observed.operation_id || '') === view.id;
+        attemptFacts.innerHTML = [...view.details, ...(own ? afterUpdateRows(observed) : [])].map(factRowHtml).join('');
+        attemptRaw.hidden = !observed;
+        attemptRawLabel.textContent = own ? 'Raw record' : 'Raw record (not matched to this attempt)';
+        // Rewritten only when the record changes, so a refresh keeps the owner's selection in it.
+        const raw = observed ? JSON.stringify(observed, null, 2) : '';
+        if (attemptRawText.textContent !== raw) attemptRawText.textContent = raw;
+        attemptRestore.hidden = !view.restoreTarget;
+        attemptRestore.dataset.target = view.restoreTarget || '';
+        attemptRestore.disabled = replaceInFlight || Boolean(latestStatus?.update_tx?.active)
+            || ['preflighting', 'updating', 'restarting'].includes(phase);
+    }
+
     function render() {
-        const verdict = updateVerdict(latestStatus || {}, phase);
+        const verdict = updateVerdict(latestStatus || {}, phase, lastAppVersion());
         dot.dataset.tone = verdict.tone;
         summary.textContent = verdict.headline;
         const hintText = [verdict.hint, ...(verdict.warnings || []).map((w) => `Warning: ${w}`)]
@@ -706,6 +905,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             'loading', 'checking', 'updating', 'preflighting', 'restarting',
             'restart_required', 'restart_needed', 'resolving', 'unmanaged',
         ].includes(verdict.state);
+        renderAttempt(verdict);
         renderLetter();
     }
 
@@ -779,7 +979,8 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                         renderOfficialTags(data.official_tags || []);
                     }
                     if (statusRefreshNext) continue; // A newer notice owns the next read.
-                    latestStatus = data;
+                    latestStatus = options.preservePhase && phase === 'preflighting' && latestStatus?.preflight_range
+                        ? bindPreflightDescription(data, { merge_plan: latestStatus.preflight_range, letter: latestStatus.letter }) : data;
                     // Keep an outstanding apply/restart await. Server progress refines
                     // its label; a fresh page starts with no old local phase.
                     if (!options.preservePhase || !['updating', 'restarting', 'preflighting'].includes(phase)) {
@@ -870,9 +1071,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
 
     async function rollback(target) {
         const confirmed = await openConfirmDialog({
-            title: 'Roll back',
-            body: `Roll back to ${target}?\n\nA rescue snapshot of the current state will be saved. The server will restart.`,
-            confirmLabel: 'Roll back',
+            title: 'Restore version',
+            body: `Restore ${target} locally?\n\nRunning work will be interrupted, a rescue snapshot will be saved, and the server will restart. Nothing will be pushed. Engine data cannot be downgraded.`,
+            confirmLabel: 'Restore',
             danger: true,
         });
         if (!confirmed) return;
@@ -914,17 +1115,28 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 throw new Error(preflight?.merge_plan?.error || 'The update plan could not be verified. No files were changed.');
             }
             const { plan, strategy } = verified;
+            latestStatus = bindPreflightDescription(latestStatus, preflight);
+            render();
             const conflictCount = (plan.code_conflict_paths || []).length + (plan.doc_conflict_paths || []).length;
             const assisted = strategy === 'assisted';
+            const description = preflightDescription(preflight);
+            // The description reads as rendered prose in its own region; the consequences of
+            // applying stay plain text below it, and the per-commit evidence sits in Details.
             const proceed = await openConfirmDialog({
                 title: `Update ${String(plan.base_sha).slice(0, 8)} -> ${String(plan.target_sha).slice(0, 8)}`,
-                body: assisted
+                content: description ? { label: "What's new", mount: (el) => mountDescription(el, description) } : null,
+                body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
-                    : `Git applies this update directly (${plan.local_dirty_count || 0} uncommitted file(s) are stashed and restored). The server restarts when it lands.`,
+                    : `Git applies this update directly (${plan.local_dirty_count || 0} uncommitted file(s) are stashed and restored). The server restarts when it lands.`)
+                    + '\n\n' + updateEffectsText(preflight),
+                details: { summary: 'Checks for this range', rows: preflightEvidenceRows(preflight) },
                 confirmLabel: assisted ? 'Start reviewed resolution' : 'Update now',
             });
             if (!proceed) {
                 setPhase('');
+                // The pin served the confirmation only: the panel reads the record as it is now,
+                // a description saved while the dialog was open included.
+                await loadStatus({ fetchRemote: false, preservePhase: true });
                 return;
             }
             setPhase('updating');
@@ -940,11 +1152,11 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                 showToast('Update landed, but automatic restart failed. Restart Ouroboros to finish.', 'error');
                 setPhase('restart_required');
             } else {
-                showToast('Update applied. Server is restarting.', 'success');
+                showToast('Restart requested to finish the update.', 'success');
                 enterRestarting();
             }
         } catch (err) {
-            showToast('Update failed: ' + applyFailureText(err), 'error');
+            showToast('Update request did not complete: ' + applyFailureText(err), 'error');
             // An error carrying restart_required does NOT mean the update
             // landed (a failed writer fence or a failed rollback also sets
             // it): re-read the durable transaction state, and when no marker
@@ -956,13 +1168,6 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     }
 
     async function replaceWithOfficial() {
-        const proceed = await openConfirmDialog({
-            title: 'Replace with official version',
-            body: 'Recovery will replace the active checkout with the exact official version from the selected channel.\n\nA rescue snapshot and a local keep branch preserve a copy, but the active branch will be reset. Continue?',
-            confirmLabel: 'Replace checkout',
-            danger: true,
-        });
-        if (!proceed) return;
         // In-flight latch, not a bare .disabled: a tab reopen re-renders the
         // panel mid-request, and render() would otherwise re-enable Replace
         // while this destructive recovery is still pending (final-review
@@ -975,6 +1180,13 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
             if (!plan.base_sha || !plan.target_sha) {
                 throw new Error(plan.error || 'Could not resolve an exact recovery target.');
             }
+            const proceed = await openConfirmDialog({
+                title: 'Replace with official version',
+                body: 'Recovery will reset the active checkout to the exact official version. A rescue snapshot and local keep branch preserve your work.\n\n'
+                    + updateEffectsText(preflight, { replace: true }),
+                confirmLabel: 'Replace checkout', danger: true,
+            });
+            if (!proceed) return;
             const data = await apiClient.updateApply('replace', plan, { confirmRecovery: true });
             if (data.status === 'restart_required') {
                 showToast('Recovery needs a restart that could not be requested. Restart Ouroboros to finish.', 'error');
@@ -1029,6 +1241,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         }
     });
     replaceBtn.addEventListener('click', replaceWithOfficial);
+    attemptRestore.addEventListener('click', () => rollback(attemptRestore.dataset.target));
     meta.addEventListener('click', (event) => {
         if (event.target.closest?.('[data-open-settings-advanced]')) {
             openSettingsTab?.('advanced');
@@ -1037,7 +1250,7 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         const confirmedPromote = await openConfirmDialog({
             title: 'Save recovery point',
-            body: 'Move this installation\'s local recovery branch (ouroboros-stable) to the current checkout?\n\nThis is the fallback the runtime boots when the working branch breaks. It does not publish anything and does not change the official QA feed of any install.',
+            body: 'Move this installation\'s local recovery branch (ouroboros-stable) to the current checkout now?\n\nThis is the fallback the runtime boots when the working branch breaks. Each successful start of a clean, launcher-managed working branch moves it, so a point saved here lasts until then (earlier versions stay under Restore). It does not publish anything and does not change the official QA feed of any install.',
             confirmLabel: 'Save recovery point',
         });
         if (!confirmedPromote) return;
@@ -1061,7 +1274,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
         getPhase: () => phase,
         reconcileRestart: reconcileRestartStatus,
         loadStatus,
+        getRequestTaskId: () => requestView(latestStatus?.letter)?.taskId || '',
     });
+    bindAppVersionRender({ getStatus: () => latestStatus, render });  // same lifetime as the panel
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'updates' || state.activePage !== 'dashboard') return;
         loadStatus({ fetchRemote: false });

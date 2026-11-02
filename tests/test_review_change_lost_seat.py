@@ -30,6 +30,9 @@ def test_a_rerun_whose_owed_seat_lost_custody_settles_by_the_seats_that_answered
         actor = collect(ctx_, surface, slot_id, retry_key)
         if slot_id != "t2":
             return actor
+        # This replacement simulates a lost producer, so it cannot also retain
+        # the original producer's canonical responded outcome (S1).
+        actor = {key: value for key, value in actor.items() if key != "outcome"}
         return {**actor, "status": "error", "raw_text": "", "operation_state": "custody_lost",
                 "late_result_pending": True, "failure_code": "review_custody_lost",
                 "error": "A start was requested but no run was ever bound to it."}

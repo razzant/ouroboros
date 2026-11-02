@@ -17,6 +17,7 @@ def test_real_pr_merge_registry_preserves_known_and_unknown_custody(tmp_path, mo
     write_task_result(tmp_path, "merge-task", "running", root_task_id="merge-task")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_id = registry._ctx.root_task_id = "merge-task"
+    registry._ctx.task_metadata = {"work_kind": "owner"}  # an owner task's minted kind
     fake = FakeGh(tmp_path, merge=case)
     monkeypatch.setattr(github, "_gh_run", fake)
     monkeypatch.setattr(github, "github_cli_configured", lambda: True)

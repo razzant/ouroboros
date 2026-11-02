@@ -80,6 +80,8 @@ def _author_decisions(drive_root: Any, record: dict, gaps: list) -> list:
 
 
 def _record_view(drive_root: Any, record: dict, seen: dict, gaps: list) -> dict:
+    from ouroboros.review_ledger import seat_text_source
+
     rid, task_id = record["record_id"], str(record.get("task_id") or "")
     brief = record.get("brief") or {}
     view = {"review_record_id": rid, "revision": record.get("revision"), "surface": record.get("surface"),
@@ -89,8 +91,8 @@ def _record_view(drive_root: Any, record: dict, seen: dict, gaps: list) -> dict:
             "critical": [], "advisory": [], "reviewers": [],
             "author_decisions": _author_decisions(drive_root, record, gaps)}
     for row in record.get("rows") or []:
-        sources = [ref for ref in row.get("source_refs") or [] if ref.get("role") == "response"]
-        response = next((ref for ref in sources if ref.get("status") == "retained"), sources[-1] if sources else None)
+        # The seat's answer, else its failure or pending note; the source's role says which.
+        response = seat_text_source(row)
         seat = {k: copy.deepcopy(row[k]) for k in ("seat_id", "parts", "status", "answers", "requested", "effective") if k in row}
         if response:
             seat["response"] = _source_text(drive_root, task_id, response, seen, gaps)
@@ -186,6 +188,8 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
     open_ids = {row["obligation_id"] for row in open_obligations}
     open_records = {row.review_record_id for row in attempts if open_ids.intersection(row.obligation_ids or [])}
     heads = [rid for rid in ids if rid not in referenced]
+    from ouroboros.review_doctrine import history_author_fields
+
     decision_rows = []
     for row in rounds:
         identity = {k: row[k] for k in ("review_record_id", "revision", "attempt", "subject") if k in row}
@@ -201,9 +205,9 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
                     "status": {"recorded_verdict": answer.get("verdict"), "response_status": answer.get("status")},
                     "reason": copy.deepcopy(answer)})
         for decision in row.get("author_decisions") or []:
-            decision_rows.append({**identity, "decision_kind": "author_decision", "remark": "Explicit author decision", "status": decision.get("disposition"),
+            decision_rows.append({**identity, "decision_kind": "author_decision",
                                   "history_role": "open" if decision.get("disposition") in {"partial", "deferred"} else role,
-                                  "reason": decision.get("rationale"), "source": decision.get("source_ref")})
+                                  **history_author_fields(decision)})
     from ouroboros.review_history_view import canonical_decision_projection
     return canonical_decision_projection({"kind": "review_dispute_history", "status": "source_unavailable" if gaps else "complete",
             "rounds": rounds, "decision_rows": decision_rows, "gaps": gaps,
@@ -260,6 +264,10 @@ def prepare_history(ctx: Any, frozen: Any, rebuttal: str) -> dict:
         source = retain_text_source(drive, task, record_id=rid or str(getattr(ctx, "_current_review_retry_key", "") or "preparation"),
                                     seat_id="author", role="rebuttal", text=rebuttal)
         inputs = {"previous_records": history["record_heads"], "rebuttal": source, "gaps": []}
+        comparison = subject_comparison(ctx, frozen, history["record_heads"],
+                                        named=str(getattr(ctx, "_review_since", "") or ""))
+        if comparison:
+            inputs["comparison"] = comparison
         if source.get("status") == "unavailable":
             inputs["gaps"].append(_gap("author rebuttal retention failed", source_ref=source))
         if number and task and root:
@@ -274,8 +282,197 @@ def prepare_history(ctx: Any, frozen: Any, rebuttal: str) -> dict:
     history["gaps"].extend(copy.deepcopy(inputs.get("gaps") or []))
     if history["gaps"]:
         history["status"] = "source_unavailable"
+    if inputs.get("comparison"):  # a rejoin restores the frozen comparison, never a new one
+        history["comparison"] = copy.deepcopy(inputs["comparison"])
     ctx._review_dispute_history, ctx._review_dispute_input = history, inputs
     return history
+
+
+_COMPARED_ANCHORS = 4    # earlier reviews whose delta is computed; later ones are named, not compared
+_LISTED_PATHS = 40       # changed paths listed per anchor; the count covers the rest
+_EXCERPT_CHARS = 2500    # diff excerpt bound per anchor (a disclosed cut)
+_EXCERPTS = 2            # changed anchors that carry an excerpt
+_CHANGE_SURFACES = ("commit_gate", "change", "preflight")
+
+
+def _current_subject(ctx: Any, frozen: Any) -> dict:
+    """The subject under review: the frozen one, else the gate's live staged index; its
+    surface is the one its record will carry (the gate's ``commit_gate``)."""
+    from ouroboros.tools.review_subject import _real_index_tree, _rev_parse, _tree_delta_name_status
+
+    surface = ("commit_gate" if str(getattr(ctx, "_current_review_tool_name", "") or "") == "commit_reviewed"
+               else str(getattr(getattr(frozen, "spec", None), "surface", "") or "change"))
+    if frozen is not None:
+        return {"root": str(frozen.spec.root), "kind": str(frozen.spec.kind), "base": str(frozen.parent_sha),
+                "head": str(frozen.spec.head or ""), "tree": str(frozen.tree_sha), "surface": surface,
+                "touched": {path for _status, path in frozen.name_status}}
+    root = str(getattr(ctx, "repo_dir", "") or "")
+    base = _rev_parse(root, "HEAD^{commit}")
+    tree = _real_index_tree(root)
+    return {"root": root, "kind": "index", "base": base, "head": "", "tree": tree, "surface": surface,
+            "touched": {path for _status, path in _tree_delta_name_status(root, base, tree)}}
+
+
+def _same_repository(ctx: Any, earlier: str, current: str) -> bool:
+    """The named record's checkout is this repository: the same directory, the same
+    host copy provenance, or a linked checkout of the same Git object store."""
+    from ouroboros.tools.review_change_custody import paid_repo_key
+    from ouroboros.workspace_copies import same_directory, source_is_system_repo
+
+    if not earlier:
+        return False
+    if same_directory(earlier, current):
+        return True
+    try:
+        if paid_repo_key(ctx, earlier) == paid_repo_key(ctx, current):
+            return True
+    except (OSError, ValueError):
+        pass
+    return pathlib.Path(earlier).is_dir() and source_is_system_repo(earlier, current)
+
+
+def _anchor(ctx: Any, drive: Any, rid: str, now: dict, *, named: bool, excerpt: bool) -> dict:
+    """One earlier review against the current subject (``subject_comparison``)."""
+    from ouroboros.review_ledger import load_record
+    from ouroboros.tools.review_binary_context import StagedDiffUnavailable
+    from ouroboros.tools.review_subject import _git_bytes, _tree_delta_diff, _tree_delta_name_status
+    from ouroboros.utils import truncate_within_limit
+    from ouroboros.workspace_copies import same_directory
+
+    anchor: dict = {"review_record_id": rid, "named": named}
+    try:
+        record = load_record(drive, rid)
+    except (OSError, ValueError) as exc:
+        return {**anchor, "relation": "unavailable", "reason": f"the record is unreadable ({type(exc).__name__})"}
+    if not record:
+        return {**anchor, "relation": "unavailable", "reason": "no such review record in this installation's ledger"}
+    subject = record.get("subject") or {}
+    anchor.update(surface=record.get("surface"), state=record.get("state"),
+                  verdict=(record.get("verdict") or {}).get("aggregate"),
+                  author_disposition=(record.get("author_decision") or {}).get("disposition") or "",
+                  subject={key: subject.get(key) for key in ("root", "kind", "base", "head", "tree_sha")})
+    old_tree, old_base, root = str(subject.get("tree_sha") or ""), str(subject.get("base") or ""), now["root"]
+    if record.get("surface") not in _CHANGE_SURFACES or not old_tree:
+        return {**anchor, "relation": "unavailable", "reason": "not a change review with a recorded tree"}
+    if named and not _same_repository(ctx, str(subject.get("root") or ""), root):
+        return {**anchor, "relation": "unavailable", "reason": "the named review is of another repository, or of a "
+                "checkout no longer linked to this one"}
+    if _git_bytes(root, ["cat-file", "-e", f"{old_tree}^{{tree}}"])[0] != 0:
+        return {**anchor, "relation": "unavailable", "reason": f"its tree {old_tree} is not readable in {root}"}
+    # The subject's identity is more than its bytes: equal trees judged as another kind, head,
+    # surface, checkout or base were another subject, and are never called the same one.
+    differs = [key for key, value in (("kind", now["kind"]), ("head", now["head"]))
+               if str(subject.get(key) or "") != value]
+    differs += [key for key, same in (("surface", record.get("surface") == now["surface"]),
+                                      ("checkout", same_directory(subject.get("root"), root))) if not same]
+    if old_tree == now["tree"]:
+        differs += [] if old_base == now["base"] else ["base"]
+        return {**anchor, "relation": "same_tree_other_subject" if differs else "same_subject", "differs": differs}
+    try:
+        limit = None
+        if old_base != now["base"]:
+            moved = {"from": old_base, "to": now["base"]}
+            if old_base and _git_bytes(root, ["cat-file", "-e", f"{old_base}^{{commit}}"])[0] == 0:
+                moved["upstream_paths"] = len(_tree_delta_name_status(root, old_base, now["base"]))
+                limit = now["touched"] | {path for _status, path in _tree_delta_name_status(root, old_base, old_tree)}
+            else:
+                moved["unavailable"] = "the earlier base is not readable here: upstream changes are not separated"
+            anchor["base_moved"] = moved
+        rows = [row for row in _tree_delta_name_status(root, old_tree, now["tree"]) if limit is None or row[1] in limit]
+        anchor.update(relation="changed", differs=differs, changed_count=len(rows),
+                      changed=[f"{status}\t{path}" for status, path in rows[:_LISTED_PATHS]],
+                      limited_to_touched=limit is not None, full_delta=f"git diff {old_tree} {now['tree']}")
+        if excerpt and rows:
+            text = _tree_delta_diff(root, old_tree, now["tree"], 1, [path for _status, path in rows[:_LISTED_PATHS]])
+            anchor.update(excerpt=truncate_within_limit(text, _EXCERPT_CHARS), excerpt_chars=len(text))
+    except (StagedDiffUnavailable, OSError) as exc:
+        anchor.update(relation="unavailable", reason=f"the delta could not be read ({exc})")
+    return anchor
+
+
+def subject_comparison(ctx: Any, frozen: Any, heads: list, *, named: str = "") -> dict:
+    """What changed since earlier reviews, frozen into the dispute input before dispatch.
+
+    Anchors: every head this task and checkout already bound (``record_heads``, the same
+    subject included) and the review the author named (``since_review``: any task or copy
+    of this repository). Each keeps the earlier record's identity, surface, state and
+    verdict label (which covered its own bytes only) apart from the author's recorded
+    disposition, and its relation to the current subject: ``same_subject`` (same checkout,
+    kind, base, head, tree and surface), ``same_tree_other_subject`` (equal bytes judged as
+    another subject, ``differs`` naming how), ``changed`` (paths and a bounded excerpt; a
+    moved base is stated apart and the delta limited to paths either subject changed) or
+    ``unavailable`` with its reason. The whole subject stays under review: nothing here is
+    a verdict, a review scope or a reuse identity. ``{}`` when there is nothing to compare."""
+    from ouroboros.review_ledger import ledger_root
+
+    order = list(dict.fromkeys([*([named] if named else []), *(str(rid) for rid in heads or [] if rid)]))
+    if not order:
+        return {}
+    try:
+        now = _current_subject(ctx, frozen)
+    except Exception as exc:  # noqa: BLE001 -- a comparison gap, never a failed review
+        return {"anchors": [], "gap": f"the current subject could not be identified ({type(exc).__name__}: {exc})",
+                "named": named}
+    drive, anchors, excerpts = ledger_root(ctx), [], 0
+    for rid in order[:_COMPARED_ANCHORS]:
+        try:
+            anchor = _anchor(ctx, drive, rid, now, named=rid == named, excerpt=excerpts < _EXCERPTS)
+        except Exception as exc:  # noqa: BLE001 -- brief material: a stated gap, never a failed wave
+            anchor = {"review_record_id": rid, "named": rid == named, "relation": "unavailable",
+                      "reason": f"the comparison could not be computed ({type(exc).__name__})"}
+        excerpts += int(bool(anchor.get("excerpt")))
+        anchors.append(anchor)
+    return {"anchors": anchors, "not_compared": order[_COMPARED_ANCHORS:],
+            "current": {key: now[key] for key in ("root", "kind", "base", "head", "tree", "surface")}}
+
+
+def render_comparison(comparison: Any) -> str:
+    """The seats' text of a frozen comparison: identical for packet and retrieving seats."""
+    if not isinstance(comparison, dict) or not (comparison.get("anchors") or comparison.get("gap")):
+        return ""
+    lines = ["", "### Change since earlier reviews (host-computed; not a verdict, not a review scope)", "",
+             "The whole current subject is under review. Each earlier verdict below covered only its own "
+             "bytes and carries nothing over; an author disposition is the author's choice, not a reviewer verdict."]
+    if comparison.get("gap"):
+        lines.append(f"- Comparison unavailable: {comparison['gap']}.")
+    for anchor in comparison.get("anchors") or []:
+        old = anchor.get("subject") or {}
+        head = (f"- Review {anchor.get('review_record_id')} ("
+                + ("named by the author" if anchor.get("named") else "bound earlier in this task on this checkout")
+                + (f"; surface {anchor.get('surface')}, state {anchor.get('state')}, verdict "
+                   f"{anchor.get('verdict') or 'none'}" if anchor.get("surface") else "")
+                + (f", author disposition {anchor['author_disposition']}" if anchor.get("author_disposition") else "")
+                + (f"; its subject: {old.get('kind')} of {old.get('root')}, base {old.get('base')}, "
+                   f"tree {old.get('tree_sha')}" if old else "") + "):")
+        relation = anchor.get("relation")
+        differs = f" (also differs: {', '.join(anchor['differs'])})" if anchor.get("differs") else ""
+        if relation == "same_subject":
+            body = ["  SAME SUBJECT: the same checkout, kind, base, head, tree and review surface; only the brief "
+                    "or intent can differ."]
+        elif relation == "same_tree_other_subject":
+            body = [f"  SAME TREE, ANOTHER SUBJECT (differs: {', '.join(anchor.get('differs') or [])}): identical "
+                    "bytes judged as another subject; nothing of that review carries over."]
+        elif relation == "changed":
+            moved = anchor.get("base_moved") or {}
+            body = [f"  CHANGED: {anchor.get('changed_count')} paths differ"
+                    + (", limited to paths either subject changed" if anchor.get("limited_to_touched") else "")
+                    + f"{differs}: " + json.dumps(anchor.get("changed") or [])
+                    + (f" (+{anchor['changed_count'] - len(anchor['changed'])} more)"
+                       if anchor.get("changed_count", 0) > len(anchor.get("changed") or []) else "") + "."]
+            if moved:
+                body.append(f"  Base moved from {moved.get('from')} to {moved.get('to')}: "
+                            + (f"{moved['upstream_paths']} upstream paths, not listed above."
+                               if "upstream_paths" in moved else str(moved.get("unavailable") or "") + "."))
+            body.append(f"  Full delta, for a seat that can read this repository: {anchor.get('full_delta')}.")
+            if anchor.get("excerpt"):
+                body += [f"  Delta excerpt ({anchor.get('excerpt_chars')} chars in full):",
+                         *("    | " + line for line in str(anchor["excerpt"]).splitlines())]
+        else:
+            body = [f"  UNAVAILABLE: {anchor.get('reason') or 'no comparison'}; nothing is claimed unchanged."]
+        lines += [head, *body]
+    if comparison.get("not_compared"):
+        lines.append("- Not compared (beyond the first " f"{_COMPARED_ANCHORS}): " + ", ".join(comparison["not_compared"]) + ".")
+    return "\n".join(lines) + "\n"
 
 
 def wave_history_input(drive_root: Any, facts: dict, subject: dict, record_id: str) -> dict:
@@ -299,6 +496,15 @@ def wave_history_input(drive_root: Any, facts: dict, subject: dict, record_id: s
             f"wave input binding could not be read ({type(exc).__name__})", record_id=record_id)]}
 
 
+# The prior-rounds section's own words beside the history it renders.
+_HISTORY_WORDS = {
+    "unreadable": ("\nREVIEW_HISTORY_SOURCE_UNAVAILABLE: durable obligations could not be read ({error}); source: "
+                   "{source}. The available history below is incomplete.\n"),
+    "authored": "\n### Author's selected account of earlier review sources\n\n{view}\n",
+    "index": "\n### Recorded review dispute index\n\n```json\n{index}\n```\n",
+}
+
+
 def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root: Any, task_id: str = "") -> str:
     """The prior-rounds section with the repository's durable open obligations
     (anti-thrashing across restarts) — the ONE owner for every brief that carries
@@ -315,23 +521,23 @@ def render_history_with_obligations(history: Any, *, drive_root: Any, repo_root:
             state = _load_state_unlocked(pathlib.Path(drive_root), strict_attempt_authority=True)
             open_obligations = state.get_open_obligations(repo_key=make_repo_key(pathlib.Path(repo_root)))
         except Exception as exc:
-            gap = ("\nREVIEW_HISTORY_SOURCE_UNAVAILABLE: durable obligations could not be read "
-                   f"({type(exc).__name__}); source: {pathlib.Path(drive_root) / 'state/advisory_review.json'}. "
-                   "The available history below is incomplete.\n")
+            gap = _HISTORY_WORDS["unreadable"].format(
+                error=type(exc).__name__, source=pathlib.Path(drive_root) / "state/advisory_review.json")
     dispute = review_dispute_history(history, drive_root=drive_root, repo_root=repo_root, task_id=task_id)
+    comparison = dispute.get("comparison")
     if task_id and drive_root is not None:
         from ouroboros.review_history_view import selected_review_history
         dispute = selected_review_history(dispute, drive_root=drive_root, task_id=task_id)["history"]
     from ouroboros.tools.review_helpers import build_review_history_section
     section = build_review_history_section(dispute["rounds"], open_obligations=open_obligations)
     if dispute.get("authored_view"):
-        section += "\n### Author's selected account of earlier review sources\n\n" + json.dumps(
-            dispute["authored_view"], ensure_ascii=False, sort_keys=True) + "\n"
+        section += _HISTORY_WORDS["authored"].format(view=json.dumps(dispute["authored_view"], ensure_ascii=False,
+                                                                     sort_keys=True))
     if dispute["decision_rows"] or dispute["gaps"]:
-        section += "\n### Recorded review dispute index\n\n```json\n" + json.dumps({
+        section += _HISTORY_WORDS["index"].format(index=json.dumps({
             "status": dispute["status"], "decision_rows": dispute["decision_rows"], "gaps": dispute["gaps"]},
-            ensure_ascii=False, sort_keys=True, default=str) + "\n```\n"
-    return gap + section
+            ensure_ascii=False, sort_keys=True, default=str))
+    return gap + section + render_comparison(comparison)
 
 
 def review_decision_aliases(history: dict, entry: dict) -> list[tuple[list, Any]]:
@@ -409,3 +615,19 @@ def review_decision_aliases(history: dict, entry: dict) -> list[tuple[list, Any]
                                         **{key: copy.deepcopy(value) for key, value in item.items()
                                            if key not in {"reason", "summary", "recommendation"}}, "authored_view": alias}))
     return paths
+
+
+def history_material() -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): the prior-rounds section's own
+    words and the host's comparison with earlier reviews over placeholder anchors in every relation. Rounds,
+    records, decisions and comparisons are data."""
+    old = {"kind": "⟨kind⟩", "root": "⟨root⟩", "base": "⟨base⟩", "tree_sha": "⟨tree⟩"}
+    anchors = [{"review_record_id": "⟨record⟩", "named": named, "surface": "⟨surface⟩", "state": "⟨state⟩",
+                "verdict": "⟨verdict⟩", "author_disposition": "⟨disposition⟩", "subject": old, "relation": relation,
+                "differs": ["⟨field⟩"], "changed": ["⟨path⟩"], "changed_count": 2, "limited_to_touched": True,
+                "base_moved": moved, "full_delta": "⟨delta⟩", "excerpt": "⟨excerpt⟩", "excerpt_chars": 9,
+                "reason": "⟨reason⟩"}
+               for named in (True, False) for relation in ("same_subject", "same_tree_other_subject", "changed", "⟨other⟩")
+               for moved in ({"from": "⟨from⟩", "to": "⟨to⟩", "upstream_paths": 1}, {"from": "⟨from⟩", "unavailable": "⟨why⟩"})]
+    anchors.append({"review_record_id": "⟨record⟩", "relation": "same_subject"})
+    return [*_HISTORY_WORDS.values(), render_comparison({"gap": "⟨gap⟩", "anchors": anchors, "not_compared": ["⟨record⟩"]})]

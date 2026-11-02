@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import * as acorn from './vendor/acorn.mjs';
 
-import { MARK_HUES, MARK_SHAPES, markView, paintStatusMark, statusMarkHtml } from '../modules/status_mark.js';
+import { MARK_HUES, MARK_SHAPES, markView, paintStatusMark, statusMarkHtml, syncMarkPhases } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import { roomStatusView } from '../modules/work_status.js';
 import { room } from './work_fixture.js';
@@ -170,4 +170,33 @@ test('the ownership check sees a second painter, a painted mark and a retired na
         'room.css: ".x .status-mark i" sets background on a mark',
         'quiz.css: ".card[data-busy] .quiz-mark" sets color on a mark',
     ]);
+});
+
+test('every moving mark rides one wave: its dots start on the document timeline, other animations are left alone', () => {
+    const wave = (startTime) => ({ animationName: 'status-mark-bounce', startTime });
+    const other = { animationName: 'chat-quote-target', startTime: 900 };
+    const mark = { children: [0, 1, 2].map(() => ({ animations: [] })) };
+    for (const dot of mark.children) dot.getAnimations = () => dot.animations;
+    const already = wave(120);  // a mark that was moving before the hook was installed
+    const listeners = new Map();
+    const doc = {
+        getAnimations: () => [already, other],
+        addEventListener: (type, fn, capture) => listeners.set(type, { fn, capture }),
+        removeEventListener: (type, fn) => { if (listeners.get(type)?.fn === fn) listeners.delete(type); },
+    };
+    const dispose = syncMarkPhases(doc);
+    assert.equal(already.startTime, 0, 'what moves already joins the wave');
+    assert.equal(other.startTime, 900, 'another animation keeps its own clock');
+    assert.equal(listeners.get('animationstart').capture, true);
+    // A mark painted 500 ms later: its first dot starts; the other two are still in their delay.
+    mark.children[0].animations = [wave(500)];
+    mark.children[1].animations = [wave(500)];
+    mark.children[2].animations = [wave(500), other];
+    listeners.get('animationstart').fn({ animationName: 'status-mark-bounce', target: { parentElement: mark } });
+    assert.deepEqual(mark.children.map((dot) => dot.animations[0].startTime), [0, 0, 0], 'all three dots, delays kept');
+    assert.equal(other.startTime, 900);
+    listeners.get('animationstart').fn({ animationName: 'thinking-pulse', target: { parentElement: mark } });
+    dispose();
+    assert.equal(listeners.has('animationstart'), false, 'the disposer removes the hook');
+    assert.equal(typeof syncMarkPhases(null), 'function', 'no document: nothing to align');
 });

@@ -176,7 +176,8 @@ def test_preview_lists_finished_not_live_folders_and_copies_and_names_the_rest(t
     assert folders["bytes_complete"] is True and folders["bytes"] >= 3 * 4096
     assert all(item["bytes"] >= 4096 for item in folders["items"])
     copies = _group(view, "working_copies")
-    assert [item["id"] for item in copies["items"]] == ["plain:copy-done"]
+    assert [item["name"] for item in copies["items"]] == ["copy-done"]
+    assert [item["id"].rsplit("-", 1)[0] for item in copies["items"]] == ["plain:copy-done"]  # one object, not its task
     assert (copies["count"], copies["in_use"]) == (1, 1)
     assert view["done"] == view["total"] == 4
 
@@ -279,6 +280,23 @@ def test_the_run_frees_a_folder_inside_the_wait_that_the_ordinary_pass_keeps(tmp
     assert isinstance(run["free_before"], int) and isinstance(run["free_after"], int)
     rows = [json.loads(line) for line in (root / "logs" / "supervisor.jsonl").read_text().splitlines()]
     assert [(row["type"], row["phase"], row["selected"]) for row in rows] == [("storage_free", "done", 1)]
+
+
+def test_the_run_names_the_folders_it_freed_in_its_event(tmp_path, monkeypatch):
+    """A drive freed by the owner's run left only counts, so a task's missing folder had no remover on record;
+    the event names each folder by its preview id, and a kept folder is never named among them."""
+    root = tmp_path / "data"
+    probes = _drives(root, [("gone", "direct", "completed", OLD), ("busy", "direct", "completed", OLD)])
+    monkeypatch.setattr("ouroboros.server_maintenance.DATA_DIR", root)
+    _fake_sizer(monkeypatch)
+    owner = _owner(probes)
+    _preview(owner, root, tmp_path)
+    probes["busy"] = True  # in use again between preview and run
+    _run(owner, root, tmp_path)
+    rows = [json.loads(line) for line in (root / "logs" / "events.jsonl").read_text().splitlines()]
+    report, = [row["report"] for row in rows if row["type"] == "storage_free"]
+    assert report["removed_ids"] + report["deleting_ids"] == ["direct:gone"] and report["stuck_ids"] == []
+    assert report["removed"] + report["deleting"] == 1 and report["kept"] == [{"reason": "in_use", "count": 1}]
 
 
 def test_a_folder_not_previewed_is_untouched_and_a_task_live_again_is_kept(tmp_path, monkeypatch):
@@ -624,7 +642,7 @@ def test_working_copies_of_finished_work_are_freed_and_a_running_ones_stays(tmp_
     owner = _owner({"finished": False, "busy": True})
     view = _preview(owner, root, tmp_path)
     copies = _group(view, "working_copies")
-    assert [item["id"] for item in copies["items"]] == ["plain:finished"] and copies["in_use"] == 1
+    assert [item["id"].rsplit("-", 1)[0] for item in copies["items"]] == ["plain:finished"] and copies["in_use"] == 1
 
     view = _run(owner, root, tmp_path, groups=("working_copies",))
     assert view["state"] == "done"
@@ -701,7 +719,7 @@ def test_stop_between_working_copies_leaves_the_rest_and_reports_a_stopped_run(t
 
     def retire_then_stop(*args, **kwargs):
         outcome = real(*args, **kwargs)
-        calls.append(list(kwargs["only"]))
+        calls.append(list(kwargs.get("only") or kwargs["only_rows"]))
         if len(calls) == 1:
             assert owner.cancel() is True  # Stop lands as the first copy's retirer returns
         return outcome
@@ -713,6 +731,200 @@ def test_stop_between_working_copies_leaves_the_rest_and_reports_a_stopped_run(t
     assert (view["run"]["removed"], view["run"]["done"], view["run"]["kept"]) == (1, 1, [])
     assert not paths["first"].exists() and paths["second"].is_dir() and paths["third"].is_dir()
     assert {row["task_id"] for row in sw.list_worktrees(data_dir=root)} == {"second", "third"}
+
+
+# ------------------------------------------------- G3-G7: leftovers no background pass removes
+
+LEFTOVER_GROUPS = ("review_evidence", "review_checkouts", "lost_copies", "service_folders")
+
+
+def _seat(root: Path, task_id: str, operation: str, *, area: bool = False, marker: bool = True) -> Path:
+    from ouroboros import review_checking as rc
+
+    home = rc.seat_dir(root, task_id, operation)
+    (home / "evidence").mkdir(parents=True)
+    (home / "evidence" / "summary.json").write_text('{"status": "retained"}', encoding="utf-8")
+    (home / "evidence" / "venv.bin").write_bytes(b"v" * 8192)
+    if marker:
+        (home / "checking.json").write_text(json.dumps({"schema": 1, "task_id": task_id, "operation_id": operation,
+                                                        "source": {"kind": "workspace", "root": str(root)}}),
+                                            encoding="utf-8")
+    if area:
+        (home / "area").mkdir()
+    return home
+
+
+def _leftovers(root: Path, wtroot: Path):
+    """One of each leftover the new groups offer, beside the twin each must keep."""
+    from tests._store_shared import seed_result
+
+    for task_id in ("seat-done", "seat-live", "checkout-live"):
+        seed_result(root, task_id, document(task_id, "completed"))
+    seats = {"done": _seat(root, "seat-done", "op-1"), "copy": _seat(root, "seat-done", "op-2", area=True),
+             "live": _seat(root, "seat-live", "op-1"), "unreadable": _seat(root, "seat-done", "op-3", marker=False)}
+    base = root / "state" / "review_checkouts"
+    checkouts = {"orphan": base / "orphan", "owned": base / "owned"}
+    for entry in checkouts.values():
+        (entry / "repo").mkdir(parents=True)
+        (entry / "repo" / "f.txt").write_text("x", encoding="utf-8")
+    (checkouts["owned"] / "checkout.json").write_text(json.dumps({"schema_version": 1, "task_id": "checkout-live"}),
+                                                      encoding="utf-8")
+    folders = {"lost": wtroot / "dlg_lost-task_0123456789abcdef", "lost_live": wtroot / "dlg_seat-live_0123456789abcdef",
+               "env": wtroot / "gone.env", "run_done": wtroot / ".test-evidence" / "run-done",
+               "run_live": wtroot / ".test-evidence" / "run-live"}
+    for folder in folders.values():
+        folder.mkdir(parents=True)
+        (folder / "f.bin").write_bytes(b"f" * 4096)
+    (folders["run_done"] / "result.json").write_text("{}", encoding="utf-8")
+    (folders["run_live"] / "owner.json").write_text(json.dumps({"supervisor_pid": os.getpid()}), encoding="utf-8")
+    return seats, checkouts, folders
+
+
+def test_leftover_groups_offer_only_proven_leftovers_and_the_run_frees_exactly_them(tmp_path, monkeypatch):
+    """A seat home of a task proven over whose copy is gone, a review checkout no task owns, a folder
+    no copy record names, a gone copy's environment and a finished test run are offered and freed;
+    a seat that keeps its copy, a live task's seat/checkout/folder, an unreadable marker and a running
+    test run are named and stay. Seat homes go through the custody trash, the rest at once."""
+    from ouroboros import maintenance
+
+    root = tmp_path / "data"
+    repo, wtroot = tmp_path / "repo", tmp_path / "wtroot"
+    _init_repo(repo)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(wtroot))
+    root.mkdir()
+    recorded = Path(sw.provision_worktree(repo_dir=repo, task_id="copy-live", worktree_root=wtroot, data_dir=root).path)
+    (recorded.with_name(recorded.name + ".env")).mkdir()  # an environment beside its live copy
+    seats, checkouts, folders = _leftovers(root, wtroot)
+    probes = {"seat-live": True, "checkout-live": True, "copy-live": True}
+    _fake_sizer(monkeypatch)
+    owner = _owner(probes)
+    view = _preview(owner, root, tmp_path)
+    offered = {group["id"]: (sorted(item["id"] for item in group["items"]), group["in_use"], group["unreadable"])
+               for group in view["groups"] if group["id"] in LEFTOVER_GROUPS}
+    assert offered == {
+        "review_evidence": ([f"seat:{seats['done'].name}"], 2, 1),
+        "review_checkouts": (["checkout:orphan"], 1, 0),
+        "lost_copies": ([f"lost:{sw._record_name(folders['lost'])}"], 1, 0),  # the full path: one name may stand in two roots
+        "service_folders": ([f"env:{sw._record_name(folders['env'])}", f"test_run:{sw._record_name(folders['run_done'])}"], 1, 0),
+    }
+    requested = []
+    monkeypatch.setattr(maintenance.child, "request", lambda: requested.append(True))
+
+    view = _run(owner, root, tmp_path, groups=LEFTOVER_GROUPS)
+    assert view["state"] == "done" and view["run"]["kept"] == [] and requested == [True]
+    assert (view["run"]["removed"], view["run"]["deleting"]) == (4, 1), "the seat home waits in the custody trash"
+    assert not seats["done"].exists() and all(seats[name].is_dir() for name in ("copy", "live", "unreadable"))
+    [trashed] = list((root / "state" / "custody_trash").iterdir())
+    assert trashed.name.startswith(seats["done"].name + "-") and (trashed / "evidence" / "venv.bin").is_file()
+    assert not checkouts["orphan"].exists() and checkouts["owned"].is_dir()
+    assert not folders["lost"].exists() and folders["lost_live"].is_dir() and recorded.is_dir()
+    assert not folders["env"].exists() and recorded.with_name(recorded.name + ".env").is_dir()
+    assert not folders["run_done"].exists() and folders["run_live"].is_dir()
+    task_custody.remove_custody_trash(root)  # the maintenance child's job
+    assert owner.projection(root)["run"]["removed"] == 5
+
+
+def test_leftover_listing_is_pure_and_a_run_re_checks_each_item(tmp_path, monkeypatch):
+    """The listers take no lock and write nothing; a seat whose task came back to life between the
+    preview and the run, and a seat a worker holds, are kept with their reasons."""
+    from ouroboros import review_checking as rc
+
+    root = tmp_path / "data"
+    wtroot = tmp_path / "wtroot"
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(wtroot))
+    root.mkdir()
+    seats, _checkouts, _folders = _leftovers(root, wtroot)
+    second = _seat(root, "seat-done", "op-4")
+    _fake_sizer(monkeypatch)
+    probes = {"seat-live": True, "checkout-live": True}
+    owner = _owner(probes)
+    with held_open(task_store.store_path(root)):  # SQLite's journal set-up falls outside: every mtime is a write's
+        before, outside = tree_state(root, mtimes=True), tree_state(wtroot, mtimes=True)
+        view = _preview(owner, root, tmp_path)
+        assert tree_state(root, mtimes=True) == before and tree_state(wtroot, mtimes=True) == outside
+    assert _group(view, "review_evidence")["count"] == 2
+    probes["seat-done"] = True  # the task is live again: nothing of it goes
+    with rc._seat_locked(second):  # a worker holds the other seat
+        view = _run(owner, root, tmp_path, groups=("review_evidence",))
+    assert sorted((row["reason"], row["count"]) for row in view["run"]["kept"]) == [("busy", 1), ("in_use", 1)]
+    assert seats["done"].is_dir() and second.is_dir()
+
+
+@pytest.mark.parametrize("state", ["readable", "unreadable"])
+def test_the_checkout_run_reads_the_review_state_once_and_unknown_custody_keeps_every_checkout(tmp_path, monkeypatch, state):
+    """The run's own listing reads the review state, and the markerless fallback one more time, not once per
+    checkout; a state that turns unreadable keeps every checkout, named, as the listing would."""
+    from ouroboros import review_checking_prune as rp
+
+    root = tmp_path / "data"
+    base = root / "state" / "review_checkouts"
+    entries = [base / name for name in ("first", "second", "third")]
+    for entry in entries:
+        (entry / "repo").mkdir(parents=True)
+        (entry / "repo" / "f.txt").write_text("x", encoding="utf-8")
+    _fake_sizer(monkeypatch)
+    owner = _owner({}, offered=("review_checkouts",))
+    assert _group(_preview(owner, root, tmp_path), "review_checkouts")["count"] == 3
+    real, calls = rp._review_rounds, []
+
+    def counted(data_root):
+        calls.append(data_root)
+        if state == "unreadable" and len(calls) > 1:
+            raise ValueError("the review state changed shape under the run")
+        return real(data_root)
+
+    monkeypatch.setattr(rp, "_review_rounds", counted)
+    view = _run(owner, root, tmp_path, groups=("review_checkouts",))
+    assert view["state"] == "done" and view["run"]["error"] is None
+    if state == "readable":
+        assert len(calls) == 2 and view["run"]["removed"] == 3 and not any(entry.exists() for entry in entries)
+    else:
+        assert view["run"]["kept"] == [{"reason": "unreadable_record", "count": 3}] and all(entry.is_dir() for entry in entries)
+
+
+def test_result_pins_of_a_finished_writer_without_a_disposition_are_offered_and_dropped(tmp_path, monkeypatch):
+    """A writer whose task is over keeps only its two pins once its checkout was released: they are
+    offered with the size of what only they reach, and the run drops both while the record and the
+    saved patch stay (a later apply is a plain apply, a continuation starts fresh)."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_continuation import _adopted_snapshot
+    from tests._store_shared import seed_result
+
+    root = tmp_path / "data"
+    repo, wtroot = tmp_path / "repo", tmp_path / "wtroot"
+    _init_repo(repo)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(wtroot))
+    root.mkdir()
+    handle = sw.provision_execution_snapshot(target_root=repo, task_id="writer", snapshot_id="snap-w",
+                                             worktree_root=wtroot, data_dir=root)
+    (Path(handle.path) / "a.txt").write_text("changed by the writer\n", encoding="utf-8")
+    patch = tmp_path / "saved" / "workspace.patch"
+    sw.capture_result_commit("snap-w", patch, data_dir=root)
+    assert sw.release_snapshot_checkout("snap-w", worktree_root=wtroot, data_dir=root)
+    seed_result(root, "writer", document("writer", "completed"))
+    custody.record_started(root, custody.RunCustody(run_id="run-w", task_id="writer", snapshot_id="snap-w",
+                                                    execution_root=handle.path))
+    _fake_sizer(monkeypatch)
+    owner = _owner({})
+    view = _preview(owner, root, tmp_path)
+    pins = _group(view, "result_pins")
+    assert [item["id"] for item in pins["items"]] == ["pins:snap-w"] and pins["items"][0]["bytes"] > 0
+    assert _group(view, "working_copies")["count"] == 0, "a released checkout is no working copy"
+
+    view = _run(owner, root, tmp_path, groups=("result_pins",))
+    assert view["state"] == "done" and (view["run"]["removed"], view["run"]["kept"]) == (1, [])
+    refs = subprocess.run(["git", "for-each-ref", "refs/ouroboros/"], cwd=str(repo), capture_output=True, text=True)
+    assert refs.stdout == ""
+    record = sw.find_execution_snapshot("snap-w", root)
+    assert record["pins_released"] and not {"baseline_ref", "result_ref", "result_sha"} & set(record)
+    assert "changed by the writer" in patch.read_text(encoding="utf-8")
+    entry = SimpleNamespace(snapshot_id="snap-w", patch_disposed=False, execution_root=handle.path, baseline_sha="b",
+                            run_id="run-w")
+    assert _adopted_snapshot(entry, SimpleNamespace(access="workspace_write"))[0] is None
+    assert _group(_preview(owner, root, tmp_path), "result_pins")["count"] == 0, "nothing left to offer"
 
 
 # ---------------------------------------------------------------- routes

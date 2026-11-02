@@ -152,7 +152,7 @@ def test_successful_turns_refresh_subject_in_same_thread_and_retain_each_output(
     source_a = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
     before_a = _author_state(author)
     first = _run(author, drive, source_a, access=access)
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     assert area.is_dir()
     _assert_coverage(first["checking_evidence"], ThreadGateway.coverage(1))
     first_summary = (Path(first["checking_evidence"]["evidence_dir"]) / "summary.json").read_bytes()
@@ -215,7 +215,7 @@ def test_directory_turns_keep_geometry_same_thread_and_frozen_evidence(tmp_path,
     (source_dir / "f.txt").write_bytes(b"A staged\n")
     source = directory_source(source_dir, drive)
     first = _run(source_dir, drive, source, access=access)
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     receipt = Path(first["checking_evidence"]["evidence_dir"]) / "summary.json"
     preserved = receipt.read_bytes()
     assert source["kind"] == "directory" and not (area / ".git").exists()
@@ -267,7 +267,7 @@ def test_failed_directory_turn_refreshes_after_its_capture_whatever_the_scope(tm
     assert evidence["status"] == "retained" and "refresh_safe" not in evidence
     captured = Path(evidence["evidence_dir"]) / "summary.json"
     preserved = captured.read_bytes()
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     assert (area / ".git" / "index.lock").is_file()  # a thread keeps its copy between turns
     thread_gateway.terminal_state = "succeeded"
     thread_gateway.before_turn = lambda current: (
@@ -368,7 +368,7 @@ def test_unobserved_terminal_is_captured_by_the_next_turn(author, tmp_path, thre
         _run(author, drive, source)
     assert caught.value is original_error
     assert not getattr(caught.value, "checking_evidence", None)
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     assert (area / rc.EVIDENCE_DIRNAME / "coverage.xml").read_bytes() == ThreadGateway.coverage(1)
     second = _run(author, drive, source, operation="op-2", thread_id="thread-1")
     assert second["turn_id"] == "turn-2" and len(thread_gateway.turn_requests) == 2
@@ -408,7 +408,7 @@ def test_lost_turn_response_rejoins_original_copy_and_invocation(author, tmp_pat
     thread_gateway.lose_start_response = True
     with pytest.raises(TimeoutError):
         _run(root, drive, source, retry_state=retry_state)
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     assert (area / rc.EVIDENCE_DIRNAME / "coverage.xml").read_bytes() == ThreadGateway.coverage(1)
     pending = retry_state["pending_invocation_id"]
     recorded = custody.invocation_record(drive, pending)["request"]
@@ -537,7 +537,7 @@ def test_saved_host_thread_id_resumes_when_caller_supplies_none(author, tmp_path
     assert len(thread_gateway.thread_requests) == 1 and len(thread_gateway.turn_requests) == 2
     assert not thread_gateway.start_requests
     assert all(thread_id == "thread-1" for thread_id, _, _ in thread_gateway.turn_requests)
-    assert thread_gateway.thread_requests[0]["workspaceRoot"] == str(home / "area")
+    assert thread_gateway.thread_requests[0]["workspaceRoot"] == str(home / "area.noindex")
     _assert_coverage(first["checking_evidence"], ThreadGateway.coverage(1))
     _assert_coverage(second["checking_evidence"], ThreadGateway.coverage(2))
     assert _author_state(author) == before
@@ -549,7 +549,7 @@ def test_mismatched_supplied_thread_id_refuses_before_refresh_or_send(author, tm
     before = _author_state(author)
     first = _run(author, drive, source)
     home = rc.seat_dir(drive, "task-1", "thread:plan_review:t1")
-    area = home / "area"
+    area = home / "area.noindex"
     # The turn's receipt exists; an identity mismatch still prevents the refresh.
     assert first["checking_evidence"]["status"] == "retained"
     marker_before = (home / "checking.json").read_bytes()
@@ -610,7 +610,7 @@ def test_cancelled_terminal_carries_evidence_on_original_poller_timeout(author, 
     assert caught.value.checking_terminal_detail["summary"]["state"] == "cancelled"
     assert thread_gateway.cancels == [("run-1", "review_slot_timeout")]
     _assert_coverage(caught.value.checking_evidence, ThreadGateway.coverage(1))
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     assert (area / rc.EVIDENCE_DIRNAME / "coverage.xml").read_bytes() == ThreadGateway.coverage(1)
     assert _author_state(author) == before
 
@@ -655,10 +655,10 @@ def test_started_writable_thread_collects_when_engine_cannot_start_new_threads(
 
 
 @pytest.mark.parametrize("access", ["readonly", "full"])
-def test_writable_plan_seat_packet_keeps_the_redacted_source_rule(author, tmp_path, thread_gateway, access):  # noqa: F811
+def test_writable_plan_seat_packet_keeps_the_snapshot_source_rule(author, tmp_path, thread_gateway, access):  # noqa: F811
     """Technical access widens what a seat may run in its copy, never what it may read.
 
-    The actual thread turn of a plan seat carries the plan runtime's redacted-snapshot
+    The actual thread turn of a plan seat carries the plan runtime's shared-snapshot
     task text; a writable seat's checking-copy instructions restate that rule instead of
     a bare 'retrieve the evidence yourself', while a read-only seat keeps its legacy
     read-only role. Whether a live harness can resolve each named source from its copy
@@ -676,7 +676,7 @@ def test_writable_plan_seat_packet_keeps_the_redacted_source_rule(author, tmp_pa
     )
     assert result.actors[0]["usage"]["review_thread_id"] == "thread-1"
     [(_thread, turn, _key)] = thread_gateway.turn_requests
-    assert "do NOT re-read the raw evidence locators" in turn["prompt"]
+    assert "the same bytes every reviewer sees" in turn["prompt"]
     assert "owner said [REDACTED]" in turn["prompt"]
     if access == "readonly":
         assert turn["instructions"].startswith("You are a delegated read-only REVIEWER session.")

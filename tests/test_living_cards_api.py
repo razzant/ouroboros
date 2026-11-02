@@ -2,7 +2,8 @@
 
 A press is the owner's act: recorded first (idempotent per ``request_id``; ``once``
 keeps the first), then delivered into the authoring task's mailbox as ``card_input``
-or, once that task no longer reads mail, as the owner's own message in the card's chat.
+(a paused, held or queued author keeps it until it reads it) or, once that task ended,
+as the owner's own message in the card's chat.
 """
 
 from __future__ import annotations
@@ -136,7 +137,7 @@ def decide(tmp_path, monkeypatch):
     monkeypatch.setattr(mb, "_BRIDGE", bridge)
     monkeypatch.setattr(td, "request_drive_root", lambda request: tmp_path)
     monkeypatch.setattr(td, "_live_root_task",
-                        lambda task_id: ({"id": task_id}, "") if state["live"] else (None, "task_not_live"))
+                        lambda task_id, **_: ({"id": task_id}, "") if state["live"] else (None, "task_not_live"))
     monkeypatch.setattr(q, "_task_drive_for_task", lambda task, task_id: tmp_path, raising=False)
     client = TestClient(Starlette(routes=[Route("/api/decisions", endpoint=td.api_decision_answer, methods=["POST"])]))
 
@@ -320,6 +321,98 @@ def test_an_undeliverable_press_stays_owed_and_a_retry_delivers_it(tmp_path, dec
     retried = decide({"request_id": "r1", "revision": 1, "decision_id": decision_id})
     assert retried.status_code == 200 and retried.json() | {"duplicate": True} == retried.json()
     assert retried.json()["delivery"] == "delivered" and len(_mail(tmp_path)) == 1
+
+
+@pytest.mark.parametrize("pause", ["owner_hold", "queued"])
+def test_a_paused_authors_press_waits_in_its_mailbox_until_it_reads_it(tmp_path, monkeypatch, pause):
+    """Like an answer: a living author that reads no mail now keeps the press (no turn of its own, the hold
+    stays), the card says the task reads it when it continues, and its read ends that wait live."""
+    import queue
+    from types import SimpleNamespace
+
+    from ouroboros.card_store import submissions_summary
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from supervisor.events_runtime_controls import _handle_owner_message_injected
+    from tests.test_question_answer_routing import runtime
+    from tests.test_quiz_answer import _post
+    from tests.test_quiz_late_answer import _inbox
+
+    app, bridge, q, task = runtime(tmp_path, monkeypatch)
+    card = _component_card(tmp_path, task_id="asker")
+    press = {"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:book"}
+    if pause == "queued":
+        q.PENDING.append(q.RUNNING.pop("asker")["task"])
+    else:
+        task["_owner_hold"] = True
+    response = _post(app, press)
+    assert response.status_code == 200, response.text
+    assert (response.json()["delivery"], response.json()["reason_code"]) == ("delivered", "awaiting_recipient_read")
+    assert _inbox(bridge) == [] and task.get("_owner_hold") is (True if pause == "owner_hold" else None)
+    assert submissions_summary(load_card(tmp_path, card["card_id"]))[0]["reason_code"] == "awaiting_recipient_read"
+    assert _post(app, press).json()["reason_code"] == "awaiting_recipient_read", "a retry still says it waits"
+
+    task.pop("_owner_hold", None)
+    if pause == "queued":
+        q.RUNNING["asker"] = {"task": q.PENDING.pop()}
+    events = queue.Queue()
+    ctx = SimpleNamespace(task_id="asker", task_metadata={}, drive_root=tmp_path, budget_drive_root=tmp_path)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "asker", events, set(), owner_ctx=ctx)
+    assert [row["content"] for row in ctx._owner_directives][-1].startswith("[Card input] The owner pressed «Book it»")
+    [read] = [event for event in list(events.queue) if event.get("card_ack")]
+    assert "reason_code" not in submissions_summary(load_card(tmp_path, card["card_id"]))[0]
+    frames = []
+    bridge._broadcast_fn = frames.append
+    _handle_owner_message_injected(read, SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge))
+    [state] = [frame for frame in frames if frame.get("type") == "card_state"]
+    assert state["submissions_summary"][0]["delivery"] == "delivered" and "reason_code" not in state["submissions_summary"][0]
+    assert "reason_code" not in _post(app, press).json()
+    # The other direction: a press while its author reads mail never waits, and its read needs no receipt.
+    reading = _post(app, {**press, "request_id": "r2"})
+    assert reading.status_code == 200 and "reason_code" not in reading.json()
+    assert "card_delivery" not in _mail(tmp_path, "asker")[-1]
+
+
+@pytest.mark.parametrize("hold", ["", "restart_hold", "owner_pause"])
+def test_a_sleeping_authors_press_wakes_it_only_when_unheld(tmp_path, monkeypatch, hold):
+    from supervisor.sleep_wake import wake_ready_sleepers
+    from tests.test_question_answer_routing import sleeping_asker
+    from tests.test_quiz_answer import _post
+    from tests.test_quiz_late_answer import _inbox
+
+    app, bridge, q = sleeping_asker(tmp_path, monkeypatch, hold)
+    card = _component_card(tmp_path, task_id="asker")
+    response = _post(app, {"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:book"})
+    assert response.status_code == 200 and response.json()["delivery"] == "delivered", response.text
+    assert [entry["msg_id"] for entry in _mail(tmp_path, "asker")] == [f"card_input:{card['card_id']}:r1"]
+    assert _inbox(bridge) == [], "never a turn of its own"
+    woke = [outcome for outcome in wake_ready_sleepers(q) if outcome.get("ok")]
+    # An unheld sleeper reads its mail and wakes for it; a held one keeps the press and says it waits.
+    assert bool(woke) is (hold == "")
+    assert response.json().get("reason_code", "") == ("" if hold == "" else "awaiting_recipient_read")
+
+
+def test_a_read_before_the_wait_is_recorded_never_brings_the_wait_back(tmp_path, monkeypatch):
+    """It continued and read the press before the press's delivery was recorded: answer and record say Sent."""
+    from ouroboros.card_store import acknowledge_press, submissions_summary
+    from ouroboros.gateway import card_decision
+    from tests.test_question_answer_routing import runtime
+    from tests.test_quiz_answer import _post
+
+    app, _bridge, _q, task = runtime(tmp_path, monkeypatch)
+    task["_owner_hold"] = True
+    card = _component_card(tmp_path, task_id="asker")
+    deliver = card_decision._deliver
+
+    def read_at_once(drive_root, record, submission, source):
+        outcome = deliver(drive_root, record, submission, source)
+        acknowledge_press(drive_root, record["card_id"], submission["request_id"])
+        return outcome
+
+    monkeypatch.setattr(card_decision, "_deliver", read_at_once)
+    response = _post(app, {"request_id": "r1", "revision": 1, "decision_id": f"card:{card['card_id']}:book"})
+    assert response.status_code == 200 and response.json()["delivery"] == "delivered", response.text
+    assert "reason_code" not in response.json()
+    assert "reason_code" not in submissions_summary(load_card(tmp_path, card["card_id"]))[0]
 
 
 # --- the card_input mailbox kind ---------------------------------------------------------------

@@ -43,7 +43,6 @@ _MOVED_OWNERS = {
     "_project_id_for_registered_chat": server_routing_context,
     "_reserved_project_for_chat": server_routing_context,
     "_scoped_task_metadata": server_routing_context,
-    "_task_belongs_to_chat": server_routing_context,
     "_task_result_ground_truth": server_routing_context,
     "_owner_evolution_stop": server_owner_routing,
     "_record_routing_receipt": server_owner_routing,

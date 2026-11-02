@@ -88,7 +88,7 @@ def test_a_pointer_a_child_stamped_before_the_rule_heals_onto_the_root(tmp_path)
     assert get_project(tmp_path, "racer")["last_task_result_id"] == "racer-root"
 
 
-def test_the_room_manifest_carries_cancel_facts_and_an_honest_omission_count(tmp_path):
+def test_the_room_manifest_addresses_cancel_facts_and_has_an_honest_omission_count(tmp_path):
     import server
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.projects_registry import create_project
@@ -121,8 +121,10 @@ def test_the_room_manifest_carries_cancel_facts_and_an_honest_omission_count(tmp
 
     [row] = manifest["final_results"]
     assert row["task_id"] == "racer-cancelled"
-    assert row["cancel_origin"] == {"source": "owner", "reason": "owner stopped it",
-                                    "requested_at": "2026-08-10T00:00:00Z"}
+    from tests.test_project_routing_v664 import _read_result_reference
+    assert "cancel_origin" not in row and row["status"] == "cancelled"
+    assert _read_result_reference(tmp_path, row)["cancel_origin"] == {
+        "source": "owner", "reason": "owner stopped it", "requested_at": "2026-08-10T00:00:00Z"}
     [live] = manifest["active_roots"]
     assert live["task_id"] == "racer-live" and live["cancel_state"] == "pending"
     assert manifest["omissions"]["children"] == 1
@@ -157,4 +159,5 @@ def test_the_manifest_row_cap_is_one_runtime_limit(tmp_path, monkeypatch):
     main = server._main_routing_manifest(_host_ctx(tmp_path))
 
     assert len(room["final_results"]) == 1 and room["omissions"]["final_results"] == 2
-    assert len(main["final_results"]) == 1 and main["omissions"]["final_results"] == 2
+    # Main's scope is the whole store: its window proves more roots exist, it does not count them.
+    assert len(main["final_results"]) == 1 and main["omissions"]["final_results"] is None

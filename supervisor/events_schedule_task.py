@@ -13,6 +13,7 @@ import functools
 import logging
 from typing import Any, Dict, Optional
 from ouroboros.headless_status import ARTIFACT_STATUS_FAILED
+from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -64,6 +65,19 @@ def _events():
 VALID_SUBAGENT_MEMORY_MODES = frozenset({"forked", "empty"})
 
 
+def _subagent_room_mode(ctx: Any, task: dict) -> tuple[str, Optional[tuple[str, str]]]:
+    """A room removed during preparation retains the Project admission refusal."""
+    from ouroboros.settings_integrity import live_subagents_mode
+
+    try:
+        return live_subagents_mode(task=task, drive_root=ctx.DRIVE_ROOT), None
+    except ValueError as exc:
+        if not task.get("project_id"):
+            raise
+        return "", ("project_routing_fence_lookup_failed",
+                    f"Task not scheduled: Project state could not be checked: {exc}")
+
+
 def _cleanup_rejected_worktree(tid: str, result_fields: Dict[str, Any]) -> None:
     """Tear down a write surface provisioned for an acting subagent that is then
     rejected by a later gate, so rejected schedules never leak a worktree or an
@@ -76,12 +90,12 @@ def _cleanup_rejected_worktree(tid: str, result_fields: Dict[str, Any]) -> None:
     if not write_root:
         return
     try:
-        from ouroboros import subagent_worktrees
+        from ouroboros import genesis_project, subagent_worktrees
 
         if surface == "self_worktree":
             subagent_worktrees.remove_worktree(task_id=str(tid))
         elif surface == "genesis":
-            subagent_worktrees.remove_genesis_project(write_root)
+            genesis_project.remove_genesis_project(write_root, task_id=str(tid))
     except Exception:
         log.debug("Failed to clean up rejected acting write surface for %s", tid, exc_info=True)
 
@@ -452,8 +466,18 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
         if canonical_root and str(canonical_root) != str(count_roots[0]):
             count_roots.append(canonical_root)
         direct_child_count = _direct_child_count(count_roots, parent_id, tid)
+        room_mode, room_refusal = _subagent_room_mode(ctx, {
+            "id": parent_id, "root_task_id": root_task_id, "project_id": project_id, "chat_id": chat_id,
+            "metadata": {**(evt.get("origin_metadata") or {}),
+                         **{key: evt[key] for key in (PRESENCE_BINDING_AUTHORITY_KEY,) if key in evt}}})
+        if room_refusal:
+            reject(ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+                   parent_id=parent_id, root_task_id=root_task_id, role=role, result_fields=result_fields,
+                   reason_code=room_refusal[0], detail=room_refusal[1],
+                   extra_fields={"admission_outcome": "never_admitted"})
+            return
         rights = check_delegation_admission(
-            parent_budget,
+            parent_budget, room_mode=room_mode,
             direct_child_count=direct_child_count,
         )
         # An unknown count is the interlocked re-check's to decide (it defers contention).
@@ -625,12 +649,29 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any, preparation: Any = None
         preparation.admit(step)
 
 
+def _admitted_cognitive_route(ctx: Any, r: SimpleNamespace) -> Optional[dict]:
+    """Reject a malformed new carrier through the ordinary admission rollback."""
+    from ouroboros.subagent_runtime import SubagentSelectionError
+    from ouroboros.supervisor_route import validate_cognitive_route
+
+    try:
+        return validate_cognitive_route(r.parent_cognitive_route)
+    except SubagentSelectionError as exc:
+        r.reject(ctx, tid=r.tid, chat_id=r.chat_id, delegation_role=r.delegation_role,
+                 parent_id=r.parent_id, root_task_id=r.root_task_id, role=r.role,
+                 result_fields=r.result_fields, detail=exc.detail, reason_code=exc.code)
+        return None
+
+
 def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> None:
     """The composed request's final admission: the receipt-then-put interlock, its refusals, the
     scheduled notice and the snapshot. On a claim this runs on the admission lane."""
     from supervisor.queue import PENDING as QUEUE_PENDING, RUNNING as QUEUE_RUNNING
     from supervisor.task_admission import enqueue_subagent_with_scheduled_result, scheduled_admission_rejection
 
+    cognitive_route = _admitted_cognitive_route(ctx, r)
+    if cognitive_route is None:
+        return
     tid, delegation_role, root_task_id, parent_id, role = r.tid, r.delegation_role, r.root_task_id, r.parent_id, r.role
     view = _gate_view(ctx, preparation)
     pending_ref = getattr(ctx, "PENDING", QUEUE_PENDING)  # the live list admission may roll back
@@ -673,7 +714,7 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         "required_capabilities": r.required_capabilities, "model_lane": r.requested_model_lane,
         **r.intent, "task_group_id": r.task_group_id, "task_group": r.task_group,
         "subagent_envelope": r.subagent_envelope, "configured_subagent": r.configured_subagent,
-        "parent_cognitive_route": r.parent_cognitive_route, "parent_id": parent_id,
+        "parent_cognitive_route": cognitive_route, "parent_id": parent_id,
         "origin_metadata": evt.get("origin_metadata"),
         **({"presence_binding_authority": evt["presence_binding_authority"]}
            if "presence_binding_authority" in evt else {}),
@@ -687,10 +728,16 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         from ouroboros.tools.control_delegation import effective_delegation_budget
         from supervisor import workspace_preparation
 
+        room_mode = "auto"
+        room_refusal = None
+
         def durable_child_count() -> Any:
             # Read on the lane, outside Q: the declared rights stay the same, current
             # counts cannot be borrowed from the pre-preparation queue snapshot.
-            nonlocal direct_child_count
+            nonlocal direct_child_count, room_mode, room_refusal
+            room_mode, room_refusal = _subagent_room_mode(ctx, task)
+            if room_refusal:
+                return direct_child_count
             direct_child_count = _direct_child_count(
                 r.count_roots, parent_id, tid,
                 propagate_contention=preparation is not None or not workspace_preparation._requests_preparation(evt))
@@ -699,7 +746,9 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         def recheck_child_admission(count: Any) -> tuple[str, str]:
             # Under Q, memory only, with the count the lane read.
             nonlocal queued_behind_active_cap
-            rights = check_delegation_admission(r.parent_budget, direct_child_count=count)
+            if room_refusal:
+                return room_refusal
+            rights = check_delegation_admission(r.parent_budget, direct_child_count=count, room_mode=room_mode)
             if not rights.ok:
                 return rights.reason_code, f"Subagent rejected: {rights.reason_code}: {rights.detail}"
             running = getattr(ctx, "RUNNING", QUEUE_RUNNING)
@@ -786,6 +835,7 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
                 root_task_id, getattr(view, "PENDING", pending_ref), getattr(view, "RUNNING", running_view)),
             max_active_subagents=max_active,
         ))
+        progress_meta["parent_cognitive_route"] = cognitive_route
         if queued_behind_active_cap:
             progress_meta["queued_behind_active_cap"] = True
     else:

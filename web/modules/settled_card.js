@@ -5,7 +5,7 @@ import { syncResultFilesItem } from './result_files.js';
 import { syncContinueAction } from './task_continue.js';
 
 /** @returns {boolean} whether the card's timeline items changed (the Files row) */
-export function syncSettledItems(record, detail) {
-    syncContinueAction(record, detail);
+export function syncSettledItems(record, detail, options) {
+    syncContinueAction(record, detail, options);  // a late offer read writes through the caller's viewport seam
     return syncResultFilesItem(record, detail);
 }

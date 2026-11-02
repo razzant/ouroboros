@@ -264,8 +264,30 @@ def test_failed_reload_and_ambiguous_low_preserve_runtime_presence_on_main():
     with task_settings_scope(failed_reload):
         assert config.get_context_mode() == "low" and config.get_owner_context_mode() == "max"
         assert config.resolve_effort("task") == "ultra"
+
         saved = captured_cognition()
     with task_settings_scope(task_settings_snapshot({}, {})):
         restore_cognition(saved)
         assert config.get_context_mode() == "low" and config.get_owner_context_mode() == "max"
         assert config.resolve_effort("task") == "ultra"
+
+
+@pytest.mark.parametrize("project_id", ["", "alpha"])
+def test_subagents_changes_are_live_while_context_effort_and_resume_stay_snapshotted(project_id):
+    from ouroboros.settings_integrity import live_subagents_mode
+
+    save_owner(document("old"))
+    create_project(config.DATA_DIR, "alpha")
+    task = {"id": "parent", "project_id": project_id}
+    with task_settings_scope(snapshot(task)):
+        captured = captured_cognition()
+        assert live_subagents_mode() == "auto"
+        for mode in ("swarm", "off", "auto"):
+            if project_id:
+                update_project_cognition(config.DATA_DIR, project_id, subagents_mode=mode)
+            else:
+                save_owner({**config.load_settings(), "OUROBOROS_SUBAGENTS_MODE": mode})
+            assert live_subagents_mode() == mode
+            restore_cognition(captured)
+            assert captured_cognition() == captured and live_subagents_mode() == mode
+            assert "subagents_mode" not in captured

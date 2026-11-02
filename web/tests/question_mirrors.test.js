@@ -4,7 +4,7 @@
 // seconds and removes only the Main copy; an answered question never enters Main again.
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
-import { NodeStub, fixture, turn } from './chat_decision_fixture.js';
+import { NodeStub, fixture, frameBubble, turn } from './chat_decision_fixture.js';
 
 // The rows the producer emits (ouroboros/project_dialogue.py::project_question_pointer): complete
 // for display, `ts` from the question's own asked_at. One batch is asked in sequence.
@@ -18,18 +18,19 @@ const SETTLE_MS = 5000;
 const text = (node, name) => node.querySelector(`.${name}`)?.textContent ?? null;
 const options = (node) => node.querySelectorAll('.chat-quiz-option');
 const labels = (node) => options(node).map((button) => text(button, 'chat-quiz-option-label'));
+// A Main copy names its Project in its bubble's voice line, beside `Ouroboros` (owner 19.10, A).
+const chipOf = (card) => card.parentNode.querySelector('.chat-quiz-project');
 
 // A Main column: bubbles are framed and mounted like chat.js does, and retirement goes through
 // the one removal seam the chat instance hands over.
 function mainFixture(extra = {}) {
     const column = new NodeStub();
     const removed = [];
-    const fx = fixture({ isMain: true,
-        frameNode: (_msg, card) => { const bubble = new NodeStub(); bubble.append(card); return bubble; },
+    const fx = fixture({ isMain: true, frameNode: frameBubble,
         insertMessageNode: (node) => { column.append(node); return true; },
         removeMessageNode: (node) => { removed.push(node); node.remove(); },
         ...extra });
-    const cards = () => column.children.map((bubble) => bubble.children[0]);
+    const cards = () => column.children.map((bubble) => bubble.querySelector('.chat-quiz-card'));
     return { ...fx, column, removed, cards, add: (row) => fx.decision.appendQuestionPointer(row) };
 }
 
@@ -59,7 +60,8 @@ test('a realistic burst: every unanswered question is the full Project form, an 
         for (const card of cards) {
             assert.ok(card.classList.contains('chat-quiz-card') && card.classList.contains('project-question-card'));
             assert.equal(text(card, 'chat-quiz-chip'), 'Question');
-            assert.equal(text(card, 'chat-live-project-name'), 'Storage');
+            assert.equal(text(card.parentNode, 'chat-live-project-name'), 'Storage');
+            assert.equal(card.querySelector('.chat-quiz-project'), null, 'the reference is the bubble\'s, not the card\'s');
             assert.equal(text(card, 'chat-quiz-question'), 'Merge **now**?');
             assert.equal(text(card, 'chat-quiz-stake'), 'At stake: Release timing');
             assert.deepEqual(labels(card), ['Yes', 'No']);
@@ -76,9 +78,9 @@ test('a realistic burst: every unanswered question is the full Project form, an 
     } finally { fx.restore(); }
 });
 
-test('the mirror is the Project form node for node; its one addition is the Project chip', () => {
+test('the mirror is the Project form node for node; its one addition is the Project reference in its voice line', () => {
     const shape = (node) => [node.className, node.textContent, node.disabled, node.children.map(shape)];
-    const room = fixture();
+    const room = fixture({ frameNode: frameBubble });
     const main = mainFixture();
     try {
         main.add({ ...WAITING, assumption: 'Yes meanwhile' });
@@ -87,18 +89,23 @@ test('the mirror is the Project form node for node; its one addition is the Proj
         const own = room.decision.buildQuizCard({ role: 'assistant', task_id: 't-1', ts: ASKED[0], text: 'Merge **now**?',
             msg_type: 'quiz', quiz: { quiz_id: 'qz-1', state: 'open', wait_for_answer: true, owner_wait_state: 'waiting',
                 stake: 'Release timing', assumption: 'Yes meanwhile', options: [
-                    { label: 'Yes', detail: 'Ship today', recommended: true }, { label: 'No', detail: 'Wait for CI' }] } });
+                    { label: 'Yes', detail: 'Ship today', recommended: true }, { label: 'No', detail: 'Wait for CI' }] } })
+            .querySelector('.chat-quiz-card');
         const [head, ...body] = mirror.children;
         const [ownHead, ...ownBody] = own.children;
         assert.deepEqual(body.map(shape), ownBody.map(shape));
-        assert.deepEqual(head.children.map((node) => node.className),
-            ['chat-quiz-chip', 'chat-live-project-card-btn chat-quiz-project', 'chat-quiz-head-end']);
-        assert.deepEqual(ownHead.children.map((node) => node.className), ['chat-quiz-chip', 'chat-quiz-head-end']);
-        // The head ends with the status and the card's one quiet Close, the same on both surfaces.
-        assert.deepEqual(head.children[2].children.map((node) => node.className), ['chat-quiz-status', 'chat-quiz-close']);
-        assert.deepEqual(shape(head.children[2]), shape(ownHead.children[1]));
+        // One head in every room: the chip, the status beside it (it describes the question), the quiet Close alone
+        // at the row's end (owner 19.10, A).
+        assert.deepEqual(shape(head), shape(ownHead));
+        assert.deepEqual(head.children.map((node) => node.className), ['chat-quiz-chip', 'chat-quiz-status', 'chat-quiz-head-end']);
+        assert.deepEqual(head.children[2].children.map((node) => node.className), ['chat-quiz-close ui-hit-area']);
         assert.equal(own.classList.contains('project-question-card'), false);
-        const chip = head.children[1];
+        // The mirror's one addition: the Project reference beside `Ouroboros` in its bubble's voice line; the room's
+        // own card names no Project and keeps the plain sender line.
+        const [voice] = mirror.parentNode.children;
+        assert.deepEqual(voice.children.map((node) => node.className), ['sender', 'chat-live-project-card-btn chat-quiz-project ui-hit-area']);
+        assert.equal(own.parentNode.children[0].className, 'sender');
+        const chip = voice.children[1];
         assert.equal(chip.querySelector('.chat-live-project-status').getAttribute('aria-hidden'), 'true');
         chip.click();
         assert.deepEqual(main.opened.map((detail) => [detail.project.id, detail.project.chat_id, detail.task_id, detail.quiz_id]),
@@ -246,11 +253,11 @@ test('an unknown source keeps what is known; otherwise the copy is a safe record
         const partial = fx.cards()[2];
         assert.deepEqual([text(partial, 'chat-quiz-question'), options(partial).length, Boolean(partial.querySelector('.chat-quiz-comment'))],
             ['Open the original question for its text.', 0, false]);
-        partial.querySelector('.chat-quiz-project').click();
+        chipOf(partial).click();
         assert.equal(fx.opened.at(-1).quiz_id, 'narrow');
         fx.add({ ...WAITING, task_id: 't-9', quiz_id: 'narrow', ts: ASKED[1], project_name: 'Storage v2' });
         const full = fx.cards()[2];
-        assert.deepEqual([labels(full), text(full, 'chat-live-project-name'), fx.column.children.length], [['Yes', 'No'], 'Storage v2', 3]);
+        assert.deepEqual([labels(full), text(full.parentNode, 'chat-live-project-name'), fx.column.children.length], [['Yes', 'No'], 'Storage v2', 3]);
     } finally { fx.restore(); }
 });
 
@@ -346,7 +353,7 @@ test('a removed copy stays removed after the bounded memory forgets it: the cano
         const unknown = fx.cards()[2];
         assert.equal(unknown.dataset.state, 'unknown');
         assert.ok(options(unknown).every(button => button.disabled));
-        unknown.querySelector('.chat-quiz-project').click();
+        chipOf(unknown).click();
         assert.equal(fx.opened.at(-1).quiz_id, 'unreadable');
         unavailable = false;
         canonical['t-1'].unreadable = 'open';
@@ -405,7 +412,7 @@ test('failed, missing and foreign canonical reads keep a safe Project recovery p
             await turn();
             fx.decision.applyQuizStateFrame({}, { task_id: 't-1', quiz_id: 'stale', state: 'open' });
             assert.equal(card.dataset.state, 'unknown', 'snapshots and non-answer live facts cannot unlock an unverified copy');
-            card.querySelector('.chat-quiz-project').click();
+            chipOf(card).click();
             assert.equal(fx.opened.at(-1).quiz_id, 'stale');
             // An explicit retry of the owned pointer can recover the canonical Project form.
             recovered = true;
@@ -658,10 +665,10 @@ test('an unchanged row writes nothing and a narrower re-delivery never blanks th
             assumption: '', recommended_index: null, project_name: '' });
         assert.equal(writes, painted + 1, 'only the append attempt itself; the card is untouched');
         const [card] = fx.cards();
-        assert.deepEqual([labels(card), text(card, 'chat-quiz-stake'), text(card, 'chat-live-project-name')],
+        assert.deepEqual([labels(card), text(card, 'chat-quiz-stake'), text(card.parentNode, 'chat-live-project-name')],
             [['Yes', 'No'], 'At stake: Release timing', 'Storage']);
         fx.decision.buildQuestionPointer({ ...WAITING, project_name: 'Storage v2' });
-        assert.equal(text(card, 'chat-live-project-name'), 'Storage v2', 'a renamed Project renames the chip in place');
+        assert.equal(text(card.parentNode, 'chat-live-project-name'), 'Storage v2', 'a renamed Project renames the chip in place');
     } finally { fx.restore(); }
 });
 
@@ -741,8 +748,8 @@ test('a replaced question stays as a read-only record; a native Main quiz is nev
         const native = fx.decision.buildQuizCard({ type: 'quiz', role: 'assistant', quiz_id: 'native', task_id: 't-main',
             question: 'Main question?', options: [{ label: 'A' }, { label: 'B' }], assumption: 'A', state: 'open', ts: ASKED[0] });
         fx.column.append(native);
-        const nativeCard = native.children[0];
-        assert.equal(nativeCard.querySelector('.chat-quiz-project'), null);
+        const nativeCard = native.querySelector('.chat-quiz-card');
+        assert.equal(native.querySelector('.chat-quiz-project'), null, 'a native Main question names no Project');
         options(nativeCard)[0].click();
         await turn();
         mock.timers.tick(SETTLE_MS * 2);

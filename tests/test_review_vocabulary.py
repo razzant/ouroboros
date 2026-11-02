@@ -53,11 +53,15 @@ def test_review_status_explains_the_pool_gate_codes_in_the_gates_words():
         # The bare token is never the whole explanation.
         assert rendered.count(code) == 1
     assert set(NOT_PERFORMED_PHRASES) == {"coupling_not_performed", "change_unanswered", "review_late_result_pending",
-                                          "result_unanswered"}
+                                          "result_unanswered", "skill_unanswered"}
     result = _review_status_message({
         "selected_attempt": SimpleNamespace(status="blocked", block_reason="result_unanswered", tool_name="review_result"),
         "effective_status": "stale", "open_debts": []})
     assert result.startswith("Last result review BLOCKED (result_unanswered)"), result
+    skill = _review_status_message({
+        "selected_attempt": SimpleNamespace(status="blocked", block_reason="skill_unanswered", tool_name="review_skill"),
+        "effective_status": "stale", "open_debts": []})
+    assert skill.startswith("Last skill review BLOCKED (skill_unanswered)"), skill
     for code in ("critical_findings", "review_late_result_pending"):  # a result is delivered again, never committed
         rendered = _review_status_message({
             "selected_attempt": SimpleNamespace(status="blocked", block_reason=code, tool_name="review_result"),

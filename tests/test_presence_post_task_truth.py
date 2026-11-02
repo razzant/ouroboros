@@ -40,7 +40,6 @@ def test_live_and_recovered_synthesis_use_recorded_presence_body(
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", run_synchronously)
     monkeypatch.setattr("ouroboros.llm.LLMClient", lambda: SimpleNamespace())
     monkeypatch.setattr(pipeline, "_run_memory_fallback_draft", paid_stage)
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *_a, **_k: None)
     raw = "Internal terminal diagnostic" if failed else "Current authored result"
     task = {"id": "presence-synthesis", "root_task_id": "presence-synthesis", "type": "presence",
             "chat_id": 7, "text": "Read the request", "_is_direct_chat": True,

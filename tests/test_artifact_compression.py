@@ -21,10 +21,11 @@ def _identity(raw):
 
 
 def _fake_ditto(monkeypatch, run):
-    # Replace this module's binding, not subprocess.run used by Git and fixtures.
+    # Replace this module's binding, not subprocess.run used by Git and fixtures; a private file shares no block.
     monkeypatch.setattr(storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(storage, "subprocess", SimpleNamespace(
         run=run, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
+    monkeypatch.setattr(storage, "_may_share", lambda path: False)
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "timeout", "size", "sha256"])
@@ -190,7 +191,7 @@ def test_compressed_patch_clone_and_streamed_fallback_keep_identity(tmp_path, mo
 @pytest.mark.parametrize("outcome", [True, False, "error"])
 def test_ntfs_control_uses_a_live_handle_and_preserves_bytes(tmp_path, monkeypatch, outcome):
     path = tmp_path / "workspace.patch"
-    raw = b"complete patch\n" * 4096
+    raw = b"complete patch\n" * 8192  # past the 64 KiB floor
     path.write_bytes(raw)
     handles = []
 

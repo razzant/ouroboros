@@ -725,6 +725,7 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
     the proposal, not an invented model family or a CLI alias table. Vision is
     a row whose input modalities state image input, else blank: Auto, which
     still tries an unknown route when an image needs one (``vision_routing``).
+    Safety stays blank to inherit Light's full binding unless explicitly pinned.
     """
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
     from ouroboros.settings_defaults import RETIRED_SETTING_KEYS, SETTINGS_DEFAULTS
@@ -747,7 +748,7 @@ def compile_model_settings(model_catalog: Sequence[Mapping[str, Any]],
         current = str(settings.get(key) or "")
         if current and current != str(SETTINGS_DEFAULTS.get(key) or ""):
             continue
-        proposed[key] = {"fallback": "", "vision": vision}.get(role, str(default["value"]))
+        proposed[key] = {"fallback": "", "vision": vision, "safety": ""}.get(role, str(default["value"]))
     return proposed
 
 

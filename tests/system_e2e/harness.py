@@ -60,7 +60,9 @@ from devtools.benchmarks.common.server_runner import (  # noqa: E402
 from ouroboros.provider_models import (  # noqa: E402
     ACTIVE_MODEL_SETTING_KEYS,
     ALL_PROVIDER_CREDENTIAL_KEYS,
+    CONNECTIONS_KEY,
     LEGACY_MODEL_SETTING_KEYS,
+    PROVIDER_KINDS,
 )
 from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS  # noqa: E402
 from tests.candidate_checkout import (  # noqa: E402
@@ -144,8 +146,10 @@ SCENARIOS = {
     "S38": ("evolution crash between the candidate commit and its receipts: the supervisor's cycle commits in its candidate under blocking review, the tree is SIGKILLed and the post-commit receipts removed; a fresh boot recovers the exact commit and its reviewed provenance at worker boot and does not absorb it (the serving checkout never held it)", LANE_MOCK),
     # Deployment: both container modes on real Docker, keyless (stub models through an exec relay).
     "S39": ("container lifecycle: the managed image boots a released seed into a body checkout and runtime venv on volumes (parent and split layouts), keeps code, packages and data across recreation, stays stopped after Panic until an owner start, refuses a mounted repository and a second container on shared data; the immutable image admits one server per data volume and, networkless, serves onboarding, a project, a task with a child and an artifact across a restart; an Update adding a local-wheel dependency survives an offline recreation, a task imports it, and rollback restores the old lock with the package disclosed", LANE_CONTAINER),
-    # #1729/#1730 in real processes: one worker frozen past the idle window is reaped by a real kill.
-    "S40": ("idle retry under the owner's Pause: after a Pause and a consumed Resume (and without them) a real worker frozen past the idle window is reaped by a real kill; its new-ID retry dispatches with no spent Resume and continues the saved work; a Pause of that running retry fences its logical root, a model write served after the acceptance never lands while one before it did, one Resume reopens the tree and Stop ends it", LANE_MOCK),
+    # #1729/#1730 in real processes: the owner's doors on one live task that keeps its id (no retry exists since #1376).
+    "S40": ("owner Pause / Resume / Stop on one live task, same id: after a Pause and a consumed Resume (and without them) the same id runs again and continues its saved work; a Pause of the running task fences its logical root, a model write served after the acceptance never lands while one before it did, one Resume reopens the tree and Stop ends it Cancelled with no late effect and no successor row", LANE_MOCK),
+    "S41": ("live skill-smoke adapter: ordinary author, one independent rebuttal, immutable payload, true/unknown criticism red, tool-policy and identity controls", LANE_MOCK),
+    "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer; in a folderless room the resumed write still lands in the turn's task drive after a sibling start_task gives the room its first folder (#2547)", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"
@@ -206,7 +210,7 @@ _NATIVE_SURFACE_KINDS = {
 MARKER_SOURCES = {
     REVIEWER_SLOT_MARKER: "ouroboros/review_execution.py",
     TRIAD_USER_MARKER: "ouroboros/tools/review_multi_model.py",   # TRIAD_USER_TURN: the one literal the send and the admission share
-    SKILL_REVIEW_MARKER: "ouroboros/skill_review_prompt.py",
+    SKILL_REVIEW_MARKER: "ouroboros/tools/review_skill.py",
     PLAN_REVIEW_MARKER: "ouroboros/tools/plan_packet.py",
     NATIVE_EPISODE_MARKER: "ouroboros/review_native_episode.py",
 }
@@ -323,11 +327,9 @@ def canned_review_answer(kind: str) -> dict | None:
     if kind == "safety":
         return {"role": "assistant",
                 "content": json.dumps({"status": "SAFE", "reason": "stub"})}
-    if kind == "skill_review":
-        return {"role": "assistant", "content": skill_review_clean_text()}
     if kind == "two_part_review":
         return {"role": "assistant", "content": two_part_clean_text()}
-    if kind == "triad_review":
+    if kind in ("triad_review", "skill_review"):
         return {"role": "assistant", "content": TRIAD_CLEAN_TEXT}
     if kind == "reviewer_slot":
         return {"role": "assistant", "content": reviewer_slot_clean_text()}
@@ -347,13 +349,13 @@ def canned_review_answer(kind: str) -> dict | None:
 def skill_review_clean_text() -> str:
     """All-PASS skill-review verdict over the tree's OWN checklist items.
 
-    The item list is imported from the prompt module (its ``_SKILL_REVIEW_ITEMS``
-    is both the prompt's expected-items contract and the parser's required set),
+    The item list is imported from the skill subject module (its ``SKILL_REVIEW_ITEMS``
+    is the closed list a finding may name),
     so an upstream checklist change re-derives the canned verdict instead of
     silently failing coverage. Lazy import: the skill-review module tree is heavy
     and only skill scenarios pay for it.
     """
-    from ouroboros.skill_review_prompt import _SKILL_REVIEW_ITEMS
+    from ouroboros.tools.review_skill import SKILL_REVIEW_ITEMS
 
     return json.dumps([
         {
@@ -362,7 +364,7 @@ def skill_review_clean_text() -> str:
             "severity": "advisory",
             "reason": "Stub skill reviewer: checked and clean for the scripted E2E payload.",
         }
-        for item in _SKILL_REVIEW_ITEMS
+        for item in SKILL_REVIEW_ITEMS
     ])
 
 
@@ -880,7 +882,10 @@ def runtime_credential_env_key_reads() -> set:
             for name in _ENV_READ_RE.findall(source):
                 if _CREDENTIAL_SHAPE_RE.search(name):
                     keys.add(name)
-    return keys
+    # The resolver reads every kind's secret settings and the added-key rows by name through the
+    # kind table, which no literal shows (``provider_connections.connection_values``).
+    keys.update(flat for spec in PROVIDER_KINDS.values() for _field, flat, secret in spec.fields if secret)
+    return keys | {CONNECTIONS_KEY}
 
 
 def proc_environ(pid: int) -> dict:
@@ -1038,7 +1043,7 @@ def retired_cost_alias_paths(payload) -> list:
 # Everything the child environment must NOT carry in the keyless lane. The env union
 # closes the documented hole: IsolatedServer._is_secret_env_key EXEMPTS provider keys,
 # so an inherited ANTHROPIC_API_KEY survives the base sanitization by design.
-STRIPPED_PROVIDER_ENV_KEYS = frozenset(_PROVIDER_ENV_KEYS) | frozenset(ALL_PROVIDER_CREDENTIAL_KEYS)
+STRIPPED_PROVIDER_ENV_KEYS = frozenset(_PROVIDER_ENV_KEYS) | frozenset(ALL_PROVIDER_CREDENTIAL_KEYS) | {CONNECTIONS_KEY}
 PROXY_ENV_KEYS = frozenset({
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -1365,9 +1370,15 @@ class ArtifactOracle:
         from ouroboros.task_store import task_facts
         return list(task_facts(self.data_root, where="parent_task_id=?", params=(str(parent_task_id),)))
 
+    def copy_records(self) -> list:
+        """Every private copy's record (``state/private_copies/<name>.json``, one file per copy)."""
+        folder = self.data_root / "state" / "private_copies"
+        return [self._json(f"state/private_copies/{path.name}") for path in sorted(folder.glob("*.json"))
+                if not path.name.startswith(".")]
+
     def body_candidate(self, task_id: str = "") -> dict:
         """One authoring candidate; callbacks before submit returns may omit its owner."""
-        rows = [row for row in self._json("state/subagent_worktrees.json").get("worktrees", [])
+        rows = [row for row in self.copy_records()
                 if row.get("kind") == "body_candidate" and (not task_id or row.get("task_id") == task_id)]
         assert len(rows) == 1, rows
         return rows[0]

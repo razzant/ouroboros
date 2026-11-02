@@ -58,6 +58,7 @@ def test_next_presence_reads_the_same_source_through_its_selected_memory_tool(tm
         path.mkdir()
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     admission = replace(_admission(), capability_ceiling=_ceiling())
     event = _observed_event()
     tasks, reads = [], []

@@ -474,6 +474,8 @@ def test_thread_start_failure_releases_maintenance_latch(roots, monkeypatch):
     monkeypatch.setattr(maintenance, "_LAST_CANCEL_INTENT_SWEEP", [0.0])
     monkeypatch.setattr(maintenance, "time", SimpleNamespace(time=lambda: 100.0))
     monkeypatch.setattr(maintenance, "threading", SimpleNamespace(Thread=lambda **k: (_ for _ in ()).throw(RuntimeError("thread unavailable"))))
+    # The child dispatcher starts its thread through ouroboros.maintenance, past the patch above: not this latch.
+    monkeypatch.setattr(maintenance, "_tick_maintenance_child", lambda: None)
     maintenance._periodic_supervisor_maintenance([100.0], [100.0])
     assert lock.acquire(blocking=False)
     lock.release()

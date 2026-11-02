@@ -3,6 +3,8 @@
 // one line under the message — what happened to his words, then the Project reference when they went to another
 // room. The picker card (chat_decision.js) shares the option labels.
 import { projectReference } from './project_reference.js';
+import { replySnippet } from './chat_reply_quote.js';
+import { ellipsize } from './text_fit.js';
 import { fmt, tr, tx } from './i18n.js';
 
 /** Human label for ONE manual-routing option row (shared with the picker card). */
@@ -131,11 +133,19 @@ const ROUTING_LEAD = {
     project_route: ['routing.lead.routed', 'Routed to'],
 };
 const PASSED_ON = new Set(['steer_task', 'tell_task', 'mailbox_delivery']);
+// A work's name on the line, within a deliberate display budget (80 characters; presentation only, never a rule for
+// what a name may be): its first readable line cut on a word, any cut said by the ellipsis. The stored name stays
+// whole; an older host stored a nameless work's whole text here, so only its opening words show.
+const SHOWN_NAME_CHARS = 80;
+function shownWorkName(title) {
+    const shown = replySnippet(title, SHOWN_NAME_CHARS);
+    return shown && !shown.endsWith('…') && /\n\s*\S/.test(String(title ?? '').trim()) ? ellipsize(shown) : shown;
+}
 function routingLeadText(annotation) {
     const action = String(annotation.action || '');
     if (PASSED_ON.has(action)) {
         const titles = (Array.isArray(annotation.target_titles) ? annotation.target_titles : [])
-            .map((title) => String(title || '').trim()).filter(Boolean);
+            .map(shownWorkName).filter(Boolean);
         return titles.length ? fmt('Passed on to {works} in', { works: titles.map((title) => `«${title}»`).join(', ') })
             : tr('routing.lead.passed_on', 'Passed on to the work in');
     }

@@ -1,9 +1,12 @@
 // Quiz-local draft and one immutable, explicitly submitted attempt. This is not an
-// outbox: restoration and recovery only GET; only a new owner press can POST.
+// outbox: restoration and recovery only GET; only a new owner press can POST. Drafts
+// save as they are typed and an emptied field releases them: no separate control
+// clears them (docs/DESIGN.md "Quiz card").
 import { MAX_DECISION_COMMENT } from './api_types.js';
 import { ANSWERABLE_QUIZ_STATES } from './question_presentation.js';
 import { tr } from './i18n.js';
 import { openConfirmDialog } from './confirm_dialog.js';
+import { attachChatInputSizing } from './chat_input_sizing.js';
 
 const PREFIX = 'ouro_quiz_reply_v1:';
 const LOCAL_EVENT = 'ouro:quiz-reply';
@@ -65,6 +68,7 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
         ]) {
             const field = view.card.querySelector(selector); if (field) field.value = value;
         }
+        view.sizing?.sync();
         return changed;
     }
     // Draft edits have their own key: typing before a queued storage event cannot
@@ -104,7 +108,10 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
             card.setAttribute('aria-busy', held && ['sending', 'checking'].includes(view.phase) ? 'true' : 'false');
             const field = card.querySelector('.chat-quiz-comment');
             const reason = card.querySelector('.chat-quiz-close-reason');
-            if (field) { field.readOnly = held; if (held && field.value !== record.draft) field.value = record.draft; }
+            if (field) {
+                field.readOnly = held;
+                if (held && field.value !== record.draft) { field.value = record.draft; view.sizing?.sync(); }
+            }
             const send = card.querySelector('.chat-quiz-send');
             if (send && field) send.disabled = !ANSWERABLE_QUIZ_STATES.includes(card.dataset.state) || !String(field.value || '').trim() || String(field.value).length > MAX_DECISION_COMMENT;
             const close = card.querySelector('.chat-quiz-close');
@@ -126,8 +133,7 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
                 ? tr('quiz.local_unavailable', 'Local saving is unavailable. Keep this window open or copy your words before closing.') : '';
             view.check.hidden = view.retry.hidden = view.forget.hidden = !held || view.phase !== 'unknown';
             view.check.disabled = view.retry.disabled = !canUse(card) || ['sending', 'checking'].includes(view.phase);
-            view.clear.hidden = held || terminal(card.dataset.state) || (!record.draft && !record.reason);
-            view.feedback.hidden = !view.line.textContent && !view.warning.textContent && view.clear.hidden;
+            view.feedback.hidden = !view.line.textContent && !view.warning.textContent && view.check.hidden;
             return true;
         });
     }
@@ -239,13 +245,19 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
         check.textContent = tr('quiz.check_status', 'Check status');
         const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'chat-quiz-retry btn btn-xs btn-default';
         retry.textContent = tr('quiz.retry_same', 'Retry same answer');
-        const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'chat-quiz-clear btn btn-xs btn-default';
-        clear.textContent = tr('quiz.clear_draft', 'Clear local draft');
-        const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'chat-quiz-forget btn btn-xs btn-default';
+        // Forget deletes only the local copy: a quiet control at the row's start, the two server actions at its end.
+        const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'chat-quiz-forget btn btn-xs btn-ghost';
         forget.textContent = tr('quiz.forget_unconfirmed', 'Forget unconfirmed local answer');
-        Object.assign(view, { feedback, line, warning, check, retry, clear, forget });
-        views.set(card, view); feedback.append(line, warning, check, retry, clear, forget); card.append(feedback);
+        Object.assign(view, { feedback, line, warning, check, retry, forget });
+        views.set(card, view); feedback.append(line, warning, forget, check, retry);
+        // The notes and recovery speak of the answer, so they follow it rather than the card's foot.
+        const box = card.querySelector('.chat-quiz-comment-box');
+        if (box) box.after(feedback); else card.append(feedback);
+        // The answer is a message field: it grows with its words to one cap, then scrolls (DESIGN §3).
+        const answer = card.querySelector('.chat-quiz-comment');
+        view.sizing = answer ? attachChatInputSizing(answer) : null;
         const edited = () => {
+            view.sizing?.sync();
             const stored = load(quiz);
             if (stored.record.attempt) {
                 const changed = adopt(view, stored); paint(view);
@@ -255,6 +267,8 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
             if (view.record.attempt) { paint(view); return; }
             view.record = { v: 1, draft: card.querySelector('.chat-quiz-comment')?.value || '',
                 reason: card.querySelector('.chat-quiz-close-reason')?.value || '', attempt: null };
+            // Emptying the unsent words also releases a refusal about them; a frozen attempt never gets here.
+            if (!view.record.draft && !view.record.reason) view.note = '';
             save(view, 'draft'); paint(view);
         };
         card.querySelector('.chat-quiz-comment')?.addEventListener('input', edited);
@@ -266,14 +280,6 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
             const frame = await reconcile(view);
             if (alive(view) && view.record.attempt === attempt && ANSWERABLE_QUIZ_STATES.includes(frame?.state)
                 && canUse(card)) await dispatch(view);
-        });
-        clear.addEventListener('click', () => {
-            if (view.record.attempt) return; // clearing a draft cannot cancel an answer in flight
-            view.record = { v: 1, draft: '', reason: '', attempt: null }; view.note = '';
-            const field = card.querySelector('.chat-quiz-comment');
-            const reason = card.querySelector('.chat-quiz-close-reason');
-            if (field) field.value = ''; if (reason) reason.value = '';
-            save(view, 'draft'); paint(view);
         });
         forget.addEventListener('click', async () => {
             if (forget.hidden || !view.record.attempt) return;
@@ -293,12 +299,14 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
             view.record = { v: 1, draft: '', reason: '', attempt: null }; view.phase = ''; view.note = '';
             const field = card.querySelector('.chat-quiz-comment'), reason = card.querySelector('.chat-quiz-close-reason');
             if (field) field.value = ''; if (reason) reason.value = '';
+            view.sizing?.sync();
             save(view, 'forget'); accept(card, null); paint(view);
         });
         const field = card.querySelector('.chat-quiz-comment');
         const reason = card.querySelector('.chat-quiz-close-reason');
         if (field) field.value = view.record.draft;
         if (reason) reason.value = view.record.reason;
+        view.sizing?.sync();
         if (terminal(card.dataset.state)) settled(card);
         else { paint(view); if (view.record.attempt) void reconcile(view); }
     }
@@ -307,6 +315,8 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
         if (!view) return;
         if (terminal(card.dataset.state)) {
             view.record = { v: 1, draft: '', reason: '', attempt: null }; view.phase = ''; view.note = ''; save(view, 'settled');
+            // A settled card has dropped its answer field; its sizing observers go with it.
+            view.sizing?.dispose(); view.sizing = null;
         }
         paint(view);
     }
@@ -356,6 +366,7 @@ export function createQuizSubmission({ apiFetch, readQuestion, accept, canUse, o
             view.phase = 'unknown'; save(view);
         }
         view.waits.forEach(cancel => cancel()); view.controllers.forEach(controller => controller.abort());
+        view.sizing?.dispose(); view.sizing = null;
     }
     globalThis.window?.addEventListener?.(LOCAL_EVENT, localChange);
     globalThis.window?.addEventListener?.('storage', localChange);

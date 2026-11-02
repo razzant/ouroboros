@@ -5,34 +5,17 @@
 // its skill, and it stays off until the page reloads or the skill's revision changes. A module is disposed when its
 // skill leaves or changes revision, on this page's Panic and when the page goes away.
 //
-// Recovery never depends on the modules. A boot marker stands in storage while modules mount; a page that finds one
-// (the last start did not finish: a frozen or crashed page, however long ago) starts without them, and so does a page
-// opened with `?plugins=off`. Either start says so and offers the way back; only Start with plugins or a start that
-// finishes clears the marker. The chat header's More menu (every surface) and the macOS app menu reload the page
-// with `?plugins=off`.
+// Recovery never depends on the modules: each start is written to the start ledger (holds.js) before the import,
+// and a module whose last start with this revision did not settle is not imported again by itself. One notice names
+// the held modules with "Start it"; a new revision of the skill starts as usual.
+import { getHolds, START_SETTLE_MS } from './holds.js';
 import { fmt, tr } from './i18n.js';
 import { showToast } from './toast.js';
 import { boundedText } from './utils.js';
 import { WIDGET_REQUEST_TIMEOUT_MS } from './widget_job.js';
 
 export const HOST_MODULE_API = 1;
-export const BOOT_MARKER_KEY = 'ouroboros.hostModules.boot';
-const PLUGINS_PARAM = 'plugins';
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
-
-/** `href` with page modules switched off (`on` false) or back on; the reconnect banner's reload markers dropped. */
-export function pluginsUrl(href, on) {
-    const url = new URL(href);
-    url.searchParams.delete('_ouro_refresh');
-    url.searchParams.delete('_ouro_reason');
-    if (on) url.searchParams.delete(PLUGINS_PARAM);
-    else url.searchParams.set(PLUGINS_PARAM, 'off');
-    return url.toString();
-}
-
-export function pluginsOffRequested(href) {
-    try { return new URL(href).searchParams.get(PLUGINS_PARAM) === 'off'; } catch { return false; }
-}
 
 /** Where the page runs, as a module may need it: a secure context, and this computer (a loopback host). */
 export function originFacts(win = globalThis.window) {
@@ -40,54 +23,25 @@ export function originFacts(win = globalThis.window) {
     return { secure: win?.isSecureContext === true, loopback: LOOPBACK_HOSTS.has(host) || host.endsWith('.localhost') };
 }
 
-/** The boot marker in localStorage, or sessionStorage where local storage is refused; every access may throw. */
-function bootMarker(win, now) {
-    const stores = [];
-    for (const name of ['localStorage', 'sessionStorage']) {
-        try { if (win?.[name]) stores.push(win[name]); } catch { /* storage blocked */ }
-    }
-    return {
-        read() {
-            for (const store of stores) {
-                try {
-                    const marker = JSON.parse(store.getItem(BOOT_MARKER_KEY) || 'null');
-                    if (Number.isFinite(marker?.at)) return marker;
-                } catch { /* unreadable: no marker here */ }
-            }
-            return null;
-        },
-        write(keys) {
-            for (const store of stores) {
-                try { store.setItem(BOOT_MARKER_KEY, JSON.stringify({ at: now(), keys })); return true; } catch { /* next */ }
-            }
-            return false;
-        },
-        clear() {
-            for (const store of stores) {
-                try { store.removeItem(BOOT_MARKER_KEY); } catch { /* blocked */ }
-            }
-        },
-    };
-}
+/** A page module's key in the start ledger; its revision is the ledger's `rev`. */
+export const moduleHoldKey = (item) => `module:${item.key}`;
 
 /**
  * The page-module runtime over a contributions store (contributions.js). `draft` is the visible room's draft port,
- * `notice(text, tone, options)` a toast; `importModule`, `now` and `mountTimeoutMs` are seams for tests.
+ * `notice(text, tone, options)` a toast, `holds` the start ledger; `importModule`, `mountTimeoutMs` and
+ * `settleMs` are seams for tests.
  */
 export function createHostModules({ store, draft = null, win = globalThis.window, doc = globalThis.document,
     importModule = (url) => import(url), notice = (text, tone, options) => showToast(text, tone, options),
-    now = () => Date.now(), mountTimeoutMs = WIDGET_REQUEST_TIMEOUT_MS } = {}) {
-    const marker = bootMarker(win, now);
-    const mounts = new Map();  // contribution key -> { item, controller, status, stage, handle }
+    holds = getHolds(), mountTimeoutMs = WIDGET_REQUEST_TIMEOUT_MS, settleMs = START_SETTLE_MS } = {}) {
+    const mounts = new Map();  // contribution key -> { item, controller, status, stage, handle, settle }
     const providers = new Map();  // contribution key -> { entry, record }
     const providerListeners = new Set();
     const disposers = [];
-    let mode = 'idle';  // idle → running | off (asked) | skipped (marker) → stopped (Panic, unload, destroy)
-    let batches = 0;
-    let batchKeys = [];
+    const announced = new Set();  // `key@revision` of held modules a notice already named
+    let mode = 'idle';  // idle → running → stopped (Panic, unload, destroy)
 
     const live = (rec) => mounts.get(rec.item.key) === rec && (rec.status === 'mounting' || rec.status === 'mounted');
-    const navigate = (href) => win?.location?.replace?.(href);
 
     function notifyProviders() {
         for (const listener of [...providerListeners]) {
@@ -108,6 +62,7 @@ export function createHostModules({ store, draft = null, win = globalThis.window
         rec.status = 'retired';
         rec.handle = null;
         rec.controller.abort();
+        rec.settle();  // this page outlived the start: it is not a hold
         let dropped = false;
         for (const [key, provider] of providers) {
             if (provider.record === rec) { providers.delete(key); dropped = true; }
@@ -171,7 +126,9 @@ export function createHostModules({ store, draft = null, win = globalThis.window
     }
 
     function mount(item) {
-        const rec = { item, controller: new AbortController(), status: 'mounting', stage: 'import', handle: null };
+        // The ledger entry stands before the module's first byte runs and goes a second after its start settled.
+        const rec = { item, controller: new AbortController(), status: 'mounting', stage: 'import', handle: null,
+            settle: holds.starting(moduleHoldKey(item), item.revision) };
         mounts.set(item.key, rec);
         let timer = 0;
         const starting = Promise.resolve().then(async () => {
@@ -191,7 +148,29 @@ export function createHostModules({ store, draft = null, win = globalThis.window
             // A revision replaced since the read answers 404: read again, and the next revision mounts instead.
             if (rec.stage === 'import' && live(rec)) await store.refresh();
             fail(rec, error);
-        }).finally(() => clearTimeout(timer));
+        }).finally(() => {
+            clearTimeout(timer);
+            setTimeout(rec.settle, settleMs);
+        });
+    }
+
+    // One notice per reason for the modules this page holds back, each named once per revision.
+    function announce(held) {
+        const unnamed = held.filter((item) => !announced.has(`${item.key}@${item.revision}`));
+        unnamed.forEach((item) => announced.add(`${item.key}@${item.revision}`));
+        for (const reason of ['start', 'all']) {
+            const group = unnamed.filter((item) => holds.reason(moduleHoldKey(item), item.revision) === reason);
+            if (!group.length) continue;
+            const labels = [...new Set(group.map((item) => item.skill_label || item.skill))];
+            const names = labels.join(', ');
+            const text = reason === 'all' ? fmt('{names} did not start: this page was opened with everything held.', { names })
+                : labels.length > 1 ? fmt('{names} did not start: the page stopped while they were starting last time.', { names })
+                    : fmt('{names} did not start: the page stopped while it was starting last time.', { names });
+            notice(text, 'warn', { ttl: 0, action: { label: tr('holds.start_it', 'Start it'), run() {
+                group.forEach((item) => holds.release(moduleHoldKey(item)));
+                sync();
+            } } });
+        }
     }
 
     function sync() {
@@ -201,40 +180,17 @@ export function createHostModules({ store, draft = null, win = globalThis.window
             const item = wanted.get(rec.item.key);
             if (!item || item.revision !== rec.item.revision || item.render.url !== rec.item.render.url) retire(rec);
         }
-        const batch = [...wanted.values()].filter((item) => !mounts.has(item.key) && !store.fault(item.key));
-        if (!batch.length) return;
-        // The marker stands before the first import of every batch and goes once the whole batch has settled.
-        batchKeys = [...new Set([...batchKeys, ...batch.map((item) => item.key)])];
-        marker.write(batchKeys);
-        batches += 1;
-        Promise.allSettled(batch.map(mount)).then(() => {
-            if (mode !== 'running') return;  // stop() already cleared it
-            batches -= 1;
-            if (!batches) { batchKeys = []; marker.clear(); }
-        });
+        const fresh = [...wanted.values()].filter((item) => !mounts.has(item.key) && !store.fault(item.key));
+        const held = fresh.filter((item) => holds.reason(moduleHoldKey(item), item.revision));
+        fresh.filter((item) => !held.includes(item)).forEach(mount);
+        announce(held);
     }
 
     /** Panic, unload or teardown: every module is disposed and none mounts again in this page. */
     function stop() {
         if (mode === 'stopped') return;
-        const wrote = mode === 'running';  // a skipped start keeps the marker it found: only Start with plugins clears it
         mode = 'stopped';
         for (const rec of [...mounts.values()]) retire(rec);
-        batches = 0;
-        batchKeys = [];
-        if (wrote) marker.clear();  // an orderly end is not a start that did not finish
-    }
-
-    function restartWithPlugins() {
-        marker.clear();
-        navigate(pluginsUrl(String(win?.location?.href || ''), true));
-    }
-
-    function onDoorClick(event) {
-        const door = event.target?.closest?.('[data-plugins="off"]');
-        if (!door) return;
-        event.preventDefault?.();
-        navigate(pluginsUrl(String(win?.location?.href || ''), false));
     }
 
     function onPageHide(event) {
@@ -242,36 +198,21 @@ export function createHostModules({ store, draft = null, win = globalThis.window
     }
 
     const api = {
-        /** Decide this start (run, asked off, or skipped after an unfinished start) and follow the store. */
+        /** Follow the store: mount every live module the ledger does not hold. */
         start() {
             if (mode !== 'idle') return api;
-            if (pluginsOffRequested(String(win?.location?.href || ''))) {
-                mode = 'off';
-                notice(tr('host_modules.off', 'Started without plugins.'), 'info', { ttl: 0,
-                    action: { label: tr('host_modules.restart_with', 'Restart with plugins'), run: restartWithPlugins } });
-            } else {
-                // Age is no proof the frozen module was fixed: a phone or mini app reopened hours later skips too.
-                if (marker.read()) {
-                    mode = 'skipped';
-                    notice(tr('host_modules.skipped', 'Plugins were skipped because the last start did not finish.'), 'warn',
-                        { ttl: 0, action: { label: tr('host_modules.start_with', 'Start with plugins'), run: restartWithPlugins } });
-                } else {
-                    mode = 'running';
-                }
-            }
+            mode = 'running';
             disposers.push(store.onChange(sync));
             win?.addEventListener?.('ouro:panic', stop);
             win?.addEventListener?.('pagehide', onPageHide);
-            doc?.addEventListener?.('click', onDoorClick);
             disposers.push(() => {
                 win?.removeEventListener?.('ouro:panic', stop);
                 win?.removeEventListener?.('pagehide', onPageHide);
-                doc?.removeEventListener?.('click', onDoorClick);
             });
             sync();
             return api;
         },
-        /** `idle`, `running`, `off`, `skipped` or `stopped`. */
+        /** `idle`, `running` or `stopped`. */
         mode: () => mode,
         /** Keys of the modules mounted now. */
         mounted: () => [...mounts.values()].filter((rec) => rec.status === 'mounted').map((rec) => rec.item.key),

@@ -16,12 +16,14 @@ from typing import Any, Dict, List, Optional
 from ouroboros.extension_registry_state import _extensions, _load_failures, _lock
 from ouroboros.skill_loader import (
     LoadedSkill,
+    _SkillLocationCandidate,
     _sanitize_skill_name,
+    _skill_location_inventory,
     discover_skill_identity,
     grant_status_for_skill,
     skill_conflict_status,
 )
-from ouroboros.skill_peer_inventory import discover_skill_peers
+from ouroboros.skill_peer_inventory import discover_conflict_peers
 
 log = logging.getLogger(__name__)
 
@@ -58,8 +60,8 @@ def _extension_runtime_state(
     review_gate = skill.review.gate_for(hash_now)
     if drive_root is None:
         drive_root = pathlib.Path(skill.skill_dir).parent.parent.parent
-    peers = list(skills) if skills is not None else list(discover_skill_peers(
-        pathlib.Path(drive_root), repo_path=repo_path
+    peers = list(skills) if skills is not None else list(discover_conflict_peers(
+        pathlib.Path(drive_root), skill.name, repo_path=repo_path
     ))
     if not any(peer.name == skill.name for peer in peers):
         peers.append(skill)
@@ -185,19 +187,20 @@ def runtime_state_for_skill_name(
     repo_path: str | None = None,
     skills: Optional[List[LoadedSkill]] = None,
     selected_skill: LoadedSkill | None = None,
+    locations: tuple[_SkillLocationCandidate, ...] | None = None,
 ) -> Dict[str, Any]:
     from ouroboros.config import get_skills_repo_path
 
     resolved_repo_path = get_skills_repo_path() if repo_path is None else repo_path
+    # Share only this observation's directory inventory, not manifest/state bytes.
+    if skills is None and locations is None:
+        locations = _skill_location_inventory(drive_root, repo_path=resolved_repo_path)
     if selected_skill is not None:
         selected = [selected_skill]
     elif skills is not None:
         selected = list(skills)
     else:
-        selected = discover_skill_identity(drive_root, skill_name, repo_path=resolved_repo_path)
-    peer_projection = list(skills) if skills is not None else list(
-        discover_skill_peers(drive_root, repo_path=resolved_repo_path)
-    )
+        selected = discover_skill_identity(drive_root, skill_name, repo_path=resolved_repo_path, locations=locations)
     safe_name = _sanitize_skill_name(skill_name)
     skill = next((item for item in selected if item.name == safe_name), None)
     if skill is None:
@@ -218,12 +221,15 @@ def runtime_state_for_skill_name(
             "reason": "missing",
         }
     else:
+        peers = list(skills) if skills is not None else list(
+            discover_conflict_peers(drive_root, safe_name, repo_path=resolved_repo_path, locations=locations)
+        )
         state = _apply_durable_extension_health(
             _apply_deps_block(
                 _extension_runtime_state(
                     skill,
                     drive_root=pathlib.Path(drive_root),
-                    skills=peer_projection,
+                    skills=peers,
                     repo_path=resolved_repo_path,
                 ),
                 pathlib.Path(drive_root),
@@ -274,9 +280,6 @@ def live_context_publishers(drive_root: pathlib.Path) -> Dict[str, Dict[str, Any
     path. A worker observes its loaded generation, not an atomic cross-process
     view. Standard unload removes the declaration.
     """
-    from dataclasses import replace
-    from ouroboros.skill_loader import load_enabled, load_review_state
-
     with _lock:
         published = [(name, bundle.loaded_skill, dict(bundle.context_snapshot), bundle.content_hash)
                      for name, bundle in _extensions.items()
@@ -284,14 +287,35 @@ def live_context_publishers(drive_root: pathlib.Path) -> Dict[str, Dict[str, Any
         peers = [bundle.loaded_skill for bundle in _extensions.values() if bundle.loaded_skill is not None]
     result = {}
     for name, skill, descriptor, revision in published:
-        current = replace(skill, enabled=load_enabled(drive_root, name), review=load_review_state(
-            drive_root, name, skill_type="extension", skill_dir=skill.skill_dir))
-        state = _apply_durable_extension_health(_apply_deps_block(_extension_runtime_state(
-            current, drive_root=drive_root, skills=peers), drive_root, current), drive_root, current)
+        state = _published_skill_readiness(skill, drive_root, peers)
         result[name] = {**descriptor, "revision": str(revision or ""),
                         "eligible": bool(state["desired_live"] and state["live_loaded"]),
                         "reason": state["reason"]}
     return result
+
+
+def _published_skill_readiness(skill, drive_root, peers):
+    """Refresh small authority controls against a captured identity, without rehashing payload bytes."""
+    from dataclasses import replace
+
+    from ouroboros.skill_loader import load_enabled, load_review_state
+
+    current = replace(skill, enabled=load_enabled(drive_root, skill.name), review=load_review_state(
+        drive_root, skill.name, skill_type="extension", skill_dir=skill.skill_dir))
+    return _apply_durable_extension_health(_apply_deps_block(_extension_runtime_state(
+        current, drive_root=drive_root, skills=peers), drive_root, current), drive_root, current)
+
+
+def widget_publication_ready(skill_name: str, generation: str, drive_root: pathlib.Path) -> bool:
+    """Leases use the same review, enablement, grants and health owner as live context publishers."""
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        if bundle is None or bundle.generation_digest != generation or bundle.loaded_skill is None:
+            return False
+        skill = bundle.loaded_skill
+        peers = [item.loaded_skill for item in _extensions.values() if item.loaded_skill is not None]
+    state = _published_skill_readiness(skill, drive_root, peers)
+    return bool(state["desired_live"] and state["live_loaded"])
 
 
 def _revert_enabled_after_load_error(

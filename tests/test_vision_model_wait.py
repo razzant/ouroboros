@@ -4,6 +4,8 @@ from dataclasses import asdict, fields
 import json
 import os
 from pathlib import Path
+import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -136,7 +138,7 @@ def _install_child_fixture(mode, events_path):
 
 @pytest.fixture
 def child_fixture(tmp_path, monkeypatch):
-    from ouroboros.tools import shell
+    from ouroboros.tools import shell, shell_process
 
     events = tmp_path / "events.jsonl"
     original = shell._tracked_subprocess_run
@@ -153,6 +155,10 @@ def child_fixture(tmp_path, monkeypatch):
         child_argv[2] = (f"import runpy; runpy.run_path({__file__!r})['_install_child_fixture']"
                          f"({state['mode']!r}, {str(events)!r}); " + argv[2])
         try:
+            if state.get("window_from_checkpoint"):
+                with monkeypatch.context() as patch:
+                    patch.setattr(shell_process, "subprocess", _window_from_checkpoint(events))
+                    return original(child_argv, **kwargs)
             return original(child_argv, **kwargs)
         finally:
             for path in payload.parent.iterdir():
@@ -172,6 +178,35 @@ def child_fixture(tmp_path, monkeypatch):
 
 def _events(path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _checkpointed(events):
+    """Whether the child has published its exact operation checkpoint (a complete custody row naming it)."""
+    try:
+        lines = events.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        return False
+    for line in lines:
+        if line.endswith("\n"):
+            row = json.loads(line)
+            if row["kind"] == "custody" and row["operation_id"]:
+                return True
+    return False
+
+
+def _window_from_checkpoint(events, ceiling_sec=120):
+    """The tracked runner's ``subprocess`` with one change: the child's execution window opens only once the child
+    has published its operation checkpoint. A loaded runner can spend any fixed window on the child's imports
+    before it creates the operation (#2113); the expiry, the kill and the parent's read stay the real ones."""
+
+    class Popen(subprocess.Popen):
+        def communicate(self, input=None, timeout=None):
+            ceiling = time.monotonic() + ceiling_sec  # a bound for a child that never gets there, not a window
+            while self.poll() is None and not _checkpointed(events) and time.monotonic() < ceiling:
+                time.sleep(0.02)
+            return super().communicate(input, timeout)
+
+    return SimpleNamespace(**{**vars(subprocess), "Popen": Popen})
 
 
 def _call(client=None, *, timeout=1.0, **kwargs):
@@ -224,7 +259,9 @@ def test_real_child_retains_one_generation_and_unknown_cost(child_fixture, mode)
         assert all(row["fields"] == ["invocation_id", "operation_id", "request_manifest_ref", "request_ref"] for row in custody)
     if mode == "slow":
         assert len([row for row in rows if row["kind"] == "poll"]) >= 8
-        assert state["timeouts"][0] > 90
+        # No task clock: the child has no timeout at all (retired pin: > 90, the 6 h window),
+        # and the 20 ms transport bound never becomes its inference deadline.
+        assert state["timeouts"][0] is None
     request = next((root / "observability" / "calls" / "image-task").glob("*_model_request.json"))
     assert json.loads(request.read_text())["operation_id"] == "operation-exact"
 
@@ -254,7 +291,7 @@ def test_real_child_reconstructs_provider_field_display_after_settlement(child_f
     assert error.code == "invalid_request" and error.status_code == 400 and error.retryable is False
     assert error.operation_id == "operation-exact" and error.route == ROUTE and error.model_role == "vision"
     assert error.body == error.problem and error.problem["context"]["providerMessage"] == "private provider body"
-    assert "provider_code=string_above_max_length, parameter=instructions" in error.display_message[:220]
+    assert "provider_error_type=string_above_max_length, parameter=instructions" in error.display_message[:220]
     assert "private provider body" not in error.display_message
     assert str(error) == "invalid_request: controlled refusal"
     assert error.physical_attempt_capture.state == "settled"
@@ -280,6 +317,9 @@ def _parent_cancel(child_fixture, mode, reason):
     rows = _events(events)
     assert len([row for row in rows if row["kind"] == "generation"]) == 1
     assert {row["operation_id"] for row in rows if row["kind"] == "cancel"} == {"operation-exact"}
+    # No task clock bounds this subscription call: the child ran without a timeout and
+    # Stop still ended it, through its control watcher (1A: never an uninterruptible wait).
+    assert state["timeouts"] == [None]
 
 
 def test_parent_cancel_reaches_same_live_operation(child_fixture):
@@ -307,8 +347,9 @@ def test_dead_child_without_checkpoint_is_unknown_not_free(monkeypatch):
 def test_killed_child_retains_exact_operation_checkpoint(child_fixture):
     state, events, root = child_fixture
     state["mode"] = "pending"
+    state["window_from_checkpoint"] = True  # the window expires half a second after the operation exists
     with pytest.raises(ClaudexorModelError) as caught:
-        vision_process.run_vision_child(child_timeout=5, subscription=True, model_role="vision",
+        vision_process.run_vision_child(child_timeout=0.5, subscription=True, model_role="vision",
                                         model=MODEL, prompt="one image", images=[], timeout=0.02)
     error = caught.value
     assert error.code == "model_outcome_unknown" and error.operation_id == "operation-exact"
@@ -323,12 +364,30 @@ def test_killed_child_retains_exact_operation_checkpoint(child_fixture):
     assert rows[-1]["state"] == "dispatched" and not any(row["state"] == "released" for row in rows)
 
 
-def test_strict_child_schema_rejects_false_capture_and_wrong_receipt():
+@pytest.mark.parametrize("reserve,bound", [(0, False), (65536, True)])
+def test_strict_child_schema_rejects_false_capture_and_wrong_receipt(reserve, bound):
     assert set(vision_process._CAPTURE["properties"]) == {field.name for field in fields(ua.PhysicalAttemptCapture)}
     assert set(vision_process._CONTEXT["properties"]) == {field.name for field in fields(ua.PhysicalAttemptContext)}
     capture = asdict(ua.PhysicalAttemptCapture("a", MODEL, "claudexor", "released", "opaque"))
+    capture["physical_context"] = asdict(ua.PhysicalAttemptContext(
+        "owner_low", "low", "cold_estimate", "route", "round", None, None, False, False,
+        view_kind="focus", response_reserve_tokens=reserve, window_witness_bound=bound))
     receipt = {"receipt_id": "ours", "custody": None, "capture": capture}
     vision_process._read_receipt(receipt, "ours")
+    restored = vision_process._restore_capture(capture).physical_context
+    assert restored.view_kind == "focus"
+    assert restored.response_reserve_tokens == reserve and restored.window_witness_bound is bound
+    for key, invalid in (("response_reserve_tokens", -1), ("response_reserve_tokens", "8192"),
+                         ("response_reserve_tokens", True), ("window_witness_bound", "true")):
+        saved = capture["physical_context"][key]
+        capture["physical_context"][key] = invalid
+        with pytest.raises(Exception):
+            vision_process._read_receipt(receipt, "ours")
+        capture["physical_context"][key] = saved
+    capture["physical_context"]["view_kind"] = ["focus"]
+    with pytest.raises(Exception):
+        vision_process._read_receipt(receipt, "ours")
+    capture["physical_context"]["view_kind"] = "focus"
     with pytest.raises(ValueError, match="another invocation"):
         vision_process._read_receipt(receipt, "theirs")
     capture["effort"] = ["not", "an", "evidence", "object"]
@@ -370,6 +429,9 @@ def test_subscription_tool_envelope_uses_existing_task_ceiling(monkeypatch):
     monkeypatch.setattr(vision, "_get_llm_client", lambda: None)
     monkeypatch.setattr(vision, "_vision_execution_window", lambda: 900)
     assert vision._vision_tool_timeout(None, {}) == 900 + 2 * vision.NESTED_SETTLEMENT_MARGIN_SEC
+    # No task clock: no envelope at all (retired: the 6 h window); the child's watcher owns Stop.
+    monkeypatch.setattr(vision, "_vision_execution_window", lambda: None)
+    assert vision._vision_tool_timeout(None, {}) is None
     monkeypatch.setattr(vision, "_resolve_vlm_model", lambda *_a, **_k: "api-model")
     assert vision._vision_tool_timeout(None, {}) == 0
 
@@ -433,7 +495,7 @@ def test_tool_result_carries_the_reconstructed_typed_provider_projection(child_f
     text = (vision._vlm_query(ctx, prompt="Describe only this image", image_url="data:image/png;base64,AAAA")
             if tool == "vlm_query" else vision._analyze_screenshot(ctx, prompt="Describe only this image"))
     first = text.splitlines()[0]
-    assert first.startswith(f"⚠️ {label}: ") and "provider_code=string_above_max_length" in first
+    assert first.startswith(f"⚠️ {label}: ") and "provider_error_type=string_above_max_length" in first
     assert "parameter=instructions" in first and "invalid_request: controlled refusal" in first
     assert "private provider body" not in text  # the raw provider body never joins the projection
     published = _published_tool_result(ctx, None)

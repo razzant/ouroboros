@@ -141,11 +141,13 @@ def test_top_level_workspace_focus_has_tool_and_schema_parity(tmp_path, monkeypa
         LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
     )
 
-    assert LOCAL_READONLY_SUBAGENT_TOOL_NAMES <= names, (
+    # Exact callable aliases intentionally have no second advertised schema.
+    aliases = {entry.name for entry in registry._entries.values() if entry.alias_for in names}
+    assert LOCAL_READONLY_SUBAGENT_TOOL_NAMES <= names | aliases, (
         f"read-only child tools missing from the workspace tool surface: "
         f"{sorted(LOCAL_READONLY_SUBAGENT_TOOL_NAMES - names)}"
     )
-    assert ACTING_SUBAGENT_TOOL_NAMES <= names, (
+    assert ACTING_SUBAGENT_TOOL_NAMES <= names | aliases, (
         f"acting child tools missing from the workspace tool surface: "
         f"{sorted(ACTING_SUBAGENT_TOOL_NAMES - names)}"
     )
@@ -321,8 +323,10 @@ def test_child_profiles_expose_existing_descendant_controls(tmp_path, constraint
     assert {"peek_task", "cancel_task", "discard_child_result"} <= names
 
 
-def test_local_readonly_verify_is_typed_zero_run_only(tmp_path):
+def test_local_readonly_verify_is_typed_zero_run_only(tmp_path, monkeypatch):
     """Readonly actor-first sessions may disclose no-leaf state, never run generic checks."""
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.outcomes import (
         read_verification_receipts,
@@ -418,9 +422,7 @@ def test_ordinary_fresh_start_ignores_actor_first_zero_run_receipt_surface(tmp_p
 
     claimed, refusal = claimed_start_request(
         data,
-        claim_target="",
         actor_ctx=ctx,
-        enforce_actor_idle=True,
         run_id="",
         task_id=ctx.task_id,
         idempotency_key="ordinary-root-invocation",
@@ -654,20 +656,19 @@ def test_discovery_lists_the_callable_catalog_in_every_mode(mode):
 
 
 def test_burst_absorb_clause_states_the_prefix_write_cost():
-    """The burst affordance names its cash side, not only its latency win."""
+    """The burst affordance names its cash side, not only its latency win, as facts; the choice
+    between them is the caller's (#1175), and absorbing is wait_tasks' own contract."""
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.tool_policy import initial_tool_schemas
     import pathlib, tempfile
     tmp = pathlib.Path(tempfile.mkdtemp())
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
-    schema = next(
-        s for s in initial_tool_schemas(registry)
-        if s["function"]["name"] == "schedule_subagent"
-    )
-    description = schema["function"]["description"]
-    assert "one round run concurrently; wait_tasks(any_terminal) absorbs whichever finishes first" in description
-    assert "prefix write" in description
-    assert "choose burst latency or spaced cost savings" in description
+    descriptions = {s["function"]["name"]: s["function"]["description"] for s in initial_tool_schemas(registry)}
+    description = descriptions["schedule_subagent"]
+    assert "Children scheduled in one round run concurrently" in description
+    assert ("on cache-write-priced routes each sibling started before the first responds pays a full "
+            "prefix write") in description
+    assert "With mode=any_terminal it returns as soon as the FIRST child finishes" in descriptions["wait_tasks"]
 
 
 def test_escalate_is_available_wherever_planning_runs():
@@ -677,3 +678,25 @@ def test_escalate_is_available_wherever_planning_runs():
 
     assert all("escalate" in names for names in
                (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES))
+
+
+def test_enable_tools_answers_a_skill_name_with_its_namespace_tools():
+    """A call asked for screenshots, saw "ext_19_r_unix_computer_use: 24 tools" in the overview and
+    asked enable_tools for "unix_computer_use": the skill's name, not a tool's. The miss now names the
+    namespace and its callable tools by the exact naming rule; an unrelated miss stays a plain miss."""
+    from ouroboros.extension_surface_names import extension_surface_name
+    from ouroboros.tools import tool_discovery as td
+
+    names = [extension_surface_name("unix_computer_use", short) for short in ("screenshot", "click")]
+
+    class Registry:
+        def callable_rows(self, namespace=""):
+            rows = [{"name": name} for name in [*names, "read_file"]]
+            return [row for row in rows if not namespace or td.tool_namespace(row["name"]) == namespace]
+
+    namespace = td.tool_namespace(names[0])
+    lines = td._named_namespace_guidance(Registry(), ["unix_computer_use"], discovery=True)
+    assert lines[0] == f"unix_computer_use names the namespace {namespace}, not one tool; enable its tools by their names."
+    assert any(names[0] in line for line in lines) and any(names[1] in line for line in lines)
+    assert td._named_namespace_guidance(Registry(), [namespace], discovery=True)[0].startswith(f"{namespace} names")
+    assert td._named_namespace_guidance(Registry(), ["definitely_not_a_tool", "read"], discovery=True) == []

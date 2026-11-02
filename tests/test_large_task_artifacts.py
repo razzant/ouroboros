@@ -264,11 +264,10 @@ def _many_inputs(tmp_path, drive, task_id, count=28):
     return artifacts.attachment_manifest_projection(drive, task_id, rows)
 
 
-def test_full_input_contract_inheritance_retry_and_mailbox(tmp_path):
+def test_full_input_contract_inheritance_and_mailbox(tmp_path):
     from ouroboros.contracts.task_contract import build_task_contract
-    from ouroboros.owner_mailbox import write_owner_message, copy_owner_mailbox_for_retry, owner_attachment_manifest
+    from ouroboros.owner_mailbox import write_owner_message
     from ouroboros.tools.control_scheduling import _materialize_child_attachment_manifest, _build_child_subagent_contract
-    import shutil
 
     drive = tmp_path / "data"
     authority = _many_inputs(tmp_path, drive, "parent")
@@ -286,15 +285,6 @@ def test_full_input_contract_inheritance_retry_and_mailbox(tmp_path):
     child_contract = _build_child_subagent_contract({"tid": "child", "parent_contract": contract, **child_authority})
     assert child_contract["attachment_manifest_ref"] == child_authority["attachment_manifest_ref"]
     assert child_contract["attachment_manifest_ref"] != contract["attachment_manifest_ref"]
-    task = {"id": "retry", "task_contract": contract, "metadata": {"task_contract": contract}}
-    replacements, error = artifacts.handoff_task_attachments_for_retry(drive, "parent", "retry", task)
-    assert not error
-    assert copy_owner_mailbox_for_retry(drive, "parent", "retry", path_replacements=replacements)
-    shutil.rmtree(artifacts.task_artifact_dir_path(drive, "parent"))
-    assert len(artifacts.resolve_attachment_manifest(drive, "retry", task["task_contract"])) == 28
-    assert len(owner_attachment_manifest(drive, "retry")) == 28
-    for row in artifacts.resolve_attachment_manifest(drive, "retry", task["task_contract"]):
-        assert artifacts.stream_artifact_file(Path(row["abs_path"]), expected=row)["sha256"] == row["sha256"]
 
 
 def test_input_manifest_tamper_and_changed_file_never_fall_back_to_preview(tmp_path):
@@ -515,16 +505,6 @@ def test_complete_directory_manifest_has_no_old_member_count_cutoff(tmp_path):
     with zipfile.ZipFile(records[1]["path"]) as archive:
         assert len(archive.namelist()) == 1002
         assert archive.read("member-1001.txt") == b"changed beyond the former bound"
-
-
-def test_retry_rejects_missing_input_outside_inline_preview(tmp_path):
-    drive = tmp_path / "data"
-    authority = _many_inputs(tmp_path, drive, "missing")
-    rows = artifacts.resolve_attachment_manifest(drive, "missing", authority)
-    Path(rows[-1]["abs_path"]).unlink()
-    task = {"id": "retry", "task_contract": authority}
-    _, error = artifacts.handoff_task_attachments_for_retry(drive, "missing", "retry", task)
-    assert error and task["task_contract"] == authority
 
 
 @pytest.mark.parametrize("drive_kind", ["headless", "direct"])

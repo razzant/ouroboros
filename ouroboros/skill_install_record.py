@@ -305,10 +305,8 @@ def settle_pending_update(drive_root: pathlib.Path, name: str, *, expected_diges
     if restored:
         try:
             from ouroboros.extension_loader import reconcile_extension
-            from ouroboros.skill_lifecycle_actions import _sync_schedules
 
             reconcile_extension(name, drive_root, load_settings)
-            _sync_schedules(drive_root, get_skills_repo_path())
         except Exception:
             log.warning("Restored update of %s needs extension reconciliation", name, exc_info=True)
     return {"status": "restored" if restored else "restore_failed", "reason": reason}

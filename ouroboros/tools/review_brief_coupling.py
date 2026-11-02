@@ -411,6 +411,10 @@ def _retrieval_slot(brief: BriefInputs, reason: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_INDEX_UNAVAILABLE = ("## Repository index\n\nThe deterministic repository index could not be built for this tree "
+                      "({reason}). List and read the tree with your own tools; nothing about it is claimed here.")
+
+
 def _repository_index(repo_dir: pathlib.Path, touched_paths: Sequence[str]) -> Tuple[str, dict]:
     """The compact index, or a disclosed absence.
 
@@ -424,12 +428,8 @@ def _repository_index(repo_dir: pathlib.Path, touched_paths: Sequence[str]) -> T
         return repository_index(pathlib.Path(repo_dir), touched_paths=list(touched_paths))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
-        return (
-            "## Repository index\n\nThe deterministic repository index could not be "
-            f"built for this tree ({reason}). List and read the tree with your own "
-            "tools; nothing about it is claimed here.",
-            {"strategy": "repository_index", "status": "unavailable", "reason": reason},
-        )
+        return (_INDEX_UNAVAILABLE.format(reason=reason),
+                {"strategy": "repository_index", "status": "unavailable", "reason": reason})
 
 
 def _required_sources_section(rows: Optional[list], ref: dict, *, layer: str = "body") -> str:
@@ -539,6 +539,11 @@ def answer_format_section(parts: Sequence[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Part 1's heading and its subject slot (the touched manifest, then the diff section).
+_PART_ONE = "## Part 1 — The change\n\n"
+_SUBJECT_SLOT = "## Subject — the staged change\n\n{touched}\n\n### Staged diff\n\n{diff}"
+
+
 def build_retrieving_brief(
     repo_dir: pathlib.Path, brief: BriefInputs,
 ) -> Tuple[str, Dict[str, Any]]:
@@ -626,13 +631,13 @@ def build_retrieving_brief(
         """``(brief_text, part1, part2)``: Part 1 is the packet seat's own task in
         session delivery with the change evidence in its subject slot; Part 2 is
         built only for a seat asked ``coupling``."""
-        part1 = "## Part 1 — The change\n\n" + build_triad_session_task(
+        part1 = _PART_ONE + build_triad_session_task(
             goal_section=goal_section, scope_section=scope_section,
             checklist_section=checklist_section, rebuttal_section=rebuttal_section,
             review_history_section=history_section, governance=governance,
             subject=brief.managed_subject, layer=layer,
             subject_root=repo_dir if layer != "body" else None,
-            subject_section=f"## Subject — the staged change\n\n{touched_slot}\n\n### Staged diff\n\n{diff_slot}",
+            subject_section=_SUBJECT_SLOT.format(touched=touched_slot, diff=diff_slot),
         )
         if brief.task_evidence_section.strip():
             part1 += f"\n\n{brief.task_evidence_section}"
@@ -744,3 +749,44 @@ def build_retrieving_brief(
         manifest["native_required_sources"] = required_rows
         manifest["native_required_sources_ref"] = required_ref
     return task_text, manifest
+
+
+def retrieving_material(layer: str) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a retrieving seat's two-part
+    brief over fixed placeholders for ``layer`` in these branches (Part 1 and its subject slot, Part 2, each answer
+    format, paging on both transports, the diff, retrieval and touched slots, managed or not, the required-source
+    section, prior coupling rounds, the repository index). Subject, manifests, records and guides are data."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools.review_context_atlas import index_material
+    from ouroboros.tools.review_subject import build_triad_session_task
+    from ouroboros.tools.review_synthesis import build_coupling_part
+
+    managed = SimpleNamespace(header=lambda body_rendered=True: "⟨header⟩", touched_paths=lambda: ["⟨path⟩"])
+    source = {"session_relative_path": "⟨path⟩", "path": "⟨path⟩", "sha256": "⟨sha⟩"}
+    rows = [{"path": "⟨path⟩", "disposition": "⟨disposition⟩", "complete_chars": 1, "coverage_basis": "delivered_inline",
+             "preimage_of": "⟨path⟩", "root": root, "reason": "⟨reason⟩"} for root in ("artifact_store", "session_root")]
+    rows.append({"path": "⟨path⟩", "disposition": "⟨disposition⟩", "coverage_basis": "⟨basis⟩"})
+    finding = {"severity": "critical", "item": "⟨item⟩", "reason": "⟨reason⟩"}
+    rounds = [{"blocked": True, "critical_findings": [finding], "advisory_findings": [finding], "summary": "⟨summary⟩",
+               "detail": "⟨detail⟩"}, {"verdict": "⟨verdict⟩"}, {"verdict": "pass"}]
+    governance = SimpleNamespace(stable_inline="⟨governance⟩", selected_inline="⟨governance⟩", navigation="⟨navigation⟩")
+    material = [_PART_ONE, _SUBJECT_SLOT, _INDEX_UNAVAILABLE, *index_material(),
+                build_triad_session_task(goal_section="⟨goal⟩", scope_section="⟨scope⟩", checklist_section="⟨checklist⟩",
+                                         rebuttal_section="⟨rebuttal⟩", review_history_section="⟨history⟩",
+                                         governance=governance, layer=layer, subject_section="⟨subject⟩"),
+                build_coupling_part(coupling_checklist="⟨checklist⟩", required_sources_section="⟨required⟩",
+                                    repository_index="⟨index⟩", history_block="⟨history⟩", layer=layer),
+                *(answer_format_section(parts) for parts in ((PART_CHANGE,), (PART_CHANGE, PART_COUPLING), (PART_COUPLING,))),
+                *(build_coupling_history_section(rounds[:count]) for count in (1, 3)),
+                _required_sources_section([], {}, layer=layer), _required_sources_section(rows, {"⟨ref⟩": 1}, layer=layer),
+                _diff_slot(BriefInputs(), "", "", "")]
+    for subject in (None, managed):
+        for delegated in (True, False):
+            brief = BriefInputs(managed_subject=subject, delegated=delegated, touched_manifest=[
+                {"path": "⟨path⟩", "disposition": "⟨disposition⟩", "extent": "⟨extent⟩"}])
+            material += [_paged_diff_pointer(brief, "⟨body⟩", source), _touched_slot(brief),
+                         paged_review_text("⟨text⟩", source, label="review brief", delegated=delegated)]
+        material += [_retrieval_slot(BriefInputs(managed_subject=subject), "⟨reason⟩"),
+                     _diff_slot(BriefInputs(), "⟨header⟩", "⟨body⟩", "⟨pointer⟩" if subject else "")]
+    return material

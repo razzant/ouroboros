@@ -288,7 +288,8 @@ def test_each_desktop_window_owns_its_appearance_and_bridge(windows, monkeypatch
     main = Window("#0d0b0f")
     main.events.closing, main.events.shown = Hook(), Hook()
     background.attach(main)
-    assert main.events.before_show.handlers == [background.appearance._before_show]  # no indicator hook
+    # No indicator hook: the caption tint's and the page zoom's own (launcher_page_zoom) only.
+    assert main.events.before_show.handlers == [background.appearance._before_show, background.zoom._before_show]
 
     class Api(lb.DesktopApi):
         _background = background

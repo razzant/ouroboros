@@ -82,7 +82,7 @@ def submit_hub_eligibility(
         reason = "Open Publish to scan the author-accepted bytes; original reviewer findings remain disclosed"
     elif str(review_profile or "") == "owner_attested":
         # Owner-attested skills SKIPPED the LLM review; a public submission needs the
-        # full tri-model review, so the hub refuses them.
+        # full skill review, so the hub refuses them.
         reason = "Owner-attested skills need a full LLM review before publication"
     elif review_stale:
         reason = "Skill needs a fresh review before publication"

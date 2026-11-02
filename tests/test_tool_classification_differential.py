@@ -1,14 +1,8 @@
-"""The single classifier answers exactly what the retired loop pair answered,
-except on a table of deltas the owner approved.
+"""Compare the classifier with the retired loop pair, except owner-approved deltas.
 
-The oracle is a golden snapshot of the OLD pair's answers, captured from the tree
-named in ``GOLDEN_SOURCE_SHA``, not a copy of the old parser: a copy is dead code
-that invites cleanup, a data file cannot drift silently.
-
-Both directions fail. An unapproved divergence fails because the cutover would then
-be changing behaviour nobody signed off. An APPROVED delta that no longer fires ALSO
-fails, so the table cannot rot into a permanent excuse list — once a delta is gone,
-its row goes with it.
+The oracle is the OLD pair's golden answers from ``GOLDEN_SOURCE_SHA``.
+An unapproved divergence fails; an approved delta that no longer fires also fails,
+so obsolete exceptions cannot survive silently.
 """
 
 from __future__ import annotations
@@ -24,6 +18,7 @@ from ouroboros._outcome_tool_errors import (
     _BLOCKING_TOOL_STATUSES,
     _NON_BLOCKING_READONLY_BLOCK_STATUSES,
     _NON_BLOCKING_RECOVERABLE_STATUSES,
+    _NON_EFFECT_OBSERVATION_STATUSES,
     _OK_TOOL_STATUSES,
     _POLICY_DENIAL_STATUSES,
     _UNPARTITIONED_BUCKETS,
@@ -39,6 +34,7 @@ from tests.tool_classification_corpus import (
     typed_result,
 )
 from tests.test_skill_install_checks import registry_release  # noqa: F401  (fixtures)
+from tests.test_scratchpad_fold import install as scratchpad_install  # noqa: F401  (fixtures)
 
 GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / "legacy_tool_classification_0f715831.json"
 
@@ -361,7 +357,31 @@ def _golden() -> dict[str, dict]:
 # New producer contracts have no historical answer: the recorded old SHA is
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
-CURRENT_PRODUCER_CONTRACTS = {
+CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # tools/tool_discovery.py `enable_tools`: a load none of which fits the route's schema ceiling;
+    # the retired pair never saw it. A physical resource refusal: nothing loaded, every tool stays callable.
+    "TOOL_SCHEMA_LIMIT": (True, "resource_constraint_blocked"),
+    # D1 per-target mutation custody: the existing INTEGRATE_ family reports a
+    # busy target as a substrate refusal; no historical answer is fabricated.
+    "INTEGRATE_DELEGATED_TARGET_BUSY": (True, "integration_blocked"),
+    # integrate_subagent_patch decision='accept' on a non-shared result: refused before any
+    # effect, an INTEGRATE_ refusal like its family; the retired pair never saw the decision.
+    "INTEGRATE_ACCEPT_UNSUPPORTED": (True, "integration_blocked"),
+    # Q: the bare warning is legacy ok; the native error keeps a sent write unknown and says do not resend.
+    "GH_WRITE_UNKNOWN": (False, "ok"),
+    "native:TOOL_ERROR:GH_WRITE_UNKNOWN": (True, "error"),
+    # Q: the bare warning is legacy ok; the native error attests GitHub refused the write with no effect.
+    "GH_WRITE_NOT_APPLIED": (False, "ok"),
+    "native:TOOL_ERROR:GH_WRITE_NOT_APPLIED": (True, "error"),
+    # Q: a failed precondition is an error in both forms; the native refusal attests no write was sent.
+    "GH_EXPECTATION_FAILED": (True, "error"),
+    "native:TOOL_ERROR:GH_EXPECTATION_FAILED": (True, "error"),
+    # Q: the bare warning is legacy ok; the native argument refusal redirects the mutation to github_write.
+    "GH_API_READ_ONLY": (False, "ok"),
+    "native:TOOL_ARG_ERROR:GH_API_READ_ONLY": (True, "argument_error"),
+    # Q: readback differs after a confirmed write; keep completed/ok with its warning so no retry duplicates the effect.
+    "GH_WRITE_READBACK_MISMATCH": (False, "ok"),
+    "native:OK:GH_WRITE_READBACK_MISMATCH": (False, "ok"),
     # #1657: only missing logs are unavailable; status/stop retain warnings.
     "SERVICE_NOT_FOUND": (False, "ok"),
     "native:LEGACY_UNAVAILABLE:SERVICE_NOT_FOUND": (True, "unavailable"),
@@ -390,9 +410,28 @@ CURRENT_PRODUCER_CONTRACTS = {
     "native:TOOL_ERROR:PR_MERGE_": (True, "error"),
     "native:TOOL_ERROR:PR_MERGE_REFUSED": (True, "error"),
     "native:TOOL_ARG_ERROR:PR_MERGE_REFUSED": (True, "argument_error"),
+    # PR detail markers: native errors vs bare-text legacy warnings; public writes carry the shared receipt.
+    "PR_CREATE_UNKNOWN": (False, "ok"),
+    "PR_EXISTS": (False, "ok"),
+    "PR_PRECHECK_FAILED": (True, "error"),
+    "PR_READY_UNKNOWN": (False, "ok"),
+    "PR_UPDATE_UNKNOWN": (False, "ok"),
+    "native:TOOL_ERROR:PR_CREATE_UNKNOWN": (True, "error"),
+    "native:TOOL_ERROR:PR_EXISTS": (True, "error"),
+    "native:TOOL_ERROR:PR_PRECHECK_FAILED": (True, "error"),
+    "native:TOOL_ERROR:PR_READY_UNKNOWN": (True, "error"),
+    "native:TOOL_ERROR:PR_UPDATE_UNKNOWN": (True, "error"),
     # Saved-setting selection uses the existing process access authority; its new
     # foreground refusal remains blocked through both text and native ACCESS_BLOCKED.
     "PROCESS_ENV_REFERENCE_BLOCKED": (True, "blocked"),
+    # A command whose task deadline or execution budget is already spent starts no child
+    # (shell_process.command_bound_spent): the substrate's refusal, after the golden source.
+    "TASK_DEADLINE_BLOCKED": (True, "blocked"),
+    # Stop now ending a running run_command/run_script publishes the calling tool's native SHELL_ERROR
+    # (shell_process.unfinished_command_result). Only the native producer is new; the bare text keeps
+    # its golden `ident:SHELL_ERROR` answer, restated here and retained intact.
+    "SHELL_ERROR": (True, "shell_error"),
+    "native:SHELL_ERROR:SHELL_ERROR": (True, "shell_error"),
     # Owner Batch4: a call the owner's Pause fenced before its launch handoff never
     # ran; it is the substrate's answer, homed with the other runtime refusals.
     "OWNER_PAUSE_NOT_STARTED": (True, "blocked"),
@@ -446,8 +485,12 @@ CURRENT_PRODUCER_CONTRACTS = {
     # refusal changes nothing and is its peers' answer, asserted live.
     "INTEGRATE_DELEGATED_INVESTIGATION_EVIDENCE": (True, "integration_blocked"),
     # #1969: an apply that had to prepare the capture returns it for inspection;
-    # nothing is applied, recorded or released, so it is its peers' answer.
-    "INTEGRATE_DELEGATED_INSPECT_CAPTURE": (True, "integration_blocked"),
+    # nothing is applied, recorded or released. The protocol worked, so the call is
+    # no error, and its own bucket keeps it out of the success set (no effect).
+    "INTEGRATE_DELEGATED_INSPECT_CAPTURE": (False, "inspection_required"),
+    # #2070: named evidence that could not all be retained keeps its surviving copy;
+    # apply and reject record nothing and change nothing, so it is its peers' answer.
+    "INTEGRATE_DELEGATED_EVIDENCE_UNRETAINED": (True, "integration_blocked"),
     # A reject request cannot undo direct effects already in the folder.
     # The refusal belongs to this disposition, not to the earlier write.
     "INTEGRATE_DIRECTORY_ALREADY_APPLIED": (True, "integration_blocked"),
@@ -537,6 +580,25 @@ CURRENT_PRODUCER_CONTRACTS = {
     # Owner decision (PR #1636): an exact edit that leaves .py/.json unparsable is
     # applied and reported, never refused; the warning is a successful call.
     "SYNTAX_WARNING": (False, "ok"),
+    # #1376: a silence diagnostic's capability gate (registry_guards) is a new producer
+    # after the retired oracle; a refused tool never ran, as for its subagent peers.
+    "DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
+    "native:ACCESS_BLOCKED:DIAGNOSTIC_CAPABILITY_BLOCKED": (True, "blocked"),
+    # control_runtime `_send_user_message`: a relay answer that cannot be recorded as owed sends nothing and
+    # keeps the relay open, published as native CAPABILITY_UNAVAILABLE. The bare warning names no suffix the
+    # retired text chain keyed on, so it is the generic ok the retired chain gave FOCUS_STALE and CHERRY_PICK_CONFLICT.
+    "RELAY_RETURN_NOT_OWED": (False, "ok"),
+    "native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED": (True, "unavailable"),
+    # control_runtime `_fold_refusal`: a scratchpad fold that changed no block publishes native
+    # TOOL_REPORTED_FAILURE for a failed fold and for a conflict alike. The bare `_FAILED` warning is the
+    # retired chain's error (every prefix-free `_FAILED` golden row); a bare `_CONFLICT` reads as ok.
+    "SCRATCHPAD_FOLD_FAILED": (True, "error"),
+    "native:TOOL_REPORTED_FAILURE:SCRATCHPAD_FOLD_FAILED": (True, "tool_reported_failure"),
+    "SCRATCHPAD_FOLD_CONFLICT": (False, "ok"),
+    "native:TOOL_REPORTED_FAILURE:SCRATCHPAD_FOLD_CONFLICT": (True, "tool_reported_failure"),
+    # control_runtime `_update_scratchpad`: the canonical blocks hold the change and only the markdown
+    # projection is stale, so the warning trails a SUCCESSFUL write (status ok, code OK).
+    "SCRATCHPAD_PROJECTION_STALE": (False, "ok"),
 }
 
 
@@ -544,6 +606,11 @@ def _live_answer(case) -> tuple[bool, str]:
     typed = typed_result(case)
     is_error = _typed_execution_failure(True, typed)
     return is_error, _typed_result_metadata(case.tool, case.text, is_error, typed)["status"]
+
+
+def _published_answer(tool: str, result) -> tuple[bool, str]:
+    is_error = _typed_execution_failure(True, result)
+    return is_error, _typed_result_metadata(tool, result.text, is_error, result)["status"]
 
 
 @pytest.mark.parametrize("subject", tuple(CURRENT_PRODUCER_CONTRACTS))
@@ -619,6 +686,52 @@ def test_spent_execution_budget_publishes_the_actual_scheduling_refusal(tmp_path
     from ouroboros import store
 
     assert ctx.event_queue.empty() and not store.store_path(tmp_path).exists()  # no child row was written
+
+
+def test_unrecordable_relay_answer_publishes_the_current_producer_contract(tmp_path, monkeypatch):
+    from queue import Queue
+    from ouroboros.tools.control_runtime import _send_user_message
+    from tests.test_control_native_results import _published
+    from tests.test_owner_relay import context, source
+
+    _row, handle = source(tmp_path)
+    recipient = context(tmp_path)
+    recipient.task_id, recipient.event_queue = "recipient", Queue()
+    recipient._open_relays = {"once": {"relay_id": "once", "source": {"chat_id": 1, "address": handle, "label": "Main"}}}
+    monkeypatch.setattr("supervisor.terminal_delivery.register_pending_delivery", lambda *_a, **_k: False)
+    result = _published(recipient, "send_user_message", lambda: _send_user_message(
+        recipient, "Response after relay", reply_to_relay="once"),
+        owner_delta="an answer that cannot be recorded as owed is a typed unavailable refusal")
+    assert (result.status, result.code) == ("unavailable", "CAPABILITY_UNAVAILABLE")
+    assert "RELAY_RETURN_NOT_OWED" in result.text and recipient.event_queue.empty() and "once" in recipient._open_relays
+    assert _published_answer("send_user_message", result) == (
+        CURRENT_PRODUCER_CONTRACTS["native:CAPABILITY_UNAVAILABLE:RELAY_RETURN_NOT_OWED"])
+
+
+@pytest.mark.parametrize("scenario", ["fold_conflict", "fold_failed", "projection_stale"])
+def test_scratchpad_warnings_publish_the_current_producer_contract(scratchpad_install, monkeypatch, scenario):  # noqa: F811
+    from ouroboros.memory import Memory, ScratchpadFoldFailed
+    from tests.test_scratchpad_fold import _tool
+
+    identifier = f"SCRATCHPAD_{scenario.upper()}"
+    _env, _memory, registry = scratchpad_install
+    assert _tool(registry, content="a block for the fold to name").status == "ok"
+    if scenario == "projection_stale":
+        def stale_projection(self, blocks):
+            raise OSError("injected projection failure")
+        monkeypatch.setattr(Memory, "_write_scratchpad_markdown", stale_projection)
+        result = _tool(registry, content="a block whose projection cannot be written")
+        published, contract = ("ok", "OK"), CURRENT_PRODUCER_CONTRACTS[identifier]
+    else:
+        if scenario == "fold_failed":
+            def refuse(self, *args, **kwargs):
+                raise ScratchpadFoldFailed("write_failed", "injected disk failure")
+            monkeypatch.setattr(Memory, "fold_scratchpad_blocks", refuse)
+        result = _tool(registry, content="FOLD naming a block nobody holds.", replaces=["0" * 64])
+        published = ("error", "TOOL_REPORTED_FAILURE")
+        contract = CURRENT_PRODUCER_CONTRACTS[f"native:TOOL_REPORTED_FAILURE:{identifier}"]
+    assert (result.status, result.code) == published and identifier in result.text
+    assert _published_answer("update_scratchpad", result) == contract
 
 
 @pytest.mark.parametrize("tool", ["write_file", "edit_text", "apply_patch", "edit_batch"])
@@ -897,6 +1010,7 @@ def test_every_outcome_bucket_is_partitioned() -> None:
         | set(_NON_BLOCKING_RECOVERABLE_STATUSES)
         | set(_NON_BLOCKING_READONLY_BLOCK_STATUSES)
         | set(_OK_TOOL_STATUSES)
+        | set(_NON_EFFECT_OBSERVATION_STATUSES)
         | set(_UNPARTITIONED_BUCKETS)
     )
     unhomed = sorted({spec.outcome_bucket for spec in TOOL_CODE_SPECS.values()} - known)

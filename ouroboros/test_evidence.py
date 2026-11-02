@@ -271,9 +271,17 @@ def diagnostic_directory(fallback, name="diagnostics") -> Path:
     return path
 
 
-def diagnostics_incomplete(reason) -> None:
-    """A producer's failed export must keep the environment needed to inspect it."""
+def diagnostics_incomplete(reason, source=None) -> None:
+    """A producer's failed export must keep the environment needed to inspect it.
+
+    ``source`` is the producer's own directory of unexported originals: only it is
+    marked, so a test that injects the failure holds its own tree, never the whole
+    enclosing run (#1908). Without one, or when its marker cannot be written, the
+    enclosing disposable environment is kept.
+    """
     from ouroboros.test_environment import retain_tree
+    if source is not None and retain_tree(source, f"test diagnostics incomplete: {reason}"):
+        return
     root = os.environ.get("OUROBOROS_TEST_TEMP_ROOT")
     if root:
         retain_tree(root, f"test diagnostics incomplete: {reason}")

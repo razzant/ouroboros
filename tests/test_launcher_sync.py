@@ -271,6 +271,50 @@ def test_ensure_managed_repo_rejects_tampered_bundle(tmp_path):
         assert "bundle hash mismatch" in str(exc)
 
 
+@pytest.mark.parametrize("entry", ["prepare", "spawn"])
+def test_unknown_role_reaches_launcher_diagnostics_without_starting_or_resetting(monkeypatch, tmp_path, caplog, entry):
+    import launcher
+    import threading
+    from unittest.mock import Mock
+    from ouroboros import config, launcher_onboarding, process_logging
+
+    settings_path = tmp_path / "settings.json"
+    original = json.dumps({
+        "OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": "false",
+        "OUROBOROS_SAFETY_MODE": "full", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full",
+        "OUROBOROS_MODEL_CONTEXT_WINDOWS": {"future_role": 0},
+        "OPENAI_API_KEY": "private-test-value",
+    }).encode("utf-8")
+    settings_path.write_bytes(original)
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(launcher, "_load_settings", config.load_settings)
+    monkeypatch.setattr(launcher_onboarding, "load_settings", config.load_settings)
+    spawn = Mock(side_effect=AssertionError("The server must not start"))
+    monkeypatch.setattr(launcher, "_hidden_popen", spawn)
+    # Use the real exception hooks installed by the launcher, with restored globals.
+    monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
+    monkeypatch.setattr(threading, "excepthook", threading.__excepthook__)
+    process_logging.install_exception_hooks()
+    if entry == "prepare":
+        with pytest.raises(ValueError) as error:
+            launcher_onboarding.prepare_first_run_settings()
+        sys.excepthook(ValueError, error.value, error.value.__traceback__)
+    else:
+        worker = threading.Thread(target=launcher.start_agent, kwargs={"port": 1},
+                                  name="test-launcher-start")
+        worker.start()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert "Uncaught exception in thread test-launcher-start" in caplog.text
+    assert "Traceback" in caplog.text and "future_role" in caplog.text
+    assert "OUROBOROS_MODEL_CONTEXT_WINDOWS" in caplog.text
+    assert "compatible application version" in caplog.text
+    assert "private-test-value" not in caplog.text
+    assert settings_path.read_bytes() == original
+    spawn.assert_not_called()
+
+
 def test_start_agent_exports_presentation_posture(monkeypatch, tmp_path):
     """Producer contract (Owner Surface Fact): the launcher's OWN env assembly
     must export OUROBOROS_PRESENTATION — a monkeypatched reader test cannot
@@ -571,12 +615,13 @@ def test_start_agent_windows_assigns_job_before_resume_and_records(monkeypatch, 
     monkeypatch.setattr(launcher, "assign_pid_to_job", lambda job, pid: calls.append(("assign", (job, pid))) or True)
     monkeypatch.setattr(launcher, "resume_process", lambda pid: calls.append(("resume", pid)) or True)
 
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)  # no custom prefix: the data root's own
     proc = launcher.start_agent(port=1)
 
     assert proc.pid == 54321
     env = next(value for key, value in calls if key == "popen_env")
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
-    assert env["PYTHONPYCACHEPREFIX"] == str(data_dir / "state" / "pycache")
+    assert env["PYTHONPYCACHEPREFIX"] == str(data_dir / "state" / "pycache.noindex")
     lifecycle_calls = [call for call in calls if call[0] != "popen_env"]
     assert lifecycle_calls[:4] == [
         ("popen_flags", 0x204),

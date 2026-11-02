@@ -5,7 +5,7 @@ import {
     effectiveStartMode,
     isFramedWidget,
     isRetainedWidget,
-    renderWidgetCardControls,
+    renderWidgetCardParts,
     renderWidgetFacade,
     setWidgetCardFault,
     syncWidgetCardControls,
@@ -17,6 +17,12 @@ import { WIDGET_WIDTH_STEPS } from '../modules/widget_size.js';
 
 function tab(render, overrides = {}) {
     return { key: 'demo:main', skill: 'demo', tab_id: 'main', title: 'Demo', render, ...overrides };
+}
+
+// The head's two parts as widgets.js places them: the lifecycle controls (`run`), then the card menu.
+function controlsOf(widget) {
+    const { run, menu } = renderWidgetCardParts(widget);
+    return `${run}${menu}`;
 }
 
 test('effective launch policy: owner override > author render.start > kind default', () => {
@@ -100,9 +106,11 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
     assert.equal(isFramedWidget(tab({ kind: 'module', entry: 'widget.js' })), true);
     assert.equal(isFramedWidget(tab({ kind: 'iframe', route: 'view' })), true);
     assert.equal(isFramedWidget(tab({ kind: 'declarative', schema_version: 1, components: [] })), false);
-    const declarative = renderWidgetCardControls(tab({ kind: 'declarative', schema_version: 1, components: [] }));
+    const declarative = controlsOf(tab({ kind: 'declarative', schema_version: 1, components: [] }));
+    assert.equal(renderWidgetCardParts(tab({ kind: 'declarative', schema_version: 1, components: [] })).run, '');
+    assert.doesNotMatch(renderWidgetCardParts(tab({ kind: 'module', entry: 'widget.js' })).menu, /data-widget-power/);
     assert.doesNotMatch(declarative, /data-widget-power|data-widget-status|data-widget-start-mode|Launch policy/);
-    const controls = renderWidgetCardControls(tab({ kind: 'module', entry: 'widget.js' }));
+    const controls = controlsOf(tab({ kind: 'module', entry: 'widget.js' }));
     // Exactly one primary control; the policy is a secondary menu of radio items.
     assert.equal((controls.match(/btn-primary/g) || []).length, 1);
     assert.match(controls, /data-widget-power>Start</);
@@ -129,8 +137,8 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
 test('a card menu is the same markup however many widgets the page shows', () => {
     // The scale invariant (docs/DESIGN.md "Widgets board"): nothing in a card's
     // label or menu depends on its neighbours, so 1 card and 18 cards read alike.
-    const one = renderWidgetCardControls(tab({ kind: 'module', entry: 'widget.js' }));
-    const many = Array.from({ length: 18 }, (_, i) => renderWidgetCardControls(
+    const one = controlsOf(tab({ kind: 'module', entry: 'widget.js' }));
+    const many = Array.from({ length: 18 }, (_, i) => controlsOf(
         tab({ kind: 'module', entry: 'widget.js' }, { key: `skill${i}:main`, skill: `skill${i}` }),
     ));
     assert.ok(many.every((markup) => markup === one));
@@ -198,7 +206,7 @@ test('the facade is idempotent and never paints over a frame still settling its 
 
 test('the launch-policy menu speaks to the owner: "Keep running", never the enum name', () => {
     assert.deepEqual(WIDGET_START_MODE_LABELS, { auto: 'Auto', manual: 'Manual', retain: 'Keep running' });
-    const controls = renderWidgetCardControls(tab({ kind: 'module', entry: 'widget.js' }));
+    const controls = controlsOf(tab({ kind: 'module', entry: 'widget.js' }));
     assert.doesNotMatch(controls, /\(retain\)/);
     assert.match(controls, /Keep running</);
 });

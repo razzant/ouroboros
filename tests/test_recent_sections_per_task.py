@@ -178,11 +178,15 @@ def test_malformed_only_log_still_discloses_its_gap(tmp_path):
                 if s.startswith("## Recent tools")]
 
 
-def test_supervisor_section_carries_its_coverage_line(tmp_path):
+def test_the_boot_row_is_the_runtime_vitals_not_a_supervisor_section(tmp_path):
+    """The ``## Supervisor`` section (one boot line behind a 200-row read) is gone; the same row
+    reaches the mind inside the Runtime section's ``vitals`` (``context_runtime_facts.vitals_fact``)."""
+    from ouroboros.context_runtime_facts import vitals_fact
+
     _write(tmp_path / "logs" / "supervisor.jsonl", [{"ts": "2026-09-22T00:00:00Z", "type": "boot", "branch": "ouroboros", "sha": "abcdef123456"}])
-    section = _section(build_recent_sections(Memory(drive_root=tmp_path), env=None), "## Supervisor")
-    assert section.splitlines()[0].startswith("## Supervisor (all tasks: all 1 matching rows; window: whole live file of logs/supervisor.jsonl")
-    assert "boot: 2026-09-22T00:00:00Z branch=ouroboros sha=abcdef123456" in section
+    assert not [s for s in build_recent_sections(Memory(drive_root=tmp_path), env=None) if s.startswith("## Supervisor")]
+    assert vitals_fact(tmp_path, observed_at="2026-09-23T10:00:00+00:00")["boot"] == "09-22 00:00 ouroboros@abcdef123456"
+    assert vitals_fact(tmp_path, observed_at="2026-09-22T10:00:00+00:00")["boot"] == "00:00 ouroboros@abcdef123456"
 
 
 def test_bounded_window_with_no_matching_rows_is_still_disclosed(tmp_path):

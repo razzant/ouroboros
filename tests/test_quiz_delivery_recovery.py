@@ -113,6 +113,19 @@ def test_live_answer_mailbox_failure_then_terminal_recovers_through_accepted_ing
     assert chat_rows(runtime.root)[:len(original_history)] == original_history
 
 
+def test_legacy_late_answer_keeps_owner_words_when_card_storage_is_unavailable(tmp_path, monkeypatch):
+    from ouroboros import owner_quiz
+
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture card storage unavailable")
+
+    monkeypatch.setattr(owner_quiz, "quiz_states", unavailable)
+    frame = late_answer_model_text(tmp_path, {"task_id": "ended", "quiz_id": "old-question"},
+                                   "Keep my exact decision: research only.")
+    assert "Keep my exact decision: research only." in frame
+    assert "could not be read" in frame
+
+
 def test_closed_history_failure_recovers_without_owner_answer(runtime, monkeypatch):
     from ouroboros.owner_mailbox import drain_owner_entries
 

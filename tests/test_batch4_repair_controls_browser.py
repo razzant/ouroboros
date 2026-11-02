@@ -45,24 +45,24 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
     from starlette.routing import Route
     from starlette.testclient import TestClient
     from ouroboros.gateway.task_continue import api_task_continue
-    from ouroboros.gateway.state import _chat_activities_snapshot_safe
+    from tests._work_projection_shared import state_fields
     from ouroboros.owner_continue import continuation_offer
     from ouroboros.owner_pause import install_fence, set_fence_state
     from ouroboros.task_results import load_task_result, write_task_result
 
     q, _, workers = _install_queue(tmp_path, monkeypatch)
     _interrupted(tmp_path)
-    write_task_result(tmp_path, 'pausing-root', 'running', root_task_id='pausing-root')
+    write_task_result(tmp_path, 'pausing-root', 'running', root_task_id='pausing-root', chat_id=1)
     fence, _ = install_fence(tmp_path, 'pausing-root', request_id='tree-pause')
-    workers.PENDING.append({'id': 'pausing-root', 'root_task_id': 'pausing-root', 'type': 'task',
+    workers.PENDING.append({'id': 'pausing-root', 'root_task_id': 'pausing-root', 'type': 'task', 'chat_id': 1,
                             'title': 'Saved root waiting for child', '_budget_pause': {'reason': 'owner'}})
-    workers.RUNNING['child'] = {'task': {'id': 'child', 'root_task_id': 'pausing-root', 'parent_task_id': 'pausing-root'}}
-    write_task_result(tmp_path, 'child', 'running', root_task_id='pausing-root', parent_task_id='pausing-root')
+    workers.RUNNING['child'] = {'task': {'id': 'child', 'root_task_id': 'pausing-root', 'parent_task_id': 'pausing-root', 'chat_id': 1}}
+    write_task_result(tmp_path, 'child', 'running', root_task_id='pausing-root', parent_task_id='pausing-root', chat_id=1)
     async def detail(_request):
         row = load_task_result(tmp_path, 'pred-1')
         return JSONResponse({**row, 'continuation_offer': continuation_offer(row, 'pred-1')})
     async def state(_request):
-        return JSONResponse({'active_chat_activities': _chat_activities_snapshot_safe(tmp_path),
+        return JSONResponse({**state_fields(tmp_path),
                              'active_chat_activities_complete': True, 'bg_consciousness_enabled': False})
     async def tasks(_request):
         return JSONResponse({'queue': {'pending': [{'id': t['id'], 'task': t} for t in workers.PENDING],
@@ -109,7 +109,10 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
                 page.route('**/api/**', respond)
                 page.goto(f'http://127.0.0.1:{server.server_port}/fixture')
                 page.wait_for_function('window.ready')
-                expect(page.locator('[data-activity-section="queue"]')).to_contain_text('pausing')
+                child = page.locator('.activity-row').filter(has=page.locator('[data-id="child"]'))
+                root = page.locator('.activity-row').filter(has=page.locator('[data-id="pausing-root"]'))
+                expect(child.locator('.activity-sub')).to_have_text('Pausing…')
+                expect(root.locator('.activity-sub')).to_have_text('Paused · 1 helper still working')
                 for door in ('header-restart', 'settings-restart'):
                     page.locator('#' + door).click()
                     expect(page.get_by_text('1 task is still pausing', exact=False)).to_be_visible()
@@ -137,7 +140,8 @@ def test_failed_admission_reload_retry_and_tree_pause_consumers(tmp_path, monkey
                 set_fence_state(tmp_path, 'pausing-root', fence_id=fence['fence_id'], state='paused')
                 page.reload()
                 page.wait_for_function('window.ready')
-                expect(page.locator('[data-activity-section="queue"]')).to_contain_text('paused')
+                expect(root.locator('.activity-sub')).to_have_text('Paused')
+                expect(child).to_have_count(0)
                 page.locator('#header-restart').click()
                 expect(page.get_by_text('1 task is still pausing', exact=False)).to_have_count(0)
                 page.get_by_role('button', name='Cancel', exact=True).click()

@@ -45,7 +45,8 @@ def candidate(tmp_path, monkeypatch):
     subprocess.run(["git", "add", "change.py"], cwd=repo, check=True)
     ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="inline-task", emit_progress_fn=lambda *a: None)
     monkeypatch.setattr(review_helpers, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(commit_admission, "release_metadata_preflight", lambda *a, **kw: "")
+    monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     return ctx
@@ -528,13 +529,8 @@ class TestReleaseMetadataPreflight:
         assert result is not None and "PREFLIGHT_BLOCKED" in result
         assert 'web/package-lock.json (expected both root "version" entries = "5.99.0-rc.1")' in result
 
-    def test_doc_only_carve_is_the_commit_gate_classifier(self, tmp_path):
-        """One detector: the release-metadata carve is the one remaining reader of
-        ``_diff_is_doc_only`` (the tests rule runs the suite on a documentation diff too).
-        A code file, a mixed diff and a doc under ``tests/`` keep the block; the carve never
-        touches the carrier-coherence checks once VERSION is in scope."""
-        from ouroboros.tools.git_review_cycle import _diff_is_doc_only
-
+    def test_serving_release_requirement_covers_documentation_and_code(self, tmp_path):
+        """File extensions do not select release policy; contribution authority does."""
         repo = _make_agent_repo(tmp_path)
         _init_git_repo(repo)
         _write_release_files(repo, version="5.99.0-rc.1")
@@ -548,20 +544,18 @@ class TestReleaseMetadataPreflight:
         def _preflight(paths):
             return commit_admission.release_metadata_preflight(repo, "m", paths)
 
-        assert _preflight(["docs/NOTES.md"]) is None
-        assert _diff_is_doc_only(["docs/NOTES.md"]) is True
-        for scope in (["ouroboros/feature.py"], ["docs/NOTES.md", "ouroboros/feature.py"], ["tests/NOTES.md"]):
-            assert _diff_is_doc_only(scope) is False, scope
+        for scope in (["docs/NOTES.md"], ["ouroboros/feature.py"],
+                      ["docs/NOTES.md", "ouroboros/feature.py"], ["tests/NOTES.md"]):
             blocked = _preflight(scope)
             assert blocked is not None and "VERSION is not in scope" in blocked, scope
+            assert commit_admission.release_metadata_preflight(repo, "m", scope, neutral_allowed=True) is None
         (repo / "pyproject.toml").write_text('[project]\nname = "ouroboros"\nversion = "5.98.0"\n', encoding="utf-8")
         stale = _preflight(["VERSION", "docs/NOTES.md"])
         assert stale is not None and "pyproject.toml" in stale
 
     @pytest.mark.parametrize("case", ["p9_history", "readme_not_staged"])
     def test_the_commit_gate_blocks_on_the_staged_index_before_any_look(self, tmp_path, monkeypatch, case):
-        """``commit_gate.deterministic_preflight`` reads the STAGED index (the prepared lane of
-        the retired advisory, as is: the version-neutral form stays allowed there), so a P9
+        """``commit_gate.deterministic_preflight`` reads the STAGED index, so a P9
         overflow or a numbered release without its staged README blocks before the tests and
         before any paid look."""
         (tmp_path / "repo").mkdir()

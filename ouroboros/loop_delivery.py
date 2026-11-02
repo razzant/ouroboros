@@ -3,7 +3,7 @@ delivery evidence state, the candidate binding, candidate publish/replace/degrad
 the delivery-control prompt cycle, the subagent handoff and the no-tool final
 answer. Extracted from loop.py (v7 L-B split); loop.py re-exports every name.
 
-Completion is an author act: ``finish_task`` (``presence_finish`` for presence
+Completion is an author act: ``finish_task`` (including focus
 tasks) selects ``action=finish|stop`` with complete ``answer`` bytes or an
 ``answer_sha256`` naming the retained candidate or the latest whole held
 response. Every held no-tool round appends the assistant row and a host row to
@@ -13,6 +13,8 @@ observed are frozen before its batch executes; only feedback positively exposed
 in a returned request counts as seen."""
 
 from __future__ import annotations
+
+from ouroboros.loop_completion_schema import completion_schema as completion_schema
 
 import hashlib
 import json
@@ -28,7 +30,6 @@ from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
 from ouroboros.task_finalization import set_terminal_host_notice
 from ouroboros.tools.registry import ToolRegistry
-from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.task_carrier import execution_kind
 
 
@@ -134,11 +135,11 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
         # Exact-hash dispositions suppress the unchanged result only: if
         # status, result, trace, or artifact identity changes, the disposition
         # goes stale and this reminder re-opens without parsing prose.
+        from ouroboros.loop_forced_finalization import HANDLED_CHILD_DISPOSITIONS
+
         children = [
             child for child in children
-            if _loop()._child_disposition_state(child) not in {
-                "integrated", "irrelevant", "deferred", "discarded", "cancelled",
-            }
+            if _loop()._child_disposition_state(child) not in HANDLED_CHILD_DISPOSITIONS
         ]
         from ouroboros.tools.join_ledger import _child_result_sha256
 
@@ -262,6 +263,9 @@ def delivery_evidence_fingerprint(
     root_task_id = str(root_task_id or metadata.get("root_task_id") or task_id)
     status_root = status_root or metadata.get("budget_drive_root") or getattr(tool_ctx, "budget_drive_root", None) or getattr(tool_ctx, "drive_root", None)
     children = _loop()._load_direct_child_results(pathlib.Path(status_root), task_id, root_task_id) if status_root and task_id else []
+    # Unclaimed host attention (#1376) is no evidence of the answer: a diagnostic that
+    # answers or is withdrawn re-arms nothing. Reading past a settled cancellation, only
+    # the author's current exact-hash claim keeps a diagnostic here.
     children = [
         {
             "task_id": str(child.get("task_id") or child.get("id") or ""),
@@ -270,6 +274,7 @@ def delivery_evidence_fingerprint(
             "disposition": _loop()._child_disposition_state(child),
         }
         for child in children
+        if _loop()._child_disposition_state({**child, "parent_decision": ""}) != "host_attention"
     ]
     receipt_root = getattr(tool_ctx, "drive_root", None) or status_root
     evidence = {
@@ -402,10 +407,9 @@ def _replace_delivery_candidate(
     control: str,
     model_text: Optional[str] = None,
 ) -> DeliveryCandidate:
-    full_text = sanitize_tool_result_for_log(full_text)
-    model_text = sanitize_tool_result_for_log(
-        full_text if model_text is None else model_text
-    )
+    # The answer's own bytes: its sha256 is the identity selection, result review
+    # and delivery name. Redaction belongs to derived log and UI projections.
+    model_text = full_text if model_text is None else model_text
     previous_candidate = getattr(tools._ctx, "_delivery_candidate", None)
     from ouroboros.loop_messages import acknowledge_acceptance_observation, owner_source_sha256
 
@@ -576,26 +580,6 @@ def _delivery_control_prompt(candidate: DeliveryCandidate, *, pending_review_cho
                if pending_review_choice else ""))
 
 
-def completion_schema(tools: ToolRegistry, schemas: list | None = None) -> str:
-    """Materialize the current permitted front door, including cold/Nano holds."""
-    from ouroboros.dialogue_provenance import is_presence_task
-    from ouroboros.usage_accounting import invalidate_task_cache_splits
-    ctx = tools._ctx
-    name = "presence_finish" if is_presence_task({"metadata": getattr(ctx, "task_metadata", {})}) else "finish_task"
-    getter = getattr(tools, "get_schema_by_name", None)
-    if not callable(getter):
-        return name
-    schema = getter(name)
-    if schema is None:
-        return "no currently permitted completion tool"
-    if schemas is not None and not any(row.get("function", {}).get("name") == name for row in schemas):
-        schemas.append(schema)
-        invalidate_task_cache_splits(getattr(ctx, "task_id", ""))
-        getattr(ctx, "messages", []).append({"role": "user", "content":
-            "[SYSTEM NOTICE] Current permitted completion schema loaded: " + name + ". The schema prefix changed."})
-    return name
-
-
 def hold_completion_response(content: Any, tools: ToolRegistry, ctx: Any, trace: dict,
                              *, response_start: int | None = None, selected: bool = False) -> None:
     """Keep each complete model row followed by host input, even on unchanged facts."""
@@ -626,6 +610,37 @@ def hold_completion_response(content: Any, tools: ToolRegistry, ctx: Any, trace:
         _loop()._publish_delivery_candidate(tools, candidate, trace)
 
 
+def observe_completion_hold(tools: ToolRegistry, ctx: Any, origin: str, reason: str, subreason: str = "") -> None:
+    """One diagnostic ``completion_held`` checkpoint, written by the branch that held a completion.
+
+    ``origin`` is ``selection``, ``prose`` or ``resume``; ``reason``/``subreason`` are that
+    branch's typed codes. The row names this attempt, execution and round and the candidate
+    retained now (hash and revision, or null), never response or owner text, in the canonical
+    events log that outlives a split execution drive. It decides nothing: a failure is only logged."""
+    try:
+        from ouroboros.preflight_receipts import canonical_data_root
+
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        retained = isinstance(candidate, _loop().DeliveryCandidate)
+        root = canonical_data_root(tools._ctx)
+        _loop()._emit_checkpoint_event(
+            getattr(ctx, "event_queue", None), str(getattr(ctx, "task_id", "") or ""),
+            root / "logs" if root is not None else getattr(ctx, "drive_logs", None),
+            {"checkpoint_kind": "completion_held", "task_attempt": getattr(tools._ctx, "task_attempt", None),
+             "execution_id": (getattr(ctx, "accumulated_usage", None) or {}).get("execution_id"),
+             "round": getattr(ctx, "round_idx", None), "origin": origin, "reason": reason,
+             "subreason": subreason or None, "answer_sha256": candidate.content_sha256 if retained else None,
+             "candidate_revision": candidate.revision if retained else None})
+    except Exception:
+        log.warning("Completion hold of %s was not observed", getattr(ctx, "task_id", ""), exc_info=True)
+
+
+def _hold_cause(tool_ctx: Any) -> str:
+    """The typed cause a nudge or result review named for the hold it just made, read once."""
+    cause, tool_ctx._completion_hold_cause = str(getattr(tool_ctx, "_completion_hold_cause", "") or ""), ""
+    return cause
+
+
 def completion_observation(ctx: Any, trace: dict) -> dict:
     """Freeze facts Main observed, before any sibling of its response executes."""
     import copy
@@ -654,6 +669,81 @@ def selected_completion_text(request: dict, candidate: Any, messages: list,
     return None, "selection_unavailable: select the current retained/whole held answer or supply complete bytes"
 
 
+OWNER_REPLY_OWED_REFUSAL = ("owner_reply_owed: your human wrote after your last live message; "
+                            "answer before finishing silently")
+
+
+def forced_completion_selection(parsed: Any, malformed: bool, candidate: Any, *, tool_ctx: Any = None,
+                                envelope_keys: Tuple[str, ...] = (), messages: list | None = None,
+                                held_sha256: str = "") -> tuple[dict | None, str | None, str]:
+    """One forced completion request, from a native ``finish_task`` call or its serialized text:
+    ``(request, selected text, "")`` or ``(None, None, error)``. Pure: finish_task's own contract
+    (``completion_request``), the same byte selection and the silence rule of
+    ``consume_completion_request``; nothing is staged, executed or acknowledged here."""
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.tools.control_runtime import completion_request
+
+    if malformed or not isinstance(parsed, dict) or getattr(parsed, "duplicate_keys", set()):
+        return None, None, "invalid_completion_request: one exact JSON object of finish_task arguments"
+    request, error = completion_request(tool_ctx, {key: value for key, value in parsed.items() if key not in envelope_keys})
+    if error:
+        return None, None, "invalid_completion_request: " + error
+    text, error = selected_completion_text(request, candidate, messages or [], held_sha256)
+    if not error and request.get("wake_silent") and tool_ctx is not None and owner_reply_owed(tool_ctx):
+        error = OWNER_REPLY_OWED_REFUSAL
+    return (None, None, error) if error else (request, text, "")
+
+
+def forced_completion_call(response_meta: dict, tool_schemas: Any) -> tuple[dict | None, str]:
+    """A forced reply's one ``finish_task`` call (``{name, arguments}``) when that call offered the tool and the
+    response is complete apart from it and a provider length cut (``forced_response_is_incomplete``), else
+    ``None`` with why a present completion stays unadopted; nothing executes either way. The call, never its
+    arguments, marks adoption: absent, malformed or cut arguments are a refused request, not a missing one."""
+    from ouroboros.loop_llm_call import forced_response_is_incomplete
+
+    calls = response_meta.get("reply_calls") or []
+    names = [call.get("name") for call in calls]
+    if "finish_task" not in names:
+        return None, ""
+    if names != ["finish_task"]:
+        return None, "completion_beside_other_calls"
+    if not any((schema.get("function") or {}).get("name") == "finish_task"
+               for schema in tool_schemas or [] if isinstance(schema, dict)):
+        return None, "completion_tool_not_offered"
+    if forced_response_is_incomplete(response_meta, completion_request=True):
+        return None, "completion_response_incomplete"
+    return calls[0], ""
+
+
+def record_forced_completion(trace: dict, tool_ctx: Any, response_meta: dict, *, native: Any,
+                             unadopted: str) -> dict | None:
+    """Type on the trace how a forced reply's completion request fared (``forced_completion_request``,
+    beside the actual ``tool_call_count`` and the provider's length cut, ``response_cut``); return the request
+    when it selected the bytes. A request in a reply that could not be adopted (the native reason, or one
+    contained beside foreign calls) is not_adopted."""
+    from ouroboros.loop_llm_call import forced_response_cut
+
+    verdict = getattr(tool_ctx, "_forced_completion", None)
+    if not unadopted and not isinstance(verdict, dict):
+        return None
+    blocked = unadopted or verdict.get("unadopted", "")
+    reason, cut = blocked or verdict["error"], forced_response_cut(response_meta)
+    trace["forced_completion_request"] = {
+        "form": "native" if native is not None or unadopted else "text",
+        "status": "not_adopted" if blocked else "refused" if reason else "selected",
+        "tool_call_count": response_meta.get("tool_call_count"), **({"reason": reason} if reason else {}),
+        **({"response_cut": cut} if cut else {})}
+    return None if reason else verdict["request"]
+
+
+def carry_forced_selection(tool_ctx: Any, request: dict | None, candidate: Any) -> None:
+    """A selected forced request's silence travels with its bytes, as ``consume_completion_request``'s
+    does, so the Place reply gate and the wake outcome read the author's whole act, never half of it."""
+    if candidate is not None and isinstance(request, dict):
+        candidate.quiet = bool(request.get("wake_silent"))
+        tool_ctx._completion_selected = request
+
+
 def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, content: Any = None) -> bool:
     """Resolve one staged author act after the full batch, using its original observation."""
     from ouroboros.tool_capabilities import completion_observation_calls
@@ -670,7 +760,7 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     candidate = getattr(tool_ctx, "_delivery_candidate", None)
     text, error = selected_completion_text(request, candidate, ctx.messages, getattr(tool_ctx, "_completion_held_sha256", ""))
     if request.get("wake_silent") and owner_reply_owed(tool_ctx):
-        error = "owner_reply_owed: your human wrote after your last live message; answer before finishing silently"
+        error = OWNER_REPLY_OWED_REFUSAL
     if getattr(tool_ctx, "_completion_conflict", False):
         error = "contradictory_completion_requests: select again after reading the completed batch"
     if observation.get("owner_source_sha256") != owner_source_sha256(tool_ctx):
@@ -681,7 +771,7 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
     delivered = (getattr(tool_ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
     if delivered:
         unseen = [call for call in unseen if not call.get("presence_delivery_confirmed") or call.get("is_error")]
-    subject = request.get("acceptance_subject")
+    subject, applied = request.get("acceptance_subject"), None
     if not error and subject is not None:
         previous = getattr(tool_ctx, "_acceptance_observation", {})
         tool_ctx._acceptance_observation = observation.get("subject", {})
@@ -703,6 +793,9 @@ def consume_completion_request(tools: ToolRegistry, ctx: Any, trace: dict, conte
         if candidate is not None:
             _loop()._arm_delivery_control(tools, ctx, trace)
         _void_presence_completion(tool_ctx, ctx.messages)
+        # A subject refusal is host prose; an acknowledgement outcome keeps its own durable row.
+        observe_completion_hold(tools, ctx, "selection", "selection_refused",
+                                "acceptance_subject" if applied is False else error.split(":", 1)[0])
         return False
     trace.pop("task_completion", None)
     tool_ctx._completion_selected = request
@@ -782,10 +875,41 @@ def _hold_delivery_for_skill_action(
 
 
 class _ParsedObject(dict):
-    """A parsed JSON object that remembers which of its keys were duplicated."""
+    """A parsed JSON object that remembers which of its keys were duplicated, and whether one of its
+    own pairs, a repeated key's included, is the ``delivery_control`` key or an ``action`` of exactly
+    finish/stop (``control_pair``)."""
 
     duplicate_keys: set
     has_duplicate_keys: bool
+    control_pair: bool
+
+
+def _parse_pairs(raw: str) -> Tuple[Any, bool]:
+    """One linear JSON parse whose objects are ``_ParsedObject``: ``(payload, any key duplicated)``,
+    ``(None, False)`` when the body is not JSON."""
+
+    has_duplicate_keys = False
+
+    def _unique_object(pairs: List[Tuple[str, Any]]) -> "_ParsedObject":
+        nonlocal has_duplicate_keys
+        result = _ParsedObject()
+        result.duplicate_keys = set()
+        result.control_pair = False
+        for key, value in pairs:
+            if key in result:
+                result.duplicate_keys.add(key)
+                has_duplicate_keys = True
+            result[key] = value
+            result.control_pair = result.control_pair or key == "delivery_control" or (
+                key == "action" and value in ("finish", "stop"))
+        return result
+
+    try:
+        return json.loads(raw, object_pairs_hook=_unique_object), has_duplicate_keys
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
+        # RecursionError: a degenerate deeply-nested blob (repetition-loop
+        # model output) must classify as not-a-control, not crash the round.
+        return None, False
 
 
 def _parse_delivery_control_object(
@@ -799,25 +923,7 @@ def _parse_delivery_control_object(
     forced armed malformed-body rule without widening history-gated parsing.
     """
 
-    has_duplicate_keys = False
-
-    def _unique_object(pairs: List[Tuple[str, Any]]) -> "_ParsedObject":
-        nonlocal has_duplicate_keys
-        result = _ParsedObject()
-        result.duplicate_keys = set()
-        for key, value in pairs:
-            if key in result:
-                result.duplicate_keys.add(key)
-                has_duplicate_keys = True
-            result[key] = value
-        return result
-
-    try:
-        payload = json.loads(raw, object_pairs_hook=_unique_object)
-    except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
-        # RecursionError: a degenerate deeply-nested blob (repetition-loop
-        # model output) must classify as not-a-control, not crash the round.
-        return None, False
+    payload, has_duplicate_keys = _parse_pairs(raw)
     if not isinstance(payload, dict):
         return None, False
     payload.has_duplicate_keys = has_duplicate_keys
@@ -873,23 +979,24 @@ def _resolve_forced_delivery_control_body(
     candidate: Optional[DeliveryCandidate],
     *,
     armed: bool, envelope_keys: Tuple[str, ...] = (), messages: list | None = None, held_sha256: str = "",
+    tool_ctx: Any = None, native: bool = False,
 ) -> Tuple[str, bool, bool, bool, bool]:
-    """Return text plus retained/degraded/consumed/replaced facts."""
+    """Return text plus retained/degraded/consumed/replaced facts. ``native`` marks ``raw`` as the
+    arguments of the reply's one ``finish_task`` call: a completion request whatever its shape.
+    With ``tool_ctx`` the request's verdict is left on ``tool_ctx._forced_completion``."""
 
     if not isinstance(candidate, _loop().DeliveryCandidate):
         candidate = None
-    parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw)
-    if isinstance(parsed, dict) and "action" in parsed:
-        allowed = {"action", "answer", "answer_sha256", "rationale", "acceptance_subject", "pending_review", *envelope_keys}
-        valid = (not duplicate_protocol_key and not embedded_protocol and not getattr(parsed, "duplicate_keys", set())
-                 and not set(parsed) - allowed and parsed.get("action") in {"finish", "stop"}
-                 and (("answer" in parsed) != ("answer_sha256" in parsed))
-                 and parsed.get("pending_review", "wait") in {"wait", "finish"}
-                 and (parsed["action"] != "stop" or isinstance(parsed.get("rationale"), str) and parsed["rationale"].strip()))
-        text, error = selected_completion_text(parsed, candidate, messages or [], held_sha256) if valid else (None, "invalid_completion_request")
+    parsed, duplicate_protocol_key, embedded_protocol = _parse_delivery_control_body(raw if isinstance(raw, str) else "")
+    if native or isinstance(parsed, dict) and "action" in parsed:
+        request, text, error = forced_completion_selection(
+            parsed, duplicate_protocol_key or embedded_protocol, candidate, tool_ctx=tool_ctx,
+            envelope_keys=envelope_keys, messages=messages, held_sha256=held_sha256)
+        if tool_ctx is not None:
+            tool_ctx._forced_completion = {"request": request, "error": error}
         if error:
             return candidate.full_text if candidate else "", candidate is not None, True, True, False
-        retained = candidate is not None and parsed.get("answer_sha256") == candidate.content_sha256
+        retained = candidate is not None and request.get("answer_sha256") == candidate.content_sha256
         return text, retained, False, True, not retained
     control_kind, replacement, _error = _classify_parsed_delivery_control(
         parsed, duplicate_protocol_key, embedded_protocol, envelope_keys=envelope_keys,
@@ -922,6 +1029,15 @@ def _resolve_forced_delivery_control_body(
     return candidate.full_text if retained else "", retained, True, True, False
 
 
+def _array_wrapped_control(body: str) -> bool:
+    """Whether a whole-body JSON array holds a control envelope as a DIRECT element: an object one of
+    whose own pairs is the ``delivery_control`` key or an ``action`` of exactly finish/stop, so a
+    repeated key cannot hide the verb. Never unwrapped or executed; nested data, strings quoting an
+    envelope and other verbs stay ordinary JSON."""
+    payload = _parse_pairs(body)[0] if body.startswith("[") else None
+    return isinstance(payload, list) and any(getattr(item, "control_pair", False) for item in payload)
+
+
 def _parse_delivery_control_body(
     raw: str,
 ) -> Tuple[Optional[Dict[str, Any]], bool, bool]:
@@ -930,16 +1046,20 @@ def _parse_delivery_control_body(
     Returns ``(parsed, duplicate_protocol_key, embedded)``. Normalization
     strips one whole-body markdown fence (shared with
     ``observability._is_delivery_control_payload``). ``embedded`` is True only
-    when the protocol object sits as a balanced trailing JSON object carrying
-    the ``delivery_control`` key at the very END of surrounding prose — a
-    protocol attempt mixed with text, never a valid control. A control object
-    quoted MID-prose is NOT matched and stays prose (disclosed residual)."""
+    when a protocol object sits in a container other than the one exact
+    object: a balanced trailing JSON object carrying the ``delivery_control``
+    key at the very END of surrounding prose, or a direct element of a
+    whole-body JSON array (``_array_wrapped_control``) — a protocol attempt,
+    never a valid control. A control object quoted MID-prose is NOT matched and
+    stays prose (disclosed residual)."""
     from ouroboros.observability import strip_protocol_fence
 
     body = strip_protocol_fence(raw)
     parsed, duplicate_protocol_key = _parse_delivery_control_object(body)
     if duplicate_protocol_key or isinstance(parsed, dict):
         return parsed, duplicate_protocol_key, False
+    if _array_wrapped_control(body):
+        return None, False, True
     # Trailing scan: ONE O(n) string-aware pass over the body (fenced and
     # double-fenced tails peeled, duplicate keys flagged, RecursionError
     # degraded, bounded line-anchor retries after an unbalanced prose brace
@@ -992,7 +1112,7 @@ def _plan_review_only_awaited(llm_trace: Dict[str, Any]) -> bool:
 
     The finalization notice and this fact read the SAME decision, so an only-awaited
     wave keeps its loud notice and is a gap, never a degradation of the task."""
-    plan_gate = llm_trace.get("force_plan_decision")
+    plan_gate = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
     return isinstance(plan_gate, dict) and plan_gate.get("review_only_awaited") is True
 
 
@@ -1089,22 +1209,24 @@ def _no_tool_final_answer(
     messages = limit_ctx.messages
     from ouroboros.loop_messages import transcript_growth_signature
     before = transcript_growth_signature(messages)
+    origin = "resume" if resume_candidate else "selection" if explicit_candidate else "prose"
 
-    def held():
+    def held(reason: str, subreason: str = ""):
         if transcript_growth_signature(messages) != before:
             _void_presence_completion(tools._ctx, messages)
+        observe_completion_hold(tools, limit_ctx, origin, reason, subreason)
         return None
     ready, content = _prepare_delivery_candidate(content, tools, limit_ctx, llm_trace,
                                                  explicit=explicit_candidate, resumed=resume_candidate)
-    if not ready:
-        return held()
+    if not ready:  # prose under armed control, or a resumed quiet selection lost with its execution
+        return held("quiet_selection_lost" if resume_candidate else "selection_required")
 
     stopping = (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
     if not stopping:
-        if _loop()._enforce_swarm_actions(
+        if _loop()._enforce_plan_gate(
             str(content or ""), messages, tools, llm_trace, emit_progress,
         ):
-            return held()
+            return held("plan_gate")
         handoff_msg = _loop()._compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
         if handoff_msg:
             if content and content.strip():
@@ -1113,7 +1235,7 @@ def _no_tool_final_answer(
             emit_progress("Subagent handoff status refreshed before final response.")
             llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
             _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            return held()
+            return held("subagent_handoff")
         absorption_result = _loop()._maybe_enforce_child_absorption_gate(
             tools, limit_ctx, content, messages, emit_progress, llm_trace,
         )
@@ -1122,7 +1244,7 @@ def _no_tool_final_answer(
             _hold_delivery_for_skill_action(
                 tools, llm_trace, control=_CHILD_ABSORPTION_HOLD_CONTROL,
             )
-            return held()
+            return held("child_absorption")
         if absorption_result is not None:
             return absorption_result
         skill_finalization_was_injected = bool(
@@ -1147,7 +1269,7 @@ def _no_tool_final_answer(
                 )
             else:
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            return held()
+            return held("finalization_nudge", _hold_cause(tools._ctx))
 
     # Declared service outputs and teardown failures are evidence of the result:
     # finalize them before its review and, when that changes evidence,
@@ -1180,10 +1302,10 @@ def _no_tool_final_answer(
             )
             _loop()._disclose_service_finalization(limit_ctx, llm_trace)
             _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            return held()
+            return held("service_evidence_changed")
 
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
-    plan_suffix = _loop()._force_plan_disclosure(tools._ctx, llm_trace)
+    plan_suffix = _loop()._plan_gate_disclosure(tools._ctx, llm_trace)
     # The forced rails already type this fact; the single degraded_reason slot below
     # cannot hold it beside an unsettled child, so the normal rail types it too.
     if plan_suffix:  # absent = not open: a clean result carries no key (pinned usage shapes)
@@ -1213,7 +1335,7 @@ def _no_tool_final_answer(
 
     if not stopping and result_review_at_delivery(tools._ctx, content or "", llm_trace, _hold_for_review):
         # The author continues freely; its next complete answer is selected explicitly.
-        return held()
+        return held("result_review", _hold_cause(tools._ctx))
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
 
     # Close delivery under the same lock as routing, then drain once. A follow-up
@@ -1251,7 +1373,7 @@ def _no_tool_final_answer(
                     _loop()._arm_delivery_control(tools, limit_ctx, llm_trace, control="owner_revision_required")
                 else:
                     tools._ctx._delivery_control_required = False
-            return held()
+            return held("owner_followup")
         if provisional_assistant is not None and messages[-1] is provisional_assistant:
             messages.pop()
         if post_controls.get("finalize_now"):
@@ -1260,6 +1382,15 @@ def _no_tool_final_answer(
             )
             _loop()._merge_finalization_trace(llm_trace, forced_trace)
             return text, usage, llm_trace
+        from supervisor.owner_stop import presence_stop_now
+        if presence_stop_now(tools._ctx):  # Stop now met this Presence answer: kept on the row, never sent
+            from ouroboros.loop_round_limits import _handle_direct_turn_hard_stop
+            text, usage, forced_trace = _handle_direct_turn_hard_stop(limit_ctx)
+            _loop()._merge_finalization_trace(llm_trace, forced_trace)
+            return text, usage, llm_trace
+        from ouroboros.place_intake import reopen_for_place_mail
+        if not stopping and reopen_for_place_mail(tools._ctx, post_controls):
+            return held("place_mail")  # keep the answer; the accepted place context gets a model round
     _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
     # UNKNOWN evidence delivers a candidate retained over it as published; a KNOWN candidate is re-retained below.
     evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
@@ -1279,7 +1410,7 @@ def _no_tool_final_answer(
             "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
         )
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-        return held()
+        return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
     if isinstance(candidate, _loop().DeliveryCandidate):
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
@@ -1287,15 +1418,23 @@ def _no_tool_final_answer(
         request = tools._ctx._completion_selected
         record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)
         if not _seal_admission_before_delivery(tools, limit_ctx, llm_trace):
-            return held()
-    if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):
-        # Only this successful common exit accepts the requested outcome. Holds,
-        # owner controls and budget exits must not inherit an earlier silent/send.
+            return held("admission_seal")
+    from ouroboros.place_reply import prepare_focus_reply
+    allowed, refusal = prepare_focus_reply(tools._ctx, str(content or ""), quiet=bool(getattr(candidate, "quiet", False)))
+    if not allowed:
+        messages.append({"role": "user", "content": refusal})
+        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        return held("focus_reply_refused")
+    if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.
         tools._ctx._presence_completion_accepted = True
         limit_ctx.accumulated_usage["presence_completion_outcome"] = tools._ctx._presence_completion["outcome"]
         limit_ctx.accumulated_usage["terminal_origin"] = _loop().TERMINAL_ORIGIN_MODEL_FINAL
     if getattr(candidate, "quiet", False):  # only this exit accepts a wake's silent finish
         limit_ctx.accumulated_usage.update(wake_silent=True, terminal_origin=_loop().TERMINAL_ORIGIN_MODEL_FINAL)
+    if summary := (getattr(tools._ctx, "_completion_selected", None) or {}).get("wake_summary"): limit_ctx.accumulated_usage["wake_summary"] = summary
+    if getattr(tools._ctx, "_owner_message_sent", False): limit_ctx.accumulated_usage["owner_message_sent"] = True
+    from ouroboros.swarm_receipt import retain_comparison
+    retain_comparison(tools._ctx)
     return _loop()._handle_text_response(str(content or ""), llm_trace, limit_ctx.accumulated_usage)
 
 
@@ -1314,11 +1453,14 @@ def finish_completed_stop(tools: ToolRegistry, ctx: Any, emit_progress: Any,
     if request["observation"].get("owner_source_sha256") != owner_source_sha256(tools._ctx):
         tools._ctx._completion_selected = None
         _loop()._arm_delivery_control(tools, ctx, ctx.llm_trace, control="owner_revision_required")
+        observe_completion_hold(tools, ctx, "selection", "owner_input_changed")
         return None
     reason = str(controls.get("finalize_now") or "").splitlines()
     cause = reason[0].strip() if reason else ""
-    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
-    if cause == REASON_OWNER_STOPPED_DIRECT_TURN:
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, presence_stop_now
+    # Stop now (a direct turn's control, a Presence turn's open intent) keeps this stop, unsent, before
+    # a hard rail below could publish it without the ordinary admission's read.
+    if cause == REASON_OWNER_STOPPED_DIRECT_TURN or presence_stop_now(tools._ctx):
         from ouroboros.loop_round_limits import _handle_direct_turn_hard_stop
         return _handle_direct_turn_hard_stop(ctx)
     waiter = getattr(tools._ctx, "model_wait_context", None)

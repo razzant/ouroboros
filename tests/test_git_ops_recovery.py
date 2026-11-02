@@ -82,44 +82,38 @@ def test_event_promotion_refuses_while_managed_update_is_active(monkeypatch):
     assert released == [token]
 
 
-def test_git_capture_repairs_corrupt_index(monkeypatch, tmp_path):
+def test_explicit_writer_repairs_corrupt_index(monkeypatch, tmp_path):
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     (git_dir / "index").write_text("broken", encoding="utf-8")
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
 
-    calls = {"status": 0, "rebuild": 0}
+    calls = []
 
-    def fake_run(cmd, cwd=None, capture_output=False, text=False, check=False, env=None,
-                 timeout=None):
-        if cmd == ["git", "status", "--porcelain"]:
-            calls["status"] += 1
-            if calls["status"] == 1:
-                return subprocess.CompletedProcess(
-                    cmd,
-                    128,
-                    stdout="",
-                    stderr="fatal: .git/index: index file smaller than expected\n",
-                )
-            return subprocess.CompletedProcess(cmd, 0, stdout=" M changed.py\n", stderr="")
+    def fake_runner(cmd, *, timeout, cwd=None, env=None, text=True):
+        calls.append((cmd, timeout))
+        if cmd == ["git", "reset", "--hard", "HEAD"] and len(calls) == 1:
+            return 128, "", "fatal: .git/index: index file smaller than expected\n"
         if cmd == ["git", "reset", "--mixed", "HEAD"]:
-            calls["rebuild"] += 1
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return 0, "", ""
+        if cmd == ["git", "reset", "--hard", "HEAD"]:
+            return 0, " M changed.py\n", ""
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops, "_run_git_process_bounded", fake_runner)
 
-    rc, stdout, stderr = git_ops.git_capture(["git", "status", "--porcelain"])
+    rc, stdout, stderr = git_ops.git_capture(["git", "reset", "--hard", "HEAD"], repair_index=True)
 
-    assert rc == 0
-    assert stdout == "M changed.py"
-    assert stderr == ""
-    assert calls["status"] == 2
-    assert calls["rebuild"] == 1
+    assert (rc, stdout, stderr) == (0, "M changed.py", "")
+    assert calls == [
+        (["git", "reset", "--hard", "HEAD"], None),
+        (["git", "reset", "--mixed", "HEAD"], None),
+        (["git", "reset", "--hard", "HEAD"], None),
+    ], "the writer, its index rebuild and the retry keep the caller's unbounded wait"
     assert any(path.name.startswith("index.corrupt.") for path in git_dir.iterdir())
 
 
-def test_bounded_git_capture_bounds_corrupt_index_rebuild(monkeypatch, tmp_path):
+def test_bounded_writer_bounds_corrupt_index_rebuild(monkeypatch, tmp_path):
     git_dir = tmp_path / ".git"
     git_dir.mkdir()
     (git_dir / "index").write_text("broken", encoding="utf-8")
@@ -129,25 +123,25 @@ def test_bounded_git_capture_bounds_corrupt_index_rebuild(monkeypatch, tmp_path)
 
     def fake_bounded(cmd, *, timeout, cwd=None, env=None, text=True):
         calls.append((cmd, timeout, cwd, text))
-        if cmd == ["git", "status", "--porcelain"] and len(calls) == 1:
+        if cmd == ["git", "reset", "--hard", "HEAD"] and len(calls) == 1:
             return 128, "", "fatal: .git/index: index file smaller than expected"
         if cmd == ["git", "reset", "--mixed", "HEAD"]:
             return 0, "", ""
-        if cmd == ["git", "status", "--porcelain"]:
+        if cmd == ["git", "reset", "--hard", "HEAD"]:
             return 0, " M changed.py\n", ""
         raise AssertionError(cmd)
 
     monkeypatch.setattr(git_ops, "_run_git_process_bounded", fake_bounded)
 
     rc, stdout, stderr = git_ops.git_capture(
-        ["git", "status", "--porcelain"], timeout=17,
+        ["git", "reset", "--hard", "HEAD"], timeout=17, repair_index=True,
     )
 
     assert (rc, stdout, stderr) == (0, "M changed.py", "")
     assert [call[0] for call in calls] == [
-        ["git", "status", "--porcelain"],
+        ["git", "reset", "--hard", "HEAD"],
         ["git", "reset", "--mixed", "HEAD"],
-        ["git", "status", "--porcelain"],
+        ["git", "reset", "--hard", "HEAD"],
     ]
     assert all(call[1] == 17 for call in calls)
 
@@ -173,23 +167,114 @@ def test_git_capture_times_out_instead_of_hanging(monkeypatch, tmp_path):
 
 
 def test_git_capture_default_timeout_is_unbounded(monkeypatch, tmp_path):
-    """Every call site other than the rescue graph passes no timeout at all;
-    confirm that shape delegates without adding a subprocess timeout."""
-    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
-    captured = {}
+    """Every call site other than the rescue graph passes no timeout at all: real Git
+    waits without a bound and its inherited stdin, named in the tracked registry while
+    it runs, and answers in the ordinary stripped text tuple."""
+    from ouroboros.tools import shell_process
 
-    def fake_run(cmd, **kwargs):
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    repo, _first, _second = _history_repo(tmp_path)
+    (repo / "value.txt").write_text("changed\n", encoding="utf-8")
+    monkeypatch.setattr(git_ops, "REPO_DIR", repo)
+    waits = []
+    communicate = subprocess.Popen.communicate
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    def observed(proc, *args, **kwargs):
+        waits.append((proc, kwargs.get("timeout"), proc in shell_process._active_subprocesses, proc.stdin))
+        return communicate(proc, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", observed)
 
     rc, stdout, stderr = git_ops.git_capture(["git", "status", "--porcelain"])
 
-    assert rc == 0
-    assert stdout == ""
-    assert stderr == ""
-    assert "timeout" not in captured
+    assert (rc, stdout, stderr) == (0, "M value.txt", "")
+    [(proc, timeout, published, stdin)] = waits
+    assert (timeout, published, stdin) == (None, True, None), "unbounded, published, stdin not replaced"
+    assert proc not in shell_process._active_subprocesses and shell_process._spawning_subprocesses == 0
+
+
+@pytest.mark.parametrize("timeout", [None, 30])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, OSError])
+def test_git_capture_exception_cleanup_preserves_the_exception(monkeypatch, tmp_path, timeout, error_type):
+    """The public capture's exceptional exit must reap its real child and close its pipes,
+    for both wait modes. Inject the communication failure only into this test's child."""
+    from ouroboros import platform_layer
+    from ouroboros.tools import shell_process
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    marker = "ob-git-exception-child"
+    failure = error_type("capture interrupted")
+    children = []
+    communicate = subprocess.Popen.communicate
+
+    def interrupted(proc, *args, **kwargs):
+        if isinstance(proc.args, list) and proc.args[-1] == marker:
+            children.append(proc)
+            assert proc in shell_process._active_subprocesses
+            raise failure
+        return communicate(proc, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    try:
+        with pytest.raises(error_type) as caught:
+            git_ops.git_capture([sys.executable, "-c", "import time; time.sleep(60)", marker], timeout=timeout)
+        assert caught.value is failure
+        [child] = children
+        assert child.poll() is not None, "an exceptional return must not leave its child running"
+        assert child.stdout.closed and child.stderr.closed
+        assert child not in shell_process._active_subprocesses
+    finally:
+        for child in children:
+            if child.poll() is None:
+                platform_layer.kill_process_tree(child)
+                child.wait(timeout=10)
+            for pipe in (child.stdout, child.stderr):
+                pipe.close()
+            shell_process._active_subprocesses.discard(child)
+
+
+@pytest.mark.parametrize("failed_step", ["kill", "wait"])
+def test_git_capture_unconfirmed_cleanup_keeps_custody_and_original_error(monkeypatch, tmp_path, failed_step, caplog):
+    """A failed cleanup is not a successful exit and must not replace the caller's exception."""
+    from io import StringIO
+    from ouroboros import platform_layer
+    from ouroboros.tools import shell_process
+
+    failure = KeyboardInterrupt("original interruption")
+
+    class UnconfirmedProcess:
+        pid = 12345
+        returncode = None
+        stdin = None
+        stdout = StringIO()
+        stderr = StringIO()
+
+        def communicate(self, **kwargs):
+            raise failure
+
+        def wait(self, timeout):
+            raise subprocess.TimeoutExpired(["git"], timeout)
+
+    child = UnconfirmedProcess()
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *_a, **_k: child)
+
+    def failed_kill(proc):
+        assert proc is child
+        if failed_step == "kill":
+            raise PermissionError("kill unavailable")
+
+    monkeypatch.setattr(platform_layer, "kill_process_tree", failed_kill)
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            git_ops.git_capture(["git", "status"])
+        assert caught.value is failure
+        assert child in shell_process._active_subprocesses
+        assert not child.stdout.closed and not child.stderr.closed
+        assert "unconfirmed" in caplog.text
+    finally:
+        shell_process._active_subprocesses.discard(child)
+        child.stdout.close()
+        child.stderr.close()
 
 
 def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):
@@ -200,6 +285,7 @@ def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):
 
     class HungProcess:
         returncode = -9
+        stdin = stdout = stderr = None
 
         def __init__(self):
             self.pid = 12345

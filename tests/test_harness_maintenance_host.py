@@ -169,8 +169,9 @@ def test_observe_and_network_boundaries_preserve_inspection(tmp_path, owned):
 @pytest.mark.parametrize("granted", [False, True])
 def test_verified_presence_ceiling_is_the_authority_not_actor_identity(tmp_path, monkeypatch, owned, granted):
     from ouroboros import owner_pause
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceToolTarget
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceToolTarget
     from tests.test_presence_authority import _resolution
 
     monkeypatch.setattr(owner_pause, "run_operation", lambda ctx, fn, *a, **kw: fn(*a, **kw))
@@ -217,3 +218,180 @@ def test_registry_exports_tools_once_and_skip_policy_needs_no_model(tmp_path):
         assert safety.check_safety(name, {}) == (True, "")
     assert "maintain_harness" in disabled_tools_for("observe")
     assert "inspect_harness" not in disabled_tools_for("observe")
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_update_preparation_is_not_an_engine_operation(http, owned, monkeypatch, failure):
+    from ouroboros import claudexor_runtime as runtime
+    from ouroboros import review_run_isolation
+    prepares = []
+
+    def prepare():
+        prepares.append(True)
+        if failure:
+            raise runtime.ClaudexorRuntimeError("runtime_node_download_failed", "negative download")
+        return "/prepared/generation/node-standalone/bin/node"
+
+    monkeypatch.setattr(review_run_isolation, "attach_home", lambda: None)
+    monkeypatch.delenv("OUROBOROS_CLAUDEXOR_BIN", raising=False)
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: SimpleNamespace(prepare_node_toolchain=prepare))
+    owned.inventory["harnesses"][0].update(mechanism="managed_npm", maintainable=True)
+    checks = []
+
+    def inspect(names, **kwargs):
+        checks.append(kwargs)
+        row = deepcopy(owned.inventory)
+        if kwargs.get("check_latest"):
+            row["harnesses"][0]["availableProblem"] = {"code": "embedded_npm_missing"}
+        return row
+
+    owned.gateway.maintenance_harnesses = inspect
+    response = http.post("/api/claudexor/maintenance/operations", json=REQUEST,
+                         headers={"Idempotency-Key": "prepared-one"})
+    assert response.status_code == 409
+    problem = response.json()["error"]
+    assert problem["code"] == ("maintenance_preparation_failed" if failure else "maintenance_restart_required")
+    assert problem["context"]["acceptance"] == "not_submitted"
+    assert problem["context"]["scope"] == "this_attempt"
+    assert problem["context"]["requestId"] == "prepared-one"
+    assert problem["context"]["preparation"] == ("failed" if failure else "ready")
+    assert not any(call[0] == "create" for call in owned.calls)
+    assert prepares == [True]
+    assert checks == [{"fresh": True}, {"fresh": True, "check_latest": True}]
+    if not failure:
+        assert "Use Restart in the chat header, then repeat Update." in problem["message"]
+
+
+@pytest.mark.parametrize("problem", [None, {"code": "latest_unavailable"}])
+def test_healthy_serving_toolchain_does_not_require_a_path_match_or_restart(http, owned, monkeypatch, problem):
+    from ouroboros import claudexor_runtime as runtime
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("healthy serving engine needs no preparation"))
+    owned.inventory["harnesses"][0].update(mechanism="managed_npm", maintainable=True, availableProblem=problem)
+    response = http.post("/api/claudexor/maintenance/operations", json=REQUEST,
+                         headers={"Idempotency-Key": "healthy-legacy"})
+    assert response.status_code == 202 and response.json() == OPERATION
+    assert owned.calls[-1] == ("create", REQUEST, "healthy-legacy")
+
+
+def test_check_latest_never_prepares_a_runtime(http, owned, monkeypatch):
+    from ouroboros import claudexor_runtime as runtime
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("Check latest must install nothing"))
+    owned.inventory["harnesses"][0].update(mechanism="managed_npm", maintainable=True,
+                                         availableProblem={"code": "embedded_npm_missing"})
+    response = http.get("/api/claudexor/maintenance/harnesses?harness=agy&fresh=true&checkLatest=true")
+    assert response.status_code == 200 and response.json() == owned.inventory
+    assert "ensure" not in owned.opened
+
+
+@pytest.mark.parametrize("failed_read", [1, 2])
+@pytest.mark.parametrize("failure", [ClaudexorUnavailable("daemon_unreachable", "negative unreachable"),
+                                    ClaudexorUnavailable("maintenance_inspection_failed", "read failed", status_code=502),
+                                    OSError("read unavailable")])
+@pytest.mark.parametrize("target", [{"kind": "latest"}, {"kind": "version", "version": "1.2.3"},
+                                   {"kind": "previous"}, {"kind": "baseline"}])
+def test_optional_read_failure_preserves_post_and_same_key_rejoin(http, owned, monkeypatch, failed_read, failure, target):
+    from ouroboros import claudexor_runtime as runtime
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("unknown observation must not prepare"))
+    body = {**REQUEST, "target": target}
+    owned.inventory["harnesses"][0].update(mechanism="managed_npm", maintainable=True,
+                                         targets=["latest", "version", "previous", "baseline"])
+    reads, submitted = [], []
+
+    def inspect(*_args, **kwargs):
+        reads.append(kwargs)
+        if len(reads) == failed_read:
+            raise failure
+        return deepcopy(owned.inventory)
+
+    def create(received, key):
+        submitted.append((received, key))
+        if len(submitted) == 1:
+            error = ClaudexorUnavailable("daemon_unreachable", "lost POST reply")
+            error.problem = {"code": error.code, "context": {"acceptance": "unknown", "requestId": key}}
+            raise error  # The engine may already have accepted this key.
+        return deepcopy(OPERATION)  # The same key rejoins its retained operation.
+
+    owned.gateway.maintenance_harnesses = inspect
+    owned.gateway.maintenance_create = create
+    for attempt in range(2):
+        reads.clear()
+        response = http.post("/api/claudexor/maintenance/operations", json=body,
+                             headers={"Idempotency-Key": "same-key"})
+        if attempt == 0:
+            assert response.status_code == 503
+            assert response.json()["error"]["context"] == {"acceptance": "unknown", "requestId": "same-key"}
+        else:
+            assert response.status_code == 202 and response.json() == OPERATION
+        assert len(reads) == failed_read
+    assert submitted == [(body, "same-key"), (body, "same-key")]
+
+
+@pytest.mark.parametrize("code", ["daemon_unreachable", "daemon_spawn_failed", "daemon_starting",
+                                 "foreign_daemon_home", "attach_only_engine"])
+def test_gateway_acquisition_failure_remains_before_submit(http, owned, monkeypatch, code):
+    def offline():
+        raise ClaudexorUnavailable(code, "cannot acquire gateway")
+    monkeypatch.setattr(service, "ensure_owned_gateway", offline)
+    response = http.post("/api/claudexor/maintenance/operations", json=REQUEST,
+                         headers={"Idempotency-Key": "same-key"})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == code
+    assert response.json()["error"]["message"] == "cannot acquire gateway"
+    assert response.json()["error"]["context"] == {
+        "acceptance": "not_submitted", "scope": "this_attempt", "requestId": "same-key"}
+    assert not owned.calls
+
+
+def test_unrelated_observation_fault_is_not_swallowed(owned):
+    def broken(*_args, **_kwargs):
+        raise TypeError("programming fault")
+    owned.gateway.maintenance_harnesses = broken
+    with pytest.raises(TypeError, match="programming fault"):
+        service.start_maintenance(REQUEST, "same-key")
+    assert not owned.calls
+
+
+@pytest.mark.parametrize("selection", ["external", "attach_only"])
+@pytest.mark.parametrize("missing_npm", [False, True])
+def test_external_engine_preparation_cannot_promise_header_restart(http, owned, monkeypatch, selection, missing_npm):
+    from ouroboros import claudexor_runtime as runtime, review_run_isolation
+    monkeypatch.setattr(runtime, "get_runtime_manager", lambda: pytest.fail("external runtime must not be prepared"))
+    monkeypatch.setattr(review_run_isolation, "attach_home", lambda: "/external-home" if selection == "attach_only" else None)
+    if selection == "external":
+        monkeypatch.setenv("OUROBOROS_CLAUDEXOR_BIN", "/external/claudexord")
+    else:
+        monkeypatch.delenv("OUROBOROS_CLAUDEXOR_BIN", raising=False)
+    owned.inventory["harnesses"][0].update(mechanism="managed_npm", maintainable=True,
+        availableProblem={"code": "embedded_npm_missing"} if missing_npm else None)
+    response = http.post("/api/claudexor/maintenance/operations", json=REQUEST,
+                         headers={"Idempotency-Key": "external-key"})
+    if not missing_npm:
+        assert response.status_code == 202 and response.json() == OPERATION
+        assert owned.calls[-1] == ("create", REQUEST, "external-key")
+        return
+    assert response.status_code == 409
+    problem = response.json()["error"]
+    assert problem["code"] == "maintenance_preparation_failed"
+    assert problem["requiredActions"] == []
+    assert problem["context"] == {"requestId": "external-key", "acceptance": "not_submitted",
+        "scope": "this_attempt", "preparation": "failed", "restartRequired": False,
+        "node": None, "cause": "runtime_override_selected"}
+    assert not any(call[0] == "create" for call in owned.calls)
+
+
+@pytest.mark.parametrize("body", [
+    {"harness": "agy", "target": {"kind": []}},
+    {"harness": "agy", "target": {"kind": {}}},
+    {"harness": "agy", "target": {"kind": "unsupported"}},
+    {"harness": "agy", "target": {"kind": "version", "version": ""}},
+    {"harness": "agy", "target": {"kind": "latest", "unexpected": True}},
+    {"harness": "agy", "target": {"kind": "latest"}, "unexpected": True},
+])
+def test_malformed_update_never_downloads_before_engine_validation(http, owned, body):
+    def invalid(received, _key):
+        assert received == body
+        raise ValueError("engine rejects malformed request")
+    owned.gateway.maintenance_create = invalid
+    reply = http.post("/api/claudexor/maintenance/operations", json=body, headers={"Idempotency-Key": "bad-body"})
+    assert reply.status_code == 400
+    assert not owned.calls, "no preparation inventory or install for a malformed Update"

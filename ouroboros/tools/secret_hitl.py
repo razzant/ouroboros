@@ -8,8 +8,8 @@ The tool carries no secret in either direction. It resolves the skill's reviewed
 whose typed ``secret_request`` names the plugin, the field ids and their Settings keys, and
 waits after this tool batch exactly as a required ``escalate`` question waits (same card
 publication, same live continuation owner, same Stop and deadlines). The owner's values go
-from the browser straight to Settings; the task wakes on ``secret_filled`` or
-``secret_cancelled`` metadata delivered through the ordinary question mailbox.
+from the browser straight to Settings; the task wakes on ``secret_filled``, ``secret_replaced``
+or ``secret_cancelled`` metadata delivered through the ordinary question mailbox.
 """
 
 from __future__ import annotations
@@ -21,7 +21,8 @@ from typing import Any, List
 
 from ouroboros.contracts.skill_manifest import MAX_SECRET_FIELDS
 from ouroboros.tools.arg_feedback import argument_refusal
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_catalog import ToolEntry
+from ouroboros.tools.tool_context import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
 TOOL_NAME = "showSecretHitl"
@@ -87,11 +88,11 @@ def _show_secret_hitl(ctx: ToolContext, pluginName: str = "", fields: Any = None
     names: List[str] = field_ids(request)
     return (f"OK: secret request {quiz_id} for {request['plugin_name']} ({', '.join(names)}) "
             f"{'accepted' if mode == 'live' else 'queued'} for delivery; the task waits after this tool batch "
-            "while the owner fills the protected form. The values go straight to Settings and are never shown "
-            "to you. You will receive secret_filled {pluginName, fields} after a confirmed save, or "
+            "while the owner fills the protected form. The values go to Settings and are not shown to you. "
+            "You receive secret_filled or secret_replaced {pluginName, fields} after a confirmed save, or "
             "secret_cancelled. Any incoming mail or an owner hurry request also ends the wait; Stop and task "
-            "deadlines still apply. Keep this task active while the owner may return: the form stops saving "
-            "when the asking task ends.")
+            "deadlines still apply. If this task ends first, the form stays usable: a later save is recorded "
+            "in the chat but does not resume this work.")
 
 
 _SCHEMA = {
@@ -99,10 +100,11 @@ _SCHEMA = {
     "description": (
         "Ask the owner to enter an integration secret (a bot token, an API key a skill needs) in a protected "
         "in-chat form instead of the chat. pluginName is the installed skill; fields are ids its manifest "
-        "declares in secret_fields (e.g. telegram: botToken). The value is saved straight to Settings and never "
-        "reaches you, the chat or logs; you then receive only secret_filled {pluginName, fields} or "
-        "secret_cancelled. Root tasks only; the task waits after this tool batch. Saving is not a "
-        "connection: afterwards check the skill's grant and status. Never ask for a secret in chat instead."
+        "declares in secret_fields (e.g. telegram: botToken). The value is saved to Settings and is not sent "
+        "in this conversation; you then receive only secret_filled or secret_replaced {pluginName, fields}, "
+        "or secret_cancelled. The owner sees whether a key is already set and may explicitly replace it. Root "
+        "tasks only; the task waits after this tool batch. Saving grants, enables and connects nothing: "
+        "afterwards check the skill's grant and status. Never ask for a secret in chat instead."
     ),
     "parameters": {
         "type": "object",

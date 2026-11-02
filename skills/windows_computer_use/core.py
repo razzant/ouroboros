@@ -515,11 +515,14 @@ def unreadable_error(matched: int, unreadable: list[Any], scanned: int, waited_m
     }
 
 
-def receipt(plan: ActPlan, chosen: Any, after: Any, waited_ms: int, polls: int) -> dict[str, Any]:
+def receipt(
+    plan: ActPlan, chosen: Any, after: Any, waited_ms: int, polls: int,
+    delivered_to: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     unread = after.get("unread", [])
     fields = {"role", "name", "automation_id", "class", "value", "enabled", "focused", "offscreen"}
     after_read = "unavailable" if fields <= set(unread) else "partial" if unread else "complete"
-    return {
+    out = {
         "ok": True,
         "did": plan.act,
         "mutating": act_mutating(plan.act),
@@ -536,6 +539,14 @@ def receipt(plan: ActPlan, chosen: Any, after: Any, waited_ms: int, polls: int) 
             "the after-state could not be read completely (see element_after.unread); "
         ) + "whether that achieved the goal is yours to judge",
     }
+    if delivered_to is not None:
+        out["delivered_to"] = delivered_to
+    if act_mutating(plan.act):
+        # The host's literal for an executed external effect (PluginAPI.register_tool):
+        # this mutating pattern call returned. View-only acts, unknown outcomes and
+        # refusals never carry it, and it is not proof that the goal was met.
+        out["observed_effect"] = True
+    return out
 
 
 def find_receipt(

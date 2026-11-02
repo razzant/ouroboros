@@ -44,6 +44,14 @@ page without one): Light and Dark force Aqua or DarkAqua on this window only, Sy
 page inherit. The window's appearance is also its page's ``prefers-color-scheme``, so forcing the
 palette a System page painted would pin System to it; the Windows caption tint stays the bridge's
 (``launcher_appearance``), which cannot say System.
+
+Until its first document has loaded, a window shows only its own background, which pywebview paints
+from a fixed ``background_color`` (the main window's was always the dark room). ``paint_room`` swaps
+it, before the window is shown, for one dynamic colour AppKit resolves against the window's effective
+appearance: the room colour (``web/ui.css`` ``--bg-primary``) of the Mac's Light or Dark, so the first
+frame follows macOS and nothing waits for the page (owner decision on #1111: A). A page whose choice
+differs forces its appearance when it declares, and the same colour then follows it, live resizes
+included. The windows shown before the server have no page choice to read and keep the Mac's.
 """
 
 from __future__ import annotations
@@ -62,6 +70,8 @@ WORLD = "ouroboros-window"
 TOOLBAR = "ouroboros-window-chrome"
 INTEGRATED = "integrated"
 APPEARANCES = {"light": "NSAppearanceNameAqua", "dark": "NSAppearanceNameDarkAqua"}
+# The room colour of each palette, web/ui.css --bg-primary (tests/test_appearance_static.py keeps them equal).
+ROOM = {"light": "#ffffff", "dark": "#0f0f11"}
 # AppKit enum values (macOS 11+ for the separator style; Ouroboros needs macOS 12). The toolbar style is read
 # from AppKit by name (``_integrate``): a mistyped number is another style with another bar height.
 _FULL_SIZE_CONTENT = 1 << 15  # NSWindowStyleMaskFullSizeContentView
@@ -171,6 +181,34 @@ def _webview_of(window: Any) -> Any:
     return BrowserView.instances[window.uid].webview
 
 
+def paint_room(window: Any) -> None:
+    """Register ``window`` to open in the room colour of its own appearance; inert off macOS."""
+    if _MACOS and window is not None:
+        window.events.before_show += lambda: _paint_room(getattr(window, "native", None))
+
+
+def _paint_room(native: Any) -> None:
+    """pywebview ``before_show`` (main thread, before the window is ordered front): one dynamic room colour."""
+    if native is None:
+        return
+    try:
+        import AppKit
+
+        def srgb(value: str) -> Any:  # as pywebview's own fixed colour is made, so the page's sRGB room matches
+            red, green, blue = (int(value[index:index + 2], 16) / 255.0 for index in (1, 3, 5))
+            return AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(red, green, blue, 1.0)
+
+        light, dark = srgb(ROOM["light"]), srgb(ROOM["dark"])
+        names = [AppKit.NSAppearanceNameAqua, AppKit.NSAppearanceNameDarkAqua]
+
+        def resolve(appearance: Any) -> Any:  # AppKit asks at each draw; a High Contrast variant matches its base
+            return light if appearance.bestMatchFromAppearancesWithNames_(names) == names[0] else dark
+
+        native.setBackgroundColor_(AppKit.NSColor.colorWithName_dynamicProvider_(None, resolve))
+    except Exception:
+        log.warning("The window keeps its fixed background colour until its page paints.", exc_info=True)
+
+
 class WindowChrome:
     """One window's title bar and appearance, decided per document on the main thread."""
 
@@ -198,6 +236,7 @@ class WindowChrome:
         if not _MACOS or window is None:
             return
         self._window = window
+        paint_room(window)
         window.events.before_show += self._before_show
         window.events.before_load += self._navigation_finished
         window.events.closed += self._close
@@ -332,6 +371,11 @@ class WindowChrome:
                 step()
             except Exception:
                 log.warning("A title bar switch could not be restored.", exc_info=True)
+
+    def zoom_changed(self) -> None:
+        """The window's page zoom changed (main thread, ``launcher_page_zoom``): the band, in CSS px, changes with it."""
+        if not self._closed and self._webview is not None:
+            self._publish()
 
     def _publish(self) -> None:
         """Tell the current document what the window actually covers; the page reserves nothing else."""

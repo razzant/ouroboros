@@ -61,8 +61,9 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
             response = page.request.get(server['url'] + '/api/schedules').json()
             (evidence / 'before-restore.json').write_text(json.dumps(response, indent=2))
             print('G1_BROWSER_SCHEDULES', json.dumps(response))
-            section.locator('summary').wait_for(state='visible')
-            section.locator('summary').click()
+            history = section.locator('[data-activity-history] > summary')
+            history.wait_for(state='visible')
+            history.click()
             button = section.get_by_role('button', name='Restore hold')
             button.wait_for(state='visible')
             assert button.get_attribute('data-hold-id') == old_id
@@ -74,7 +75,8 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
                 if width < 700:
                     wait_drawer_closed(page)
                 section.scroll_into_view_if_needed()
-                assert section.locator('.activity-sub').evaluate('(el) => el.scrollWidth <= el.clientWidth + 1')
+                assert section.locator('.activity-sub').evaluate_all(
+                    '(els) => els.length > 0 && els.every((el) => el.scrollWidth <= el.clientWidth + 1)')
                 page.screenshot(path=str(evidence / f'g1-activity-{width}.png'), full_page=True)
             page.set_viewport_size({'width': 1440, 'height': 960})
             # A new accepted Stop while the old DOM still offers its old identity.

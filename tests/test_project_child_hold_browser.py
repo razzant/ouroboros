@@ -19,7 +19,8 @@ from tests.test_project_admission_refusal_browser import _producers
 from tests.test_project_authority_outages import _uncertain_child
 from tests.test_project_hold_recovery import worker
 from tests._store_shared import result_signature
-from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
+from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame, state_reads
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 WAIT = "Waiting for Project verification"
@@ -32,6 +33,33 @@ def _chip_mark(chip):
     """A chip's status mark and body tone (docs/DESIGN.md "Status marks"): what it does and whose move it is."""
     return chip.evaluate("el => { const mark = el.querySelector(':scope > .status-mark');"
                          " return [mark.dataset.shape, mark.dataset.hue, el.dataset.chipTone]; }")
+
+
+def _assert_narrow_identity(card):
+    assert card.get_attribute("data-expanded") != "1"
+    role = card.locator('[data-live-title]')
+    assert card.locator('[data-live-disclosure]').is_visible()
+    facts = card.evaluate("""el => {
+        const role = el.querySelector('[data-live-title]'), style = getComputedStyle(role);
+        const chip = el.querySelector('[data-live-phase]');
+        const details = el.querySelector('[data-live-disclosure]');
+        const r = role.getBoundingClientRect(), c = chip.getBoundingClientRect();
+        const d = details.getBoundingClientRect();
+        return {width: r.width, clipped: role.scrollWidth > role.clientWidth,
+            ellipsis: style.textOverflow, overflow: style.overflowX, whiteSpace: style.whiteSpace,
+            roleTop: r.top, chipTop: c.top,
+            detailsTop: d.top - parseFloat(getComputedStyle(details).marginTop),
+            ordered: c.right <= r.left && r.right <= d.left,
+            cardFits: el.scrollWidth <= el.clientWidth + 1,
+            chipFits: chip.scrollWidth <= chip.clientWidth + 1};
+    }""")
+    assert facts["width"] >= 40, facts  # A readable role fragment, not a zero-width flex item.
+    assert role.is_visible() and role.inner_text() == "researcher"
+    assert facts["clipped"] and facts["ellipsis"] == "ellipsis", facts
+    assert facts["overflow"] == "hidden" and facts["whiteSpace"] == "nowrap", facts
+    assert abs(facts["roleTop"] - facts["chipTop"]) <= 1, facts
+    assert abs(facts["detailsTop"] - facts["chipTop"]) <= 1, facts
+    assert facts["ordered"] and facts["cardFits"] and facts["chipFits"], facts
 
 
 @pytest.mark.parametrize("engine,ending", [("chromium", "recovery"), ("webkit", "recovery"), ("chromium", "cancel")])
@@ -99,10 +127,10 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
         try:
             page = browser.new_page(viewport={"width": 1440, "height": 900}, reduced_motion="reduce")
             page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
-            page.on("pageerror", lambda error: errors.append(str(error)))
+            errors = PageErrors(page, engine)
             page.route("**/api/tasks*", task_transport)
             page.route("**/api/tasks/**", task_transport)
-            page.route("**/api/state", state_transport)
+            page.route(state_reads, state_transport)
             page.goto(server["url"], wait_until="domcontentloaded")
             page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
             page.wait_for_selector('#chat-messages[data-history-hydrated="true"]')
@@ -143,7 +171,7 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             page.evaluate("() => window.__heldCard = document.querySelector('.chat-live-card[data-task-id=held]')")
             page.set_viewport_size({"width": 390, "height": 844})
             shot(page, "held-narrow")
-            assert child_card.evaluate("el => el.scrollWidth <= el.clientWidth + 1")
+            _assert_narrow_identity(child_card)
             # Typed unknown-dispatch fact uses the same host projection, without a
             # promise of automatic continuation (no client text classification).
             held = next(row for row in host.pending if row["id"] == child["id"])
@@ -155,6 +183,7 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             assert "automatic recovery is not authorized" in child_card.locator('[data-live-meta]').inner_text()
             assert _chip_mark(child_card.locator('[data-live-phase]')) == STILL
             shot(page, "previous-run-unconfirmed-narrow")
+            _assert_narrow_identity(child_card)
             held["_project_admission_restore_hold"] = previous_hold
             unreadable["on"] = False
             assert result_signature(root, "held") == original  # the original receipt, unchanged
@@ -182,7 +211,7 @@ def test_nested_child_wait_and_same_id_recovery(direct_server_with_data, tmp_pat
             assert child_card.locator('[data-live-phase]').inner_text() == "Stopped"
             assert _chip_mark(child_card.locator('[data-live-phase]')) == ["dot", "neutral", "neutral"]
             shot(page, "cancelled-narrow")
-            assert not errors, errors
+            assert not errors.unexpected(), errors
         except Exception:
             page.screenshot(path=str(evidence / "zz-failure.png"))
             raise
@@ -279,7 +308,7 @@ def test_held_tree_header_updates_on_child_reply_without_detail_polling(direct_s
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.route("**/api/tasks*", task_transport)
             page.route("**/api/tasks/**", task_transport)
-            page.route("**/api/state", state_transport)
+            page.route(state_reads, state_transport)
             page.goto(server["url"], wait_until="domcontentloaded")
             page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
             page.wait_for_selector('#chat-messages[data-history-hydrated="true"]')

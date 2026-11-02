@@ -30,11 +30,8 @@ _POSIX_ONLY = pytest.mark.skipif(
     os.name == "nt", reason="custody spawn/reap mechanics are POSIX-only"
 )
 
-# Popen call sites that legitimately bypass spawn_supervised: short-lived
-# synchronous helpers (waited within the call), panic/cleanup layers, the
-# launcher (custody host), and custody itself. Adding a NEW long-lived spawn
-# site requires routing it through spawn_supervised/record_process or
-# explicitly justifying it here.
+# Raw Popen exemptions: waited helpers, cleanup layers and custody hosts.
+# Long-lived sites require spawn_supervised/record_process or an explicit justification.
 _POPEN_ALLOWLIST = {
     "launcher.py",                        # custody host process (pre-runtime)
     # exec_source_launcher spawns the next custody host and exits. Interactive OS
@@ -58,14 +55,20 @@ _POPEN_ALLOWLIST = {
     "ouroboros/subagent_worktrees.py",
     "ouroboros/preflight_runner.py",      # waited hermetic pytest child
     "ouroboros/tools/shell_process.py",   # bounded foreground commands (waited + tracked)
+    # GitHub's exact-byte capture starts one bounded foreground CLI: a timer
+    # kills it at the deadline, cap overflow kills it, and the call waits in
+    # both the normal path and cleanup before returning.
+    "ouroboros/tools/github.py",
+    # Bounded Git read: waits, kills/reaps on timeout, then joins both pipe readers.
+    "ouroboros/tools/vcs_read.py",
     "ouroboros/tools/skill_exec.py",      # bounded skill run (waited + tracked)
     "ouroboros/tools/skill_preflight.py", # waited preflight child
     "ouroboros/marketplace/isolated_deps.py",  # waited installer child
-    # Connect's vendor-CLI install (domain op, moved here by review wave 3): ONE
-    # waited child spawned+registered atomically under the tools.shell lock,
-    # so /panic's tracked-subprocess sweep can never observe it alive but
-    # untracked (isolated_deps._run template).
-    "ouroboros/claudexor_daemon.py",
+    # Connect's vendor-CLI install (domain op, extracted from the owned-daemon
+    # module): ONE waited child published through shell_process.tracked_start, so
+    # /panic's lock-free sweep or a begun stop that misses it is met by its own
+    # publication (isolated_deps._run template).
+    "ouroboros/claudexor_harness_install.py",
     "ouroboros/extension_process_runner.py",  # waited calls and session-owned response streams
     "ouroboros/workspace_executor.py",    # custody write-through added at spawn
     "ouroboros/local_model.py",           # custody record added at spawn

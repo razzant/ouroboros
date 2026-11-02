@@ -19,8 +19,9 @@ app releases: at startup an unmodified built-in whose bundled version changed is
 in place, keeping its enablement, its Telegram state and the owner's grants while the
 requested keys and permissions are unchanged; a copy with local changes is kept and the
 owner chooses on update. Nothing re-installs a built-in the owner removed.
-A built-in no longer bundled loses its launcher marker and keeps running as a skill that
-left its source. A built-in whose manifest ``os`` excludes this host is not offered or newly
+A built-in no longer bundled is uninstalled when its copy is unchanged (grants survive), after a
+clean re-seed of the same pass; an edited or unknown copy loses its launcher marker and keeps running
+as the owner's skill. A built-in whose manifest ``os`` excludes this host is not offered or newly
 installed; an installed copy is still re-seeded (discovery hides it, except a Unix
 computer-use copy kept on Windows for remote machines). ``state/native_seed.json`` records
 the committed bundled tree the last complete pass reconciled, so an unchanged tree costs a
@@ -297,20 +298,35 @@ def _warn_equal_version_drift(seed: pathlib.Path, target: pathlib.Path, version:
 
 
 def release_removed_builtins(drive_root: pathlib.Path, *, seed_dir: Optional[pathlib.Path] = None,
-                             log_obj: Any = None) -> bool:
-    """A built-in no longer bundled keeps its files and records; only the launcher
-    marker goes, so the copy is the owner's from now on. Returns whether every one went."""
+                             log_obj: Any = None, retire: bool = True) -> bool:
+    """A built-in no longer bundled: a copy nobody changed is uninstalled (the bundle carries its
+    successor; grants survive the uninstall), an edited or unknown copy keeps its files and records and
+    only the launcher marker goes, so it is the owner's from now on. ``retire=False`` (a re-seed of
+    this pass failed) leaves unchanged copies marked for the next boot. Returns whether every one went."""
+    from ouroboros.skill_source_install import SkillInstallError, uninstall_installed
+
     logger = log_obj or log
     seed_root = pathlib.Path(seed_dir or bundled_skills_dir())
     native_root = pathlib.Path(drive_root) / "skills" / "native"
     if not native_root.is_dir():
         return True
     complete = True
-    for entry in native_root.iterdir():
+    for entry in sorted(native_root.iterdir()):
         marker = entry / SEED_MARKER
         if not entry.is_dir() or entry.name.startswith(".") or not marker.is_file() or (seed_root / entry.name).is_dir():
             continue
         try:
+            if _changed_since_install(pathlib.Path(drive_root), entry.name, entry) is False:
+                if not retire:
+                    complete = False
+                    continue
+                try:
+                    uninstall_installed(pathlib.Path(drive_root), entry.name)
+                    logger.info("Built-in skill %r is no longer bundled and was unchanged; uninstalled.", entry.name)
+                    continue
+                except SkillInstallError:  # another folder uses the name: release this copy as the owner's
+                    logger.warning("Built-in skill %r could not be uninstalled; kept as the owner's copy.",
+                                   entry.name, exc_info=True)
             marker.unlink()
             logger.info("Built-in skill %r is no longer bundled; its installed copy is now user-managed.", entry.name)
         except OSError:
@@ -368,11 +384,12 @@ def record_converted_builtin(drive_root: pathlib.Path, skill: Any, legacy: Any, 
 
 def _seed_identity(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
     """The committed bundled tree, read without its payloads; a dirty or unknown tree stays uncached."""
+    from ouroboros.git_observation import host_git_env
     if not (repo_dir / ".git").exists():
         return None
     try:
         status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", "skills"],
-                                cwd=str(repo_dir), capture_output=True, text=True, timeout=10)
+                                cwd=str(repo_dir), capture_output=True, text=True, timeout=10, env=host_git_env())
         if status.returncode or status.stdout.strip():
             return None
         tree = subprocess.run(["git", "rev-parse", "--verify", "HEAD:skills"], cwd=str(repo_dir),
@@ -585,8 +602,8 @@ def _reconcile_bundle(drive: pathlib.Path, seed_root: pathlib.Path, repo: pathli
     except Exception:
         failures.append("reseed")
         logger.warning("Built-in skill re-seed raised", exc_info=True)
-    try:
-        if not release_removed_builtins(drive, seed_dir=seed_root, log_obj=logger):
+    try:  # a successor that failed to re-seed keeps its retired partner until the next boot
+        if not release_removed_builtins(drive, seed_dir=seed_root, log_obj=logger, retire=not failures):
             failures.append("release")
     except Exception:
         failures.append("release")

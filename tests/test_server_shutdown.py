@@ -16,12 +16,14 @@ def _stop_restart_watcher(server):
 
 
 def test_owned_stop_runs_every_in_memory_owner_and_reads_records_from_the_set(monkeypatch, tmp_path):
-    """One failing owner does not skip the others; durable records come from the set, never a walk."""
+    """One failing owner does not skip the others, and its failure keeps the outcome unconfirmed
+    beside the durable records (none here); those come from the set, never a walk."""
     from ouroboros import owned_shutdown
 
     order = []
-    def shell_failure():
+    def shell_failure(*, deadline):
         order.append("shell")
+        assert deadline == owned_shutdown._GENERATION_STOP.deadline  # the first door's one grace
         raise OSError("shell custody unavailable")
     monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", shell_failure)
     monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground",
@@ -30,7 +32,8 @@ def test_owned_stop_runs_every_in_memory_owner_and_reads_records_from_the_set(mo
                         lambda root, **kw: order.append(("services", root, kw)))
     monkeypatch.setattr(os, "walk", lambda *_a, **_kw: pytest.fail("the exit never walks data/state"))
     outcome = owned_shutdown.stop_owned_work(tmp_path)
-    assert outcome["state"] == "completed" and outcome["targets"] == 0
+    assert outcome["state"] == "unconfirmed" and outcome["targets"] == 0 and outcome["unconfirmed"] == []
+    assert outcome["memory_unconfirmed"] == {"commands": {"state": "failed"}}
     assert sorted(order, key=str) == sorted(["shell", ("services", tmp_path.resolve(),
                                                        {"wait": True, "durable": False})], key=str)
 
@@ -197,6 +200,7 @@ def test_managed_update_restart_arms_prepared_transaction_for_direct_reexec(
     import ouroboros.gateway.control as control
     import supervisor.git_ops as git_ops
     import supervisor.update_merge as update_merge
+    from ouroboros import server_process, server_restart
     import server
 
     prepared = {
@@ -214,19 +218,27 @@ def test_managed_update_restart_arms_prepared_transaction_for_direct_reexec(
     )
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    owner, restart = threading.Event(), threading.Event()
+    monkeypatch.setattr(server_process, "_owner_restart_requested", owner)
+    monkeypatch.setattr(server_process, "_restart_requested", restart)
+    monkeypatch.setattr(server, "_owner_restart_requested", owner)
+    monkeypatch.setattr(server_restart, "_owner_restart_requested", owner)
     monkeypatch.setattr(server, "_restart_current_process_impl", lambda *_a, **_kw: None)
     monkeypatch.setattr(update_merge, "read_update_tx_strict", lambda: ("valid", {"phase": "pending_boot_smoke"}))
     monkeypatch.delenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, raising=False)
 
-    request = type("Request", (), {"app": type("App", (), {"state": type("State", (), {
-        "request_restart": lambda _self, owner=False: None,
-    })()})()})()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        request_restart=server_process._request_restart_exit)))
     response = control._restart_response(request, strategy="auto_merge", plan={})
 
     assert response.status_code == 200
+    assert owner.is_set() and restart.is_set()
     assert delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV not in os.environ
     server._restart_current_process("127.0.0.1", 8765)
     assert os.environ[delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV] == "tx-owner-wait"
+    assert not delegate_recovery.owner_restart_in_progress(tmp_path)
 
 
 def test_failed_managed_update_restart_disarms_transaction_token(monkeypatch, tmp_path):
@@ -928,20 +940,24 @@ def test_terminal_custody_precedes_every_best_effort_wait_in_the_teardown():
     goes AFTER the custody write too: `append_jsonl` waits up to two seconds for
     the log lock and then does file I/O, so on slow storage or a held lock it can
     eat the launcher's force-exit budget before a single worker is terminalized.
-    Nothing between the join and `kill_workers` may do I/O."""
+    Nothing between the join and `kill_workers` may do I/O. The early cause is the
+    door's lock-free entry write, made before the join, so a kill before the row
+    still leaves the cause."""
     import inspect
     import server
 
     teardown = inspect.getsource(server.lifespan).split("\n    finally:\n", 1)[1]
     stop_idx = teardown.index("_supervisor_stop.set()")
+    entry_idx = teardown.index("begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())")
     join_idx = teardown.index("supervisor_thread.join(timeout=2)")
     kill_idx = teardown.index("kill_workers(")
     append_idx = teardown.index('"server_shutdown"')
     extension_idx = teardown.index("extension_reconcile_task.cancel()")
     host_idx = teardown.index("host_service_listener.close()")
     sweeps_idx = teardown.index("stop_owned_work(lifespan_drive_root)")
-    assert stop_idx < join_idx < kill_idx < extension_idx < host_idx < sweeps_idx
+    assert stop_idx < entry_idx < join_idx < kill_idx < extension_idx < host_idx < sweeps_idx
     assert kill_idx < append_idx < extension_idx
+    assert teardown.count("begin_owned_stop(") == 1 and "shutdown_entry" not in teardown[join_idx:kill_idx]
 
 
 def test_supervisor_revival_clears_a_stale_stop_flag(monkeypatch):

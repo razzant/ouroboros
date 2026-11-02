@@ -1,4 +1,5 @@
-"""Focused authority-drift regressions kept outside the size-ratcheted isolation module."""
+"""Focused regressions kept outside the size-ratcheted isolation module: what a capture says while
+the target moves (no target-drift diagnostics any more), SQLite WAL indexes and nested repositories."""
 
 from __future__ import annotations
 
@@ -7,7 +8,6 @@ import json
 import sqlite3
 import subprocess
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -19,7 +19,9 @@ from ouroboros.subagent_worktrees import provision_execution_snapshot, find_exec
 from test_delegated_run_isolation import _isolated_entry, _nanny_ctx, _seed_target
 
 
-def test_drift_capture_freezes_evidence_and_safe_reject_releases_empty_snapshot(tmp_path, monkeypatch):
+def test_an_empty_capture_closes_itself_even_when_the_target_moved(tmp_path, monkeypatch):
+    """A neighbor's edit of the target during the run is not the run's: an unchanged copy captures
+    as no changes and closes itself (no_changes), with no drift fact, and the edit stays put."""
     from ouroboros.tools.delegate import _capture_terminal_patch
     from ouroboros.tools.subagent_integration import _integrate_delegated_patch
 
@@ -30,36 +32,14 @@ def test_drift_capture_freezes_evidence_and_safe_reject_releases_empty_snapshot(
     (target / "neighbor.txt").write_text("owner change\n", encoding="utf-8")
 
     capture = _capture_terminal_patch(ctx, entry)
-    assert capture["status"] == "ready_no_changes"
-    assert capture["target_mutated_during_run"] == ["neighbor.txt"]
+    assert capture["status"] == "ready_no_changes" and capture["disposition"] == custody.NO_CHANGES, capture
+    assert not {"target_drift_checked", "target_mutated_during_run", "target_drift_unknown"} & set(capture)
     manifest_path = custody.delegated_capture_dir(custody.custody_root(ctx), "t-nanny", "snapDrift") / "workspace_patch.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["authority_drift"]["paths"] == ["neighbor.txt"]
-    (target / "neighbor.txt").unlink()
-
-    replay = _capture_terminal_patch(ctx, entry)
-    assert replay["status"] == "ready_no_changes"
-    assert replay["target_mutated_during_run"] == ["neighbor.txt"]
-    assert "Rejected delegated run" in _integrate_delegated_patch(
-        ctx, "run-drift", "reject", "preserve for inspection")
-    assert find_execution_snapshot("snapDrift") is None
-    custody._CUSTODY.clear()
-
-
-def test_excluded_untracked_baseline_drift_is_not_clean(tmp_path, monkeypatch):
-    from ouroboros.tools.delegate import _capture_terminal_patch
-
-    target = _seed_target(tmp_path)
-    ctx = _nanny_ctx(tmp_path, target, monkeypatch)
-    handle = provision_execution_snapshot(target_root=target, task_id="t-nanny", snapshot_id="snapSecretDrift")
-    entry = _isolated_entry(ctx, target, handle, run_id="run-secret-drift")
-    assert any(row.get("path") == ".env" and row.get("baseline") for row in handle.excluded_untracked)
-    (target / ".env").write_text("SECRET=changed\n", encoding="utf-8")
-
-    capture = _capture_terminal_patch(ctx, entry)
-    assert capture["status"] == "ready_no_changes"
-    assert capture["target_mutated_during_run"] == [".env"]
-    assert entry.patch_captured is True
+    assert "authority_drift" not in json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert entry.patch_disposed == custody.NO_CHANGES and find_execution_snapshot("snapDrift") is None
+    assert not Path(handle.path).exists()
+    assert (target / "neighbor.txt").read_text(encoding="utf-8") == "owner change\n"
+    assert "no_changes" in _integrate_delegated_patch(ctx, "run-drift", "reject", "nothing to keep")
     custody._CUSTODY.clear()
 
 
@@ -78,8 +58,9 @@ def test_nested_untracked_git_repository_does_not_break_snapshot_provision(tmp_p
     assert any(row.get("reason") == "nested_repository" for row in handle.excluded_untracked)
 
 
-def test_drift_uses_snapshot_registry_when_custody_root_differs(tmp_path, monkeypatch):
-    from ouroboros.delegate_target_drift import _target_drift_evidence
+def test_capture_uses_the_copy_record_when_the_custody_root_differs(tmp_path, monkeypatch):
+    """The copy's record lives on the copies' data root, not the custody ledger's: the capture finds
+    it there, records the result commit in it and keeps it (with both pins) after the checkout goes."""
     from ouroboros.tools.delegate import _capture_terminal_patch
 
     target = _seed_target(tmp_path)
@@ -89,13 +70,15 @@ def test_drift_uses_snapshot_registry_when_custody_root_differs(tmp_path, monkey
     entry = _isolated_entry(ctx, target, handle, run_id="run-separate-roots")
     assert find_execution_snapshot(handle.snapshot_id) is not None
     assert find_execution_snapshot(handle.snapshot_id, data_dir=entry.ledger_root) is None
+    (Path(handle.path) / "tracked.txt").write_text("one\ntwo\nchild\n", encoding="utf-8")
 
     capture = _capture_terminal_patch(ctx, entry)
-    assert capture["status"] == "ready_no_changes"
-    assert capture["target_drift_checked"] is True
-    assert capture.get("target_mutated_during_run", []) == []
-    (target / "untracked.txt").write_text("changed\n", encoding="utf-8")
-    assert _target_drift_evidence(entry)["paths"] == ["untracked.txt"]
+    assert capture["status"] == "ready_with_changes" and capture["checkout_released"] is True, capture
+    record = find_execution_snapshot(handle.snapshot_id)
+    assert record["result_sha"] == capture["result_commit"] and not Path(handle.path).exists()
+    for ref, sha in ((record["baseline_ref"], handle.baseline_sha), (record["result_ref"], record["result_sha"])):
+        assert subprocess.run(["git", "rev-parse", ref], cwd=target, check=True, capture_output=True,
+                              text=True).stdout.strip() == sha
     custody._CUSTODY.clear()
 
 
@@ -146,12 +129,10 @@ def test_another_process_s_wal_index_is_excluded_without_a_baseline(tmp_path, mo
     """A project may hold another process's WAL database (a dev server, or one killed that left its
     index behind): its untracked ``app.db-shm`` is excluded from a mutating run's snapshot by its
     code, with no content baseline (its bytes are shared memory no raw reader opens), so the
-    snapshot provisions, and the post-run capture and drift check pass it unread while it changes
-    underneath (``.gitignore`` of ``*.db`` alone never covers it; with the log ignored too, nothing
-    else moves)."""
+    snapshot provisions, and the post-run capture passes it unread while it changes underneath
+    (``.gitignore`` of ``*.db`` alone never covers it)."""
     import hashlib
 
-    from ouroboros.delegate_target_drift import _target_drift_evidence
     from ouroboros.tools.delegate import _capture_terminal_patch
 
     target = _seed_target(tmp_path)
@@ -172,14 +153,11 @@ def test_another_process_s_wal_index_is_excluded_without_a_baseline(tmp_path, mo
             commit()
             assert hashlib.sha256(index.read_bytes()).hexdigest() != before, "the index changed underneath"
         capture = _capture_terminal_patch(ctx, entry)
-        evidence = _target_drift_evidence(entry)
     finally:
         release()
-    assert evidence["checked"] is True and evidence["error"] == "", evidence
-    assert capture["status"] == "ready_no_changes" and capture.get("target_drift_checked") is True, capture
-    assert "app.db-shm" not in evidence["paths"] and "app.db-shm" not in capture.get("target_mutated_during_run", [])
-    if ignored or killed:  # only the index moved, if anything, and it is no drift
-        assert evidence["paths"] == [] and capture.get("target_mutated_during_run", []) == []
+    # The copy itself never held the index, so its result is the baseline: an empty capture.
+    assert capture["status"] == "ready_no_changes" and capture["disposition"] == custody.NO_CHANGES, capture
+    assert not {"target_drift_checked", "target_mutated_during_run"} & set(capture)
     custody._CUSTODY.clear()
 
 
@@ -222,15 +200,14 @@ def _committed_index(tmp_path, mode):
     return tmp_path / "target", lambda: None
 
 
-@pytest.mark.parametrize("kind", ["snapshot", "independent", "task-copy"])
+@pytest.mark.parametrize("kind", ["snapshot", "task-copy"])
 @pytest.mark.parametrize("mode", ["held", "left-behind", "fresh-clone"])
 def test_a_tracked_wal_index_is_dropped_from_every_copy(tmp_path, monkeypatch, mode, kind):
     """A committed index is refilled from the target with every tracked file, and its refusal failed
-    every mutating run's snapshot, every evidence-only investigation's private copy and every
-    ``self_worktree`` child's task copy, while held, left behind, and in a fresh clone where nothing
+    every mutating run's or evidence-only investigation's private copy and every ``self_worktree``
+    child's task copy, while held, left behind, and in a fresh clone where nothing
     holds it. It leaves the copy's baseline as a staged removal does, recorded by its code with no
-    content baseline; the drift check passes it unread, and the copied database opens whole."""
-    from ouroboros.delegate_target_drift import _target_drift_evidence
+    content baseline, and the copied database opens whole."""
     from ouroboros.subagent_worktrees import provision_worktree
 
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
@@ -241,14 +218,12 @@ def test_a_tracked_wal_index_is_dropped_from_every_copy(tmp_path, monkeypatch, m
             handle = provision_worktree(repo_dir=target, task_id="t-self", source_is_system_repo=False,
                                         worktree_root=tmp_path / "snaps", data_dir=tmp_path / "data")
         else:
-            handle = provision_execution_snapshot(target_root=target, task_id="t1", snapshot_id="snapTracked",
-                                                  independent=kind == "independent")
+            handle = provision_execution_snapshot(target_root=target, task_id="t1", snapshot_id="snapTracked")
             assert [row for row in handle.excluded_untracked if row.get("path") == "app.db-shm"] == [
                 {"path": "app.db-shm", "reason": "sqlite_wal_index"}]
-            evidence = _target_drift_evidence(types.SimpleNamespace(
-                target_root=str(target), baseline_sha=handle.baseline_sha, snapshot_id=handle.snapshot_id,
-                authority_source=""))
-            assert (evidence["checked"], evidence["error"], evidence["paths"]) == (True, "", []), evidence
+            listed = subprocess.run(["git", "ls-tree", "-r", "--name-only", handle.baseline_sha], cwd=target,
+                                    check=True, capture_output=True, text=True).stdout.split()
+            assert "app.db-shm" not in listed and {"app.db", "app.db-wal", "app.py"} <= set(listed)
     finally:
         release()
     copy = Path(handle.path)
@@ -288,8 +263,10 @@ def test_an_index_a_child_stages_is_neither_captured_nor_applied_over_the_target
     assert capture["status"] == "ready_with_changes", capture
     assert "✅ Integrated" in out, out
     assert (target / "tracked.txt").read_text(encoding="utf-8") == "one\ntwo\nchild\n"
-    assert manifest["tracked_changed"] == ["tracked.txt"]
-    assert [row["path"] for row in manifest["tracked_excluded"]] == ["app.db-shm"]
+    assert manifest["tracked_changed"] == ["tracked.txt"] and manifest["untracked_included"] == []
+    # The copy's own staged index leaves the result commit by its code, so it never reaches the patch.
+    assert {"path": "app.db-shm", "reason": "sqlite_wal_index"} in manifest["untracked_excluded"]
+    assert manifest["tracked_excluded"] == [] and "app.db-shm" not in Path(capture["patch_artifact"]).read_text()
     assert (after.st_ino, after.st_mtime_ns, after.st_size) == (before.st_ino, before.st_mtime_ns, before.st_size)
     assert subprocess.run(["git", "ls-files", "app.db-shm"], cwd=target, check=True,
                           capture_output=True, text=True).stdout == ""

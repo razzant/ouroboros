@@ -22,7 +22,9 @@ that waits, its ``tails`` (what of its tree still runs, typed and worded as the
 owner's card says it, ``gateway/work_status.py``) -- and the dated authored
 focus of any root that has not settled.  The task result is read per row; the
 direct fragment carries a live turn's facts until that result exists; the open
-delegated runs are one custody read per roster.
+delegated runs are one custody read per roster.  A source a row's read could not
+open is named on that row (``unavailable``): the facts it holds are unknown at
+that read, never absent, and its queue facts stay.
 
 The 40-row cap is presentation only -- the addressability gate consults every
 row -- and the cut is disclosed in the note. A full initial note is followed
@@ -200,8 +202,12 @@ def _pause_fact(pause: Dict[str, Any], fence: Any) -> Dict[str, Any]:
     before the field existed). A newer stated reason is ``unknown`` with that
     reason, never silently money.
     """
+    from ouroboros.work_stop import reason_policy, stop_presentation
     reason = _recorded_reason(pause)
-    kind = {"sleep": "sleep", "owner": "owner_pause", "budget": "budget", "": "budget"}.get(reason, "unknown")
+    view = stop_presentation({"_budget_pause": {**pause, "reason": reason or "budget"}}, {"owner": fence or {}})
+    cause = view["stop"].get("cause")
+    kind = ("sleep" if reason_policy(reason)["cause"] == "wait" else
+            {"pause": "owner_pause", "money": "budget"}.get(cause, "unknown"))
     fact: Dict[str, Any] = {"kind": kind, "state": str(pause["state"])}
     if kind == "sleep":
         fact.update(_sleep_facts(pause.get("sleep")))
@@ -252,40 +258,30 @@ def _waiting_facts(stored: Dict[str, Any], attempt: Any) -> List[Dict[str, Any]]
     return facts
 
 
-_HOLD_CODES = {"continuation_writer_unsettled": "earlier_work_unconfirmed", "saved_work_hold": "saved_on_stop",
-               "owner_restart_hold": "after_restart", "panic_hold": "after_panic",
-               "root_fence_lifted_pending_selection": "awaiting_selection",
-               "root_fence_member_pending_selection": "awaiting_selection"}
-
-
 def _queue_hold_facts(task: Dict[str, Any], stored: Dict[str, Any], waiting: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """What holds a listed root that its own result records do not say: the queue row's typed hold
-    (a Continue waiting for the earlier attempt's writers, work saved by a stop, a Panic, a member awaiting
-    selection) and a Pause over its tree still settling or parked warm, named by its declared author and dated
-    by its press, as the owner's card says it (gateway/work_status.py)."""
-    from ouroboros.gateway.work_status import REASON_TEXT  # D01->D11 is lazy-only
+    """The owner's current stop and words, including tree precedence and release authority."""
+    from ouroboros.work_stop import stop_presentation
 
-    facts: List[Dict[str, Any]] = []
-    hold = task.get("_budget_pause_hold") if isinstance(task.get("_budget_pause_hold"), dict) else {}
-    if hold and not hold.get("selected"):
-        reason = str(hold.get("reason") or "")
-        code = _HOLD_CODES.get(reason) or ("restore_failed" if reason.startswith("restore_refused:") else "held")
-        text = REASON_TEXT.get(code, code)
-        fact = {"kind": "hold", "reason": code, "text": text if isinstance(text, str) else code,
-                "since": _iso_text(hold.get("held_at")) or None}
-        predecessor = ((task.get("metadata") or {}).get("continuation") or {}).get("predecessor_task_id")
-        if code == "earlier_work_unconfirmed" and predecessor:
-            fact["tasks"] = [str(predecessor)]
-        facts.append(fact)
-    fence = stored.get("owner_pause") if isinstance(stored.get("owner_pause"), dict) else {}
-    if fence.get("state") in {"requested", "paused"} and not any(wait.get("kind") == "owner_pause" for wait in waiting):
-        fact = {"kind": "owner_pause", "state": str(fence["state"]),
-                # A settling fence restamps ``paused_at``; the Pause began at its press.
-                "since": _iso_text(fence.get("requested_at")) or _iso_text(fence.get("paused_at")) or None}
-        if by := _pause_by(fence):
+    view = stop_presentation({**stored, **task}, {"owner": stored.get("owner_pause") or {}})
+    stop, entry = view["stop"], view["reason"]
+    if not stop and not view["refusal"] and entry["code"] != "earlier_work_unconfirmed":
+        return []
+    kind = {"pause": "owner_pause", "money": "budget", "authority": "budget"}.get(stop.get("cause"), "hold")
+    prior = next((fact for fact in waiting if fact.get("kind") == kind), {})
+    # The exact marker's wait fact is replaced by this one current decision.
+    waiting[:] = [fact for fact in waiting if fact.get("kind") not in {"owner_pause", "budget", "hold", "unknown"}]
+    fact = {**prior, "kind": kind, "reason": entry["code"], "text": entry["text"],
+            "release": view["release"], "since": (_iso_text(entry.get("since")) or iso_from_epoch(entry.get("since"))
+                                                  or prior.get("since")),
+            **({"refusal": view["refusal"]} if view["refusal"] else {})}
+    if kind == "owner_pause":
+        fact["state"] = str(stop.get("state") or "")
+        if by := _pause_by(stop):
             fact["by"] = by
-        facts.append(fact)
-    return facts
+    predecessor = ((task.get("metadata") or {}).get("continuation") or {}).get("predecessor_task_id")
+    if view["waiting"] and predecessor:
+        fact["tasks"] = [str(predecessor)]
+    return [fact]
 
 
 def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[List[str]] = None,
@@ -326,7 +322,7 @@ def _live_trees(root: pathlib.Path, snapshot: Dict[str, Any], gaps: Optional[Lis
     return trees
 
 
-def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any) -> List[Dict[str, Any]]:
+def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any, root_task_id: str = "") -> List[Dict[str, Any]]:
     """What of a tree still runs, typed and worded as the owner's card says it (``work_status.work_tails``):
     helpers the queue runs that its Pause has not parked, open runs typed by ``work_status.run_tail`` from their
     own task's stored result, and the review work a settled Pause lets finish."""
@@ -346,8 +342,12 @@ def _tree_tails(root: Any, tree: Optional[Dict[str, Any]], fence: Any) -> List[D
         stops = unconfirmed_stops(root, str(entry.task_id), owner) if entry.task_id else frozenset()
         kind, state = ws.run_tail(getattr(entry, "source", ""), owner, stop_unknown=str(entry.run_id) in stops)
         runs.append({"run_id": str(entry.run_id), "kind": kind, "state": state})
-    return ws.work_tails([task for task in tree["running"] if task not in parked], runs,
-                         reviewing=fence.get("state") == "paused" and bool(fence.get("finishing_reviews")))
+    from supervisor.continuation_admission import model_handoffs
+    root_task_id = root_task_id or str(fence.get("root_task_id") or "")
+    tails = ws.work_tails([task for task in tree["running"] if task not in parked], runs,
+                          reviewing=fence.get("state") == "paused" and bool(fence.get("finishing_reviews")))
+    return tails + (ws.model_tails(model_handoffs(root, root_task_id)) if root_task_id else [])
+
 
 
 def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bool = False,
@@ -416,11 +416,15 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
     waiting = [] if settled else _waiting_facts(stored, queue_row.get("attempt") or task.get("_attempt"))
     if not settled:
         waiting += _queue_hold_facts(task, stored, waiting)
+    from ouroboros.work_stop import stop_presentation
+    view = stop_presentation({**stored, **task}, {"owner": stored.get("owner_pause") or {}})
+    if view["stop"] or view["refusal"]:
+        row.update(stop=view["stop"], release=view["release"], refusal=view["refusal"])
     if waiting:
         row["waiting"] = waiting
         # A root that waits also says what of its tree still runs: a review its Pause lets finish, a run nobody can
         # confirm. A running root's own status already says it runs (its helpers' churn stays out of every roster).
-        tails = _tree_tails(canonical_root, (trees or {}).get(task_id), stored.get("owner_pause"))
+        tails = _tree_tails(canonical_root, (trees or {}).get(task_id), stored.get("owner_pause"), task_id)
         if tails:
             row["tails"] = tails
     return row
@@ -429,11 +433,9 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
 def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Every host-listed active independent root, compact (id, title, room, status).
 
-    Pooled rows come from the queue snapshot (running, then pending); a
-    subagent -- a row with a parent or the subagent role -- is not an
-    independent root.  ``incomplete`` is the ONE aggregate fact: the snapshot
-    is missing, unreadable or stale, the direct-roots fragment could not
-    read every actor, or delegated custody was unreadable.  Never raises.
+    Pooled rows come from the queue snapshot (running, then pending), inline moved authors from the Presence census.
+    Subagents (a parent or the subagent role) are not independent roots. ``incomplete`` combines missing/unreadable/stale
+    snapshots, incomplete direct/Presence observations, unreadable bindings and delegated custody. Never raises.
     """
     root = pathlib.Path(drive_root)
     snapshot = _load_queue_snapshot(root)
@@ -467,13 +469,43 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
         if task_id and task_id not in seen:
             seen.add(task_id)
             rows.append(_compact_root(task_id, row, status="running", direct=True, canonical_root=root, trees=trees))
+    from ouroboros.conversation_lease import resolved_presence_turns
+
+    presence = resolved_presence_turns(root)
+    rows += _moved_presence_roots(root, presence, seen, trees, gaps)
     return {
         "roots": rows,
+        "presence_turns": presence["roots"],
         "incomplete": bool(fragment.get("incomplete")) or not bool(observation.get("fresh"))
         or not bool(direct_observation.get("fresh")) or bool(gaps) or any(row.get("unavailable") for row in rows),
         "queue_snapshot": observation,
         "direct_roots": direct_observation,
     }
+
+
+def _moved_presence_roots(root: pathlib.Path, presence: Dict[str, Any], seen: set, trees: Dict[str, Any],
+                          gaps: List[str]) -> List[Dict[str, Any]]:
+    """Live inline Presence authors a move bound to a Project, wherever they run (``resolved_presence_turns``):
+    Project works addressed like any root. An unmoved turn stays its place's, never a roster row."""
+    from ouroboros.projects_registry import project_id_for_task
+
+    if not presence["complete"]:
+        gaps.append("presence_observation_incomplete")
+    rows = []
+    for fact in presence["roots"]:
+        task_id = fact["task_id"]
+        if task_id in seen or fact["state"] != "running":
+            continue
+        try:
+            moved = project_id_for_task(root, task_id, strict=True)
+        except Exception:
+            gaps.append("presence_binding_unreadable")
+            continue
+        if moved:
+            seen.add(task_id)
+            rows.append({**_compact_root(task_id, fact["row"], status="running", canonical_root=root, trees=trees),
+                         "inline_presence": True})
+    return rows
 
 
 def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, Any]]:
@@ -482,7 +514,9 @@ def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, 
     Pause has not parked, external runs, review work, runs nobody can confirm). Facts only, never a tell_task
     target (``independent_roots`` stays the address book). Never raises; an unreadable source yields no rows (the
     roster discloses freshness)."""
+    from ouroboros.projects_registry import project_binding_for_task
     from ouroboros.task_results import load_task_result
+    from ouroboros.work_stop import stop_presentation
 
     root = pathlib.Path(drive_root)
     try:
@@ -499,10 +533,19 @@ def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, 
             stored = load_task_result(root, root_id, strict=True) or {}
         except Exception as exc:
             stored, unavailable = {}, {"task_result": type(exc).__name__}
+        try:  # a moved root's tree lives in its Project, whatever room its own row still names
+            binding = project_binding_for_task(root, root_id, strict=True) or {}
+        except Exception as exc:
+            binding, unavailable = {}, {**unavailable, "project": type(exc).__name__}
+        view = stop_presentation({**stored, "id": root_id}, {"owner": stored.get("owner_pause") or {}})
         rows.append({"work_id": root_id, "title": str(stored.get("suggested_name") or stored.get("title") or ""),
-                     "room": {"chat_id": stored.get("chat_id"), "project_id": str(stored.get("project_id") or "")},
+                     "room": {"chat_id": binding.get("project_chat_id") or stored.get("chat_id"),
+                              "project_id": str(binding.get("project_id") or stored.get("project_id") or "")},
+                     **({"waiting": waiting} if (waiting := _queue_hold_facts({"id": root_id}, stored, [])) else {}),
+                     **({"stop": view["stop"], "release": view["release"], "refusal": view["refusal"]}
+                        if view["stop"] or view["refusal"] else {}),
                      "root_status": str(stored.get("status") or "unknown"), "helpers_running": len(tree["running"]),
-                     "helpers_waiting": tree["pending"], "tails": _tree_tails(root, tree, stored.get("owner_pause")),
+                     "helpers_waiting": tree["pending"], "tails": _tree_tails(root, tree, stored.get("owner_pause"), root_id),
                      **({"unavailable": unavailable} if unavailable else {})})
     return rows
 
@@ -538,9 +581,10 @@ def independent_message_target(
     Presence stays outside the owner-addressable roster. Its retained RUNNING
     record admits a peer write, not a claim that another process is alive or has
     read it; the shared execution observation travels with the write receipt.
+    A moved author is listed (``_moved_presence_roots``) yet answers as this same mailbox.
     """
     listed = host_listed_independent_root(drive_root, task_id)
-    if listed is not None:
+    if listed is not None and not listed.get("inline_presence"):
         return listed
     from ouroboros.dialogue_provenance import presence_record_binding, presence_target_record
 
@@ -560,9 +604,11 @@ def independent_message_target(
 
 
 def _facts_fingerprint(row: Dict[str, Any]) -> str:
-    """Recorded names, start, origin, waits and tails: absolute values, so a heartbeat never churns them."""
+    """Recorded names, start, origin, waits and tails, and the sources this read could not open: absolute
+    values, so a heartbeat never churns them while a gap that moves to another row does."""
     facts = {key: row[key] for key in ("suggested_name", "started_at", "origin", "waiting", "tails", "open_questions",
-                                     "project_admission_hold", "recorded_status", "project_name") if row.get(key)}
+                                     "project_admission_hold", "recorded_status", "project_name", "unavailable")
+             if row.get(key)}
     return json.dumps(facts, ensure_ascii=False, sort_keys=True, separators=(",", ":")) if facts else ""
 
 
@@ -581,8 +627,11 @@ def roster_fingerprint(roster: Dict[str, Any], *, exclude: str = "") -> tuple:
 
 _WAIT_LABELS = {"owner": "owner answer", "review": "review", "model": "model access", "budget": "budget pause",
                 "sleep": "sleep", "owner_pause": "owner Pause", "hold": "held", "unknown": "unknown wait"}
-_WAIT_DETAILS = ("quiz_id", "reason", "text", "by", "role", "mode", "retained", "state", "settlement", "rail", "until",
+_WAIT_DETAILS = ("quiz_id", "reason", "text", "by", "release", "role", "mode", "retained", "state", "settlement", "rail", "until",
                  "reset_at", "wake_at", "senders", "tasks", "runs", "services", "any_mail")
+# What a source this read could not open (``row["unavailable"]``) leaves unknown on its row, never absent.
+_UNAVAILABLE_MEANS = {"task_result": "its waits, open questions and settlement are unknown, not ended",
+                      "project": "its project binding is unknown"}
 
 
 def _detail_text(value: Any) -> str:
@@ -620,13 +669,18 @@ def render_roster_note(roster: Dict[str, Any], *, exclude: str = "") -> str:
         room = f"project={row['project_id']}" if row["project_id"] else f"chat={row.get('chat_id')}"
         suggested = str(row.get("suggested_name") or "")
         title = row["title"] or (f"suggested name {json.dumps(suggested, ensure_ascii=False)}" if suggested else "(untitled)")
-        direct = " · live direct conversation" if row.get("direct_chat") else ""
+        direct = (" · live direct conversation" if row.get("direct_chat")
+                  else " · live place conversation turn" if row.get("inline_presence") else "")
         lines.append(f"- {row['task_id']} · {title} · {room} · {row['status']}{direct}")
         facts = [f"started_at={row['started_at']}"] if row.get("started_at") else []
         if row.get("origin"):
             facts.append("origin=" + json.dumps(row["origin"], ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         if facts:
             lines.append("  " + " · ".join(facts))
+        if row.get("unavailable"):
+            lines.append("  unavailable at this read: " + "; ".join(
+                f"{source}={error} ({_UNAVAILABLE_MEANS.get(source, 'its facts are unknown')})"
+                for source, error in sorted(row["unavailable"].items())))
         if row.get("waiting"):
             lines.append("  waiting (recorded; the queue status above is unchanged): "
                          + "; ".join(_render_wait(wait) for wait in row["waiting"]))

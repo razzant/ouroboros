@@ -15,7 +15,6 @@ import sys
 import tempfile
 import threading
 import time
-import zlib
 
 _PYTEST_DATA_DIR = None
 _PYTEST_ROOT = None
@@ -114,14 +113,22 @@ def _provider_catalog_state_returns():
     """Hand `LLMClient`'s provider-catalog class state back as the test found it.
 
     A class not yet imported when the test started is found pristine; a test
-    that imports it and fetches gives the empty caches back.
+    that imports it and fetches gives the empty caches back, and the catalogue
+    a clean fetch recorded at the worker-shared data root, which any later test
+    would adopt, returns to what the test found.
     """
     cls = _provider_catalog_class()
     saved = _provider_catalog_snapshot(cls) if cls is not None else None
+    record = _PYTEST_DATA_DIR / "state" / "openrouter_models.json" if _PYTEST_DATA_DIR is not None else None
+    recorded = record.read_bytes() if record is not None and record.is_file() else None
     yield
     cls = _provider_catalog_class()
     if cls is not None:
         _restore_provider_catalog(cls, saved if saved is not None else _PROVIDER_CATALOG_PRISTINE)
+    if record is not None and recorded is None:
+        record.unlink(missing_ok=True)
+    elif record is not None and (not record.is_file() or record.read_bytes() != recorded):
+        record.write_bytes(recorded)
 
 
 @pytest.fixture
@@ -135,6 +142,23 @@ def provider_catalog_offline(monkeypatch):
         yield saved
 
 
+@pytest.fixture(scope="session")
+def ui_candidate_checkout(tmp_path_factory):
+    """One origin-proof copy of this checkout for the session's host UI cases.
+
+    `direct_server_with_data` enters `case_checkout` over it, so each case keeps its own custody,
+    data, ports and processes; copying, the final source check and proven-teardown retirement
+    stay `candidate_checkout`'s own (tests/candidate_checkout.py).
+    """
+    if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
+        pytest.skip("set OUROBOROS_RUN_UI_SMOKE=1 to run browser UI smoke")
+    from tests.candidate_checkout import candidate_checkout
+
+    with candidate_checkout(pathlib.Path(__file__).resolve().parents[1],
+                            tmp_path_factory.mktemp("ui-candidate") / "repo", origin_proof=True) as owner:
+        yield owner
+
+
 @pytest.fixture
 def preflight_timeout_diagnostics(request, monkeypatch, tmp_path):
     """Observe the Windows nested-pytest timeout without changing its gate."""
@@ -142,6 +166,7 @@ def preflight_timeout_diagnostics(request, monkeypatch, tmp_path):
     import json
     from ouroboros import preflight_runner
     from ouroboros.platform_layer import collect_descendant_pids
+    from tests import stack_samples
 
     from ouroboros.test_evidence import diagnostic_directory
     trace_dir = diagnostic_directory(tmp_path / "preflight-diagnostics", "preflight-" + request.node.name)
@@ -154,9 +179,13 @@ def preflight_timeout_diagnostics(request, monkeypatch, tmp_path):
         def probe(temp_root):
             module = original_probe(temp_root)
             path = preflight_runner._probe_dir(temp_root) / (module + ".py")
+            # GIL-held stack samples (tests/stack_samples.py says what they cannot see), each
+            # process's in its own file beside its event log: one writer per file, whole lines.
+            shutil.copyfile(stack_samples.__file__, path.with_name(module + "_samples.py"))
             with path.open("a", encoding="utf-8") as stream:
                 stream.write(f'''
-import atexit, faulthandler, json, sys, time
+import atexit, json, sys, time
+from {module}_samples import start as _start_samples
 _trace = open({str(trace_dir)!r} + "/" + str(os.getpid()) + ".log", "a", encoding="utf-8")
 def _trace_event(event, **facts):
     _trace.write(json.dumps(dict(event=event, pid=os.getpid(), ppid=os.getppid(),
@@ -164,10 +193,12 @@ def _trace_event(event, **facts):
         monotonic=time.monotonic(), **facts)) + "\\n")
     _trace.flush()
 _trace_event("probe_import", stdout_fd=sys.stdout.fileno(), stderr_fd=sys.stderr.fileno())
-faulthandler.dump_traceback_later({dump_after!r}, repeat=True, file=_trace)
+_stop_samples = _start_samples({str(trace_dir)!r} + "/" + str(os.getpid()) + ".samples", {dump_after!r})
 def _trace_exit():
-    _trace_event("atexit")
-    faulthandler.cancel_dump_traceback_later()
+    try:
+        _trace_event("atexit")
+    finally:  # A failed event write still stops and joins the sampler.
+        _stop_samples()
 atexit.register(_trace_exit)
 def pytest_sessionstart(session):
     _trace_event("sessionstart")
@@ -208,7 +239,7 @@ def pytest_testnodedown(node, error):
         install()
     yield install
     if trace_dir.exists():
-        for path in sorted(trace_dir.glob("*.log")):
+        for path in sorted([*trace_dir.glob("*.log"), *trace_dir.glob("*.samples")]):
             print(f"\npreflight diagnostic {path.name}:\n{path.read_text(encoding='utf-8')}")
 
 _ORIGINAL_POPEN_INIT = subprocess.Popen.__init__
@@ -476,11 +507,13 @@ def _pin_lane_groups(items, shards: int) -> None:
     """
     if shards <= 0:
         return
+    from tests.ci_verdicts import serial_group
+
     for item in items:
         path = item.nodeid.split("::", 1)[0]
         serial = item.get_closest_marker("serial") is not None
         # Serial: by FILE (the isolation unit). Others: the scope `--dist loadscope` uses (class when present).
-        group = f"serial{zlib.crc32(path.encode('utf-8')) % shards}" if serial else item.nodeid.rsplit("::", 1)[0]
+        group = serial_group(path, shards) if serial else item.nodeid.rsplit("::", 1)[0]
         item.add_marker(pytest.mark.xdist_group(group))
     items.sort(key=lambda item: item.get_closest_marker("serial") is None)
 
@@ -654,10 +687,19 @@ def pytest_runtest_protocol(item, nextitem):  # noqa: ARG001
         loops.append(asyncio.new_event_loop())
         loops.append(asyncio.new_event_loop())
         item.stash[_PHASE_EVENT_LOOPS] = loops
+        if _SAFE_TEMP_ROOT:
+            item.stash[_RETENTION_BEFORE_ITEM] = _basetemp_witness(item)
         yield
     finally:
+        # The call and teardown hooks close their loops and fail that phase if a close raises;
+        # this pass only guarantees the close. A loop whose close already raised is left half
+        # closed (on Windows a proactor without its self-pipe), and raising again here, after
+        # the reports, would end the whole session as an INTERNALERROR.
         for loop in loops:
-            loop.close()
+            try:
+                loop.close()
+            except Exception:  # noqa: BLE001
+                pass
         asyncio.set_event_loop(None)
         if _PHASE_EVENT_LOOPS in item.stash:
             del item.stash[_PHASE_EVENT_LOOPS]
@@ -712,11 +754,12 @@ def _launcher_no_real_network(request):
 def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
     so do a returning stop's named queue and the launch/schedule process memory."""
-    from ouroboros import delegate_recovery, server_control
+    from ouroboros import delegate_recovery, launcher_bootstrap, server_control
     from supervisor import queue, schedule_occurrence, worker_assignment
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    monkeypatch.setattr(launcher_bootstrap, "source_handoff", launcher_bootstrap._SourceHandoff())
     monkeypatch.setattr(delegate_recovery, "_restart_parent", None)
     monkeypatch.setattr(queue, "RETURNS_NAMED", {})
     monkeypatch.setattr(schedule_occurrence, "_DEFERRED", {})
@@ -726,15 +769,19 @@ def _isolate_restart_generation(monkeypatch):
 @pytest.fixture(autouse=True)
 def _reset_custody_memo_between_tests():
     """Isolate the process-local custody caches: active custody is keyed only by run ID and
-    the delegated-activity memo by path. Tests reuse both identities: no first-wins binding
-    or shown cursor may leak."""
-    from ouroboros import delegate_activity, delegate_custody
+    the delegated-activity memo by path; owed local custody writes (``custody_owed``) belong
+    to the test that owed them. Tests reuse these identities: no first-wins binding, shown
+    cursor or owed write may leak into another test's quiescence."""
+    from ouroboros import custody_owed, delegate_activity, delegate_custody
 
     delegate_custody._CUSTODY.clear()
     delegate_activity.reset_process_memo()
+    custody_owed._FACTS.clear()
+    custody_owed._wake, custody_owed._wake_sent = None, False
     yield
     delegate_custody._CUSTODY.clear()
     delegate_activity.reset_process_memo()
+    custody_owed._FACTS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -784,6 +831,38 @@ def _restore_the_live_log_sink_between_tests(monkeypatch):
     from ouroboros import utils
 
     monkeypatch.setattr(utils, "_log_sink", None)
+
+
+_HOST_LAUNCHING_MARKERS = ("ui_browser", "browser", "ui_browser_docker")
+
+
+@pytest.fixture(autouse=True)
+def _act_as_the_installs_a_browser_or_e2e_test_launched(request, monkeypatch, tmp_path_factory):
+    """Browser and system-E2E tests boot real hosts on roots under this session's temporary tree, then seed
+    and read those hosts' stores from this process. A root a host booted carries its own install identity,
+    which every other install refuses (install_identity.py, the copied-folder rule), so here the test acts
+    as the install it launched, as ``install_identity.acting_as`` lets tooling do: only for a root that
+    already carries an identity, and never minting one. The rule's own tests run in the default lane."""
+    node = request.node
+    path = pathlib.Path(node.path)
+    if not (any(node.get_closest_marker(name) for name in _HOST_LAUNCHING_MARKERS)
+            or "system_e2e" in path.parts or path.name == "test_e2e_cancellation_scenarios.py"):
+        yield
+        return
+    from ouroboros import install_identity
+
+    base = pathlib.Path(tmp_path_factory.getbasetemp()).resolve()
+    ownership = install_identity._ownership
+
+    def as_its_launcher(target, *, initialize=True):
+        root = install_identity.layout_root(target)
+        if base in root.parents and (root / install_identity.IDENTITY_PATH).is_file():
+            with install_identity.acting_as(root):
+                return ownership(target, initialize=False)
+        return ownership(target, initialize=initialize)
+
+    monkeypatch.setattr(install_identity, "_ownership", as_its_launcher)
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -1250,13 +1329,18 @@ def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001
     """
     teardown_loop = item.stash[_PHASE_EVENT_LOOPS][1]
     asyncio.set_event_loop(teardown_loop)
+    tmp = (getattr(item, "funcargs", None) or {}).get("tmp_path")
     try:
         yield  # fixture finalizers and teardown run here
     finally:
         teardown_loop.close()
         asyncio.set_event_loop(None)
+        from tests._store_journal_shared import give_back_converted_journals
+
+        give_back_converted_journals()  # every monkeypatch undone: what a forced journal converted reverts
         _fail_if_the_password_resolver_leaked(item)
         _fail_if_a_thread_leaked(item)
+        _fail_if_retention_was_left(item, tmp)
 
 
 _PRISTINE_PASSWORD_RESOLVER = None
@@ -1341,6 +1425,45 @@ def _fail_if_a_thread_leaked(item):
                 f"was torn down: {', '.join(leaked)} — stop/join it at its owner (a fixture "
                 f"finalizer or the test's own missing stop), do not widen the tolerance of the "
                 f"test it pollutes", pytrace=False)
+
+
+# ---- retention hygiene: name the test whose marker keeps the whole run (#1908) ----
+#
+# Under an owner that releases its scratch (scripts/safe_test.py, run_tests.py, the native
+# preflight) one retention marker anywhere beneath its root keeps all of it: 7-11 GB per full
+# battery. A test that manufactures one (an injected fault, a stubbed reap) retires it; one that
+# forgot kept every green battery's root and nothing named it. retain_tree touches the scratch
+# declaration above the tree it marks, so one stat clears a test under an unmoved declaration.
+_RETENTION_BEFORE_ITEM = pytest.StashKey()
+_BASETEMP_DECLARATION: list = []  # this process's, looked up once
+
+
+def _basetemp_witness(item):
+    try:
+        if not _BASETEMP_DECLARATION:
+            from ouroboros.test_environment import SCRATCH_MARKER
+            base = pathlib.Path(item.config._tmp_path_factory.getbasetemp())
+            _BASETEMP_DECLARATION.append(next((path / SCRATCH_MARKER for path in (base, *base.parents)
+                                               if (path / SCRATCH_MARKER).is_file()), None))
+        return _BASETEMP_DECLARATION[0].stat().st_mtime_ns
+    except (AttributeError, OSError):  # no basetemp or declaration: the tmp_path top check remains
+        return None
+
+
+def _fail_if_retention_was_left(item, tmp):
+    from ouroboros.test_environment import RETENTION_MARKER
+    from tests._shared import retention_left_in
+
+    if _RETENTION_BEFORE_ITEM not in item.stash or not isinstance(tmp, pathlib.Path):
+        return
+    moved = _basetemp_witness(item) != item.stash[_RETENTION_BEFORE_ITEM]
+    left = retention_left_in(tmp) if moved or (tmp / RETENTION_MARKER).exists() else ""
+    if left:
+        pytest.fail(f"{item.nodeid} left retention in its tmp_path, which keeps the whole run root "
+                    f"{_SAFE_TEMP_ROOT} with every test's scratch: {left} — retire what this test "
+                    "manufactured (an injected fault, a stubbed reap) with "
+                    "tests._shared.retire_synthetic_retention; a real one means its teardown was never proven",
+                    pytrace=False)
 
 
 @pytest.hookimpl(optionalhook=True, trylast=True)

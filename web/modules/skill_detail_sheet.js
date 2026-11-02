@@ -5,10 +5,11 @@
 // so while it does. Close, Escape and the backdrop return focus to the opener.
 import { bindDialogFocus } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-import { mountChatMarkdown } from './chat_markdown.js';
+import { mountChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
+import { mountConnectorPlaces } from './connector_places.js';
 import { reviewSentence } from './skill_card_renderer.js';
 import {
-    catalogWhoHtml, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
+    catalogWhoHtml, connectsServices, displayAddress, externalLinkHtml, officialMarkHtml, permissionWords, popularityText,
     relativeAge, repoLabel, routeExternalLink, versionText,
 } from './skill_presentation.js';
 
@@ -92,6 +93,7 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
     const dialog = document.createElement('dialog');
     dialog.className = 'document-reader skills-detail-sheet';
     dialog.setAttribute('aria-labelledby', 'skills-sheet-title');
+    dialog.setAttribute('aria-modal', 'true');
     const popularity = item.source_id === 'builtin' ? '' : popularityText(item);
     dialog.innerHTML = `<div class="document-reader-panel">
         <div class="document-reader-head">
@@ -102,9 +104,11 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
             <div class="document-reader-actions" data-sheet-actions>${actionsHtml}</div>
             <button type="button" class="btn btn-default document-reader-close" data-sheet-close>Close</button>
         </div>
-        <div class="document-reader-body skills-sheet-body is-quiet-focus" tabindex="-1" data-sheet-body></div>
+        <div class="document-reader-body skills-sheet-body is-quiet-focus" tabindex="-1" data-sheet-body><section class="skills-sheet-section" data-sheet-places hidden></section><div class="skills-sheet-content" data-sheet-content></div></div>
     </div>`;
     const body = dialog.querySelector('[data-sheet-body]');
+    const content = dialog.querySelector('[data-sheet-content]');
+    let disposePlaces = null;
     let closed = false;
     let disposeFocus = null;
     let controller = null;
@@ -112,6 +116,8 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         if (closed) return;
         closed = true;
         controller?.abort();
+        disposePlaces?.();
+        destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
         // Close the modal first: WebKit's own close moves focus to what was focused before it opened
         // (a pressed button is not focused there), and the restore below then returns it to the opener.
         if (dialog.open && typeof dialog.close === 'function') dialog.close();
@@ -122,7 +128,8 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         const about = String(detail?.about || item.description || '');
         const aboutError = detail && !detail.about && detail.about_error
             ? note(`Its SKILL.md couldn’t be read (${escapeHtml(detail.about_error)}); this is the catalog’s description.`) : '';
-        body.innerHTML = [
+        destroyChatMarkdown(content.querySelector('.skills-sheet-about'));
+        content.innerHTML = [
             reading ? `<p class="skills-sheet-status" role="status">Reading ${escapeHtml(item.name)} from ${escapeHtml(item.source_name || 'its source')}…</p>` : '',
             error ? `<div class="skills-sheet-status is-error" role="alert"><p>Couldn’t read the full description from ${escapeHtml(item.source_name || 'its source')}: ${escapeHtml(error)}.</p><button type="button" class="btn btn-default btn-sm" data-sheet-retry>Try again</button></div>` : '',
             `<section class="skills-sheet-section"><h3>About</h3><div class="skills-sheet-about" data-i18n-authored></div>${aboutError}</section>`,
@@ -154,12 +161,17 @@ export function openSkillDetailSheet({ item, installed = null, source = null, ac
         const action = event.target.closest('[data-sheet-action]');
         if (action) onAction(action.dataset.sheetAction, action);
     });
+    dialog.addEventListener('close', close);
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(); });
     // Opened by a pointer, the reading region shows its focus ring from the first key, not before.
     dialog.addEventListener('keydown', () => body.classList.remove('is-quiet-focus'), { once: true });
     document.body.appendChild(dialog);
     if (typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', '');
     disposeFocus = bindDialogFocus(dialog, { initialFocus: body, returnFocus, onEscape: close });
+    if (installed && connectsServices(installed).length) {
+        const places = dialog.querySelector('[data-sheet-places]'); places.hidden = false;
+        disposePlaces = mountConnectorPlaces(places, installed.name, { leave: close, returnFocus });
+    }
     read();
     return {
         close,

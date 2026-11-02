@@ -18,6 +18,8 @@ def body(tmp_path, monkeypatch):
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     return serving, data
 
 

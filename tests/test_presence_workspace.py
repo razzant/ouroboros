@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.presence_admission import PresenceAdmissionError, admit_presence_turn
-from ouroboros.presence_capabilities import (
+from ouroboros.presence_admission import admit_presence_turn
+from tests.frozen_presence_capabilities import (
     PresenceState,
     PresenceStateError,
     load_presence_state,
@@ -42,6 +42,7 @@ def installed(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "STATE_PATH", data / "state" / "state.json")
     monkeypatch.setattr(queue, "DRIVE_ROOT", data)
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("MCP_ENABLED", "false")
     skill_dir = data / "skills" / "external" / "community-helper"
     skill_dir.mkdir(parents=True)
@@ -64,14 +65,14 @@ def installed(tmp_path, monkeypatch):
     save_enabled(data, skill.name, True)
     save_review_state(data, skill.name, SkillReviewState(status="pass", content_hash=skill.content_hash))
     ctx = ToolContext(repo_dir=repo, drive_root=data)
-    for name in tools:
-        _configure_presence(ctx, "select", behavior_skill=skill.name, request_id=name,
-                            target_type="tool", target_name=name)
-    _configure_presence(ctx, "select", behavior_skill=skill.name, request_id="files",
-                        target_type="resource", root="active_workspace",
-                        operations=["read", "write", "shell"])
-    _configure_presence(ctx, "workspace", behavior_skill=skill.name, workspace_root=str(workspace))
     binding = _binding(data)
+    from ouroboros.places import load_places, edit_place
+    place = load_places(data)[0]
+    edit_place(data, place.place_id, "set_working_folder", author="owner", working_folder=str(workspace))
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "full")
     return SimpleNamespace(repo=repo, data=data, workspace=workspace, ctx=ctx,
                            skill=skill, binding=binding, skill_dir=skill_dir)
 
@@ -98,7 +99,7 @@ def test_legacy_state_shape_and_fingerprint_stay_identical(tmp_path):
         "schema_version": 1, "selections": [],
         "runtime_overrides": {"model_slot": None, "inline_max_rounds": None},
     }
-    from ouroboros.presence_capabilities import _domain_sha256
+    from tests.frozen_presence_capabilities import _domain_sha256
 
     expected = _domain_sha256("ouroboros.presence.state.v1", payload)
     assert presence_state_fingerprint(PresenceState()) == expected
@@ -116,51 +117,27 @@ def test_legacy_state_shape_and_fingerprint_stay_identical(tmp_path):
         PresenceState(workspace_root="relative/folder")
 
 
-def test_owner_changes_preserve_selection_and_admitted_snapshot(installed):
+def test_owner_changes_preserve_admitted_snapshot(installed):
     original = _admit(installed)
-    for action, params in (
-        ("runtime", {"model_slot": "light", "inline_max_rounds": 6}),
-        ("select", {"request_id": "read_file", "target_type": "tool", "target_name": "read_file"}),
-        ("runtime", {"reset_runtime": True}),
-    ):
-        _configure_presence(installed.ctx, action, behavior_skill=installed.skill.name, **params)
-        assert load_presence_state(installed.data, installed.skill.name).workspace_root == str(installed.workspace)
-    inspected = json.loads(_configure_presence(installed.ctx, "inspect", behavior_skill=installed.skill.name))
-    assert inspected["workspace_root"] == str(installed.workspace)
-    profile_path = installed.skill_dir / "SKILL.md"
-    profile_path.write_text(profile_path.read_text().replace(
-        "Work in the selected folder.", "Read and update the selected folder."), encoding="utf-8")
-    revised = load_skill(installed.skill_dir, installed.data)
-    save_review_state(installed.data, revised.name, SkillReviewState(status="pass", content_hash=revised.content_hash))
-    assert _admit(installed).workspace_root == original.workspace_root
     other = installed.workspace.with_name("other")
     other.mkdir()
-    _configure_presence(installed.ctx, "workspace", behavior_skill=installed.skill.name, workspace_root=str(other))
+    _configure_presence(installed.ctx, "set_working_folder", place_id=original.place.place_id, working_folder=str(other))
     updated = _admit(installed)
     assert updated.workspace_root == str(other)
-    assert updated.state_fingerprint != original.state_fingerprint
     assert original.workspace_root == str(installed.workspace)
     with pytest.raises(FrozenInstanceError):
         original.workspace_root = str(other)
     task = _build_task(original, _event(), drive_root=installed.data, staged_files=())
     assert task["task_contract"]["workspace"] == {"root": str(installed.workspace), "mode": "external"}
-    _configure_presence(installed.ctx, "workspace", behavior_skill=installed.skill.name, workspace_root="")
-    legacy_task = _build_task(_admit(installed), _event(), drive_root=installed.data, staged_files=())
-    assert "workspace_root" not in legacy_task and "memory_mode" not in legacy_task
+    _configure_presence(installed.ctx, "set_working_folder", place_id=original.place.place_id, working_folder="")
+    cleared = _build_task(_admit(installed), _event(), drive_root=installed.data, staged_files=())
+    assert "workspace_root" not in cleared and "memory_mode" not in cleared
 
 
-def test_invalid_or_disappeared_folder_never_falls_back_to_system_repo(installed):
-    from ouroboros.workspace_admission import WorkspaceRootError
-
-    for invalid in (installed.repo, installed.data, installed.workspace / "absent"):
-        with pytest.raises(WorkspaceRootError):
-            _configure_presence(installed.ctx, "workspace", behavior_skill=installed.skill.name,
-                                workspace_root=str(invalid))
-        assert load_presence_state(installed.data, installed.skill.name).workspace_root == str(installed.workspace)
+def test_folder_remains_an_address_even_if_temporarily_unavailable(installed):
+    original = _admit(installed)
     installed.workspace.rmdir()
-    with pytest.raises(PresenceAdmissionError, match="not a directory") as failure:
-        _admit(installed)
-    assert failure.value.code == "presence_workspace_unusable"
+    assert _admit(installed).workspace_root == original.workspace_root
 
 
 def test_admitted_registry_reads_writes_and_runs_script_in_external_folder(installed):
@@ -191,7 +168,7 @@ def test_admitted_registry_reads_writes_and_runs_script_in_external_folder(insta
     assert hashlib.sha256(core.read_bytes()).hexdigest() == before
 
 
-def test_promotion_and_scheduled_followup_keep_admitted_folder_and_shared_memory(installed, monkeypatch):
+def test_focus_promotion_uses_ordinary_scope_and_followup_keeps_admitted_folder(installed, monkeypatch):
     from ouroboros.tools.control import _build_child_subagent_contract, _start_task
     from ouroboros.tools.followup import _handle_schedule_followup
     from supervisor import queue, workers
@@ -206,8 +183,8 @@ def test_promotion_and_scheduled_followup_keep_admitted_folder_and_shared_memory
     _confirm_promote(monkeypatch)
     monkeypatch.setattr(workers, "DRIVE_ROOT", installed.data)
     monkeypatch.setattr(workers, "REPO_DIR", installed.repo)
-    result = _start_task(ctx, "Finish the report", title="Report finish", workspace_root="/unselected",
-                                   project_name="Unselected")
+    result = _start_task(ctx, "Finish the report", title="Report finish", workspace_root=str(installed.workspace),
+                                   project_name="Selected")
     assert result.startswith("OK: task"), result
     event = ctx.pending_events[0]
     enqueued = []
@@ -219,9 +196,9 @@ def test_promotion_and_scheduled_followup_keep_admitted_folder_and_shared_memory
     assert outcome["status"] == "scheduled", outcome
     promoted = enqueued[0]
     assert promoted["workspace_root"] == str(installed.workspace)
-    assert promoted["memory_mode"] == "shared"
-    assert not promoted.get("drive_root") and not promoted.get("project_id")
-    assert resolve_project_id(promoted) == ""
+    assert promoted["memory_mode"] == "forked"
+    assert promoted.get("drive_root") and promoted["project_id"] == "selected"
+    assert resolve_project_id(promoted) == "selected"
 
     queue.init(installed.data)
     queue.init_queue_refs([], {}, {"value": 0})
@@ -229,7 +206,7 @@ def test_promotion_and_scheduled_followup_keep_admitted_folder_and_shared_memory
         result = _handle_schedule_followup(ctx, objective="Revisit the report", relation="related", **params)
         assert result.startswith("FOLLOWUP_SCHEDULED"), result
     # A future configuration cannot retarget work already admitted/scheduled.
-    _configure_presence(installed.ctx, "workspace", behavior_skill=installed.skill.name, workspace_root="")
+    _configure_presence(installed.ctx, "set_working_folder", place_id=_admit(installed).place.place_id, working_folder="")
     for record in queue.list_scheduled_tasks(installed.data)["tasks"]:
         assert record["followup_relation"]["kind"] == "related"
         assert record["followup_relation"]["billing_group"] == {
@@ -245,8 +222,8 @@ def test_promotion_and_scheduled_followup_keep_admitted_folder_and_shared_memory
         "workspace_root": str(installed.workspace), "workspace_mode": "external",
     })
     assert child["workspace"] == task["task_contract"]["workspace"]
-    assert child["capability_ceiling"] == task["task_contract"]["capability_ceiling"]
-    assert not (installed.data / "state" / "headless_tasks").exists()
+    assert "capability_ceiling" not in child and "capability_ceiling" not in task["task_contract"]
+    assert (installed.data / "state" / "headless_tasks").exists()
 
 
 def test_explicit_project_choice_still_wins_over_presence_folder(installed):
@@ -259,10 +236,10 @@ def test_explicit_project_choice_still_wins_over_presence_folder(installed):
 def test_promotion_with_an_unusable_presence_folder_returns_the_typed_repair_and_sends_nothing(
     installed, monkeypatch,
 ):
-    """The Presence branch of workspace admission: the admitted folder vanished
-    before the promote was admitted, so the typed refusal names the Presence
-    profile as the place to fix it (the cause rides `detail` to the model) and
-    admission sends no chat text — nothing fans out into a public conversation."""
+    """A requested folder vanishes before ordinary promotion admission.
+
+    The typed repair names that request; admission still sends no public text.
+    """
     import shutil
 
     from ouroboros.tools.control import _start_task
@@ -274,7 +251,7 @@ def test_promotion_with_an_unusable_presence_folder_returns_the_typed_repair_and
     _confirm_promote(monkeypatch)
     monkeypatch.setattr(workers, "DRIVE_ROOT", installed.data)
     monkeypatch.setattr(workers, "REPO_DIR", installed.repo)
-    result = _start_task(ctx, "Finish the report", title="Report finish")
+    result = _start_task(ctx, "Finish the report", title="Report finish", workspace_root=str(installed.workspace))
     assert result.startswith("OK: task"), result
     event = ctx.pending_events[0]
     shutil.rmtree(installed.workspace)  # the admitted folder disappears before admission
@@ -288,7 +265,7 @@ def test_promotion_with_an_unusable_presence_folder_returns_the_typed_repair_and
     ))
 
     assert (outcome["status"], outcome["reason"]) == ("needs_manual_target", "workspace_unusable")
-    assert outcome["detail"].startswith("The folder configured in the Presence profile is unusable: ")
+    assert "This task asked for" in outcome["detail"] and "explicitly" in outcome["detail"]
     assert str(installed.workspace) in outcome["detail"]
-    assert outcome["detail"].endswith("Fix the Presence profile's workspace_root or clear it.")
+    assert "Presence profile" not in outcome["detail"]
     assert sent == [] and enqueued == []

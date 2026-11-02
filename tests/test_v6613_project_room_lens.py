@@ -273,7 +273,7 @@ def test_room_delegation_snapshot_capture_and_vcs_share_the_selected_target(tmp_
         assert result.status == "ok", result.text
         assert (target / "from_delegate.txt").read_text() == "delegated change\n"
         assert not (ctx.repo_dir / "from_delegate.txt").exists()
-        status = registry.execute("vcs_status", {})
+        status = registry.execute("vcs_read", {"action": "status"})
         assert "from_delegate.txt" in status and f"repo={target}" in status
         assert find_execution_snapshot("room-snapshot") is None
         assert not execution.exists()

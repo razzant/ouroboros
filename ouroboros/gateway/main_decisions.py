@@ -17,12 +17,31 @@ log = logging.getLogger(__name__)
 
 
 def question_display_rooms(drive_root: Any, task_id: str, quizzes: Any, *, rooms=None, project_ids=None) -> dict:
-    """Shared detail/census proof; context and immutable delivery are not display authority."""
+    """Shared detail/census proof; context and immutable delivery are not display authority.
+
+    A private Presence question's room is Main, its address; the Project its work lives in shows the
+    same row (``room_membership.row_rooms``) and is named in ``also_project_ids`` when the room rule
+    proves it. Unreadable authority leaves that Project unproven, never Main."""
     from ouroboros.projects_registry import RoomResolver, list_reserved_projects
+    from ouroboros.presence_owner_contact import private_main_contact
 
     if not isinstance(quizzes, dict) or not quizzes:
         return {}
-    unknown = {qid: {"state": "unknown"} for qid in quizzes}
+    private = {qid: {"state": "known", "chat_id": 1, "project_id": ""} for qid, block in quizzes.items()
+               if isinstance(block, dict) and block.get("quiz_id") == qid and private_main_contact(block, task_id)}
+    if private:
+        try:
+            rooms = rooms or RoomResolver(drive_root, strict=True)
+            if project_ids is None:
+                project_ids = {p["chat_id"]: p["id"] for p in list_reserved_projects(drive_root, strict=True)}
+            work = rooms(task_id)
+            if work in project_ids:
+                private = {qid: {**room, "also_project_ids": [project_ids[work]]} for qid, room in private.items()}
+        except Exception:
+            log.debug("private question Project unavailable for %s", task_id, exc_info=True)
+    if len(private) == len(quizzes):
+        return private
+    unknown = {qid: private.get(qid, {"state": "unknown"}) for qid in quizzes}
     try:
         rooms = rooms or RoomResolver(drive_root, strict=True)
         chat = rooms(task_id)
@@ -39,6 +58,9 @@ def question_display_rooms(drive_root: Any, task_id: str, quizzes: Any, *, rooms
                 result[qid] = {"state": "unknown"}
                 continue
             display = chat or own.get("chat_id")
+            if qid in private:
+                result[qid] = private[qid]
+                continue
             # Hidden authors have no display room until THIS quiz's recorded Main publication.
             if display == 0:
                 display = (1 if type(block.get("publication_chat_id")) is int
@@ -78,7 +100,11 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
     attempt = int(activity.get("task_attempt") or 1)
     current = {} if phase in {"budget_paused", "budget_pausing"} else activity.get("model_waits") or {}
     waits = {key: row for key, row in current.items() if isinstance(row, dict) and human_required_model_wait(row, attempt)}
-    return waits, phase == "budget_paused" and activity.get("can_resume") is True
+    from ouroboros.work_stop import activity_stop_view
+
+    view = activity_stop_view(activity)
+    return waits, (phase in {"budget_paused", "budget_pausing"} and not activity.get("live")
+                   and view["resumable"] and activity.get("can_resume") is True)
 
 
 def _question_sources(drive_root: Any, candidates: dict) -> dict:
@@ -225,7 +251,8 @@ def main_decisions_snapshot(drive_root: Any, activities: list[dict], bindings: d
         waits, can_resume = owner_actions(activity)
         if not waits and not can_resume:
             continue
-        cause = str(activity.get("pause_cause") or "")
+        from ouroboros.work_stop import activity_stop_view
+        cause = activity_stop_view(activity)["pause_cause"]
         attention.append({**activity, "task_id": task_id, "project_name": project.get("name") or "Project",
                           "model_waits": waits, "can_resume": can_resume,
                           "cancelable": activity.get("cancelable") is True,

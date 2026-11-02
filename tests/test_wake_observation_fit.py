@@ -83,7 +83,7 @@ def test_a_route_switch_before_any_response_is_measured_again(tmp_path, monkeypa
     ctx, _ = _ctx(tmp_path, window=500_000)
     assert _project_wake_input(ctx) is False
     ctx.context_fit_plan = replace(ctx.context_fit_plan, window_tokens=120_000)
-    assert _project_wake_input(ctx) is True and ctx.messages[1]["content"][-1]["text"] == PROJECTION
+    assert _project_wake_input(ctx) is True and ctx.messages[1]["content"] == PROJECTION
     assert [event["after_overflow"] for event in events] == [False]
 
 
@@ -163,8 +163,8 @@ def test_a_known_window_that_cannot_hold_it_gets_the_source_overview(tmp_path, m
     events = _record_events(monkeypatch)
     ctx, _ = _ctx(tmp_path, window=120_000)
     assert _project_wake_input(ctx) is True
-    assert ctx.messages[1]["content"][-1]["text"] == PROJECTION  # re-sealed as the prefix anchor
-    assert ctx.messages[1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert ctx.messages[1]["content"] == PROJECTION
+    assert ctx.messages[1]["cache_control"] == {"type": "ephemeral"}  # re-sealed as the prefix anchor
     assert ctx.tools._ctx.task_metadata["wake_observation"] is WAKE  # the source facts are untouched
     assert events == [{"checkpoint_kind": "wake_input_by_source", "round": 1, "after_overflow": False,
                        "composition": {"task_terminal": 2500}, "source_sha256": "f" * 64}]
@@ -186,7 +186,7 @@ def test_unknown_capacity_sends_the_whole_input_and_overflow_may_shrink_it(tmp_p
     assert _project_wake_input(ctx) is False and ctx.messages[1]["content"] == FULL
     # A real provider overflow is proof: the stored-source delivery is the smaller retry.
     assert _project_wake_input(ctx, overflowed=True) is True
-    assert ctx.messages[1]["content"][-1]["text"] == PROJECTION
+    assert ctx.messages[1]["content"] == PROJECTION
     assert events[-1]["after_overflow"] is True
     assert _project_wake_input(ctx, overflowed=True) is False  # once
 
@@ -210,7 +210,7 @@ def test_the_projected_wake_is_what_is_measured_priced_sealed_and_sent(main_call
     answer, _cost, _mode = loop._call_round_model(ctx)
     assert answer and len(gateway.uploads) == 1
     sent = gateway.uploads[0][0]
-    assert sent["messages"][1]["content"] == [{"type": "text", "text": PROJECTION}]  # host markers stripped
+    assert sent["messages"][1]["content"] == PROJECTION  # the seal's mark stays host-only
     assert sent["messages"][-1]["content"].startswith(CLOCK_NOTE_PREFIX)
     assert FULL not in json.dumps(sent)
     rows = ledger(ctx.drive_root)
@@ -218,7 +218,7 @@ def test_the_projected_wake_is_what_is_measured_priced_sealed_and_sent(main_call
     digest = hashlib.sha256(_canonical_candidate_bytes(sent)).hexdigest()
     assert {row["candidate_raw_sha256"] for row in rows if row["attempt_id"] == settled["attempt_id"]} == {digest}
     # The canonical transcript now holds the projected input and the consumed clock line.
-    assert ctx.messages[1]["content"][-1]["text"] == PROJECTION
+    assert ctx.messages[1]["content"] == PROJECTION
     assert ctx.messages[-1]["content"] == sent["messages"][-1]["content"]
     checkpoints = [event for event in list(events.queue)
                    if "wake_input_by_source" in json.dumps(event, default=str)]
@@ -239,7 +239,7 @@ def test_a_real_overflow_before_any_response_retries_with_the_strictly_smaller_d
     assert answer and len(gateway.uploads) == 2
     first, retry = gateway.uploads[0][0], gateway.uploads[1][0]
     assert first["messages"][1]["content"] == FULL  # unsealed: the whole input went out first
-    assert retry["messages"][1]["content"] == [{"type": "text", "text": PROJECTION}]
+    assert retry["messages"][1]["content"] == PROJECTION
     assert json.dumps(FULL)[1:-1] not in json.dumps(retry)
     rows = ledger(ctx.drive_root)
     settled = [row for row in rows if row["state"] == "settled"][-1]

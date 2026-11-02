@@ -680,19 +680,21 @@ def test_a_reader_racing_a_fold_still_names_the_pending_registration(tmp_path, m
 
 def test_every_shutdown_door_records_its_stop_requests_before_any_wait():
     """Wiring: owner Restart, the lifespan teardown and the emergency exit each call begin_owned_stop
-    before their first wait (deleting any one call fails here)."""
+    with their cause before their first wait (deleting any one call or cause fails here)."""
     import inspect
 
     import server
     from ouroboros import server_restart
 
     restart = inspect.getsource(server_restart._stop_owned_work)
-    assert restart.index("begin_owned_stop(") < restart.index("_owned_live_task_ids(") < restart.index("kill_workers(")
+    assert restart.index('begin_owned_stop(DATA_DIR, cause="owner_restart")') < restart.index("_owned_live_task_ids(") \
+        < restart.index("kill_workers(")
     teardown = inspect.getsource(server.lifespan)
     stop_flag = teardown.index("_supervisor_stop.set()  # first")
-    assert stop_flag < teardown.index("begin_owned_stop(", stop_flag) < teardown.index("supervisor_thread.join(", stop_flag)
+    door = teardown.index("begin_owned_stop(lifespan_drive_root, cause=server_stop_cause())", stop_flag)
+    assert stop_flag < door < teardown.index("supervisor_thread.join(", stop_flag)
     emergency = inspect.getsource(server._emergency_process_cleanup)
-    assert emergency.index("begin_owned_stop(") < emergency.index("kill_workers(")
+    assert emergency.index("begin_owned_stop(DATA_DIR, cause=server_stop_cause())") < emergency.index("kill_workers(")
 
 
 def test_the_ledger_compaction_forgets_dropped_rows(tmp_path):

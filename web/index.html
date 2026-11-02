@@ -16,6 +16,7 @@
     <link rel="stylesheet" href="/static/model_wait.css">
     <link rel="stylesheet" href="/static/room_work.css">
     <link rel="stylesheet" href="/static/cards.css">
+    <link rel="stylesheet" href="/static/consciousness.css">
     <link rel="icon" href="/static/favicon.png" type="image/png">
     <script src="/static/chart.umd.min.js"></script>
     <script src="/static/purify.min.js"></script>
@@ -28,7 +29,7 @@
     <div id="app">
         <div id="nav-drawer-backdrop" class="nav-drawer-backdrop" hidden></div>
         <nav id="primary-sidebar" class="primary-sidebar" aria-label="Ouroboros navigation">
-            <!-- Three zones (docs/DESIGN.md "Shell"): a pinned head, the Projects list as the one scroller, the tools after it. -->
+            <!-- Zones (docs/DESIGN.md "Shell"): a pinned head, the Projects list as the one scroller, the tools after it, the version and the update at the bottom edge. -->
             <div class="sidebar-head">
                 <!-- The drawer's head (stack layout only): its one close control, exactly where the header's ☰ was. -->
                 <div class="drawer-head">
@@ -55,10 +56,6 @@
             <!-- Its header is the one page header, rendered by app.js (page_header.js): ☰ · name · status … × -->
             <div id="project-panel-body" class="project-panel-body"></div>
         </aside>
-    </div>
-    <div id="reconnect-overlay">
-        <div class="spinner"></div>
-        <div>Reconnecting to Ouroboros...</div>
     </div>
     <script type="module" src="/static/app.js"></script>
 </body>

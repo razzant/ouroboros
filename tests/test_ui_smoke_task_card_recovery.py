@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
+from tests.ui_chat_viewport_smoke import state_reads
 
 
 @pytest.mark.serial
@@ -79,7 +80,9 @@ def test_bound_direct_task_header_and_review_cost_survive_reopen(
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         try:
             def project_activity(route):
-                response = route.fetch()
+                # Every state read lands here, `?bindings_since=` ones too; the whole body is read, since the census
+                # below re-homes the turn through its task bindings (a bindings_since answer carries none).
+                response = route.fetch(url=route.request.url.split("?", 1)[0])
                 payload = response.json()
                 direct = [dict(original)] if active["running"] else []
                 availability = {"complete": True}
@@ -91,7 +94,7 @@ def test_bound_direct_task_header_and_review_cost_survive_reopen(
                 payload["active_chat_activities_complete"] = availability["complete"]
                 route.fulfill(content_type="application/json", body=json.dumps(payload))
 
-            page.route("**/api/state", project_activity)
+            page.route(state_reads, project_activity)
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             project_row = page.locator(f'.nav-project-row[data-project-id="{project_id}"]')
             project_row.wait_for(state="visible", timeout=30_000)

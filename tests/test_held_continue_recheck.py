@@ -94,7 +94,7 @@ def test_a_retained_delegated_run_releases_its_continue_through_the_tick_without
     dc._CUSTODY.clear()
     assert DUTY in _tick(monkeypatch, run=(DUTY,))
     assert budget_hold_fact(held) is None
-    assert held["_budget_pause_hold"]["selected_by"] == "reconciliation"
+    assert held["_resume_selection"]["selected_by"] == "reconciliation"
     assert len(_selections(tmp_path, held["id"])) == 1
     # Released: the next tick has no held row to schedule for.
     assert DUTY not in _tick(monkeypatch)

@@ -18,8 +18,8 @@ import pytest
 
 from ouroboros import body_adoption, body_candidate, body_switch
 from tests.body_candidate_support import (
-    RICH_CHANGE, candidate_commit, git, isolate, make_ctx, make_serving, restart_receipt, rich_commit,
-    run_entry,
+    RICH_CHANGE, candidate_commit, git, host_restart_ack, isolate, make_ctx, make_serving, restart_receipt,
+    rich_commit, run_entry,
 )
 
 pytestmark = pytest.mark.serial  # real cold-entry processes throughout
@@ -586,6 +586,7 @@ def test_request_restart_adopts_only_when_the_exact_commit_is_named(scene):
     from ouroboros.tools.registry import ToolRegistry
 
     scene.commit()
+    sent = host_restart_ack(scene.ctx, scene.data)
     registry = ToolRegistry(repo_dir=scene.serving, drive_root=scene.data)
     registry.set_context(scene.ctx)
     marker = scene.data / "state" / "pending_restart_verify.json"
@@ -594,11 +595,16 @@ def test_request_restart_adopts_only_when_the_exact_commit_is_named(scene):
     assert "NOT adopted" in plain and scene.phase() == ""
     assert json.loads(marker.read_text())["expected_sha"] == scene.old  # the SERVING commit, not the candidate's
 
+    # One requester attempt sends one request; the adoption cases are this task's next attempt.
+    scene.ctx.task_attempt = 2
     refused = registry.execute("request_restart", {"reason": "adopt", "adopt_commit": "0" * 40})
     assert "RESTART_BLOCKED: ADOPTION_COMMIT_UNKNOWN" in refused
+    assert len(sent) == 1  # refused before any intent reached the host, so the attempt stays free
 
     adopting = registry.execute("request_restart", {"reason": "adopt reviewed fix", "adopt_commit": scene.cand})
     assert f"adopts candidate commit {scene.cand[:12]} onto ouroboros" in adopting
+    assert [(intent["task_attempt"], intent["reason"]) for intent in sent] == [
+        (1, "just restart"), (2, "adopt reviewed fix")]
     written = json.loads(marker.read_text())
     assert (written["expected_sha"], written["expected_branch"], written["reason"]) == (
         scene.cand, "ouroboros", "adopt reviewed fix")
@@ -608,6 +614,38 @@ def test_request_restart_adopts_only_when_the_exact_commit_is_named(scene):
     assert body_adoption.authorized_base(scene.data, scene.cand, "adopt reviewed fix") == scene.old
     assert body_adoption.authorized_base(scene.data, scene.cand, "another reason") == ""
     assert git(scene.serving, "rev-parse", "HEAD") == scene.old  # authorizing touched nothing
+
+
+@pytest.mark.parametrize("host", ["accepted", "refused", "silent"])
+def test_request_restart_repeated_in_one_attempt_keeps_its_first_request(scene, monkeypatch, host):
+    """A second call in the same attempt sends nothing and only reads the host's answer to the
+    first request: its reason and commit stay. Only an accepted request reads as requested."""
+    from ouroboros.tools import control_events
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0)  # a silent host is a lost ACK at once
+    scene.commit()
+    sent = host_restart_ack(scene.ctx, scene.data, status=None if host == "silent" else host)
+    registry = ToolRegistry(repo_dir=scene.serving, drive_root=scene.data)
+    registry.set_context(scene.ctx)
+    marker = scene.data / "state" / "pending_restart_verify.json"
+
+    first = registry.execute("request_restart", {"reason": "adopt reviewed fix", "adopt_commit": scene.cand})
+    receipt, handoff = marker.read_bytes(), body_adoption.read(scene.data)
+    again = registry.execute("request_restart", {"reason": "a different reason"})  # no commit: would not adopt
+
+    [intent] = sent
+    request_id = intent["request_id"]
+    if host == "accepted":
+        assert f"adopts candidate commit {scene.cand[:12]}" in first
+        assert again == "Restart requested. The previously acknowledged request is unchanged."
+    else:
+        status = "REFUSED" if host == "refused" else "UNCONFIRMED"
+        for reply in (first, again):
+            assert reply.startswith(f"RESTART_{status}: request {request_id}") and "Restart requested" not in reply
+    assert (marker.read_bytes(), body_adoption.read(scene.data)) == (receipt, handoff)
+    assert (intent["reason"], scene.ctx.pending_restart_reason) == ("adopt reviewed fix", "adopt reviewed fix")
+    assert scene.ctx.pending_restart_request["request_id"] == request_id
 
 
 def test_supervisor_evolution_restart_authorizes_the_candidate_commit_or_stops(scene):

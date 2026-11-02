@@ -25,6 +25,40 @@ def _works(root):
     return works_snapshot(root, owners, raw)["works"]
 
 
+def test_a_warm_sleep_waits_only_on_its_current_attempt_and_a_pause_still_wins(tmp_path, monkeypatch):
+    from ouroboros import owner_pause, owner_wait
+    from ouroboros.task_results import write_task_result
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    task = {"id": "sleeper", "type": "task", "chat_id": 7, "root_task_id": "sleeper"}
+    write_task_result(tmp_path, "sleeper", "running", chat_id=7)
+    wait = owner_wait.set_owner_wait(tmp_path, "sleeper", {
+        "state": "waiting", "reason": "sleep", "sleep": {"mode": "warm"}, "task_attempt": 1})
+    workers.RUNNING["sleeper"] = {"task": task, "attempt": 1, "owner_wait": wait}
+    [work] = _works(tmp_path)
+    assert (work["activity"], work["live"], work["release"], work["turn"]) == ("waiting", False, "self", [])
+    assert work["because"][0]["code"] == "sleeping"
+    # Hurry and Wrap up wake a warm sleep (model_sleep), so the sleeper keeps them beside Pause.
+    assert {"wrap_up", "hurry", "pause"} <= {control["action"] for control in work["controls"]}
+    assert "resume" not in {control["action"] for control in work["controls"]}
+
+    # The durable result still holds the older wait; the live worker's new observation wins.
+    for changed in ({"state": "resumed"}, {"task_attempt": 2}):
+        workers.RUNNING["sleeper"]["owner_wait"] = {**wait, **changed}
+        [work] = _works(tmp_path)
+        assert (work["activity"], work["live"]) == ("working", True)
+        assert work["because"] == []
+
+    workers.RUNNING["sleeper"]["owner_wait"] = wait
+    fence, _ = owner_pause.install_fence(tmp_path, "sleeper", request_id="pause-sleeper", by=_OWNER)
+    owner_pause.set_fence_state(tmp_path, "sleeper", fence_id=fence["fence_id"], state="paused")
+    [work] = _works(tmp_path)
+    assert (work["activity"], work["live"]) == ("paused", False)
+    assert work["because"][0]["code"] == "paused_by_owner"
+    assert "resume" in {control["action"] for control in work["controls"]}
+    assert not {"wrap_up", "hurry"} & {control["action"] for control in work["controls"]}
+
+
 def test_a_settling_pause_says_what_still_executes_and_a_stop_nobody_confirmed(tmp_path, monkeypatch):
     from ouroboros import budget_pause, delegate_custody
     from supervisor.events_budget import install_exact_budget_pause
@@ -52,10 +86,10 @@ def test_a_settling_pause_says_what_still_executes_and_a_stop_nobody_confirmed(t
         install_exact_budget_pause(ctx, task_id, budget_pause.exact_pause_marker(saved)["checkpoint"])
     assert not workers.RUNNING
     [work] = _works(tmp_path)
-    assert (work["activity"], work["transition"], work["live"]) == ("working", "pausing", False)
+    assert (work["activity"], work["transition"], work["live"]) == ("paused", "none", False)
     assert [(tail["code"], tail["state"], tail["ids"]) for tail in work["tails"]] == [
         ("external_runs_unconfirmed", "unknown", ["run-1"])]
-    assert "stop" in {control["action"] for control in work["controls"]}, "its Stop still reaches that run"
+    assert {"stop", "resume"} <= {control["action"] for control in work["controls"]}, "its Stop still reaches that run"
 
 
 def test_a_warm_park_executes_nothing_and_its_unconfirmed_stop_stays_unconfirmed(tmp_path, monkeypatch):

@@ -26,7 +26,9 @@ def test_steady_ownership_check_cost(tmp_path, monkeypatch, case, write):
         check(target, write=write)
     microseconds = (time.perf_counter() - started) * 1_000_000 / calls
     print(json.dumps({"case": case, "calls": calls, "microseconds_per_call": microseconds}))
-    assert microseconds < 50, f"{case}: {microseconds:.2f} us/check"
+    # A warm check is at most one stat (pinned structurally below); Windows' stat alone costs tens of microseconds,
+    # while the regressions this bounds (a JSON read, an ancestor walk) cost hundreds.
+    assert microseconds < 150, f"{case}: {microseconds:.2f} us/check"
 
 
 def test_warm_checks_only_stat_the_canonical_identity(tmp_path, monkeypatch):

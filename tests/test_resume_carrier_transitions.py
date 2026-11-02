@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.work_stop import retain_consumed_selection
 from ouroboros import budget_pause as bp, working_checkpoint as wc
 from supervisor import budget_resume as br, events_budget as eb
 from tests._budget_pause_exact_helpers import (
@@ -30,7 +31,7 @@ def test_consumed_exact_member_retires_its_previous_saved_selection(tmp_path, mo
     assert q.resume_budget_paused_task(CHILD, selected_by=ROOT)['ok']
     workers.WORKERS[0].busy_task_id = None
     workers.assign_tasks()
-    previous = copy.deepcopy(workers.RUNNING[CHILD]['task'][eb.BUDGET_HOLD_KEY])
+    previous = copy.deepcopy(workers.RUNNING[CHILD]['task'][eb.SELECTION_KEY])
     newer = _exact_root(tmp_path, monkeypatch, q, workers)
     assert newer != previous['root_grant_id']
     _save_current(tmp_path, workers)
@@ -61,7 +62,7 @@ def test_consumed_exact_member_retires_its_previous_saved_selection(tmp_path, mo
     live = workers.RUNNING[CHILD]['task']
     handoff = copy.deepcopy(live['_budget_pause_resume'])
     assert handoff['root_grant_id'] == newer
-    assert live[eb.BUDGET_HOLD_KEY] == previous
+    assert eb.SELECTION_KEY not in live and eb.BUDGET_HOLD_KEY not in live
     _consume(monkeypatch, ctx, limit, handoff)
     exact = bp.budget_pause_row(tmp_path, CHILD)
     assert exact['state'] == bp.STATE_RESUMED and exact['grant']['consumed_at']
@@ -73,6 +74,7 @@ def test_consumed_exact_member_retires_its_previous_saved_selection(tmp_path, mo
         'wait_id': 'retirement-only', 'restart_transaction_id': 'fixture'}
     assert br.revoke_exact_budget_resume(waiting, 'restart_before_dispatch') is False
     assert '_budget_pause_resume' not in waiting
+    assert eb.SELECTION_KEY not in waiting
     assert eb.BUDGET_HOLD_KEY not in waiting
 
     # Even a stale handoff beside a newer UNSELECTED hold cannot erase that hold.
@@ -80,13 +82,14 @@ def test_consumed_exact_member_retires_its_previous_saved_selection(tmp_path, mo
     eb.hold_budget_row(held, reason=eb.HOLD_SAVED_WORK, detail='newer hold')
     held['_budget_pause_resume'] = handoff
     before_held = copy.deepcopy(held)
-    assert eb.continue_consumed_resume_selection(held, exact) is False
+    assert retain_consumed_selection(held, exact) is False
     assert held == before_held
 
     # No fixture cleanup: acknowledged recovery itself must retire the old hold.
     _restart(q, workers, monkeypatch)
     child = next(row for row in q.PENDING if row['id'] == CHILD)
     assert '_budget_pause_resume' not in child
+    assert eb.SELECTION_KEY not in child
     assert eb.BUDGET_HOLD_KEY not in child
     assert bp.budget_pause_row(tmp_path, CHILD)['grant'] == exact['grant']
     assert eb.budget_resume_dispatch_allowed(q, child) is True

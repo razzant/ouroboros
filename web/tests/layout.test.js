@@ -81,3 +81,46 @@ test('the Project panel has no fill rule: it keeps its own width beside Main', a
     const mod = await import('../modules/layout.js');
     assert.equal('projectPanelFillsContent' in mod, false);
 });
+
+test('a pinch is read against the layout width, so a smaller Interface size is no pinch', async () => {
+    const { pinchMagnified } = await import('../modules/layout.js');
+    const at = ({ inner, client, visual }) => ({ innerWidth: inner, visualViewport: { width: visual },
+        document: { documentElement: { clientWidth: client } } });
+    // Measured in mobile Chromium, 390 px wide: 80 % lays the page out at 488 px, innerWidth reads 489.
+    assert.equal(pinchMagnified(at({ inner: 489, client: 488, visual: 487.5 })), false);
+    assert.equal(pinchMagnified(at({ inner: 390, client: 390, visual: 195 })), true, 'a pinch to 2x');
+    // iOS WebKit's innerWidth is the zoomed visible width (measured: 201 of a 402 px layout at a pinch to 2x).
+    assert.equal(pinchMagnified(at({ inner: 201, client: 402, visual: 201 })), true, 'a pinch in iOS WebKit');
+    assert.equal(pinchMagnified(at({ inner: 700, client: 685, visual: 685 })), false, 'a classic scrollbar is no pinch');
+    assert.equal(pinchMagnified({ innerWidth: 390 }), false, 'no visual viewport, no pinch');
+});
+
+test('measurePinnedBars writes the pinned head and foot heights for the rows\' scroll margin', async () => {
+    const { measurePinnedBars } = await import('../modules/layout.js');
+    const props = new Map();
+    const box = (height) => ({ getBoundingClientRect: () => ({ height }) });
+    const head = box(104), foot = box(60.5);
+    const sidebar = { style: { setProperty: (name, value) => props.set(name, value) },
+        querySelector: (sel) => ({ '.sidebar-head': head, '.sidebar-foot-meta': foot })[sel] ?? null };
+    const observed = [];
+    let fire = null;
+    let disconnected = false;
+    class Observer {
+        constructor(callback) { fire = callback; }
+        observe(el, options) { observed.push([el, options?.box]); }
+        disconnect() { disconnected = true; }
+    }
+    const dispose = measurePinnedBars(sidebar, { Observer });
+    // The border box: a band or a safe area that arrives later changes only the bars' padding.
+    assert.deepEqual(observed, [[head, 'border-box'], [foot, 'border-box']]);
+    assert.equal(props.get('--sidebar-head-h'), '104px');
+    assert.equal(props.get('--sidebar-foot-h'), '60.5px');
+    foot.getBoundingClientRect = () => ({ height: 88 });  // an update capsule wrapped onto a second line
+    fire();
+    assert.equal(props.get('--sidebar-foot-h'), '88px');
+    dispose();
+    assert.equal(disconnected, true);
+    // A page without the bars, or without ResizeObserver, measures nothing and still returns a disposer.
+    assert.equal(typeof measurePinnedBars({ querySelector: () => null }, { Observer }), 'function');
+    assert.equal(typeof measurePinnedBars(sidebar, { Observer: undefined }), 'function');
+});

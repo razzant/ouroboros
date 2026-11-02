@@ -4,9 +4,12 @@ forced services and owner-directive drain, the one forced model call, stale and
 fallback candidates and the forced final answer.
 
 A forced rail makes one model call on the task's own messages and tool schemas,
-executes no tool and buys no repair call: a reply that still asks for a tool is
-a preamble and falls back to the retained or host text. A second call happens
-only to answer owner directives that arrived during the first.
+executes no tool and buys no repair call: a sole ``finish_task`` call is the
+request its serialized text would be, resolved purely, and a provider length cut
+after a whole request is disclosed beside it, not refused; a reply asking for any
+other tool is a preamble and falls back to the retained or host text. A second
+call answers only owner directives that arrived during the first. A configured
+API child's standing timeout repeat (#1886) buys no forced call at all.
 
 Every rail records through ``_record_forced_finalization``; a rail runs no result
 review (its outcome says what ended the task).
@@ -21,24 +24,20 @@ import pathlib
 import queue
 import time
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros._usage_wait import receiver_abandonable
-from ouroboros.loop_llm_call import forced_response_is_incomplete, forced_response_parts
+from ouroboros.loop_llm_call import (
+    TIMEOUT_REPEAT_KEY, forced_response_cut, forced_response_is_incomplete, forced_response_parts, timeout_repeat_blocked,
+)
 from ouroboros.model_wait import ModelWaitInterrupted
-from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED
+from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
-from ouroboros.utils import sanitize_tool_result_for_log
-
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_delivery import DeliveryCandidate
-
-if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_round_limits import _RoundLimitContext
 
 
@@ -95,8 +94,14 @@ def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
         return []
 
 
+# Child states that need no further author disposition before this task finishes.
+HANDLED_CHILD_DISPOSITIONS = frozenset({
+    "integrated", "irrelevant", "deferred", "discarded", "cancelled", "host_attention",
+})
+
+
 def _child_disposition_state(child: Dict[str, Any]) -> str:
-    """Return cancellation or the current task-tree exact-hash disposition."""
+    """Return cancellation, the current task-tree exact-hash disposition, or host attention."""
 
     # Explicit cancellation wins every completion race; late scratch results are
     # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):
@@ -114,7 +119,14 @@ def _child_disposition_state(child: Dict[str, Any]) -> str:
             return current
     except Exception:
         pass
-    return ""
+    # A host-minted silence diagnostic is attention to this task, not work it
+    # delegated: it stays listed, accounted and readable, but owes no author
+    # disposition, pending or settled (#1376). An explicit one above still wins.
+    from ouroboros.work_diagnostics import diagnostic_ref
+
+    ref = diagnostic_ref(child)
+    minted = bool(ref) and str(child.get("task_id") or child.get("id") or "") == "silence-" + ref["episode_id"]
+    return "host_attention" if minted and str(child.get("parent_task_id") or "") == ref["task_id"] else ""
 
 
 def _project_child_result_dispositions(
@@ -162,6 +174,7 @@ def _record_forced_finalization(
     # answer (`_forced_final_answer`) and the no-spend host-fallback fence
     # path (`_handle_budget_exceeded` -> `_forced_fallback_result`).
     ctx.accumulated_usage.setdefault("terminal_origin", TERMINAL_ORIGIN_HOST_NOTICE)
+    ctx.accumulated_usage.pop("wake_summary", None)  # Only the accepting exit can publish the author's sentence.
     # Every rail returns this candidate's bytes. A wake's quiet selection stays
     # internal here too (the pipeline publishes only the host's outcome notice);
     # an ordinary replacement or the host's own fallback text is speech.
@@ -193,6 +206,63 @@ def _record_forced_finalization(
             and candidate.evidence_fingerprint == current_fingerprint
         ),
     }
+    # A standing timeout repeat's facts ride every forced terminal, whichever rail ended the round.
+    _project_timeout_repeat(ctx.accumulated_usage, llm_trace, str(ctx.task_id or ""))
+
+
+def _project_timeout_repeat(usage: Dict[str, Any], llm_trace: Dict[str, Any], task_id: str) -> None:
+    """A standing timeout record on a terminal (#1886): its typed facts in the trace (``trace_refs``)
+    and the parent's notice beside the answer, inside the result identity. Idempotent."""
+    if not isinstance(usage.get(TIMEOUT_REPEAT_KEY), dict):
+        return
+    llm_trace["timeout_repeat"] = dict(usage[TIMEOUT_REPEAT_KEY])
+    notice, current = _timeout_repeat_notice(usage, task_id), str(usage.get("terminal_host_notice") or "")
+    if notice not in current:
+        set_terminal_host_notice(usage, current, notice)
+
+
+def _timeout_repeat_notice(usage: Dict[str, Any], task_id: str) -> str:
+    """Parent-facing facts over the first timeout and repeat's physical/call ids.
+    Custody and response receipts distinguish failure from pre-send refusal.
+    The result retains facts and exact sources after drive GC. No cost figures:
+    late settlement changes neither this notice nor the child's result identity.
+    """
+    record = usage.get(TIMEOUT_REPEAT_KEY) or {}
+    last = record.get("repeat") or usage.get("_last_llm_failure") or {}
+    first, kind = record.get("first") or {}, str(usage.get("_last_llm_error_kind") or "")
+
+    def refs(row: Dict[str, Any]) -> str:
+        ids = [f"{label} {row[key]}" for key, label in (("physical_attempt_id", "attempt"), ("generation_id", "generation"))
+               if row.get(key)]
+        return f" ({', '.join(ids)})" if ids else ""
+
+    same = bool(first.get("llm_call_id")) and last.get("llm_call_id") == first.get("llm_call_id")
+    new = bool(last.get("llm_call_id")) and not same
+    if record.get("state") == "dispatched":
+        repeat = f"The one repeat has a dispatch record{refs(last)} but no confirmed provider outcome (UNKNOWN)."
+    elif kind == "provider_outcome_unknown" or (new and (last.get("response_ref") or last.get("attempt_custody_state")
+                                                       in ("dispatched", "unresolved", "settled"))):
+        outcome = ("has no confirmed provider outcome" if kind == "provider_outcome_unknown"
+                   else f"failed as {last.get('failure_code') or kind or 'an unrecorded class'}")
+        repeat = f"It was repeated once on the same model; the repeat {outcome}{refs(last) if new else ''}."
+    else:  # never dispatched: the loop ceiling, the deadline (its sleep or dispatch gate), a forced rail or a pre-send refusal
+        from ouroboros.outcomes import BEST_EFFORT_REASON_CODES
+
+        rail = str(usage.get("reason_code") or "")
+        forced_rail = rail in BEST_EFFORT_REASON_CODES  # it ended the round before the repeat could go
+        cause = ("this call's retry budget was already spent" if record.get("budget_spent") else
+                 "owner requested finalization" if rail == "owner_requested_finalization" else
+                 "the task deadline left no room" if kind == "deadline_exhausted" or rail in {"deadline_local", "finalization_grace"}
+                 or same and not forced_rail else rail if forced_rail else last.get("failure_code") or kind or "unrecorded")
+        repeat = f"The one same-model repeat it earned was not sent ({cause})."
+    code = first.get("status_code")
+    status = f"status {code}" if isinstance(code, int) and code >= 400 else "typed as a timeout"
+    return (f"Stream timeout: the provider ended this child's reply with an explicit timeout ({status}) after the "
+            f"model had started answering{refs(first)}. {repeat} No further request or summary was sent. Partial "
+            "output of these attempts was not adopted as an answer, and no partial tool call ran. Each attempt keeps "
+            "its own cost record; retained failure facts and source refs: query_data(op=\"json\", kind=\"task_result\", "
+            f"ids=[\"{task_id}\"], select=\"trace_refs\") (trace_refs.timeout_repeat). "
+            "The parent task decides what follows.")
 
 
 def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = True) -> str:
@@ -222,10 +292,8 @@ def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = Tru
         note_chat_id = getattr(tools_ctx, "current_chat_id", None)
 
         def _undecided(c: Dict[str, Any]) -> bool:
-            if _loop()._child_disposition_state(c) in {
-                "integrated", "irrelevant", "deferred", "discarded", "cancelled",
-            }:
-                return False  # explicitly handled
+            if _loop()._child_disposition_state(c) in HANDLED_CHILD_DISPOSITIONS:
+                return False  # explicitly handled, or host attention
             if (
                 canonical_task_summary_reached_chat(c, note_chat_id)
                 and str(c.get("task_id") or c.get("id") or "") not in claimed
@@ -343,9 +411,7 @@ def _undispositioned_children(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
     try:
         return [
             child for child in _loop()._direct_child_results(ctx)
-            if _loop()._child_disposition_state(child) not in {
-                "integrated", "irrelevant", "deferred", "discarded", "cancelled",
-            }
+            if _loop()._child_disposition_state(child) not in HANDLED_CHILD_DISPOSITIONS
         ]
     except Exception:
         return []
@@ -392,11 +458,11 @@ def _plan_gate_identity(decision: Dict[str, Any]) -> str:
     own typed fields (status, the holding objections, the pending asks, the hurry
     attribution) — never the rendered English (astra F3)."""
     return "|".join(str(decision.get(key) or "") for key in (
-        "status", "allow", "enforcement", "owner_hurry_local_advisory", "unreadable", "force_plan_met",
+        "status", "allow", "enforcement", "owner_hurry_local_advisory", "unreadable",
     )) + "|" + ",".join(str(x) for x in decision.get("holding") or []) + "|" + ",".join(str(x) for x in decision.get("pending_asks") or [])
 
 
-def _enforce_swarm_actions(
+def _enforce_plan_gate(
     content: str,
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -417,9 +483,9 @@ def _enforce_swarm_actions(
     no-chat contract forbids putting into ``messages``
     (``loop_round_limits.py``) — that is the only release this fires on."""
 
-    decision = _loop()._force_plan_decision(tools._ctx, llm_trace)
+    decision = _loop()._plan_gate_decision(tools._ctx, llm_trace)
     if decision.get("required"):
-        llm_trace["force_plan_decision"] = decision
+        llm_trace["plan_gate"] = decision
     identity = _plan_gate_identity(decision) if decision.get("required") else ""
     told = str(getattr(tools._ctx, "_plan_gate_told_identity", "") or "")
     if decision.get("allow"):
@@ -449,7 +515,7 @@ def _enforce_swarm_actions(
         return True
     if content.strip():
         messages.append({"role": "assistant", "content": content})
-    reminder = _loop()._force_plan_reminder(decision)
+    reminder = _loop()._plan_gate_reminder(decision)
     _loop()._append_or_merge_user_message(messages, reminder)
     llm_trace["reasoning_notes"].append(reminder)
     tools._ctx._plan_gate_told_identity = identity
@@ -484,7 +550,7 @@ def _plan_gate_facts(decision: Dict[str, Any]) -> str:
         return ""
     objections, pending = decision.get("open_objections") or [], decision.get("pending_asks") or []
     status = str(decision.get("status") or "")
-    if not objections and not pending and status not in {"force_plan_unmet", "unreadable", "held"}:
+    if not objections and not pending and status not in {"unreadable", "held"}:
         return ""
     parts = ["plan_review_open=true", f"plan_gate_status={status}",
              f"plan_open_objections={len(objections)}", f"plan_holding={len(decision.get('holding') or [])}",
@@ -496,8 +562,6 @@ def _plan_gate_facts(decision: Dict[str, Any]) -> str:
     if decision.get("owner_hurry_local_advisory"):
         parts.append("owner_hurry_local_advisory=true")
         parts.append(f"configured_enforcement={decision.get('configured_enforcement') or 'blocking'}")
-    if decision.get("force_plan_met") is False:
-        parts.append("force_plan_met=false")
     if decision.get("unreadable"):
         parts.append("plan_record_unreadable=true")
     return " ".join(parts)
@@ -510,10 +574,10 @@ def _forced_state_facts(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> s
     Never raises: a forced answer outranks its own annotation."""
     try:
         tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
-        projected = llm_trace.get("force_plan_decision")
+        projected = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
         decision = (
             projected if isinstance(projected, dict)
-            else (_loop()._force_plan_decision(tools_ctx, llm_trace) if tools_ctx is not None else {})
+            else (_loop()._plan_gate_decision(tools_ctx, llm_trace) if tools_ctx is not None else {})
         )
         lines = [line for line in (_plan_gate_facts(decision),) if line]
         undecided = _undispositioned_children(ctx)
@@ -551,13 +615,32 @@ def _prepare_forced_prompt(
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     # The typed facts sit BEFORE the owner-source observation so that one-shot block
     # stays the tail of the message (the prompt-cache prefix rule).
-    return (
-        prompt
-        + _loop()._forced_delegation_note(tools_ctx, llm_trace)
-        + _forced_state_facts(ctx, llm_trace)
-        + _presence_forced_contract(ctx, tools_ctx)
-        + _forced_subject_prompt(ctx, llm_trace)
-    )
+    head = prompt + _loop()._forced_delegation_note(tools_ctx, llm_trace) + _forced_state_facts(ctx, llm_trace)
+    presence = _presence_forced_contract(ctx, tools_ctx)
+    return head + presence + _forced_subject_prompt(ctx, llm_trace, presence_armed=bool(presence))
+
+
+def _deliver_forced_late_results(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> bool:
+    """Locators of timed-out calls that settled since (``late_tool_results``) and an owed native task
+    wait's result (``native_task_wait.deliver_owed``) join the forced candidate on the live transcript
+    before it is priced and sealed: an authorized forced send is the task's next turn too. Rails that
+    end without a send never call this; a budget candidate priced and then not sent leaves them in the
+    transcript its pause or next ordinary round carries."""
+    tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    if tools_ctx is not None:
+        from ouroboros.late_tool_results import deliver_late_results
+        from ouroboros.native_task_wait import deliver_owed
+
+        return deliver_owed(ctx) | deliver_late_results(ctx.messages, tools_ctx, llm_trace, ctx.drive_logs,
+                                                        _loop()._append_or_merge_user_message)
+    return False
+
+
+def _presence_forced_armed(tools_ctx: Any) -> bool:  # the host ceiling AND the Presence metadata
+    contract = getattr(tools_ctx, "task_contract", None)
+    metadata = getattr(tools_ctx, "task_metadata", None)
+    return (isinstance(contract, dict) and isinstance(contract.get("capability_ceiling"), dict)
+            and isinstance(metadata, dict) and isinstance(metadata.get("presence"), dict))
 
 
 def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
@@ -571,11 +654,7 @@ def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
     the Presence metadata the pipeline keys that result on. A delegated child inherits
     the ceiling with its contract, but it answers its parent, not a conversation.
     """
-    contract = getattr(tools_ctx, "task_contract", None)
-    metadata = getattr(tools_ctx, "task_metadata", None)
-    presence = metadata.get("presence") if isinstance(metadata, dict) else None
-    if not (isinstance(contract, dict) and isinstance(contract.get("capability_ceiling"), dict)
-            and isinstance(presence, dict)):
+    if not _presence_forced_armed(tools_ctx):
         return ""
     tools_ctx._presence_forced_declaration = {"status": "missing", "reason": "no presence_finish declaration"}
     tools_ctx._presence_forced_pending = None
@@ -584,7 +663,7 @@ def _presence_forced_contract(ctx: _RoundLimitContext, tools_ctx: Any) -> str:
         from ouroboros.tool_access import canonical_data_root
 
         # Receipts live on the canonical root; a forked execution drive holds none.
-        sent = presence_send_facts(canonical_data_root(tools_ctx), ctx.task_id, presence)
+        sent = presence_send_facts(canonical_data_root(tools_ctx), ctx.task_id, tools_ctx.task_metadata["presence"])
     except Exception:
         sent = "unknown (receipts unreadable)"
     handoff = getattr(tools_ctx, "_swarm_handoff_attempt", None)
@@ -651,8 +730,9 @@ def _read_presence_declaration(tools_ctx: Any, extracted: str) -> None:
             "status": "declared", "outcome": value["outcome"], "message": value.get("message", "").strip()}
 
 
-def _forced_subject_prompt(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> str:
-    """Capture the source before pricing/sending, never after a reply arrives."""
+def _forced_subject_prompt(ctx: _RoundLimitContext, llm_trace: Dict[str, Any], *, presence_armed: bool = False) -> str:
+    """Capture the source before pricing/sending, never after a reply arrives. An armed [PRESENCE_DELIVERY]
+    (``_presence_forced_contract``) is that call's whole completion contract: no generic one follows it."""
     from ouroboros.loop_messages import capture_acceptance_observation, acceptance_observation_prompt
 
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
@@ -660,13 +740,15 @@ def _forced_subject_prompt(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -
         return ""
     observed = capture_acceptance_observation(tools_ctx, llm_trace, ctx.incoming_messages)
     rendered = acceptance_observation_prompt(tools_ctx, observed)
+    if presence_armed:
+        return "\n\n" + rendered if rendered else ""
     candidate = getattr(tools_ctx, "_delivery_candidate", None)
-    if candidate is not None:
-        rendered += ("\nAt this forced boundary do not call tools. Select the complete answer as prose "
-            "or one serialized completion request: {\"action\":\"finish\",\"answer_sha256\":\""
-            + candidate.content_sha256 + "\"}. Use answer instead for full replacement bytes; "
-            "stop also requires rationale naming unfinished work. Presence additionally requires its explicit outward declaration.")
-    return "\n\n" + rendered if rendered else ""
+    selector = ("{\"action\":\"finish\",\"answer_sha256\":\"" + candidate.content_sha256 + "\"} keeps the retained answer; "
+                if candidate is not None else "")
+    return "\n\n" + (rendered + "\n" if rendered else "") + (
+        "No tool runs at this boundary. Give the complete answer as prose, or one completion request alone: "
+        "a finish_task call or the same request as one JSON object (" + selector + "answer carries complete "
+        "bytes; stop also requires rationale naming unfinished work). A reply asking for any other tool is a preamble.")
 
 
 def _finalize_forced_services(
@@ -824,7 +906,11 @@ def _call_forced_model_once(
 ) -> str:
     from ouroboros.model_slots import task_model_binding
     from ouroboros.model_wait import current_model_wait
+    from ouroboros.subagent_bootstrap import is_configured_api_child
 
+    if admitted_request is None and _loop()._retire_main_reasoning(ctx):
+        from ouroboros.transcript_prefix import append_reasoning_retirement_fact
+        append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), ctx.messages)
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     # The admitted send reuses the lookahead's one measurement (``task_pacing.prepared_wrapup_candidate``);
     # a direct, drift or owner-refresh send measures its own final input afresh.
@@ -866,39 +952,52 @@ def _call_forced_model_once(
                 "the fresh forced candidate does not fit the admitted balances at its own price")
         return True
 
-    # Named residual: reads the task's refused-image memory, never recovers a first refusal (vision_routing).
-    final_msg, _final_cost = _loop().call_llm_with_retry(
-        ctx.llm,
-        ctx.messages,
-        ctx.active_model,
-        getattr(ctx, "tool_schemas", None),
-        ctx.active_effort,
-        ctx.max_retries,
-        ctx.drive_logs,
-        ctx.task_id,
-        ctx.round_idx,
-        ctx.event_queue,
-        ctx.accumulated_usage,
-        ctx.task_type,
-        use_local=ctx.active_use_local,
-        deadline_ts=ctx.deadline_ts,
-        response_meta_out=response_meta,
-        transport_reserve_sec=0.0,
-        allow_server_web_search=_loop()._server_web_allowed_by_task(
-            getattr(getattr(ctx, "tools", None), "_ctx", None)
-        ),
-        initial_messages=initial_messages,
-        physical_context=physical,
-        candidate_predicate=candidate_predicate if admitted_request is not None else None,
-        model_role=role,
-        model_account_override=account,
-        # A forced final belongs to the loop invocation that is finishing, so it
-        # continues that same active turn instead of opening a new one.
-        model_turn_state=getattr(owner_ctx, "model_turn_state", None),
-        send_clock_policy=main_clock_policy(
-            getattr(owner_ctx, "task_metadata", {}), task_type=str(getattr(ctx, "task_type", "") or "")),
-    )
+    from ouroboros.working_checkpoint import model_call_scope
+
+    # The forced call owns the same write-ahead allowance as an ordinary round.
+    # Named residual: reads refused-image memory, never recovers a first refusal.
+    with model_call_scope(ctx):
+        final_msg, _final_cost = _loop().call_llm_with_retry(
+            ctx.llm,
+            ctx.messages,
+            ctx.active_model,
+            getattr(ctx, "tool_schemas", None),
+            ctx.active_effort,
+            ctx.max_retries,
+            ctx.drive_logs,
+            ctx.task_id,
+            ctx.round_idx,
+            ctx.event_queue,
+            ctx.accumulated_usage,
+            ctx.task_type,
+            use_local=ctx.active_use_local,
+            deadline_ts=ctx.deadline_ts,
+            response_meta_out=response_meta,
+            transport_reserve_sec=0.0,
+            allow_server_web_search=_loop()._server_web_allowed_by_task(
+                getattr(getattr(ctx, "tools", None), "_ctx", None)
+            ),
+            initial_messages=initial_messages,
+            physical_context=physical,
+            candidate_predicate=candidate_predicate if admitted_request is not None else None,
+            model_role=role,
+            model_account_override=account,
+            # A forced final belongs to the loop invocation that is finishing, so it
+            # continues that same active turn instead of opening a new one.
+            model_turn_state=getattr(owner_ctx, "model_turn_state", None),
+            send_clock_policy=main_clock_policy(
+                getattr(owner_ctx, "task_metadata", {}), task_type=str(getattr(ctx, "task_type", "") or "")),
+            configured_api_child=is_configured_api_child(owner_ctx),  # a forced call is still that actor's call
+        )
+    # The reply's calls as data for the one completion request this rail may read; none executes and
+    # ``tool_call_count`` stays the provider's actual count.
+    response_meta["reply_calls"] = [dict(name=str(f.get("name") or ""), arguments=f.get("arguments")) for f in (
+        (call.get("function") or {}) for call in (final_msg or {}).get("tool_calls") or [] if isinstance(call, dict))]
     ctx.accumulated_usage["_forced_response_meta"] = response_meta
+    if owner_ctx is not None and final_msg is not None:  # an answered forced final, outside the round observer
+        from ouroboros.transcript_prefix import count_accepted_send
+        count_accepted_send(owner_ctx, ctx.messages, getattr(ctx, "tool_schemas", None),
+                            round_idx=ctx.round_idx, usage=ctx.accumulated_usage)
     return str((final_msg or {}).get("content") or "").strip()
 
 
@@ -916,7 +1015,7 @@ def _publish_model_forced_candidate(
     if tools is None:
         return None
     current = _loop()._current_delivery_candidate(ctx, llm_trace)
-    if current is not None and current.full_text == sanitize_tool_result_for_log(full_text):
+    if current is not None and current.full_text == full_text:
         return _loop()._degrade_retained_delivery_candidate(
             ctx, llm_trace, current, control=f"forced_preserve:{reason_code}",
             reason_code=degraded_reason or reason_code,
@@ -1009,10 +1108,21 @@ def _forced_fallback_result(
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Compose fallback. ``host_words`` is the caller's fact about ``fallback_text`` on the
     provider-death rail: the host's own notice (``host_notice``) or retained model bytes
-    (``host_salvage``); ``None`` keeps the rail's previous provenance."""
+    (``host_salvage``); ``None`` keeps the rail's previous provenance.
+
+    Every no-call exit is admitted here, so a rail stamps its own reason before calling:
+    while Stop now holds an inline Presence turn (``presence_stop_now``), any rail ends on
+    the hard stop's terminal instead, its retained answer kept on the row and never sent.
+    The hard stop and Wrap up compose here under the owner's own reason, not read again."""
     tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    from supervisor.owner_stop import presence_stop_now
+
+    if reason_code != REASON_OWNER_REQUESTED_FINALIZATION and presence_stop_now(tool_ctx):
+        from ouroboros.loop_round_limits import _handle_direct_turn_hard_stop
+
+        return _handle_direct_turn_hard_stop(ctx)
     plan_suffix = (
-        _loop()._force_plan_disclosure(tool_ctx, llm_trace, forced_reason=reason_code)
+        _loop()._plan_gate_disclosure(tool_ctx, llm_trace, forced_reason=reason_code)
         if tool_ctx is not None else ""
     )
     suffix = plan_suffix + _loop()._forced_orphan_note(ctx)
@@ -1092,7 +1202,9 @@ def _forced_fallback_result(
             )
             return candidate.full_text, ctx.accumulated_usage, llm_trace
 
-    composed = sanitize_tool_result_for_log(fallback_text)
+    # Model bytes stay exact; a host notice quoting a provider sanitized that quote where
+    # it was composed (``loop_transport``).
+    composed = fallback_text
     candidate = _publish_model_forced_candidate(
         ctx, llm_trace, composed, reason_code,
     )
@@ -1115,28 +1227,61 @@ def _resolve_forced_delivery_control(
     tools_ctx: Any,
     extracted: str,
     *, ctx: Optional[_RoundLimitContext] = None, llm_trace: Optional[Dict[str, Any]] = None,
+    native_call: Optional[Dict[str, Any]] = None, foreign_calls: bool = False,
+    response_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str, bool, bool]:
-    """Resolve forced control; returns text, degradation, retained, replaced."""
-    if tools_ctx is None or not extracted:
+    """Resolve forced control; returns text, degradation, retained, replaced. ``native_call`` is the reply's
+    adopted ``finish_task`` call: its arguments, never the reply's text, are read as the request its text form
+    would be (absent ones are a refused request); the verdict stays on ``tools_ctx._forced_completion``.
+    Refused with no answer retained, it leaves the reply's own plain words, never a request in them.
+    A request in the text is judged on the reply first, as ``forced_completion_call`` judges a native one: beside
+    native calls (``foreign_calls``) or in a response not complete apart from it (``response_meta``) it is not
+    adopted. A request that is not adopted or rejected consumes nothing (latch, subject, binding, stop, silence)."""
+    from ouroboros.loop_delivery import _parse_delivery_control_body, apply_delivery_subject_decision
+
+    def requested(text: str) -> bool:
+        parsed, _, _ = _parse_delivery_control_body(text)
+        return isinstance(parsed, dict) and "action" in parsed
+
+    if tools_ctx is not None:
+        tools_ctx._forced_completion = None
+    arguments = (native_call or {}).get("arguments")
+    body = extracted if native_call is None else (arguments if isinstance(arguments, str) else "")
+    if tools_ctx is None or not (body or native_call is not None):
         return extracted, "", False, False
-    presence_armed = isinstance(getattr(tools_ctx, "_presence_forced_declaration", None), dict)
+    candidate = getattr(tools_ctx, "_delivery_candidate", None)
+    kept = isinstance(candidate, _loop().DeliveryCandidate)
+    unadopted = "" if native_call is not None or not requested(body) else (
+        "completion_beside_other_calls" if foreign_calls else "completion_response_incomplete"
+        if forced_response_is_incomplete(response_meta, completion_request=True) else "")
+    if unadopted:
+        # Only classified (a pure parse), so the protocol attempt stays private and the retained answer stands.
+        tools_ctx._forced_completion = {"request": None, "error": "", "unadopted": unadopted}
+        return (candidate.full_text if kept else ""), REASON_DELIVERY_CONTROL_DEGRADED, kept, False
+    presence_armed = (native_call is None and not foreign_calls
+                      and isinstance(getattr(tools_ctx, "_presence_forced_declaration", None), dict))
     if presence_armed:
         _read_presence_declaration(tools_ctx, extracted)
-    candidate = getattr(tools_ctx, "_delivery_candidate", None)
     armed = presence_armed or bool(getattr(tools_ctx, "_delivery_control_required", False)) or (
-        isinstance(candidate, _loop().DeliveryCandidate)
-        and _loop()._delivery_replace_required(candidate)
-    )
+        kept and _loop()._delivery_replace_required(candidate))
+    if foreign_calls:  # its other text is only classified too; the response stays in its source
+        resolved, retained, degraded, _consumed, _replaced = _loop()._resolve_forced_delivery_control_body(
+            body, candidate, armed=armed, messages=getattr(ctx, "messages", None),
+            held_sha256=getattr(tools_ctx, "_completion_held_sha256", ""))
+        return resolved, REASON_DELIVERY_CONTROL_DEGRADED if degraded else "", retained, False
     resolved, retained, degraded, consumed, replaced = (
         _loop()._resolve_forced_delivery_control_body(
-            extracted, candidate, armed=armed,
+            body, candidate, armed=armed,
             envelope_keys=("presence_finish",) if presence_armed else (),
             messages=getattr(ctx, "messages", None), held_sha256=getattr(tools_ctx, "_completion_held_sha256", ""),
+            tool_ctx=tools_ctx, native=native_call is not None,
         )
     )
+    if native_call is not None and degraded and not kept and extracted and not requested(extracted):
+        resolved = _loop()._resolve_forced_delivery_control_body(extracted, None, armed=armed)[0]
+    consumed = consumed and not degraded  # a rejected control leaves the latch and every binding as they were
+    selected = consumed  # the request's own bytes; a refused subject below keeps them
     if presence_armed and isinstance(tools_ctx._presence_forced_pending, dict):
-        from ouroboros.loop_delivery import _parse_delivery_control_body
-
         parsed, _, _ = _parse_delivery_control_body(extracted)
         if degraded or not (isinstance(parsed, dict) and parsed.get("action") in {"finish", "stop"}):
             # A declaration cannot speak unless its outer control positively chose the final record.
@@ -1145,11 +1290,10 @@ def _resolve_forced_delivery_control(
                 "status": "invalid", "reason": "the delivery-control envelope was rejected"}
     if consumed:
         tools_ctx._delivery_control_required = False
-        from ouroboros.loop_delivery import _parse_delivery_control_body, apply_delivery_subject_decision
-
-        parsed, duplicate, embedded = _parse_delivery_control_body(extracted)
+        parsed, duplicate, embedded = _parse_delivery_control_body(body)
+        # A null subject names none, as finish_task's own staging drops it: nothing to acknowledge or degrade.
         if (not duplicate and not embedded and isinstance(parsed, dict)
-                and "acceptance_subject" in parsed and not degraded):
+                and parsed.get("acceptance_subject") is not None):
             applied, error = (
                 apply_delivery_subject_decision(ctx.tools, ctx, llm_trace, parsed["acceptance_subject"])
                 if ctx is not None and llm_trace is not None else
@@ -1163,12 +1307,11 @@ def _resolve_forced_delivery_control(
                     candidate.acceptance_binding = _loop()._forced_unaccepted_binding(
                         ctx.tools, candidate, REASON_DELIVERY_CONTROL_DEGRADED,
                     )
-    if consumed and not degraded and llm_trace is not None:
-        parsed, _, _ = _parse_delivery_control_body(extracted)
-        if isinstance(parsed, dict) and parsed.get("action") == "stop":
-            import hashlib
-            llm_trace["task_completion"] = {"action": "stop", "rationale": parsed["rationale"],
-                "answer_sha256": hashlib.sha256(resolved.encode("utf-8")).hexdigest(), "source": "forced_completion"}
+    request = (tools_ctx._forced_completion or {}).get("request")
+    if selected and llm_trace is not None and isinstance(request, dict) and request.get("action") == "stop":
+        # The author's stop travels with its selected bytes, as its silence does (a refused subject degrades the binding).
+        llm_trace["task_completion"] = {"action": "stop", "rationale": request["rationale"],
+            "answer_sha256": hashlib.sha256(resolved.encode("utf-8")).hexdigest(), "source": "forced_completion"}
     return (
         resolved,
         REASON_DELIVERY_CONTROL_DEGRADED if degraded else "",
@@ -1213,6 +1356,20 @@ def _send_admitted_forced_candidate(
         return _loop()._call_forced_model_once(ctx)
 
 
+def _timeout_repeat_final(
+    ctx: _RoundLimitContext, llm_trace: Dict[str, Any], fallback_text: str, reason_code: str, provider_terminal: bool,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """A standing timeout repeat (#1886) ends this rail without a summary call: the rail keeps its
+    reason, the parent that chose the actor gets the saved work and the repeat's facts."""
+    timeout_repeat_blocked(ctx.accumulated_usage)  # a restored dispatch reads as UNKNOWN
+    ctx.accumulated_usage.update(execution_status="failed", reason_code=reason_code)
+    salvaged = _loop()._last_assistant_text(ctx.messages)
+    return _loop()._forced_fallback_result(
+        ctx, llm_trace, salvaged or fallback_text, reason_code,
+        source=_loop().provider_no_call_source(ctx.accumulated_usage, False)[0],
+        provider_terminal=provider_terminal, host_words=not salvaged)
+
+
 def _forced_final_answer(
     ctx: _RoundLimitContext,
     *,
@@ -1239,13 +1396,36 @@ def _forced_final_answer(
             ctx, llm_trace, fallback_text, reason_code,
             source=f"{reason_code}_window_elapsed", host_words=fallback_host_words,
         )
+    if TIMEOUT_REPEAT_KEY in ctx.accumulated_usage:  # owed or spent: no summary is bought for it
+        return _timeout_repeat_final(ctx, llm_trace, fallback_text, reason_code, provider_terminal)
+    from ouroboros.loop_output_exhaustion import no_recap, finish
+    if no_recap(ctx.accumulated_usage):
+        return finish(ctx, reason=reason_code)
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    _loop()._retire_main_reasoning(ctx)
+    if _admitted_request is None:  # an admitted candidate was priced with them (``loop_budget``)
+        _deliver_forced_late_results(ctx, llm_trace)
     _loop()._append_or_merge_user_message(ctx.messages, prompt)
+    from ouroboros.transcript_prefix import append_reasoning_retirement_fact
+    from supervisor.owner_stop import presence_stop_now
+    append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), ctx.messages)
     extracted = ""
     response_meta: Dict[str, Any] = {}
     attempt = 0
+    refresh_late = False
+    stop_now = False
     while attempt < (1 if single_semantic_turn else 2):
         try:
+            if refresh_late and _deliver_forced_late_results(ctx, llm_trace) and _admitted_request is not None:
+                from ouroboros import task_pacing
+
+                _admitted_request, _initial_messages = task_pacing.prepared_wrapup_candidate(
+                    ctx, [dict(row) for row in ctx.messages],
+                    allow_server_web_search=_loop()._server_web_allowed_by_task(tools_ctx))
+                if _admission is not None and task_pacing.wrapup_reservation_fits(
+                        request=_admitted_request, **_admission) is False:
+                    raise ForcedCandidateUnaffordable("late result changed the resumed wrap-up price")
+            refresh_late = False
             ctx.accumulated_usage.pop("_forced_response_meta", None)
             if attempt == 0 and _admitted_request is not None:
                 forced = _send_admitted_forced_candidate(
@@ -1259,6 +1439,7 @@ def _forced_final_answer(
             controlled = _loop()._handle_model_wait_control(ctx, error)
             if controlled is not None:
                 return controlled
+            refresh_late = True
             continue  # only an actual warm Resume returns; retry the same intent
         except BudgetExceeded:
             _loop()._drain_forced_owner_directives(ctx, llm_trace)
@@ -1285,9 +1466,13 @@ def _forced_final_answer(
             log.warning("Failed to get final response after %s", reason_code, exc_info=True)
             extracted = ""
             response_meta = {}
+        if TIMEOUT_REPEAT_KEY in ctx.accumulated_usage:  # this call's own timeout repeat did not answer either
+            return _timeout_repeat_final(ctx, llm_trace, fallback_text, reason_code, provider_terminal)
         ctx.accumulated_usage["execution_status"] = "failed"
         ctx.accumulated_usage["reason_code"] = reason_code
-        if not _loop()._drain_forced_owner_directives(ctx, llm_trace):
+        late = _loop()._drain_forced_owner_directives(ctx, llm_trace)
+        # The closing admission reads Stop now as an ordinary answer's does; it outranks a late directive.
+        if (stop_now := presence_stop_now(tools_ctx)) or not late:
             break
         if str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") == "provider_outcome_unknown":
             return _loop()._forced_fallback_result(
@@ -1309,43 +1494,68 @@ def _forced_final_answer(
         _loop()._append_or_merge_user_message(
             ctx.messages,
             "[FORCED_OWNER_REFRESH] Answer all current directives; ignore the stale draft."
-            + _forced_subject_prompt(ctx, llm_trace),
+            + _forced_subject_prompt(ctx, llm_trace, presence_armed=_presence_forced_armed(
+                getattr(getattr(ctx, "tools", None), "_ctx", None))),
         )
+        refresh_late = True
         attempt += 1
 
     # Control resolution runs BEFORE the incomplete branch: a retained candidate
     # recovered from a control body must not be discarded as a truncated draft,
     # and a stale-evidence retention keeps its own reason (#447/issue-449).
-    incomplete = bool(extracted) and forced_response_is_incomplete(response_meta)
+    from ouroboros.loop_delivery import carry_forced_selection, forced_completion_call, record_forced_completion
+
+    # An adopted native completion request (a reply complete apart from that one call and a provider length
+    # cut) is not a tool request, and its serialized text form reads the response the same way; the actual
+    # call count stays the response's. A reply with native calls none of which is adopted asks for tools: a
+    # preamble whose text consumes nothing.
+    native, unadopted = forced_completion_call(response_meta, getattr(ctx, "tool_schemas", None))
+    foreign = native is None and bool(response_meta.get("reply_calls") or response_meta.get("tool_call_count"))
+    worded = native is None and bool(extracted)
     extracted, control_degraded, retained, replaced = _resolve_forced_delivery_control(
-        tools_ctx, extracted, ctx=ctx, llm_trace=llm_trace,
+        tools_ctx, extracted, ctx=ctx, llm_trace=llm_trace, native_call=native, foreign_calls=foreign,
+        response_meta=response_meta,
     )
+    serialized = not foreign and isinstance(getattr(tools_ctx, "_forced_completion", None), dict)
+    request = record_forced_completion(llm_trace, tools_ctx, response_meta, native=native, unadopted=unadopted)
+    # Plain words beside a refused sole request (nothing retained) are a draft, as beside an unadopted call.
+    incomplete = (native is not None and request is None and not retained and bool(extracted)) or worded and (
+        foreign or forced_response_is_incomplete(response_meta, completion_request=serialized))
+    silent = bool((request or {}).get("wake_silent"))  # a typed silent selection answers even without words
     current = _loop()._current_delivery_candidate(ctx, llm_trace)
+    # A reply that still asks for a tool is a preamble on every rail, replace
+    # control or not; other incompleteness may still be resolved by a replace.
+    preamble = incomplete and (bool(response_meta.get("tool_call_count")) or current is not None or not replaced)
+    if stop_now:  # kept on the row, never sent: this answer, unless a preamble or stale selection answers nothing
+        if (extracted or silent) and not preamble and not (retained and current is None):
+            carry_forced_selection(tools_ctx, request, _publish_model_forced_candidate(
+                ctx, llm_trace, extracted, reason_code, degraded_reason=control_degraded))
+        from ouroboros.loop_round_limits import _handle_direct_turn_hard_stop
+        return _handle_direct_turn_hard_stop(ctx)
     if retained and current is None:
         return _loop()._forced_fallback_result(
             ctx, llm_trace, extracted, reason_code,
             source="model_control_retained", candidate_reason=control_degraded,
             provider_terminal=provider_terminal,
         )
-    # A reply that still asks for a tool is a preamble on every rail, replace
-    # control or not; other incompleteness may still be resolved by a replace.
-    if incomplete and (
-        bool(response_meta.get("tool_call_count")) or current is not None or not replaced
-    ):
+    if preamble:
         return _loop()._forced_fallback_result(
             ctx, llm_trace, extracted or fallback_text, reason_code,
             source="forced_model_incomplete", candidate_reason=control_degraded,
             provider_terminal=provider_terminal, host_words=None if extracted else fallback_host_words,
         )
-    if extracted:
+    if extracted or silent:
         ctx.accumulated_usage["_best_effort_extracted"] = True
         plan_suffix = (
-            _loop()._force_plan_disclosure(tools_ctx, llm_trace, forced_reason=reason_code)
+            _loop()._plan_gate_disclosure(tools_ctx, llm_trace, forced_reason=reason_code)
             if tools_ctx is not None else ""
         )
         if plan_suffix:  # absent = not open: a clean result carries no key (pinned usage shapes)
             ctx.accumulated_usage["terminal_plan_review_open"] = True
-        set_terminal_host_notice(ctx.accumulated_usage, plan_suffix, _loop()._forced_orphan_note(ctx))
+        cut = forced_response_cut(response_meta) if isinstance(request, dict) else ""
+        set_terminal_host_notice(ctx.accumulated_usage, plan_suffix, _loop()._forced_orphan_note(ctx), (
+            f"The provider cut this reply at its output limit ({cut}) after its completion request; anything "
+            "the model meant to add after that request is not here.") if cut else "")
         full_text = extracted
         ctx.accumulated_usage["terminal_origin"] = TERMINAL_ORIGIN_MODEL_FINAL
         if isinstance(getattr(tools_ctx, "_presence_forced_pending", None), dict):
@@ -1354,6 +1564,7 @@ def _forced_final_answer(
             ctx, llm_trace, full_text, reason_code,
             degraded_reason=control_degraded,
         )
+        carry_forced_selection(tools_ctx, request, candidate)
         if control_degraded and candidate is not None:
             llm_trace.setdefault("reasoning_notes", []).append(
                 "Forced finalization received an invalid delivery-control object; "
@@ -1366,6 +1577,11 @@ def _forced_final_answer(
             source="model",
             candidate=candidate,
         )
+        if isinstance(request, dict):  # this accepting exit publishes the author's sentence and comparison
+            if request.get("wake_summary"):
+                ctx.accumulated_usage["wake_summary"] = request["wake_summary"]
+            from ouroboros.swarm_receipt import retain_comparison
+            retain_comparison(tools_ctx)
         return (
             candidate.full_text if candidate is not None else full_text,
             ctx.accumulated_usage,

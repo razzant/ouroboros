@@ -364,7 +364,7 @@ def test_closed_generation_retains_its_chosen_refusal_across_real_contention(env
 
     monkeypatch.setattr(prep.PreparationClaim, "refuse", refuse)
     monkeypatch.setattr(task_admission, "persist_never_admitted_refusal", persist)
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("closed-busy"))
         env.wait_phase("closed-busy", prep.COPYING)
         prep.close_generation(env.gen)

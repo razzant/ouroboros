@@ -278,7 +278,8 @@ def test_every_public_write_refuses_in_the_window_and_outside_published_while_se
         assert txn.load("t1") is None and set(txn.custody_rows()) == {"r1"}
 
 
-def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path):
+@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path, monkeypatch, mode):
     """The seam commits ``phase=retired`` into the store, clears the stamp and renames it aside.
     A writer that opened the file earlier reads that phase inside its own transaction before
     closing for the rename (required by the journal handoff on every platform); a writer
@@ -286,14 +287,19 @@ def test_a_straggler_after_the_retirement_is_told_retired_not_migrating(tmp_path
     never «not published yet»."""
     from ouroboros.startup_migrations import stamp
 
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     path = publish(tmp_path, document("t1"))
     retired = path.with_name(path.name + ".exported-test")
     with contextlib.closing(store.connect(path, store.TIER_ENFORCED)) as straggler:  # opened before the seam ran
-        with store.open_store(tmp_path, write=True) as txn:
-            txn.set_meta("phase", store.RETIRED)
-        stamp(tmp_path, **{store.GENERATION_KEY: None})
+        # Commit the phase before quiescing the old writer; open_store would also
+        # attempt the handoff while that writer still holds its WAL connection.
+        with contextlib.closing(store.connect(path, store.TIER_ENFORCED)) as retiring:
+            with store.transaction(retiring, write=True):
+                store.Txn(retiring).set_meta("phase", store.RETIRED)
         with store.transaction(straggler, write=True):
             assert store.Txn(straggler).phase() == store.RETIRED
+    store.prepare_handoff(path, store.TIER_ENFORCED)
+    stamp(tmp_path, **{store.GENERATION_KEY: None})
     os.replace(path, retired)
     with pytest.raises(StoreRetired):
         store.update_task(tmp_path, "t1", lambda current: {**current, "note": "late"})
@@ -492,13 +498,15 @@ def test_nothing_above_sqlite_3_24_in_the_store_modules():
     assert sqlite3.sqlite_version_info >= (3, 24, 0)
 
 
-def test_the_schema_builds_on_this_engine(tmp_path):
+@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+def test_the_schema_builds_on_this_engine(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(store, "_journal_mode", lambda *_: mode)
     path = publish(tmp_path, document("t1"))
-    with sqlite3.connect(path) as conn:
+    with contextlib.closing(sqlite3.connect(path)) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert tables == {"tasks", "task_bodies", "task_cards", "obligations", "task_handoffs", "custody_runs",
                           "custody_outbox", "meta"}
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == ("wal" if mode == "WAL" else "delete")
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 0  # the version lives in meta
 
 
@@ -536,7 +544,7 @@ def test_readers_decode_bodies_after_the_read_transaction_closed(tmp_path, monke
 def _outside_the_lock(root, monkeypatch, probes):
     """Every mutator input is prepared with NO write transaction open: each prepared input first
     takes and releases the store's write lock itself, which ``StoreBusy``-fails under a mutator."""
-    from ouroboros import swarm_rollup, task_custody
+    from ouroboros import task_custody
 
     def guard(name, real):
         def probe(*args, **kwargs):
@@ -546,25 +554,22 @@ def _outside_the_lock(root, monkeypatch, probes):
             return real(*args, **kwargs)
         return probe
 
-    for module, name in ((task_custody, "capture_unread_mail"), (task_custody, "capture_owner_mail"),
-                         (swarm_rollup, "initial_swarm_rollup")):
+    for module, name in ((task_custody, "capture_unread_mail"), (task_custody, "capture_owner_mail")):
         monkeypatch.setattr(module, name, guard(name, getattr(module, name)))
 
 
 def test_mutator_inputs_are_prepared_before_begin_and_reprepared_outside_when_the_row_moved(tmp_path, monkeypatch):
-    """S3 fix 13 (Grok MINOR, Astra M11): the mailbox captures and the swarm rollup run before
-    ``BEGIN``; a mutator that finds its input missing (a projector turning the row terminal, a
-    first row) rolls back empty and the whole write repeats with the input prepared outside the
-    lock."""
+    """Mailbox captures run before BEGIN; a projector turning a row terminal
+    rolls back empty and repeats with that input prepared outside the lock."""
     from ouroboros import store_import, task_results
 
     store_import.ensure_current_store(tmp_path)
     probes: list = []
     _outside_the_lock(tmp_path, monkeypatch, probes)
-    # A first row that is not create-only: the rollup is prepared on the second round, outside.
+    # A first row needs no history input: its producer-owned fan-out starts empty.
     task_results.write_task_result(tmp_path, "t1", "running")
-    assert probes == ["initial_swarm_rollup"]
-    assert task_results.load_task_result(tmp_path, "t1")["swarm_fanout_rollup"]["through"] == 0
+    assert probes == []
+    assert task_results.load_task_result(tmp_path, "t1")["swarm_fanout_rollup"]["fanout_count"] == 0
     # The projector turns a non-terminal write terminal: the captures are prepared outside, once.
     probes.clear()
     stored = task_results.write_task_result(tmp_path, "t1", "running",

@@ -23,13 +23,15 @@ class CardSubmissionSummary(TypedDict):
     """One recorded owner press: which control, its label as drawn, when, and its delivery
     (``delivered`` into the authoring task's mailbox, ``forwarded`` as the owner's message
     after that task ended, ``owed`` while neither has happened). ``request_id`` retries an
-    owed press, after a reload too."""
+    owed press, after a reload too. ``reason_code`` ``awaiting_recipient_read``: delivered
+    to a paused, held or queued author that has not read it yet."""
 
     action_id: str
     label: str
     at: str
     delivery: Literal["owed", "delivered", "forwarded"]
     request_id: str
+    reason_code: NotRequired[str]
 
 
 class CardOutbound(ChatReferenceFields):
@@ -47,7 +49,7 @@ class CardOutbound(ChatReferenceFields):
 
 
 class CardStateOutbound(TypedDict):
-    """A shown card changed: a new body (``card.revision`` grew) or a recorded press. Read
+    """A shown card changed: a new body (``card.revision`` grew) or a press recorded or read. Read
     ``GET /api/cards/{card_id}`` again; it is a signal, never a second card."""
 
     type: Literal["card_state"]
@@ -105,7 +107,36 @@ class CardPinResponse(TypedDict):
     pinned_at: NotRequired[str]
 
 
+class UiHold(TypedDict):
+    """One start the page did not outlive: an app card (``app:<card_id>``, ``rev`` its bytes' sha256), a skill's
+    widget (``widget:<skill>:<tab_id>``, ``rev`` its revision) or page module (``module:<contribution key>``)."""
+
+    key: str
+    rev: str
+
+
+class UiHoldsSurface(TypedDict, total=False):
+    """Where the page runs, as raw facts: the desktop shell's bridge, inside the Telegram mini app."""
+
+    pywebview: bool
+    telegram: bool
+
+
+class UiHoldsRequest(TypedDict):
+    """``POST /api/ui/holds``: the holds one page found when it opened (web/modules/holds.js), once per load."""
+
+    holds: List[UiHold]
+    surface: NotRequired[UiHoldsSurface]
+
+
+class UiHoldsResponse(TypedDict):
+    """How many holds were named in a System row now (``0`` when each was named already or is gone)."""
+
+    ok: bool
+    named: int
+
+
 __all__ = [
     "CardAppRef", "CardOutbound", "CardPinResponse", "CardResponse", "CardStateOutbound",
-    "CardSubmissionSummary", "CardWidgetRef",
+    "CardSubmissionSummary", "CardWidgetRef", "UiHold", "UiHoldsRequest", "UiHoldsResponse", "UiHoldsSurface",
 ]

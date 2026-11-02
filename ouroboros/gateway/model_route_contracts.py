@@ -70,6 +70,9 @@ class ResponseLimitPreview(TypedDict):
 
     route: ResponseLimitRoute
     response_limit: ResponseLimit
+    window: Dict[str, Any]  # context_view_facts.window_projection
+    window_route: Dict[str, Any]  # the window acknowledgement's independent fingerprint
+    window_ack: bool
 
 
 class ResponseLimitAckResponse(TypedDict):
@@ -82,7 +85,7 @@ class ResponseLimitAckResponse(TypedDict):
 class CapabilityAckRequest(TypedDict):
     """``POST /api/owner/capability-ack``: the owner vouches for one exact route. With
     ``max_output_tokens`` present it records that route's maximum response (0 removes it);
-    otherwise ``window_tokens`` (a positive integer) records its context window. ``route_fp``,
+    otherwise ``window_tokens`` records its context window (0 removes it). ``route_fp``,
     when sent, must equal the fingerprint the preview showed, or the request is refused (400).
     It writes acknowledgement evidence, never settings; repeating it overwrites the same record."""
 

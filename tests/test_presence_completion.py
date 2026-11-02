@@ -12,7 +12,7 @@ import ouroboros.loop as loop
 from ouroboros.outcomes import derive_loop_outcome
 from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.presence_runner import build_presence_result_event
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_presence_runner import _admission
 from tests._store_shared import read_result
 
@@ -188,7 +188,7 @@ def test_owner_followup_invalidates_finish_before_or_during_final_gate(turn, tmp
 
         monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review)
     else:
-        from ouroboros.tools.presence import _finish_presence
+        from tests.presence_legacy_helpers import _finish_presence
 
         def finish(ctx, **kwargs):
             result = _finish_presence(ctx, **kwargs)
@@ -205,7 +205,7 @@ def test_owner_followup_invalidates_finish_before_or_during_final_gate(turn, tmp
 
 @pytest.mark.parametrize("reason", ["cancel", "budget"])
 def test_control_or_budget_tail_precedes_pending_finish(turn, tmp_path, monkeypatch, reason):
-    from ouroboros.tools.presence import _finish_presence
+    from tests.presence_legacy_helpers import _finish_presence
     from ouroboros.usage_accounting import BudgetExceeded
 
     registry, calls, run = turn

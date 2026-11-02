@@ -86,9 +86,14 @@ def test_answer_follows_reader_at_finish_without_creating_a_successor(host, monk
         # Recovery retry observes the ended recipient and its existing successor.
         status, response = host.run_async(answer_decision(host.root, body))
         assert status == 200, response
-    recipient = "asker" if destination == "asker" else successor if destination == "successor" else ""
+    recipient = ("asker" if destination == "asker" else successor
+                 if destination in {"successor", "held_successor"} else "")
     assert debt(host.root)["recipient_task_id"] == recipient
-    if recipient:
+    if held:
+        # A held successor holds the answer unread until it continues; no head relays it.
+        assert not _inbox(bridge) and debt(host.root)["reason_code"] == "awaiting_recipient_read"
+        assert [entry["msg_id"] for entry in drain_owner_entries(host.root, successor)] == [debt(host.root)["msg_id"]]
+    elif recipient:
         assert not _inbox(bridge)
         ctx, _messages = drain(host.root, recipient)
         assert [r["content"] for r in ctx._owner_directives] == ["exact answer"]
@@ -99,8 +104,7 @@ def test_answer_follows_reader_at_finish_without_creating_a_successor(host, monk
         assert message["chat_id"] == 1 and debt(host.root)["route"] == "fresh_head"
         assert not drain_owner_entries(host.root, "asker")
     if held:
-        assert read_fence(host.root, successor) == held
-        assert not drain_owner_entries(host.root, successor) and not sent
+        assert read_fence(host.root, successor) == held and not sent
     assert host.run_async(answer_decision(host.root, body))[0] == 200
     assert not _inbox(bridge)
     if successor:

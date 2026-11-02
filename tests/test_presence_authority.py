@@ -4,17 +4,9 @@ from pathlib import Path
 import pytest
 
 from ouroboros.contracts.task_contract import build_task_contract
-from ouroboros.presence_authority import (
-    PresenceAuthorityError,
-    build_presence_capability_ceiling,
-    presence_ceiling_allows_binding,
-    presence_ceiling_allows_delegated_read,
-    presence_ceiling_allows_delegated_surface,
-    presence_ceiling_allows_tool,
-    presence_ceiling_from_payload,
-    presence_ceiling_payload,
-)
-from ouroboros.presence_capabilities import (
+from ouroboros.presence_authority import PresenceAuthorityError, presence_ceiling_allows_binding, presence_ceiling_allows_delegated_read, presence_ceiling_allows_delegated_surface, presence_ceiling_allows_tool, presence_ceiling_from_payload, presence_ceiling_payload
+from tests.frozen_presence_authority import build_presence_capability_ceiling
+from tests.frozen_presence_capabilities import (
     PresenceArgumentBinding,
     PresenceProfileResolution,
     PresenceResourceTarget,
@@ -24,7 +16,7 @@ from ouroboros.presence_capabilities import (
     PresenceToolTarget,
     presence_state_fingerprint,
 )
-from ouroboros.presence_runtime import ResolvedPresenceRuntime
+from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 from ouroboros.tool_access import ResolvedResourceBinding
 from ouroboros.tools.registry import ToolContext, ToolEntry, ToolRegistry
 
@@ -74,6 +66,7 @@ def test_ceiling_compiles_exact_tools_scripts_resources_and_digest():
         "tell_task",
         "update_identity",
         "update_scratchpad",
+        "update_world",
     ]
     scoped = {grant.name: [(item.argument_path, item.static_value) for item in grant.bindings]
               for grant in ceiling.tool_grants if grant.name in {"get_task_result", "recent_tasks", "tell_task"}}
@@ -240,7 +233,6 @@ def test_registry_filters_schema_dispatch_and_resolved_targets(tmp_path):
     names = {schema["function"]["name"] for schema in registry.schemas()}
     assert names == {
         "finish_task",  # ceiling-only work has no speaker metadata; local completion grants no resource
-        "presence_finish",
         "presence_cancel_work",
         "read_file",
         "chat_history",
@@ -254,6 +246,7 @@ def test_registry_filters_schema_dispatch_and_resolved_targets(tmp_path):
         "tell_task",
         "update_identity",
         "update_scratchpad",
+        "update_world",
     }
     # Own memory is advertised and it runs; nothing that acts outside this mind
     # comes with it, in the schemas or in dispatch.
@@ -281,7 +274,8 @@ def test_registry_filters_schema_dispatch_and_resolved_targets(tmp_path):
     ).endswith("\tok")
 
 
-def test_presence_argument_bindings_override_model_supplied_values(tmp_path):
+def test_presence_argument_bindings_override_model_supplied_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     selection = PresenceSelection(
         "1" * 64,
         PresenceToolTarget("builtin", "bound_tool"),

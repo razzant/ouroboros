@@ -1,63 +1,39 @@
-"""The physical floor of the memory view: what of my memory a request shows only by address.
+"""One start allowance and an ordered walk over an immutable memory snapshot.
 
-The view's structure decides what it holds; the floor only takes away, and only when that
-structure does not fit. ``fit_memory_view`` walks the ladder once, element by element,
-while the view is larger than the boundary of the element's step, and every element it
-takes is drawn as an address line with its period: the horizon stays, the granularity
-changes. No search, no second render to choose a level, nothing added to fill room.
-
-Three boundaries, each in estimator tokens of memory (``context_budget.request_context_budget``):
-host facts, room headers, retold pointers and pages answer to the window minus the reply
-reserve and the working margins (``MEMORY_VIEW_WORKING_MARGINS``); my own replies and
-people's words only to the window minus the reply reserve, so a margin never costs the
-conversation itself; an owner-selected Low or Nano target, with its own margins
-(``MODE_TARGET_WORKING_MARGINS``), bounds the steps of ``MODE_TARGET_STEPS`` alone: a chosen
-target trims facts, headers and retold memory, never the conversation. An unknown window
-takes no window step.
-``render_view_for_mode`` is the whole floor decision of one mode's projection (story text,
-room text and the floor fact the task trace keeps).
-
-``physical_mode`` lowers a task's starting mode (Max, Low, Nano) only when the fixed part
-of the preferred mode with the shortest view of my memory cannot fit the window minus the
-reply reserve on the route's calibrated estimate (estimator tokens scaled by the route's measured
-ratio): all of my memory is already addresses and the request still cannot be sent.
-``mode_views`` renders every mode of one plan and picks that starting mode (a new route that
-cannot hold a shown view narrows it from the same snapshot and the level it shows, ``kept``,
-never unfolding an address). Rendering stays ``memory_view``'s; nothing here reads
-the chronicle, publishes a record or calls a model.
+After the start, only a physical deficit narrows the selected forms. Owner rows
+without carried commitments may spend the work room, but never silently disappear.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+import logging
+import math
+from functools import lru_cache
+from typing import Callable, Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import context_budget
 from ouroboros.chat_chain import parse_address
+from ouroboros.context_layout import INDEX_STEPS as INDEX_STEPS
 from ouroboros import memory_view as mv
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.utils import estimate_tokens
+from ouroboros.section_floor import PROTECTED, retain_section, relocated_text, section_views
 
-# The ladder, old before new and people last: host fact lines of this room's tasks
-# (F1), other live rooms without notes (F1b), retold records, whole or not, as one line per room
-# (F3), my oldest pages, parts and accounts (F5; a record an account tells stays its address line), this
-# room's retold page (F4), my longest replies (F2), then people's words: other rooms' (F6, only when the
-# view shows them) and this room's (F7).
-LADDER = ("F1", "F1b", "F3", "F5", "F4", "F2", "F6", "F7")
-# The only steps an owner-selected Low or Nano target takes: facts, headers,
-# pointers and old retold memory; my replies and people's words answer to the window alone.
-MODE_TARGET_STEPS = ("F1", "F1b", "F3", "F5", "F4")
-# Both sides of the conversation, my replies and people's words, become addresses only when the
-# window minus the reply reserve cannot hold them: never for the working margins.
-WINDOW_ONLY_STEPS = ("F2", "F6", "F7")
-MODES = ("max", "low", "nano")  # the starting-mode order the window may lower through
-_COLLAPSING = ("F1", "F1b")  # many elements, one line: the first element carries it
-_SHOWN = (("F2", "{} of my replies"), ("F7", "{} lines of people in this room"),
-          ("F6", "{} lines of people in other rooms"), ("F4", "{} records of this room's page"),
-          ("F5", "{} pages, parts or accounts of my story"), ("F3", "the retold records of {} rooms (one line per room)"),
-          ("F1", "{} task fact lines"), ("F1b", "{} other open rooms"))
-# One name set per closing ``floor_note`` can print (``memory_read_path``, with or without the
-# chronicle_write sentence): the shortest view takes the longest.
+log = logging.getLogger(__name__)
+
+LADDER = ("F1", "F1b", "F6r", "F6", "F6a", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a")
+MODES = ("max", "low", "nano")
+_COLLAPSING = ("F1", "F1b", "F6a", "F7a", "F5a", "F8a")
+_ORDINARY = ("F1", "F1b")  # task lines and quiet rooms collapsed: the forms a view takes before any cut
+_LIST_FORMS = {'F7a': ('F2', 'F7p', 'F7'), 'F5a': ('F5',), 'F8a': ('F8',)}
+_SHOWN = (("F2", "{} of my replies"), ("F7", "{} owner rows"), ("F7p", "{} other spoken rows"),
+          ("F6r", "{} other rooms as ranges"), ("F6", "{} other rooms as directory lines"),
+          ("F6a", "{} other rooms in an aggregate"), ("F4", "{} room records"),
+          ("F5l", "{} story pages by first sentence"), ("F5", "{} pages or parts of my story"), ("F3", "{} retold rooms"),
+          ("F1", "{} task fact lines"), ("F1b", "{} quiet rooms"))
+_SHOWN += (("F7a", "{} aggregate row ranges"), ("F5a", "{} aggregate story lists"))
+_SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note lists"))
 _PATH_CASES = ((), ("enable_tools",), ("list_available_tools",), ("chronicle_write", "list_available_tools"))
 _SEALING_TOOLS = frozenset({"chronicle_write", "enable_tools"})  # sent, or loadable through enable_tools
 
@@ -68,38 +44,47 @@ def view_tokens(text: str) -> int:
 
 
 def floor_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, str, str]]:
-    """``(step, element id, whole text, address line)`` of what the floor may address, in ladder order.
-
-    Inside a step oldest first; my replies longest first, then oldest. Where a step folds
-    many elements into one line (F1, F1b) the first carries that line. An element whose
-    address line is not shorter than its text is not degradable. Never here: identity,
-    knowledge, marks, notes, the words that started the work, a helper's owner words, this
-    room's header, a retold room's one line, the F1b summary.
-    """
+    """Ordered addressable forms, oldest first; F5 by covered-period start then sequence, across kinds.
+    Display order is independent. Core and governing words have no rung."""
     if not snapshot.active:
         return []
     room = snapshot.room or {}
     lane1, lane2 = room.get("lane1") or [], room.get("lane2") or []
-    quiet = [item for item in snapshot.live_rooms if not item["notes"] and not item["words"]]
-    mine = sorted((item for item in lane1 if item["kind"] == "ouroboros"), key=lambda item: (-item["chars"], item["pos"]))
-    words = sorted((word for item in snapshot.live_rooms for word in item["words"]), key=lambda word: word["pos"])
+    # F1b remains for saved snapshots captured before quiet rooms left the live-room list.
+    quiet = [r for r in snapshot.live_rooms if not r.get("live") and not r["notes"] and not r["words"] and (
+        not r.get("directory") or not (r["facts"].get("people") or r["facts"].get("mine") or r.get("focus")))]
+    others = [r for r in snapshot.live_rooms if r not in quiet]
+    mine = sorted((i for i in lane1 if i["kind"] == "ouroboros"), key=lambda i: i["pos"])
     steps = {
-        "F1": [(item["first"], item["line"], "" if i else mv._facts_line(room, [item])) for i, item in enumerate(lane2)],
-        "F1b": [(item["room_id"], "\n".join(mv._live_room(item)), "" if i else mv._rooms_line([item]))
-                for i, item in enumerate(quiet)],
-        "F3": [(room_id, "\n".join(map(legacy.retold_record, group)), legacy.room_pointer(group))
-               for room_id, group in legacy.pointer_rooms(snapshot.story).items()],
-        "F5": [(entry["id"], "\n".join(mv._page_lines(entry)), mv._page_pointer(entry))
-               for entry in snapshot.story if entry.get("kind") != "legacy" and not entry.get("told_by")],
-        "F4": [(item["id"], mv._retold(item), mv._retold(item, True))
-               for item in [*room.get("legacy", ()), *room.get("under_parts", ())]],
-        "F2": [(item["address"], item["line"], mv._row_pointer(item, "my reply")) for item in mine],
-        "F6": [(word["address"], word["line"], mv._row_pointer(word, "words")) for word in words],
-        "F7": [(item["address"], item["line"], mv._row_pointer(item, "words"))
-               for item in lane1 if item["kind"] != "ouroboros"],
+        "F1": [(i["first"], i["line"], "" if n else mv._facts_line(room, [i])) for n, i in enumerate(lane2)],
+        "F1b": [(r["room_id"], mv._directory_room(r) if r.get("directory") else "\n".join(mv._live_room(r)),
+                  "" if n else mv._rooms_line([r])) for n, r in enumerate(quiet)],
+        "F6r": [(r["room_id"], "\n".join(mv._live_room(r)), mv._range_room(r)) for r in others if not r.get("directory")],
+        "F6": [(r["room_id"], mv._range_room(r), mv._directory_room(r)) for r in others if not r.get("directory")],
+        "F6a": [(r["room_id"], mv._directory_room(r), "" if n or quiet else mv._rooms_line([r])) for n, r in enumerate(others)],
+        "F3": [(rid, "\n".join(map(legacy.retold_record, group)), legacy.room_pointer(group))
+               for rid, group in legacy.pointer_rooms(snapshot.story).items()],
+        "F2": [(i["address"], i["line"], mv._row_pointer(i, "my reply")) for i in mine],
+        "F4": [(i["id"], mv._retold(i, i.get("standing", False)), mv._retold(i, True))  # a standing part's members: short already
+               for i in [*room.get("legacy", ()), *room.get("under_parts", ())]],
+        "F7p": [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
+                if i["kind"] != "ouroboros" and not i.get("owner_side", i["kind"] == "human")],
+        "F7": [(i["address"], i["line"], mv._row_pointer(i, "words")) for i in lane1
+               if i.get("owner_side", i["kind"] == "human") and not i.get("immune")],
+        "F5l": [(e["id"], "\n".join(mv._page_lines(e)), mv._page_label(e))
+                for e in sorted(snapshot.story, key=lambda e: tuple(e.get("floor_order", (0, 0))))
+                if e.get("kind") == "page" and not e.get("told_by")],
+        "F5": [(e["id"], "\n".join(mv._page_lines(e)), mv._page_pointer(e))
+               for e in sorted(snapshot.story, key=lambda e: tuple(e.get("floor_order", (0, 0))))
+               if e.get("kind") not in ("legacy", "account") and not e.get("told_by")],
+        # These are forms of an already addressed set, never permission to cut another row/page.
+        "F7a": [(str(room['room_id']), '', '')] if lane1 else [],
+        "F5a": [('story', '', '')] if snapshot.story else [],
+        "F8": [(n['id'], '\n'.join(mv._note_lines([n])), mv._note_pointer(n)) for n in room.get('notes', ())],
+        "F8a": [(str(room['room_id']), '', '')] if room.get('notes') else [],
     }
     return [(step, ident, whole, short) for step in LADDER for ident, whole, short in steps[step]
-            if step in _COLLAPSING or len(short) < len(whole)]
+            if step in _COLLAPSING or step == 'F8' or len(short) < len(whole)]
 
 
 def degradable_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str, int, int]]:
@@ -109,57 +94,251 @@ def degradable_elements(snapshot: mv.MemoryViewSnapshot) -> List[Tuple[str, str,
 
 
 def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Optional[int], non_memory_tokens: int,
-                     target_tokens: Optional[int] = None, calibration_ratio: float = 1.0) -> Dict[str, Optional[int]]:
-    """The memory allowances of the three boundaries (``None``: not known, so no step answers to it).
-
-    ``margin``: the window minus the reply reserve and the working margins; ``physical``: the
-    window minus the reply reserve; ``budget``: an owner-selected target with its own margins.
-    """
+                     target_tokens: Optional[int] = None, calibration_ratio: float = 1.0,
+                     work_room_levels: int = 1, boundary_tokens: Optional[int] = None) -> Dict[str, Optional[int]]:
+    """One start bound for all unsolicited material; a physical bound for uncovered owner rows."""
     frame = dict(output_reserve_tokens=output_reserve_tokens, non_memory_tokens=non_memory_tokens,
-                 calibration_ratio=calibration_ratio)
-    window = context_budget.request_context_budget(
-        window_tokens=window_tokens, margin_count=context_budget.MEMORY_VIEW_WORKING_MARGINS, **frame)
-    budget = context_budget.request_context_budget(
-        window_tokens=window_tokens, target_tokens=target_tokens,
-        margin_count=context_budget.MODE_TARGET_WORKING_MARGINS, **frame)["with_margin_tokens"] if target_tokens else None
-    return {"margin": window["with_margin_tokens"], "physical": window["without_margin_tokens"], "budget": budget}
+                 calibration_ratio=calibration_ratio, margin_count=work_room_levels, boundary_tokens=boundary_tokens)
+    physical = context_budget.request_context_budget(window_tokens=window_tokens, **frame)
+    start = context_budget.request_context_budget(window_tokens=window_tokens, target_tokens=target_tokens, **frame)
+    return {"margin": start["with_margin_tokens"], "physical": physical["without_margin_tokens"],
+            "budget": start["with_margin_tokens"] if target_tokens else None}
+
+
+def _memoized_measure(measure):
+    """One walk's immutable forms; never cache across captures or request envelopes."""
+    prices = {}
+    def measured(level):
+        if level.addressed not in prices:
+            prices[level.addressed] = measure(level)
+        return prices[level.addressed]
+    return measured
+
+
+def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: str, fixed: int,
+                  schemas: int, window: int, reserve: int, work: int, ratio: float,
+                  allowance: Optional[int]) -> Optional[Dict[str, Any]]:
+    """The Max room of one start, the host's measure in the owner's Max frame with whole books.
+
+    ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
+    is the books, core, knowledge with scratchpad and runtime facts (``dynamic_head_text`` and ``dynamic_text``:
+    Health, recent activity, skills, drive state too), assignment, reply reserve and work room; ``zero_need`` adds the tool
+    schemas, ``need`` my memory in its ordinary forms (task lines and quiet rooms collapsed, nothing cut):
+    ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. Measures only: the start
+    alone chooses the mode, and the mind judges what to fold.
+    """
+    if allowance is None:
+        return None
+    base = view_tokens(core.base_prompt) + view_tokens(core.bible_md)
+    parts = {"books": max(0, sum(map(view_tokens, books)) - base), "core": base + view_tokens(core.semi_stable_text),
+             "knowledge, scratchpad and runtime facts": view_tokens(core.dynamic_head_text) + view_tokens(core.dynamic_text)}
+    parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
+    elements = floor_elements(snapshot) if snapshot else ()
+    ordinary = mv.FloorLevel(tuple((step, tuple(ident for s, ident, *_ in elements if s == step))
+                                   for step in _ORDINARY)) if snapshot else mv.FULL_VIEW
+    memory = {"story": view_tokens(story), "room": view_tokens(mv.render_room(snapshot, ordinary)) if snapshot else 0,
+              "unfolded": unfolded_pages(snapshot)["tokens"]}
+    zero = math.ceil(fixed * ratio) + reserve + work
+    return {"window": window, "allowance": allowance, "floor_need": math.ceil((fixed - schemas) * ratio) + reserve + work,
+            "schemas": schemas, "zero_need": zero, "need": zero + math.ceil((memory["story"] + memory["room"]) * ratio),
+            **memory, "reserve": reserve, "work": work, "levels": snapshot.spec.work_room_levels if snapshot else 1,
+            "room_id": snapshot.spec.room_id if snapshot else None,
+            "folds": sum(int((snapshot.legacy_blocks or {}).get(key) or 0) for key in ("parts", "accounts")) if snapshot else 0,
+            "parts": sorted(([name, tokens] for name, tokens in parts.items()), key=lambda part: -part[1])}
+
+
+def max_room_lost(fact: Mapping[str, Any]) -> bool:
+    """Max cannot hold whole books here: the story alone overflows the room, or nothing of memory fits beside them."""
+    return fact["story"] > fact["allowance"] or fact["zero_need"] > fact["window"]
+
+
+def with_max_room(facts: Mapping[str, Any], fact: Optional[Mapping[str, Any]], mode: str) -> Dict[str, Any]:
+    """The view facts with the start's settled Max room: ``held`` when Max kept whole books (``cuts``: the steps past
+    F1/F1b it took); ``route`` when the books, core, assignment, reply reserve and work room alone exceed the window
+    (a disclosed fact of the route); else ``crowded`` (memory or tool schemas took the room). ``headroom`` or
+    ``short`` compare the whole need with the window."""
+    if not fact:
+        return dict(facts)
+    steps = dict((facts.get("floor") or {}).get("steps") or {})
+    cause = "held" if mode == "max" else "route" if fact["floor_need"] > fact["window"] else "crowded"
+    gap = fact["window"] - fact["need"]
+    return {**facts, "max_room": {**fact, "cause": cause, **({"headroom": gap} if gap >= 0 else {"short": -gap}),
+                                  "cuts": [step for step in LADDER if cause == "held" and step not in _ORDINARY and steps.get(step)]}}
+
+
+def crowded_by_memory(fact: Optional[Mapping[str, Any]]) -> bool:
+    """A settled Max room (``with_max_room``) that memory lowered to Low: ``crowded`` while everything but memory
+    (books, core, assignment, tool schemas, reply reserve and work room: ``zero_need``) fits the window, so folding
+    memory can give a later start its books back. A route, or tool schemas that tip a start alone, are not memory's."""
+    return (isinstance(fact, Mapping) and fact.get("cause") == "crowded" and isinstance(fact.get("zero_need"), int)
+            and isinstance(fact.get("window"), int) and fact["zero_need"] <= fact["window"])
+
+
+ROUTE_FACT = ("its window cannot hold the books beside my core, assignment, reply reserve and the work's room (needs "
+              "{need:,} > {window:,}: {parts}); folding memory or dropping tool schemas cannot make room here.")
+
+
+def floor_parts(fact: Mapping[str, Any]) -> str:
+    """``books B, core C, …, reply reserve V, work room K``: what the floor need is made of, largest first."""
+    named = ", ".join(f"{name} {tokens:,}" for name, tokens in fact["parts"])
+    return f"{named}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}"
+
+
+def unfolded_pages(snapshot: Optional[mv.MemoryViewSnapshot]) -> Dict[str, Any]:
+    """My story's pages no part or account holds yet, from the captured snapshot alone: how many, their tokens and
+    ``rooms`` as ``[label, tokens, pages]``, the room holding most of them first (where they pile up)."""
+    rooms: Dict[str, List[Any]] = {}
+    for entry in snapshot.story if snapshot else ():
+        if entry.get("kind") == "page" and not entry.get("told_by"):
+            room = rooms.setdefault(str(entry.get("room_id")), [str(entry.get("label") or entry.get("room_id")), 0, 0])
+            room[1] += view_tokens("\n".join(mv._page_lines(entry)))
+            room[2] += 1
+    ranked = sorted(rooms.values(), key=lambda room: (-room[1], room[0]))
+    return {"pages": sum(room[2] for room in ranked), "tokens": sum(room[1] for room in ranked), "rooms": ranked}
+
+
+def pages_text(pages: Mapping[str, Any], *, rooms: int = 3) -> str:
+    """``N pages no part or account holds yet, T tokens, most in <room> t, …``: the rooms holding most of them."""
+    most = ", ".join(f"{label} {tokens:,}" for label, tokens, _count in pages["rooms"][:rooms])
+    return (f"{pages['pages']} page{'' if pages['pages'] == 1 else 's'} no part or account holds yet, "
+            f"{pages['tokens']:,} tokens" + (f", most in {most}" if most else ""))
+
+
+def addressed_text(steps: Mapping[str, Any]) -> str:
+    """``3 task fact lines, 2 quiet rooms``: what a view shows only by address, in its floor note's words."""
+    return ", ".join(text.format(steps[step]) for step, text in _SHOWN if steps.get(step))
+
+
+def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optional[Mapping[str, Any]] = None) -> str:
+    """The host's measure of one start in the provable parts; the mind judges what they mean. ``pages``
+    (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
+    zero = fact["window"] - fact["zero_need"]
+    unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
+    return (f"window {fact['window']:,}; books, core, knowledge, scratchpad, runtime facts, assignment, reply reserve and work room "
+            f"{fact['floor_need']:,}{f' ({floor_parts(fact)})' if parts else ''}; tool schemas {fact['schemas']:,}; with "
+            f"no memory shown {'headroom' if zero >= 0 else 'over by'} {abs(zero):,}; my memory "
+            f"{fact['story'] + fact['room']:,} = story {fact['story']:,} ({unfolded}) + rooms {fact['room']:,}, "
+            f"beside a Max room of {fact['allowance']:,}")
+
+
+def lowered_line(mode: str, lowered_from: str, fact: Optional[Mapping[str, Any]] = None) -> str:
+    """Why a start left the owner's mode, in measured parts: facts only, never an instruction or a possibility."""
+    if mode != "low":
+        return (f"The window cannot hold {lowered_from.capitalize()} with even the shortest view of my memory; "
+                f"this task runs in {mode.capitalize()}.")
+    if not fact:
+        return "Low: the books did not fit beside the story and the work room."
+    if fact["floor_need"] > fact["window"]:
+        return "Low with chapter maps, a disclosed fact of this route: " + ROUTE_FACT.format(
+            need=fact["floor_need"], window=fact["window"], parts=floor_parts(fact))
+    return f"Low with chapter maps. The host's measure of this start: {measure_text(fact, parts=True)}."
 
 
 def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Optional[int]], *,
-                    kept: mv.FloorLevel = mv.FULL_VIEW, saving: int = 0) -> mv.FloorLevel:
-    """One pass down the ladder: an element becomes an address while the view exceeds its step's boundary.
-
-    My replies and people's words answer to ``physical``, every other step to ``margin`` and, in
-    ``MODE_TARGET_STEPS``, also to ``budget``. Each element saves its known difference;
-    the view is measured once, in full, and never rendered again to choose. ``kept`` (a level a
-    shown view already has) stays addressed and the walk goes on from it; ``saving`` is what the
-    walk must save beyond it (an actual size refusal's deficit). Every step stays a prefix of its
-    elements, so a floor fact's counts name the level (``kept_level``).
-    """
+                    kept: mv.FloorLevel = mv.FULL_VIEW, saving: int = 0,
+                    measure: Optional[Callable[[mv.FloorLevel], int]] = None) -> mv.FloorLevel:
+    """One ordered walk, then give back new cuts that fit. Previously chosen forms stay selected."""
     elements = degradable_elements(snapshot)
+    labels = {ident: short for step, ident, _whole, short in elements if step == 'F5l'}
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
-    current = view_tokens(mv.render_story(snapshot)) + view_tokens(mv.render_room(snapshot)) - sum(
-        whole - short for step, ident, whole, short in elements if (step, ident) in old)
-    taken: Dict[str, List[str]] = {step: list(ids) for step, ids in kept.addressed}
-    by_budget, saved = kept.by_budget, 0
+    taken = set(old)
+    measure = _memoized_measure(measure or (
+        lambda level: view_tokens(mv.render_story(snapshot, level)) + view_tokens(mv.render_room(snapshot, level))))
+    current = measure(kept)
+    bounds = [b for b in (allowances.get("margin"), allowances.get("budget"), allowances.get("physical")) if b is not None]
+    bound = min(bounds) if bounds else None
+    target = min(bound if bound is not None else current, current - saving) if saving else bound
+    budget = allowances.get("budget") is not None and allowances.get("budget") == bound
+
+    def level(selected):
+        selected = {(s, i) for s, i in selected if s != 'F5l' or ('F5', i) not in selected}
+        selected = {(s, i) for s, i in selected if s not in _LIST_FORMS or any(
+            prior in _LIST_FORMS[s] for prior, _ in selected)}
+        return mv.FloorLevel(tuple((s, tuple(i for step, i, *_ in elements if step == s and (s, i) in selected))
+                                  for s in LADDER if any(step == s for step, _ in selected)),
+                             by_budget=kept.by_budget + (len(selected - old) if budget else 0))
+
+    uncovered = uncovered_owner_rows(snapshot, elements)
+    last = {(step, ident) for step, ident, *_ in uncovered}
+    added = []
     for step, ident, whole, short in elements:
-        if (step, ident) in old:
+        if target is not None and current <= target:
+            current = measure(level(taken))  # aggregate boundaries and the receipt are part of the budget
+            if current <= target:
+                break
+        if (step, ident) in taken or target is None or current <= target or (step, ident) in last:
             continue
-        window = allowances.get("physical" if step in WINDOW_ONLY_STEPS else "margin")
-        budget = allowances.get("budget") if step in MODE_TARGET_STEPS else None
-        over_window = (window is not None and current > window) or (saving > 0 and saved < saving)
-        if not over_window and not (budget is not None and current > budget):
+        if step in _LIST_FORMS or step == 'F8':
+            trial = taken | {(step, ident)}
+            if step == 'F8a':
+                # Individually larger labels can still earn a smaller aggregate.
+                trial.update((s, i) for s, i, *_ in elements if s == 'F8')
+            if step in _LIST_FORMS and not any(s in _LIST_FORMS[step] for s, _ in trial):
+                continue
+            before, after = measure(level(taken)), measure(level(trial))
+            if after >= before:
+                continue
+            current, delta = after, before - after
+            taken = trial
+            added.append((step, ident, delta))
             continue
-        current -= whole - short
-        saved += whole - short
-        taken.setdefault(step, []).append(ident)
-        by_budget += not over_window
-    return mv.FloorLevel(tuple((step, tuple(taken[step])) for step in LADDER if step in taken), by_budget=by_budget)
+        if step == 'F5l' and ('F5', ident) in taken:
+            continue
+        if step == 'F5' and ('F5l', ident) in taken:
+            whole = labels[ident]
+        delta = max(0, whole - short)
+        taken.add((step, ident))
+        added.append((step, ident, delta))
+        current -= delta
+    current = measure(level(taken))
+    # A coarse final cut can leave space for an earlier element; give it back without unfolding kept choices.
+    story_blocked = set()  # Each story rung keeps its oldest addressed prefix.
+    for step, ident, delta in reversed(added):
+        if step in story_blocked:
+            continue
+        if target is not None and current + delta <= target:
+            trial = taken - {(step, ident)}
+            actual = measure(level(trial))
+            if actual <= target:
+                taken, current = trial, actual
+        if step in {"F5l", "F5"} and (step, ident) in taken:
+            story_blocked.add(step)
+    # People's words last: uncovered owner rows become addresses, oldest first, only while the view does not fit.
+    physical = allowances.get("physical")
+    for step, ident, whole, short in uncovered:
+        if physical is None or current <= physical:
+            break
+        if (step, ident) not in taken:
+            taken.add((step, ident))
+            current -= max(0, whole - short)
+            if current <= physical:
+                current = measure(level(taken))
+            # Uncovered words still go oldest first after every carried/story rung.
+            # Their new addresses can use the same range form, without taking another row.
+            if current > physical:
+                form = ('F7a', str((snapshot.room or {})['room_id']))
+                current = measure(level(taken))
+                if form not in taken:
+                    after = measure(level(taken | {form}))
+                    if after < current:
+                        taken.add(form)
+                        current = after
+    return level(taken)
+
+
+def uncovered_owner_rows(snapshot: mv.MemoryViewSnapshot, elements=None) -> List[Tuple[str, str, int, int]]:
+    """Owner rows no page or note carries yet, oldest first; governing and unanswered rows have no address."""
+    owner = {i["address"]: i for i in (snapshot.room or {}).get("lane1", ())}
+    return [e for e in (degradable_elements(snapshot) if elements is None else elements)
+            if e[0] == "F7" and not owner[e[1]].get("carried")]
 
 
 def kept_level(snapshot: mv.MemoryViewSnapshot, facts: Mapping[str, Any]) -> mv.FloorLevel:
     """The level a projection's floor fact names: each step's first ``count`` elements, in ladder order."""
     floor = (facts or {}).get("floor") or {}
+    if "addressed" in floor:
+        return mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in floor["addressed"]),
+                             by_budget=int(floor.get("by_budget") or 0))
     counts = dict(floor.get("steps") or {})
     ids: Dict[str, List[str]] = {}
     for step, ident, _whole, _short in floor_elements(snapshot):
@@ -167,6 +346,127 @@ def kept_level(snapshot: mv.MemoryViewSnapshot, facts: Mapping[str, Any]) -> mv.
             ids[step].append(ident)
     return mv.FloorLevel(tuple((step, tuple(ids[step])) for step in LADDER if ids.get(step)),
                          by_budget=int(floor.get("by_budget") or 0))
+
+
+def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: Iterable[str], *,
+               owner_note: bool = False) -> mv.FloorLevel:
+    """Select exact inspected forms; a note's :whole address restores its captured source."""
+    eligible = {f"{step}:{ident}": (step, ident) for step, ident, *_ in floor_elements(snapshot)}
+    taken = {(step, ident) for step, ids in kept.addressed for ident in ids}
+    for address in addresses:
+        if address.endswith(':whole') and address[:-6] in eligible and eligible[address[:-6]][0] == 'F8':
+            taken.discard(eligible[address[:-6]])
+            if not any(s == 'F8' for s, _ in taken):
+                taken = {(s, i) for s, i in taken if s != 'F8a'}
+            continue
+        if address not in eligible:
+            raise ValueError(f"Unknown or protected view_address: {address}")
+        step, ident = eligible[address]
+        if step in _LIST_FORMS:
+            if not any(s in _LIST_FORMS[step] for s, _ in taken):
+                raise ValueError('Aggregate forms require already addressed rows, pages or notes')
+            if step == 'F7a' and not owner_note and any(
+                    ('F7', row['address']) in taken and not row.get('carried') for row in snapshot.room['lane1']):
+                raise ValueError('Uncovered owner commitments require an authored working_note before changing their form')
+        if step == "F7" and not owner_note and not next(
+                row.get("carried") for row in snapshot.room["lane1"] if row["address"] == ident):
+            raise ValueError("Uncovered owner commitments require an authored working_note before changing their form")
+        taken.add((step, ident))
+        if step in ('F5l', 'F5'):
+            taken.discard(('F5' if step == 'F5l' else 'F5l', ident))
+        if step == 'F8':
+            taken = {(s, i) for s, i in taken if s != 'F8a'}  # an explicit label selection unfolds the note list
+        if step in ("F6", "F6a"):
+            taken.update((prior, ident) for prior in ("F6r", "F6") if f"{prior}:{ident}" in eligible)
+    return mv.FloorLevel(tuple((step, tuple(ident for s, ident, *_ in floor_elements(snapshot)
+                                           if s == step and (s, ident) in taken)) for step in LADDER
+                               if any(s == step for s, _ in taken)), by_budget=kept.by_budget)
+
+
+def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool = False):
+    """Render selected forms, preserving other projections and the tail.
+
+    The boundary's fit callback decides publication. Ordinary Main accepts an
+    authored restore with an advisory capacity deficit; dispatch fits it later.
+    """
+    from ouroboros.context_fit import _governance_blocks, _system_blocks, _request_tokens
+
+    if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
+        raise ValueError("This actor has no captured memory view")
+    snapshot = mv.snapshot_from_json(plan.core.memory_view_json)
+    shown = plan.projection(mode)
+    level = level_with(snapshot, kept_level(snapshot, shown.memory_facts), addresses, owner_note=owner_note)
+    old = shown.memory_facts.get("floor") or {}
+    switched = old.get("mode_switch") or {}
+    max_room = shown.memory_facts.get("max_room")  # the start's fact: a selection keeps its frame
+    note = floor_note(level, window_tokens=old.get("window_tokens"), mode=mode,
+                      target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
+                      lowered_from=switched.get("from"), max_room=max_room)
+    story, room = mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note)
+    facts = view_facts(snapshot, level, window_tokens=old.get("window_tokens"), mode=mode,
+                       allowances={"margin": old.get("allowance_tokens"), "physical": old.get("physical_allowance_tokens"),
+                                   "budget": old.get("budget_allowance_tokens")},
+                       target_tokens=old.get("target_tokens"), lowered_from=switched.get("from"))
+    facts.update({"max_room": max_room} if max_room else {})
+    governance = _governance_blocks(None, plan.core, mode="low" if mode == "nano" else mode)
+    sections = (*plan.core.semi_stable_sections, *plan.core.dynamic_head_sections, *plan.core.dynamic_sections,
+                *(governance[0] if not isinstance(governance[0], str) else ()))
+    receipts = shown.memory_facts.get("host_sections_addressed", ())
+    if receipts:
+        facts["host_sections_addressed"] = receipts
+    system = _system_blocks(plan.core, governance, story, room, mode, section_views(sections, receipts))
+    tokens = _request_tokens(system, shown.user_content_json or plan.user_content_json,
+                            current_messages=plan.messages_for(mode))
+    projection = dataclasses.replace(shown, system_content_json=json.dumps(system, ensure_ascii=False, sort_keys=True),
+        memory_facts=view_receipt(snapshot, story, room, facts), estimated_tokens=tokens,
+        calibrated_tokens=int(tokens * shown.calibration_ratio))
+    return dataclasses.replace(plan, **{f"{mode}_projection": projection})
+
+
+def owner_note_capsule(plan, addresses, note, request, *, drive_root, task_id, mode="max"):
+    """Keep the mind's account of selected owner commitments with their exact captured source."""
+    from ouroboros import context_compaction as cc
+    from ouroboros.context_budget import _Selection
+
+    wanted = {address[3:] for address in addresses if address.startswith("F7:")}
+    if any(address.startswith("F7a:") for address in addresses):
+        wanted.update(dict(kept_level(mv.snapshot_from_json(plan.core.memory_view_json),
+                                     plan.projection(mode).memory_facts).addressed).get("F7", ()))
+    if not wanted:
+        return None
+    snap = mv.snapshot_from_json(plan.core.memory_view_json)
+    rows = [{"role": "user", "content": row["line"]} for row in snap.room["lane1"]
+            if row["address"] in wanted and not row.get("carried")]
+    if not rows:
+        return None
+    if not note.strip():
+        raise ValueError("Uncovered owner commitments require an authored working_note")
+    request = dataclasses.replace(request, transcript_sha256=cc.context_reclaim_transcript_sha256(rows))
+    unit = cc._unit_from_slice(rows, 0, len(rows) - 1, trace_refs_by_tool_call_id={}, measurement_density=1.0)
+    selection = _Selection((unit,), request.transcript_sha256, unit.predicted_reclaim_tokens)
+    source = cc._persist_reclaim_checkpoint(rows, request, selection, drive_root=drive_root, task_id=task_id)
+    if not source:
+        raise ValueError("The exact owner-word source could not be retained")
+    return cc._capsule_message(unit, note, [cc._part(unit.unit_id, unit.source_text)], source, request)[0]
+
+
+def view_inventory(plan, mode: str, *, memory_facts=None) -> List[Dict[str, Any]]:
+    if plan is None or getattr(plan, "core", None) is None:
+        return []
+    from ouroboros.section_floor import section_inventory
+    facts = plan.projection(mode).memory_facts if memory_facts is None else memory_facts
+    host_rows = section_inventory(plan, mode, facts)
+    if not plan.core.memory_view_json:
+        return host_rows
+    snapshot = mv.snapshot_from_json(plan.core.memory_view_json)
+    level = kept_level(snapshot, plan.projection(mode).memory_facts if memory_facts is None else memory_facts)
+    chosen = {(step, ident) for step, ids in level.addressed for ident in ids}
+    return [{"view_address": f"{step}:{ident}", "kind": "memory", "tokens": whole,
+             "saving_tokens": max(0, whole - short), "eligible": True, "selected": (step, ident) in chosen,
+             **({"restore_view_address": f"F8:{ident}:whole", "form":
+                 'whole' if (step, ident) not in chosen else 'aggregate' if dict(level.addressed).get('F8a') else 'line'}
+                if step == 'F8' else {})}
+            for step, ident, whole, short in degradable_elements(snapshot)] + host_rows
 
 
 def memory_read_path(tool_names: Optional[Iterable[str]]) -> str:
@@ -189,7 +489,7 @@ def memory_read_path(tool_names: Optional[Iterable[str]]) -> str:
 
 def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str, target_tokens: Optional[int] = None,
                lowered_from: Optional[str] = None, tool_names: Optional[Iterable[str]] = None,
-               budget_mode: Optional[str] = None) -> str:
+               budget_mode: Optional[str] = None, max_room: Optional[Mapping[str, Any]] = None) -> str:
     """``### Physical floor``: a fact and a possibility for the mind, exactly when a step past F1/F1b ran
     or the window lowered the task's mode; never an instruction or a threshold. In Nano it
     closes with how this request reaches ``memory_read`` (``tool_names``: the schemas it sends). The
@@ -199,7 +499,7 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     window names the cut's frame; a fitting route keeps this note's bytes, and the round's facts
     name the acting window. The mode names this view and the mode the task runs in, lowered at its
     start or on a later route; ``budget_mode`` (default ``mode``) names the owner's target that took
-    the budget cuts."""
+    the budget cuts; the start's ``max_room`` fact names why Max lowered to Low (``lowered_line``)."""
     names = None if tool_names is None else tuple(tool_names)
     counts = dict(level.steps)
     asked = set(counts) - set(_COLLAPSING)
@@ -208,19 +508,18 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     lines, name = ["### Physical floor"], mode.capitalize()
     if asked:
         bounds = ([f"the window ({window_tokens} tokens)"]
-                  if sum(counts.values()) > level.by_budget else []) + (
+                  if window_tokens is not None else []) + (
             [f"the {(budget_mode or mode).capitalize()} mode budget ({target_tokens} tokens)"] if level.by_budget else [])
         subject = " and ".join(bounds)
-        shown = ", ".join(text.format(counts[step]) for step, text in _SHOWN if counts.get(step))
+        shown = addressed_text(counts)
         sealing = (" Sealing a closed part of the open conversation as a page (chronicle_write kind=page) or folding "
-                   "old pages (kind=part) brings it back in my own words."
+                   "old pages (kind=part) can carry the commitments in my own words."
                    if names is None or _SEALING_TOOLS & set(names) else "")
         lines.append(f"This {name} view retains memory cuts for {subject}. "
-                     f"Shown above only by address: {shown}. Nothing is lost: memory_read reads "
+                     f"Shown above in reduced forms: {shown}. The retained sources remain readable: memory_read reads "
                      f"each.{sealing}")
     if lowered_from:
-        lines.append(f"The window this view was cut for ({window_tokens} tokens) cannot hold "
-                     f"{lowered_from.capitalize()} with even the shortest view of my memory; this task runs in {name}.")
+        lines.append(lowered_line(mode, lowered_from, max_room))
     path = memory_read_path(names) if mode == "nano" else ""
     return "\n".join(lines + [path] if path else lines)
 
@@ -236,23 +535,27 @@ def view_facts(snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, *, window_
     gone = {step: set(ids) for step, ids in level.addressed}
     room = snapshot.room or {}
     rows = [(item["last_pos"], item["last"]) for item in room.get("lane2") or () if item["first"] in gone.get("F1", ())]
-    addressed = gone.get("F2", set()) | gone.get("F7", set())  # once, not per lane-1 row
+    addressed = gone.get("F2", set()) | gone.get("F7", set()) | gone.get("F7p", set())  # once, not per lane-1 row
     rows += [(item["pos"], item["address"]) for item in room.get("lane1") or () if item["address"] in addressed]
     status = snapshot.legacy_blocks or {}
     return {"role": snapshot.spec.role, "room_id": snapshot.spec.room_id,
-            "floor": {"steps": dict(level.steps), "window_tokens": window_tokens, "mode": mode,
+            "floor": {"steps": dict(level.steps), "addressed": level.addressed, "window_tokens": window_tokens, "mode": mode,
                       "allowance_tokens": allowances.get("margin"), "physical_allowance_tokens": allowances.get("physical"),
                       "target_tokens": target_tokens, "budget_allowance_tokens": allowances.get("budget"),
                       "by_budget": level.by_budget, "mode_switch": {"from": lowered_from, "to": mode} if lowered_from else None,
                       "newest_addressed_row": parse_address(max(rows)[1]) if rows else None,
-                      "pointer_records": [ident for step, ids in level.addressed if step in ("F4", "F5") for ident in ids]},
+                      "pointer_records": [ident for step, ids in level.addressed if step in ("F4", "F5l", "F5") for ident in ids]},
             "story_status": {"folded": status.get("folded", 0), "total": status.get("total", 0)}}
 
 
 def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mode: str, window_tokens: Optional[int],
                          known_window: bool, output_reserve: Optional[int], ratio: float, non_memory_tokens: int,
                          lowered_from: Optional[str] = None, tool_names: Optional[Iterable[str]] = None,
-                         kept: Optional[mv.FloorLevel] = None, saving: int = 0) -> Tuple[str, str, Dict[str, Any]]:
+                         kept: Optional[mv.FloorLevel] = None, saving: int = 0, boundary_tokens: Optional[int] = None,
+                         working_reserve_tokens: Optional[int] = None,
+                         measure_text: Optional[Callable[[str, str], int]] = None,
+                         start_work: bool = False,
+                         max_room: Optional[Mapping[str, Any]] = None) -> Tuple[str, str, Dict[str, Any]]:
     """``(story text, room text, facts)`` of one mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
@@ -264,23 +567,41 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     What ``kept.by_budget`` counts the owner's mode target took (only it carries one), so the note
     and the fact name that budget in whatever mode the view is narrowed, hop after hop.
     """
-    target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve)
-    if kept is not None and kept.by_budget:
-        target = context_budget.context_mode_limits(owner_mode, owner_mode, output_reserve)[0]
+    target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
+    if kept is not None:
+        target = context_budget.context_mode_limits(owner_mode, owner_mode, output_reserve)[0] if kept.by_budget else None
     window = int(window_tokens) if known_window and window_tokens else None
     allowances = floor_allowances(window_tokens=window, output_reserve_tokens=reserve, non_memory_tokens=non_memory_tokens,
-                                  target_tokens=None if kept is not None else target, calibration_ratio=ratio)
-    if kept is not None:
+                                  target_tokens=None if kept is not None else target, calibration_ratio=ratio,
+                                  work_room_levels=snapshot.spec.work_room_levels, boundary_tokens=boundary_tokens)
+    if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
-    level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving)
-    note = floor_note(level, window_tokens=window, mode=mode, target_tokens=target, lowered_from=lowered_from,
-                      tool_names=tool_names, budget_mode=owner_mode)
+    size = lambda shown: view_tokens(mv.render_story(snapshot, shown)) + view_tokens(mv.render_room(snapshot, shown))
+    uncovered = uncovered_owner_rows(snapshot)
+    @lru_cache(maxsize=128)
+    def receipt(level):
+        note = floor_note(level, window_tokens=window, mode=mode, target_tokens=target, lowered_from=lowered_from,
+                          tool_names=tool_names, budget_mode=owner_mode, max_room=max_room)
+        if allowances["margin"] is not None and size(level) > allowances["margin"]:
+            gone = dict(level.addressed)
+            held = [f"F7:{ident}" for step, ident, *_ in uncovered if ident not in gone.get(step, ())]
+            owners = held and size(level_with(snapshot, level, held, owner_note=True)) <= allowances["margin"]
+            note += "\nStart room is smaller than requested: " + (
+                "uncovered owner words remain in view; only physical pressure can turn their oldest rows into named addresses."
+                if owners else "what my memory shows even in its shortest forms exceeds it.")
+        return note
+    # The request owner can measure JSON separators and rounding in the actual envelope.
+    measure_text = measure_text or (lambda story, room: view_tokens(story) + view_tokens(room))
+    measure = lambda level: measure_text(mv.render_story(snapshot, level),
+                                       mv.render_room(snapshot, level, floor_note=receipt(level)))
+    level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving, measure=measure)
+    note = receipt(level)
     return (mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note),
             view_facts(snapshot, level, window_tokens=window, mode=mode, allowances=allowances, target_tokens=target,
                        lowered_from=lowered_from))
 
 
-TRACE_FIELDS = ("role", "room_id", "floor", "story_status")  # what a task trace keeps of a view receipt
+TRACE_FIELDS = ("role", "room_id", "floor", "story_status", "max_room", "host_sections_addressed")  # what a task trace keeps of a view receipt
 
 
 def trace_facts(receipt: Mapping[str, Any]) -> Dict[str, Any]:
@@ -291,8 +612,8 @@ def trace_facts(receipt: Mapping[str, Any]) -> Dict[str, Any]:
 def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: Mapping[str, Any]) -> Dict[str, Any]:
     """A projection's view fact: the floor fact plus the spec, the chronicle's state and block sizes.
 
-    ``role``, ``room_id``, ``floor`` and ``story_status`` are what a task trace keeps
-    (``memory_inventory.VIEW_TRACE_KEY``); the rest is the receipt's (estimator tokens).
+    ``role``, ``room_id``, ``floor``, ``story_status`` and the start's ``max_room`` are what a task trace
+    keeps (``memory_inventory.VIEW_TRACE_KEY``); the rest is the receipt's (estimator tokens).
     """
     return {**facts, "spec": dataclasses.asdict(snapshot.spec), "store_status": dict(snapshot.store_status),
             "legacy_frontier_status": snapshot.frontier.get("status"),
@@ -301,78 +622,83 @@ def view_receipt(snapshot: mv.MemoryViewSnapshot, story: str, room: str, facts: 
 
 
 def minimal_view_tokens(snapshot: mv.MemoryViewSnapshot, *, window_tokens: Optional[int] = None) -> int:
-    """The shortest view of my memory: every degradable element by address, with the longest floor note."""
+    """The shortest view of my memory, with the longest floor note for its selected forms."""
     taken: Dict[str, List[str]] = {}
     for step, ident, _whole, _short in floor_elements(snapshot):  # grouped in ladder order
+        if step in _LIST_FORMS and not any(taken.get(prior) for prior in _LIST_FORMS[step]):
+            continue
         taken.setdefault(step, []).append(ident)
-    level = mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in taken.items()))
-    note = max((floor_note(level, window_tokens=window_tokens, mode="nano", lowered_from="max", tool_names=names)
-                for names in _PATH_CASES), key=view_tokens)  # an upper bound, whatever schemas it sends
-    return view_tokens(mv.render_story(snapshot, level)) + view_tokens(mv.render_room(snapshot, level, floor_note=note))
+    candidates = [taken]
+    if taken.get('F8'):
+        whole_notes = {s: ids for s, ids in taken.items() if s not in ('F8', 'F8a')}
+        lines = [i for s, i, whole, short in degradable_elements(snapshot) if s == 'F8' and short < whole]
+        candidates += [whole_notes, {**whole_notes, 'F8': lines}]
+    def price(selected):
+        selected = {s: [i for i in ids if s != 'F5l' or i not in selected.get('F5', ())]
+                    for s, ids in selected.items()}
+        level = mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in selected.items() if ids))
+        note = max((floor_note(level, window_tokens=window_tokens, mode="nano", lowered_from="max", tool_names=names)
+                    for names in _PATH_CASES), key=view_tokens)  # an upper bound, whatever schemas it sends
+        return view_tokens(mv.render_story(snapshot, level)) + view_tokens(mv.render_room(snapshot, level, floor_note=note))
+    # Optional list forms must earn their space, just as in the walk. Price
+    # every combination (at most eight) with its actual floor receipt; their
+    # interactions must not make an available pointer-only view impossible.
+    alternatives = []
+    for selected in candidates:
+        forms = [s for s in _LIST_FORMS if selected.get(s)]
+        for mask in range(1 << len(forms)):
+            omitted = {s for index, s in enumerate(forms) if mask & (1 << index)}
+            alternatives.append({s: ids for s, ids in selected.items() if s not in omitted})
+    return min(map(price, alternatives))
 
 
-def physical_mode(preferred: str, fixed_tokens_by_mode: Mapping[str, int], minimal_view_tokens: int, *,
-                  window_tokens: Optional[int], known_window: bool, reserve_by_mode: Mapping[str, Optional[int]],
-                  calibration_ratio: float = 1.0) -> str:
-    """The first of the preferred mode and the smaller ones whose fixed part and shortest view fit.
+# Host producers before indexes, then the memory walk, all under the same start budget.
+# Running views narrow only under physical pressure or a refusal.
+HOST_STEPS = ("runtime", "review_pool", "review_continuity", "registry", "installed_skills",
+              "drive_state", "world", "subagents", "architecture_map", "development_map")
 
-    Measured by the one capacity frame on the calibrated estimate: the window minus the
-    mode's reply reserve, no working margin. An unknown window keeps the preferred mode;
-    when even Nano cannot fit, Nano is sent as it is.
+
+def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None):
+    """First steps of mode_views, using the same physical allowance as memory.
+
+    Producers own meaning; this walk selects only explicit smaller views. Retained
+    source handles precede pointers. A failed capture leaves the full bytes inline.
+    Previously shown addresses stay addressed; their savings never pay a new deficit.
     """
-    if not known_window or not window_tokens or preferred not in MODES:
-        return preferred
-    candidates = MODES[MODES.index(preferred):]
-    for mode in candidates:
-        frame = context_budget.request_context_budget(
-            window_tokens=window_tokens, output_reserve_tokens=reserve_by_mode.get(mode),
-            non_memory_tokens=fixed_tokens_by_mode[mode] + minimal_view_tokens, calibration_ratio=calibration_ratio)
-        if frame["free_tokens"] is not None and frame["free_tokens"] >= 0:  # free space: no working margin in it
-            return mode
-    return candidates[-1]
-
-
-def mode_views(snapshot: mv.MemoryViewSnapshot, *, preferred: str, fixed_tokens_by_mode: Mapping[str, int],
-               window_tokens: Optional[int], known_window: bool, output_reserve: Optional[int], ratio: float,
-               start: Optional[str] = None, tool_names: Optional[Mapping[str, Iterable[str]]] = None,
-               allow_mode_lowering: bool = True, kept: Optional[Mapping[str, mv.FloorLevel]] = None,
-               saving: Optional[Mapping[str, int]] = None, select: Optional[str] = None,
-               ) -> Tuple[Dict[str, Tuple[str, str, Dict[str, Any]]], str]:
-    """Every mode's ``(story text, room text, view receipt)`` and the mode the task starts in.
-
-    The starting mode is ``physical_mode`` of the owner's ``preferred`` one, or ``start`` (the
-    mode a task already runs in, on a new route) when that is lower: a route switch never raises
-    a mode, and only the owner's mode carries a target. A caller that keeps current Max books
-    until actual refusal sets ``allow_mode_lowering=False``: memory views still fit their
-    ordinary allowances, but estimated pressure cannot select another mode or report a switch.
-    The projection of a mode this window
-    chose names the change in its ``### Physical floor`` (and its fact, ``mode_switch``), never
-    in the runtime facts, which are captured before any mode is chosen. ``tool_names`` maps a
-    mode to the schemas its request sends (``None``: not known, so its floor claims no path).
-    ``kept`` maps a mode to the level its shown view has, and narrows from it
-    (``render_view_for_mode``); ``saving`` maps a mode to what it must save beyond that level.
-    A lower mode this window selects, or ``select`` (the mode an actual refusal chose), narrows from the
-    level of the mode the task shows (``start``, else ``preferred``), never from its own unsent one:
-    nothing shown unfolds.
-    """
-    window = int(window_tokens) if known_window and window_tokens else None
-    physical = (physical_mode(preferred, fixed_tokens_by_mode, minimal_view_tokens(snapshot, window_tokens=window),
-                              window_tokens=window, known_window=known_window, calibration_ratio=ratio,
-                              reserve_by_mode={mode: context_budget.context_mode_limits(mode, preferred, output_reserve)[1]
-                                               for mode in MODES})
-                if allow_mode_lowering else preferred)
-    begin = (select if select in MODES
-             else start if start in MODES and MODES.index(start) > MODES.index(physical) else physical)
-    shown = start if start in MODES else preferred
-    carried = kept is not None and begin != shown  # the shown level moves to the selected mode
-    views = {}
-    for mode in MODES:
-        story, room, facts = render_view_for_mode(
-            snapshot, mode=mode, owner_mode=preferred, window_tokens=window, known_window=known_window,
-            output_reserve=output_reserve, ratio=ratio, non_memory_tokens=fixed_tokens_by_mode[mode],
-            lowered_from=preferred if mode == begin == physical != preferred else None,
-            tool_names=(tool_names or {}).get(mode),
-            kept=None if kept is None else kept.get(shown if carried and mode == begin else mode, mv.FULL_VIEW),
-            saving=(saving or {}).get(mode, 0))
-        views[mode] = (story, room, view_receipt(snapshot, story, room, facts))
-    return views, begin
+    if measure is None or not window or not root or not task_id:
+        return list(previous), saving
+    receipts = list(previous)
+    addressed = section_views(sections, receipts)
+    candidates = [part for part in sections if part.section_id not in addressed
+                  and part.section_id not in PROTECTED and part.operative_view is not None
+                  and len(part.operative_view) < len(part.full_text)]
+    if not candidates:
+        return receipts, saving
+    initial = current = measure(addressed)
+    physical = floor_allowances(window_tokens=window, output_reserve_tokens=reserve,
+                                non_memory_tokens=0, calibration_ratio=ratio)["physical"]
+    bound = allowance if allowance is not None else physical
+    if (bound is None or current <= bound) and saving == 0:
+        return receipts, 0
+    order = {name: i for i, name in enumerate((*HOST_STEPS, *INDEX_STEPS))}
+    for part in sorted(candidates, key=lambda p: (p.section_id in INDEX_STEPS,
+                                               order.get(p.section_id, len(HOST_STEPS)))):
+        if part.section_id in addressed:
+            continue
+        if (bound is None or current <= bound) and initial - current >= saving:
+            break
+        if part.section_id in INDEX_STEPS and current <= physical and initial - current >= saving:
+            continue  # the knowledge outline remains a physical step, not a start-target choice
+        try:
+            row = retain_section(part, root=root, task_id=task_id)
+        except (OSError, ValueError):
+            log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
+            continue
+        short = relocated_text(part, row["reader"])
+        saved = view_tokens(part.full_text) - view_tokens(short)
+        if saved <= 0:
+            continue
+        addressed[part.section_id] = short
+        receipts.append({**row, "tokens_saved": saved})
+        current = measure(addressed)
+    return receipts, max(0, saving - (initial - current))

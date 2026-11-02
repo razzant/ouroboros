@@ -111,8 +111,8 @@ _GIT_STATIC_INTROSPECTION_SUBCOMMANDS = frozenset({
 # text diff prints "Binary files differ" for them, never the bytes.
 _GIT_DIFF_CONTENT_FLAGS = frozenset({"--binary", "--ext-diff", "--textconv"})
 # Output-limiting flags under which `git diff` emits only file NAMES / stat
-# counts, never file content — safe regardless of binary-vs-text (the vcs_diff
-# FP shape: `git diff --stat` / `vcs_diff(stat=true|name_only=true)`).
+# counts, never file content — safe regardless of binary-vs-text (the vcs_read diff
+# FP shape: `git diff --stat` / `vcs_read(action=diff, stat=true|name_only=true)`).
 _GIT_DIFF_CONTENT_FREE_FLAGS = frozenset({
     "--stat", "--numstat", "--shortstat", "--dirstat",
     "--name-only", "--name-status", "--summary", "--compact-summary",
@@ -570,7 +570,7 @@ def _git_diff_can_dump_content(argv: list[str]) -> bool:
     An output-limiting flag (`--stat`/`--name-only`/`--name-status`/…) makes the
     diff emit only file NAMES / stat counts — never content — regardless of
     binary-vs-text, so it cannot leak a protected artifact and the whole-work_dir
-    fallback is skipped (the documented `git diff --stat` / `vcs_diff(stat=true)`
+    fallback is skipped (the documented `git diff --stat` / `vcs_read(action=diff, stat=true)`
     false positive). Everything else — a BARE `git diff` (can dump a modified
     text file's content), a revision argument, a forced content flag
     (--binary/--ext-diff/--textconv), or a PATCH flag (`-p`/`-u`/`-U<n>`/`-W`/

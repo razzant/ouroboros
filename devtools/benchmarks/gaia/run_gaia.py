@@ -90,22 +90,15 @@ def _resolve_provider_keys(needed: set[str]) -> dict[str, str]:
 
 
 def _credential_keys_for_model(model: str) -> set[str]:
-    text = str(model or "").strip()  # tolerate "a, b"-split entries with leading spaces
-    if text.startswith("openai::"):
+    """The flat settings a model's built-in route reads (``provider_models`` groups): the openai
+    pair keeps the legacy base URL, which a pinned openai web search drops again; a keyless lane
+    falls back to the OpenRouter key. A named connection's row is not carried into the run."""
+    from ouroboros.provider_models import PROVIDER_CREDENTIAL_GROUPS, parse_model_route
+
+    route = parse_model_route(str(model or "").strip())  # tolerate "a, b"-split entries with leading spaces
+    if route.kind == "openai":
         return {"OPENAI_API_KEY", "OPENAI_BASE_URL"}
-    if text.startswith("anthropic::"):
-        return {"ANTHROPIC_API_KEY"}
-    if text.startswith("cloudru::"):
-        return {"CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL"}
-    if text.startswith("gigachat::"):
-        return {"GIGACHAT_CREDENTIALS", "GIGACHAT_USER", "GIGACHAT_PASSWORD"}
-    if text.startswith("minimax::"):
-        return {"MINIMAX_API_KEY", "MINIMAX_REGION"}
-    if text.startswith("deepseek::"):
-        return {"DEEPSEEK_API_KEY"}
-    if text.startswith("openai-compatible::"):
-        return {"OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_BASE_URL"}
-    return {"OPENROUTER_API_KEY"}
+    return set(PROVIDER_CREDENTIAL_GROUPS.get(route.kind) or ()) or {"OPENROUTER_API_KEY"}
 
 
 _WEBSEARCH_BACKEND_KEYS: dict[str, tuple[str, ...]] = {

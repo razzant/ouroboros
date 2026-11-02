@@ -204,10 +204,11 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         const childFrame = id => frame(id, { delegation_role: 'subagent', subagent_event: 'scheduled',
             subagent_task_id: id, parent_task_id: 'same-id', root_task_id: 'same-id', subagent_role: 'reader' });
         childFrame('child');
-        // The server's room for the held root: a wait (its reason, the hold's label, is on the row).
+        // Work membership names all queued and running children, unlike the root census.
+        const members = () => ['same-id', ...[...queue.pending, ...queue.running].map(row => row.id)];
         const snapshot = () => instance.hydrateStateSnapshot({ active_chat_activities: [held],
             active_chat_activities_complete: true, supervisor_ready: true,
-            ...projection(7, [heldWork(held)], room('waiting')) });
+            ...projection(7, [{ ...heldWork(held), members: { ids: members() } }], room('waiting')) });
         const status = () => globalThis.document.byId.get('chat-status').textContent;
         snapshot(); await settle();
         assert.equal(status(), 'Waiting', 'the room says what the server says');
@@ -253,17 +254,17 @@ test('actual child queue hydration refreshes room status once and reconciles dep
         snapshot(); await settle();
         assert.equal(reads.filter(url => url === '/api/tasks/child').length, 1, 'held queue departure reads detail once');
         for (let pass = 0; pass < 3; pass++) { snapshot(); await settle(); }
-        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 1,
-            'a current nonterminal answer retires missing membership without inventing hold recovery');
+        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 4,
+            'later complete bodies retry an absent nonterminal child without inventing hold recovery');
         assert.equal(child.querySelector('[data-live-phase]').textContent, hold.label);
         queue.pending = [{ id: 'child', task: { project_admission_hold: hold } }];
         snapshot(); await settle();
         queue.pending = [];
         detailStatus = 'cancelled';
         snapshot(); await settle();
-        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 2, 'a new queue departure is a new observation');
+        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 5, 'a new queue departure is a new observation');
         assert.equal(child.dataset.finished, '1', 'terminal detail heals a missing terminal frame');
         for (let pass = 0; pass < 3; pass++) { snapshot(); await settle(); }
-        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 2);
+        assert.equal(reads.filter(url => url === '/api/tasks/child').length, 5);
     } finally { instance?.destroy(); restoreDom(prior); }
 });

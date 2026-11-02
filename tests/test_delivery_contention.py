@@ -222,13 +222,13 @@ def test_physical_failure_retains_existing_backoff_and_spends_no_busy_retries(tm
     with pinned(tmp_path):
         delivery._handle_send_message(event, ctx)
         td.replay_pending_deliveries(tmp_path, event_queue=bus)
-    assert not td.pending_deliveries(tmp_path)[0].get("replay_attempts")
+    assert td.pending_deliveries(tmp_path)[0]["dispatch_attempts"] == 0
     transport = message_bus.get_bridge()
     actual = transport.send_message
     sends = []
     monkeypatch.setattr(transport, "send_message", lambda *_a, **_k: sends.append(True) or failed_receipt)
     td.replay_pending_deliveries(tmp_path, event_queue=bus)
-    assert len(sends) == 1 and td.pending_deliveries(tmp_path)[0]["replay_attempts"] == 1
+    assert len(sends) == 1 and td.pending_deliveries(tmp_path)[0]["dispatch_attempts"] == 1
     for _ in range(3):
         td.replay_pending_deliveries(tmp_path, event_queue=bus)
     assert len(sends) == 1

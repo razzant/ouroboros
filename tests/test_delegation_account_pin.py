@@ -76,10 +76,12 @@ def test_a_pinned_route_is_judged_by_its_own_subject_exactly():
     # whatever the siblings say (positive-evidence rule, per subject).
     assert _exhausted_window(_Quota([_snap("acct-b", spent=True)]),
                              "some-route", "", "koshak") == (False, "")
-    # A typed absence row for the pinned subject fail-opens it exactly as the
-    # harness-wide reader does for the whole route…
+    # A typed absence row for the pinned subject cannot mask its own dated block
+    # (OB1851: one subject's rows are constraints); it only withholds "available"…
     absence = {"subject": {"harness": "some-route", "subject_id": "koshak"}}
     assert _exhausted_window(_Quota([_snap("koshak", spent=True)], [absence]),
+                             "some-route", "", "koshak") == (True, "2099-08-03T12:00:00Z")
+    assert _exhausted_window(_Quota([_snap("koshak", spent=False), _snap("acct-b", spent=True)], [absence]),
                              "some-route", "", "koshak") == (False, "")
     # …and a sibling's absence says nothing about the pinned subject.
     sibling_absence = {"subject": {"harness": "some-route", "subject_id": "acct-b"}}

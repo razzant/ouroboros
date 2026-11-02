@@ -90,15 +90,63 @@ def installed_release_digest(loaded: Any) -> str:
     return digest if is_release_digest(digest) else ""
 
 
-def _manifest_facts(manifest: Any) -> Dict[str, Any]:
+def _connector_facts(manifest: Any, *, icon_source: bytes | None = None) -> Dict[str, Any]:
+    from ouroboros.extension_ui_validation import validate_contributions
+    from ouroboros.icon_geometry import icon_spec
+
+    clean, _ = validate_contributions(manifest) if manifest is not None else ([], [])
+    places = [row for row in clean if row.get("provides") == "place"]
+    icon = getattr(manifest, "raw_extra", {}).get("icon", "")
+    if not icon and places:
+        icon = places[0].get("icon", "")
+    services = [str(row.get("destination") or "")[len("vendor:"):].strip() for row in places
+                if str(row.get("destination") or "").startswith("vendor:")]
+    return {"connects": connect_services(services), "icon": icon_spec(icon, icon_source),
+            "title": getattr(manifest, "raw_extra", {}).get("title") or next((p["label"] for p in places if p.get("label")), "")}
+
+
+def connect_services(*values: Any) -> List[str]:
+    """The services a connector connects (``Slack``), from manifests or Hub rows; [] for none.
+
+    The Hub index writes a list of service names; anything else names no service.
+    """
+    names: set[str] = set()
+    for value in values:
+        if isinstance(value, (list, tuple)):
+            names.update(str(item).strip() for item in value if isinstance(item, str) and item.strip())
+    return sorted(names)
+
+
+def _catalog_icon(raw: Any, folder: pathlib.Path | None = None) -> Dict[str, str]:
+    """Catalog hints are display data, never live extension authority."""
+    from ouroboros.icon_geometry import MAX_ICON_BYTES, icon_spec
+
+    if isinstance(raw, dict):
+        return icon_spec("ui/icon.svg", raw.get("svg")) if raw.get("kind") == "svg" else icon_spec(raw.get("name", ""))
+    source = None
+    if raw == "ui/icon.svg" and folder is not None:
+        path = _inside(folder, raw)
+        try:
+            if path is not None:
+                with path.open("rb") as stream:
+                    source = stream.read(MAX_ICON_BYTES + 1)
+        except OSError:
+            pass
+    return icon_spec(raw, source)
+
+
+def _manifest_facts(manifest: Any, folder: pathlib.Path | None = None) -> Dict[str, Any]:
     if manifest is None:
-        return {"type": "", "needs_keys": [], "permissions": []}
+        return {"type": "", "needs_keys": [], "permissions": [], "connects": [], "icon": {}}
     keys: List[str] = []
     for raw in manifest.env_from_settings or []:
         key = str(raw or "").strip().upper()
         if key and key not in keys:
             keys.append(key)
-    return {"type": str(manifest.type or ""), "needs_keys": keys,
+    facts = _connector_facts(manifest)
+    raw_icon = manifest.raw_extra.get("icon") or next((row.get("icon") for row in manifest.contributes if row.get("icon")), "")
+    facts["icon"] = _catalog_icon(raw_icon, folder)
+    return {**facts, "type": str(manifest.type or ""), "needs_keys": keys,
             "permissions": [str(item) for item in manifest.permissions or []]}
 
 
@@ -152,7 +200,7 @@ def _hub_entry(raw: Any, stem: str, clone: pathlib.Path) -> Dict[str, Any]:
         if payload is None:
             raise ValueError("hosted path leaves the repository")
         entry["source"] = {"kind": "hosted", "path": payload.relative_to(clone).as_posix()}
-        entry.update(_manifest_facts(read_manifest(payload)))
+        entry.update(_manifest_facts(read_manifest(payload), payload))
     else:
         from ouroboros.skill_sources import validate_git_url
 
@@ -162,6 +210,10 @@ def _hub_entry(raw: Any, stem: str, clone: pathlib.Path) -> Dict[str, Any]:
         entry["source"] = {"kind": "git", "repo": validate_git_url(str(source.get("repo") or "")),
                            "path": str(source.get("path") or "").strip("/"), "commit": commit}
         entry.update(_manifest_facts(None))
+    if "connects" in raw:
+        entry["connects"] = connect_services(entry["connects"], raw["connects"])
+    if not entry["icon"] and "icon" in raw:
+        entry["icon"] = _catalog_icon(raw["icon"])
     return entry
 
 
@@ -228,7 +280,7 @@ def parse_plain_tree(root: pathlib.Path, *, repo_name: str = "") -> Dict[str, An
                                  "version": str(getattr(manifest, "version", "") or ""), "category": [],
                                  "owner": "", "withdrawn": None,
                                  "source": {"kind": "folder", "path": folder.relative_to(root).as_posix()},
-                                 **_manifest_facts(manifest)}
+                                 **_manifest_facts(manifest, folder)}
         try:
             entry["digest"] = tree_release_digest(folder, manifest)
         except Exception as exc:
@@ -393,7 +445,7 @@ def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[D
         source = entry.get("source") or {}
         item = {
             "id": f"{row['id']}/{entry['name']}", "source_id": row["id"], "source_name": row["name"],
-            "trust": row["trust"], "name": entry["name"], "description": entry.get("description", ""),
+            "trust": row["trust"], "name": entry["name"], "title": entry.get("title", ""), "description": entry.get("description", ""),
             "category": list(entry.get("category") or []), "version": entry.get("version", ""),
             "digest": entry.get("digest", ""), "official": is_official,
             "recommended": is_official and endorsed.get("recommended") is True,
@@ -401,6 +453,7 @@ def items_for(row: Dict[str, Any], snapshot: Optional[Dict[str, Any]]) -> List[D
             "withdrawn": entry.get("withdrawn"), "type": entry.get("type", ""),
             "needs_keys": list(entry.get("needs_keys") or []), "permissions": list(entry.get("permissions") or []),
             "installed": None,
+            "connects": connect_services(entry.get("connects")), "icon": _catalog_icon(entry.get("icon", "")),
         }
         if row.get("url"):
             item["repo_url"] = row["url"]
@@ -505,12 +558,16 @@ def install_listing(drive_root: pathlib.Path, loaded: Any, snapshots: Dict[str, 
     record = read_install_record(pathlib.Path(drive_root), loaded.name)
     category: List[str] = []
     removal = removal_action(loaded, record)
+    from ouroboros.extension_registry_state import live_host_asset
+
+    connector = _connector_facts(getattr(loaded, "manifest", None),
+                                 icon_source=live_host_asset(loaded.name, getattr(loaded, "content_hash", ""), "ui/icon.svg"))
     if record is None:
         builtin = snapshots.get("builtin")
         if builtin and builtin[1] and getattr(loaded, "source", "") == "native":
             entry = next((e for e in builtin[1]["entries"] if e["name"] == loaded.name), None)
             category = list((entry or {}).get("category") or [])
-        return {"install": None, "category": category, "removal": removal}
+        return {**connector, "install": None, "category": category, "removal": removal}
     known, entry = _entry_for_record(record, snapshots)
     base = str(record.get("base_digest") or "")
     current = installed_release_digest(loaded)
@@ -522,7 +579,7 @@ def install_listing(drive_root: pathlib.Path, loaded: Any, snapshots: Dict[str, 
                                                          "left_source": False}
     category = list((entry or {}).get("category") or [])
     source = record.get("source") or {}
-    return {"category": category, "removal": removal, "install": {
+    return {**connector, "category": category, "removal": removal, "install": {
         "source": {key: source[key] for key in ("id", "name", "kind", "part") if source.get(key)},
         "official": official, "release": dict(record.get("release") or {}),
         "basis": record.get("basis"), "base_known": bool(base),
@@ -593,6 +650,10 @@ def _join_installed(items: List[Dict[str, Any]], index: Dict[str, Dict[str, Any]
             source = (record or {}).get("source") or {}
             item["installed"] = {"state": "name_taken", "source_id": source.get("id", ""),
                                  "source_name": source.get("name", "") or ", ".join(current["locations"])}
+        if item["installed"]["state"] == "installed" and current.get("skill_dir"):
+            # Older Hub snapshots need no schema refresh to identify an installed connector.
+            manifest = read_manifest(pathlib.Path(current["skill_dir"]))
+            item["connects"] = connect_services(item.get("connects"), _connector_facts(manifest)["connects"])
 
 
 def catalog_view(drive_root: pathlib.Path, *, rows: Optional[List[Dict[str, Any]]] = None, refresh: bool = False,
@@ -677,7 +738,7 @@ def item_detail(drive_root: pathlib.Path, item_id: str, *, rows: Optional[List[D
         about = str(getattr(manifest, "body", "") or "")[:_MAX_ABOUT_CHARS]
     except Exception as exc:
         about_error = str(exc)[:300]
-    facts = _manifest_facts(manifest) if manifest is not None else {
+    facts = _manifest_facts(manifest, folder) if manifest is not None else {
         "type": item.get("type", ""), "needs_keys": item.get("needs_keys", []), "permissions": item.get("permissions", [])}
     uses = [{"kind": "permission", "id": perm, "label": _PERMISSION_WORDS.get(perm, perm)}
             for perm in facts["permissions"]]

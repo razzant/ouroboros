@@ -733,6 +733,80 @@ def test_chat_history_settled_result_overrides_pre_final_summary_finality(tmp_pa
     assert rec["outcome_final"] is True
 
 
+def test_chat_history_replays_the_rows_current_custody_debt_beside_its_raw_history(tmp_path):
+    """#1583: a summary written while a debt was open replays with the row's CURRENT list, so a
+    healed older stamp reads Done while its raw reason and axes stay as written."""
+    stamp = "delegated_custody_unreconciled"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    rows = [{"ts": "2026-10-06T00:00:52Z", "direction": "system", "type": "task_summary", "task_id": task_id,
+             "chat_id": 1, "text": "Summary written at the terminal.", "reason_code": stamp,
+             "delegated_runs_unreconciled": ["run-1"], "outcome_phase": "warn", "outcome_final": True}
+            for task_id in ("healed", "owed")]
+    (logs / "chat.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    (logs / "progress.jsonl").write_text("", encoding="utf-8")
+    axes = {"execution": {"status": "ok", "reason_code": "final_message"},
+            "objective": {"status": "not_evaluated", "source": "none", "warning": stamp, "warnings": [stamp]}}
+    for task_id, debt in (("healed", []), ("owed", ["run-1"])):
+        seed_result(tmp_path, task_id, {"_schema_version": 1, "task_id": task_id, "status": "completed",
+                                        "reason_code": stamp, "outcome_axes": axes,
+                                        "delegated_runs_unreconciled": debt})
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "10"})))
+    replayed = {item["task_id"]: item for item in json.loads(response.body.decode("utf-8"))["messages"]
+                if item.get("task_id") in {"healed", "owed"}}
+    assert replayed["healed"]["delegated_runs_unreconciled"] == [] and replayed["healed"]["outcome_phase"] == "done"
+    assert replayed["owed"]["delegated_runs_unreconciled"] == ["run-1"] and replayed["owed"]["outcome_phase"] == "warn"
+    for record in replayed.values():
+        assert record["reason_code"] == stamp and record["outcome_axes"]["objective"]["warning"] == stamp
+
+
+def test_chat_history_never_turns_a_legacy_stamp_into_its_execution_cause(tmp_path):
+    """R1 QA (consumer evidence ``synthetic-stamp-no-cause``): a stored older failed row with the stamp,
+    no typed execution cause and a known-empty list replays with no execution reason, so neither
+    reader names a debt; Continue still refuses for the unrecorded cause. Without a list the same
+    failed row refuses alike, and an older finished row (``synthetic-debt-unknown``) keeps its
+    warning: no list is no proof of reconciliation."""
+    stamp = "delegated_custody_unreconciled"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text("".join(json.dumps({
+        "ts": "2026-10-06T00:00:52Z", "direction": "system", "type": "task_summary", "task_id": task_id,
+        "chat_id": 1, "text": "Summary written at the terminal.", "outcome_phase": "warn", "outcome_final": True,
+    }) + "\n" for task_id in ("legacy", "no-list", "finished-no-list")), encoding="utf-8")
+    (logs / "progress.jsonl").write_text("", encoding="utf-8")
+    failed_axes = {"execution": {"status": "failed"}, "lifecycle": {"status": "failed"},
+                   "objective": {"warning": stamp, "warnings": [stamp]}}
+    for task_id, debt in (("legacy", {"delegated_runs_unreconciled": []}), ("no-list", {})):
+        seed_result(tmp_path, task_id, {
+            "_schema_version": 1, "task_id": task_id, "status": "failed", "reason_code": stamp,
+            "delegation_role": "root", "root_task_id": task_id, "outcome_axes": failed_axes, **debt})
+    seed_result(tmp_path, "finished-no-list", {
+        "_schema_version": 1, "task_id": "finished-no-list", "status": "completed", "reason_code": stamp,
+        "delegation_role": "root", "root_task_id": "finished-no-list",
+        "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "lifecycle": {"status": "completed"},
+                         "objective": {"source": "author_acceptance", "status": "pass", "warning": stamp,
+                                       "warnings": [stamp]}}})
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "10"})))
+    replayed = {item["task_id"]: item for item in json.loads(response.body.decode("utf-8"))["messages"]
+                if item.get("task_id") in {"legacy", "no-list", "finished-no-list"}}
+    assert set(replayed) == {"legacy", "no-list", "finished-no-list"}, replayed
+    record = replayed["legacy"]
+    assert record["outcome_axes"]["execution"].get("reason_code", "") != stamp
+    assert record["outcome_phase"] == "error" and record["delegated_runs_unreconciled"] == []
+    assert record["reason_code"] == stamp and record["outcome_axes"]["objective"]["warning"] == stamp
+    assert record["continuation_offer"] == {"eligible": False, "cause": stamp, "refusal": "interruption_cause_unrecorded"}
+    unlisted = replayed["no-list"]
+    assert unlisted["outcome_axes"]["execution"].get("reason_code", "") != stamp
+    assert unlisted["outcome_phase"] == "error" and unlisted["continuation_offer"] == record["continuation_offer"]
+    finished = replayed["finished-no-list"]
+    assert finished["outcome_axes"]["execution"]["reason_code"] == "final_message"
+    assert finished["outcome_phase"] == "warn", "no list is no proof of reconciliation"
+
+
 def test_chat_history_attaches_terminal_cost_truth_from_task_result(tmp_path):
     """v6.82 P1: a terminal task_results/<id>.json carries the final cost truth;
     it is attached to the surviving progress anchor on replay. ABI-3
@@ -1064,7 +1138,9 @@ def test_chat_history_replays_the_live_subtree_ceiling_for_a_running_root(tmp_pa
 
     seen_roots = []
 
-    def _projection(_drive, *, root_task_id="", allow_stale=False):
+    def _breakdown(_drive, *, root_task_id="", allow_stale=False, custody_root=None, include_custody=False):
+        # The live-root projection's one read: stale-allowed, with custody coverage.
+        assert allow_stale is True and include_custody is True
         seen_roots.append(root_task_id)
         if root_task_id == "root-empty":
             return {"attempt_counts": {"metadata_only": 1}, "subscription_sessions": 0}
@@ -1074,7 +1150,7 @@ def test_chat_history_replays_the_live_subtree_ceiling_for_a_running_root(tmp_pa
             "attempt_counts": {"resolved": 4}, "subscription_sessions": 0,
         }
 
-    monkeypatch.setattr(usage_accounting, "usage_projection", _projection)
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", _breakdown)
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "chat.jsonl").write_text("", encoding="utf-8")
@@ -1186,3 +1262,23 @@ def test_chat_history_replays_an_admission_notice_without_terminal_truth(tmp_pat
     assert rec["text"] == "Аудит · Not started: the working folder can't be used"
     assert "task_terminal_status" not in rec
     assert "outcome_final" not in rec
+
+
+def test_history_preserves_relay_sender_target_summary_quotes_and_row_identity(tmp_path):
+    """The deck receives every saved relay field, including unknown senders and the stamped receiver, unchanged."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_references import projection_fields
+    relay = {'relay_id': 'deck-note', 'summary': 'Check both browser engines',
+             'sender': {'name': 'Verification', 'chat_id': 42, 'task_id': 'sender-task'},
+             'target': {'task_id': 'receiver-task', 'title': 'Compare both engines'},
+             'quotes': [{'text': 'Keep my words available', 'source': {'chat_id': 1, 'label': 'Main'}},
+                        {'text': '', 'attachments': [{'name': 'instructions.txt'}], 'source': {'chat_id': 1}}]}
+    row = {'chat_id': 1, 'ts': '2026-10-22T11:00:00Z', 'direction': 'out',
+           'type': 'relay_entry', 'text': 'Full note as written', 'relay': relay}
+    ds.append(tmp_path, 'chat', row, feed=True)
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={'limit': '10'})))
+    note = next(item for item in json.loads(response.body)['messages'] if item.get('relay'))
+    assert note['relay'] == relay
+    assert note['row_address'] == projection_fields(row)['row_address']
+    assert note['text'] == row['text']

@@ -14,7 +14,7 @@ def test_server_subcommand_sanitizes_argv(monkeypatch):
 
     class FakeServer:
         @staticmethod
-        def main():
+        def executable_main():
             seen["argv"] = list(sys.argv)
             return 0
 

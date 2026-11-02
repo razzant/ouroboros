@@ -717,7 +717,7 @@ def external_workspace_git_violation(
         _subcmd, _sub_args = _git_subcommand_and_args(invocation)
         _output_files = _git_output_file_args(_sub_args)
         # READ-ONLY git is never target-checked: `git status`/`log`/`diff` at the
-        # system repo is the vcs_status-equivalent inspection lane, and blocking
+        # system repo is the vcs_read status-equivalent inspection lane, and blocking
         # it is the recorded false-block class (v4.5.1; f14baf8f). Classification
         # deliberately probes with allow_network=True so it answers ONLY "does
         # this invocation mutate?" — the contract's network fence is enforced

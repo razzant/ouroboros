@@ -7,12 +7,16 @@ runtime or reads live data. Synthetic CDP touch is Chromium's input pipeline, no
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
+from ouroboros.launcher_window_chrome import DOCUMENT_SCRIPT
 from tests import test_subscription_setup_browser as setup_browser
-from tests.test_design_system_gate_browser import PROJECTS, save_evidence, seed_page, settle, sidebar_metrics
+from tests.test_design_system_gate_browser import (PROJECTS, open_nav, rest, save_evidence, seed_page, settle,
+                                                   sidebar_metrics)
 from tests._work_projection_shared import work_fields
+from tests.ui_motion_samples import SAMPLE_TRANSITION
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
@@ -208,6 +212,81 @@ def test_back_closes_the_topmost_dialog_before_its_layer(shell_ui, tmp_path, cas
     assert facts['second_back']['layers'] == [] and not facts['second_back']['drawer'], facts
 
 
+FILES_BACK_FACTS = """() => {
+    const shown = el => Boolean(el && el.getClientRects().length);
+    const active = document.activeElement;
+    return {layers: window.__ouroLayers?.ids() ?? 'left the app', armed: window.__ouroLayers?.historyArmed() ?? null,
+        view: document.querySelector('.files-layout')?.dataset.filesView ?? null,
+        list: shown(document.querySelector('.files-sidebar')), file: shown(document.querySelector('.files-preview')),
+        editor: document.querySelector('.files-editor')?.value ?? null,
+        unsaved: [...document.querySelectorAll('.files-entry')].filter(row => shown(row.querySelector('.files-entry-unsaved')))
+            .map(row => row.dataset.path || ''),
+        focus: active?.closest?.('.files-entry')?.dataset.path ?? (active?.matches?.('[data-files-back]') ? 'back' : active?.tagName),
+        telegramBack: window.Telegram?.WebApp?.BackButton?.isVisible ?? null};
+}"""
+
+
+@pytest.mark.parametrize('via', ['history', 'telegram'])
+def test_back_returns_a_narrow_files_page_from_its_file_to_the_list(shell_ui, tmp_path, via):
+    """#7: a file shown alone on a phone is one dismissable layer, so the system Back and Telegram's Back close it the
+    way Back to folder does: the list, focus on the file's row, its unsaved draft kept for that row. Escape in the
+    editor closes it the same way; the desk split registers no layer, and a page narrow again registers it again."""
+    page = seed_page(shell_ui, 390, 844, telegram=via == 'telegram')
+    page.route('**/api/files/read*', lambda route: route.fulfill(json={
+        'path': 'notes.md', 'name': 'notes.md', 'size': 11, 'display_path': '/workspace/notes.md',
+        'is_text': True, 'content': 'Saved text\n', 'truncated': False}))
+    facts = {'engine': shell_ui['engine'], 'via': via}
+    try:
+        boot(page, shell_ui)
+        open_nav(page, 'files')
+        row = page.locator('.files-entry', has_text='project_notes_with_a_long_descriptive_name.md')
+        facts['list'] = page.evaluate(FILES_BACK_FACTS)
+        row.click()
+        page.locator('.files-editor').wait_for()
+        wait_quietly(page, 'window.__ouroLayers?.historyArmed()')
+        facts['open'] = page.evaluate(FILES_BACK_FACTS)
+        page.locator('.files-editor').fill('Draft kept by Back')
+        press_back(page, via)
+        wait_quietly(page, "() => document.querySelector('.files-layout').dataset.filesView === 'list'")
+        page.wait_for_timeout(200)
+        facts['back'] = page.evaluate(FILES_BACK_FACTS)
+        row.click()
+        wait_quietly(page, 'window.__ouroLayers?.historyArmed()')
+        facts['reopened'] = page.evaluate(FILES_BACK_FACTS)
+        page.locator('.files-editor').press('Escape')
+        wait_quietly(page, "() => document.querySelector('.files-layout').dataset.filesView === 'list'")
+        page.wait_for_timeout(200)
+        facts['escape'] = page.evaluate(FILES_BACK_FACTS)
+        row.click()
+        page.set_viewport_size({'width': 1280, 'height': 860})
+        wait_quietly(page, '() => !window.__ouroLayers?.size()')
+        page.wait_for_timeout(200)
+        facts['desk'] = page.evaluate(FILES_BACK_FACTS)
+        page.set_viewport_size({'width': 390, 'height': 844})
+        wait_quietly(page, '() => window.__ouroLayers?.size() === 1')
+        page.wait_for_timeout(200)
+        facts['narrow_again'] = page.evaluate(FILES_BACK_FACTS)
+    finally:
+        evidence(tmp_path, f'shell-files-back-{via}-{shell_ui["engine"]}', facts)
+        page.close()
+    assert facts['list']['layers'] == [] and facts['list']['view'] == 'list', facts
+    opened = facts['open']
+    assert opened['layers'] == ['files-file'] and opened['armed'] and opened['file'] and not opened['list'], facts
+    assert opened['focus'] == 'back', facts
+    back = facts['back']
+    assert back['layers'] == [] and back['view'] == 'list' and back['list'] and not back['file'], facts
+    assert back['focus'] == 'notes.md' and back['unsaved'] == ['notes.md'], facts
+    assert back['editor'] == 'Draft kept by Back', facts
+    assert facts['reopened']['layers'] == ['files-file'] and facts['reopened']['editor'] == 'Draft kept by Back', facts
+    escape = facts['escape']
+    assert escape['layers'] == [] and escape['view'] == 'list' and escape['focus'] == 'notes.md', facts
+    assert escape['editor'] == 'Draft kept by Back' and escape['unsaved'] == ['notes.md'], facts
+    assert facts['desk']['layers'] == [] and facts['desk']['list'] and facts['desk']['file'], facts
+    assert facts['narrow_again']['layers'] == ['files-file'] and facts['narrow_again']['view'] == 'file', facts
+    if via == 'telegram':
+        assert (opened['telegramBack'], back['telegramBack'], facts['desk']['telegramBack']) == (True, False, False), facts
+
+
 @pytest.mark.parametrize('width,height', [(1280, 860), (390, 844)])
 def test_escape_in_a_composer_capsule_closes_only_the_capsule(shell_ui, tmp_path, width, height):
     page = seed_page(shell_ui, width, height)
@@ -255,7 +334,8 @@ def test_a_project_opened_from_the_phone_drawer_takes_focus(shell_ui, tmp_path, 
         page.wait_for_timeout(250)
         press(page.locator('#nav-projects-list [data-project-id]').first)
         page.wait_for_function("() => window.__ouroLayers.top() === 'project'")
-        page.wait_for_timeout(400)
+        # The panel lay in the room the drawer made inert: focus goes in once the card has come home.
+        rest(page)
         facts['focus'] = page.evaluate(WHO)
         facts['inside_panel'] = page.evaluate("document.getElementById('project-panel').contains(document.activeElement)")
         facts['layers'] = ids(page)
@@ -476,45 +556,84 @@ def test_copy_and_reply_sit_side_by_side_on_one_line(shell_ui, tmp_path, width):
         assert max(c['bottom'] for c in row) - min(c['bottom'] for c in row) <= 0.5, facts
 
 
-TITLE_BAND = """band => {
-    // launcher_window_chrome.py's own press filter: a plain press off any control moves the window.
-    const CONTROLS = 'a[href], button, input, select, textarea, summary, label, iframe, video, audio, '
-        + '[contenteditable]:not([contenteditable="false"]), [tabindex]:not([tabindex="-1"]), [draggable="true"], '
-        + '[role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], '
-        + '[role="radio"], [role="switch"], [role="slider"], [role="textbox"]';
+TITLE_BAND = """({band, allowed}) => {
+    // Exercise the launcher's real CONTROLS/cursor exclusion, not a copied predicate.
     const left = document.getElementById('primary-sidebar').getBoundingClientRect().right;
-    const caught = {};
+    const controls = new Set(), unexpected = [];
+    let empty = null, drags = 0;
     for (let y = 4; y < band; y += 6) {
         for (let x = left + 4; x < innerWidth - 8; x += 12) {
             const t = document.elementFromPoint(x, y);
-            const control = t?.closest(CONTROLS);
-            if (control) caught[control.tagName.toLowerCase() + '.' + [...control.classList].slice(0, 2).join('.')] = y;
+            const control = t?.closest(allowed);
+            window.__chromeMessages.length = 0;
+            const press = new MouseEvent('mousedown', {bubbles: true, cancelable: true, clientX: x, clientY: y, detail: 1});
+            t.dispatchEvent(press);
+            const messages = window.__chromeMessages.map(m => m.type);
+            if (control) {
+                controls.add(control.id || control.textContent.trim());
+                if (messages.length || press.defaultPrevented) unexpected.push({x, y, messages, control: control.outerHTML});
+            } else if (messages.join() === 'drag' && press.defaultPrevented) {
+                drags++;
+                empty ||= {x, y};
+            } else unexpected.push({x, y, messages, target: t.outerHTML.slice(0, 200)});
         }
     }
     const tab = document.querySelector('.page.active .app-tab');
-    return {caught, firstTabTop: tab ? Math.round(tab.getBoundingClientRect().top) : null};
+    const header = document.querySelector('.page.active .app-page-header');
+    return {controls: [...controls], unexpected, empty, drags, height: header.getBoundingClientRect().height,
+        firstTabTop: tab ? Math.round(tab.getBoundingClientRect().top) : null};
 }"""
 
 
-@pytest.mark.parametrize('page_name', ['dashboard', 'settings'])
+@pytest.mark.parametrize('page_name', ['dashboard', 'settings', 'skills', 'files', 'widgets'])
 def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path, page_name):
-    """macOS desktop window: the transparent title bar's band over a page holds no control, its tabs start below."""
+    """Composition A: only intended navigation/actions occupy the band; plain space still requests native drag."""
     page = seed_page(shell_ui, 1280, 860)
+    # The production document-start script and its messages, with only the native bridge replaced by a recorder.
+    # AppKit's window movement itself is covered separately; no owner window is used here.
+    page.add_init_script("""window.__chromeMessages = [];
+        window.webkit = {messageHandlers: {ouroborosWindowChrome: {postMessage: m => window.__chromeMessages.push(m)}}};
+    """ + DOCUMENT_SCRIPT)
     facts = {'engine': shell_ui['engine'], 'page': page_name}
     try:
         boot(page, shell_ui)
-        # What launcher_window_chrome.py writes into the document once the integrated title bar is applied.
-        page.evaluate("""() => { const root = document.documentElement; root.dataset.windowChrome = 'integrated';
-            root.style.setProperty('--window-chrome-top', '52px'); root.style.setProperty('--window-chrome-start', '78px'); }""")
+        page.evaluate("window.__ouroWindowChrome({doc: performance.timeOrigin, top: 52, start: 78})")
         page.locator(f'[data-nav-page="{page_name}"]').click()
         page.locator(f'#page-{page_name}').wait_for(state='visible')
         settle(page)
-        facts['band'] = page.evaluate(TITLE_BAND, 52)
+        allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, '
+                   '.app-page-toolbar :is(#skills-refresh, #skills-update-all, #files-refresh, '
+                   '#files-new-file, #files-new-dir, #files-paste)')
+        facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
+        band = facts['band']
+        assert band['height'] == 52 and band['drags'] > 0 and not band['unexpected'], facts
+        if page_name == 'widgets':
+            assert band['controls'] == [] and band['firstTabTop'] is None, facts
+        else:
+            assert band['controls'], facts
+            if page_name != 'files':
+                assert 0 <= band['firstTabTop'] < 52, facts
+        # Real pointer presses on empty band: one drag, then the Mac's double-click request.
+        page.evaluate('window.__chromeMessages.length = 0')
+        page.mouse.click(**band['empty'])
+        assert page.evaluate('window.__chromeMessages.map(m => m.type)') == ['drag']
+        page.evaluate('window.__chromeMessages.length = 0')
+        page.mouse.dblclick(**band['empty'])
+        assert page.evaluate('window.__chromeMessages.map(m => m.type)') == ['drag', 'double-click']
+        # Controls keep their normal behaviour and never send a native-window request.
+        page.evaluate('window.__chromeMessages.length = 0')
+        if page_name == 'files':
+            page.locator('#files-new-file').click()
+            page.locator('#page-files .files-editor').wait_for()
+        elif page_name != 'widgets':
+            tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
+            tab.click()
+            assert tab.get_attribute('aria-selected') == 'true'
+        assert page.evaluate('window.__chromeMessages.map(m => m.type)') == []
     finally:
+        setup_browser.capture(page, f'shell-title-band-{page_name}-{shell_ui["engine"]}')
         evidence(tmp_path, f'shell-title-band-{page_name}-{shell_ui["engine"]}', facts)
         page.close()
-    assert facts['band']['caught'] == {}, facts
-    assert facts['band']['firstTabTop'] is not None and facts['band']['firstTabTop'] >= 52, facts
 
 
 def live_state(project_ids, pins=()):
@@ -538,6 +657,13 @@ SIDEBAR_FACTS = """() => {
     return {rows: rows.map((e) => e.querySelector('[data-project-id]').dataset.projectId),
             gapToTools: Math.round(files.top - zone.bottom), filesTop: Math.round(files.top),
             sidebarBottom: Math.round(side.getBoundingClientRect().bottom),
+            // The foot: how far the version row's bottom sits above the column's content edge (0 = on the edge), and
+            // whether the column itself scrolls (the short-window fallback, where the foot is pinned over it).
+            footGap: Math.round(side.getBoundingClientRect().bottom - parseFloat(getComputedStyle(side).paddingBottom)
+                - side.querySelector('.sidebar-foot-meta').getBoundingClientRect().bottom),
+            footBelowTools: side.querySelector('.sidebar-foot-meta').getBoundingClientRect().top
+                >= side.querySelector('[data-nav-page="settings"]').getBoundingClientRect().bottom - 0.5,
+            columnScrolls: side.scrollHeight > side.clientHeight + 1,
             showAll: Boolean(document.getElementById('nav-projects-show-all')),
             header: {shape: mark.dataset.shape, hue: mark.dataset.hue, drawn: getComputedStyle(mark).display !== 'none'},
             expanded: document.getElementById('nav-projects-toggle').getAttribute('aria-expanded')};
@@ -572,8 +698,14 @@ def test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow(shell
     assert collapsed['expanded'] == 'false' and collapsed['rows'] == pins, facts
     assert collapsed['showAll'] is False, facts
     assert collapsed['header'] == facts['open']['header'] == {'shape': 'moving', 'hue': 'ink', 'drawn': True}, facts
-    # The tools follow the Projects zone: no empty room between them (the free room is under the last row).
+    # The tools follow the Projects zone: no empty room between them (owner 18.10). The version and the update rest on
+    # the bottom edge in every state (owner 22.10): the free room lies between the tools and the foot.
     assert collapsed['gapToTools'] <= 24 and collapsed['filesTop'] < collapsed['sidebarBottom'] - 200, facts
+    for state in ('open', 'collapsed', 'expanded'):
+        side = facts[state]
+        assert side['footBelowTools'], (state, facts)
+        if not side['columnScrolls']:
+            assert abs(side['footGap']) <= 1, (state, facts)
     assert facts['open']['expanded'] == 'true' and len(facts['open']['rows']) == len(PROJECTS), facts
     assert facts['expanded']['expanded'] == 'true' and len(facts['expanded']['rows']) == len(PROJECTS), facts
 
@@ -733,7 +865,7 @@ def test_a_handle_drag_moves_its_box_and_the_room_follows_it_frame_by_frame(shel
 
 
 def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path):
-    """Docked, the panel slides in from 18px past the window's edge. Placed in #app (an absolute grid item), that
+    """Docked, the panel slides in from past the window's right edge. Placed in #app (an absolute grid item), that
     offset would widen the page, and a scrollIntoView during the slide (a Project opened on a question) would
     scroll the whole window sideways; #app clips it. The slide is slowed so the check lands inside it."""
     page = seed_page(shell_ui, 1108, 680)
@@ -755,6 +887,97 @@ def test_the_project_panel_sliding_in_never_widens_the_window(shell_ui, tmp_path
     assert facts['sliding'] not in ('none', 'matrix(1, 0, 0, 1, 0, 0)'), ('checked while the panel slides', facts)
     assert facts['pageWidth'] <= facts['window'], facts
     assert facts['scrollLeft'] == 0 and facts['sidebarLeft'] == 0, facts
+
+
+# What the panel shows: how many of its room's answers, and whether its loading row is up (chat_render_batch.js).
+PANEL_SHOWS = """(panel, answers) => ({
+    rows: answers.filter(answer => [...panel.querySelectorAll('.chat-messages .chat-bubble')]
+        .some(row => row.textContent.includes(answer))).length,
+    loading: [...panel.querySelectorAll('.chat-load-older[aria-busy="true"]')]
+        .some(row => !row.hidden && row.getClientRects().length > 0)})"""
+# Seek the real slide: a busy runner must not turn missed compositor frames into a missing-motion failure. `setOff`
+# is the time from just before the open was asked to the slide's start: the panel's own wait begins after the ask.
+PANEL_FRAMES = """({project, opening, answers}) => { const panel = document.getElementById('project-panel');
+    const sample = """ + SAMPLE_TRANSITION + """, shows = """ + PANEL_SHOWS + """;
+    let asked = 0, setOff = null;
+    return sample({root: panel, target: () => panel, property: 'transform',
+        ready: () => { const ready = panel.classList.contains('open') === opening;
+                       if (ready && setOff === null) setOff = performance.now() - asked;
+                       return ready; },
+        act: () => { asked = performance.now();
+                     if (opening) window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}));
+                     else panel.querySelector('#project-panel-close').click(); },
+        measure: () => ({left: panel.getBoundingClientRect().left, hidden: panel.hidden, ...shows(panel, answers)})})
+        .then(seen => ({...seen, setOff})); }"""
+# A room's read takes 150 ms, as on a real link: a panel that set off at the click would cross the window empty. A
+# held read lands only when the test releases it, so the panel's bounded wait for its room has to end on its own.
+HISTORY_READS = """(() => { const real = window.fetch, waiting = [];
+    window.__historyReads = {hold: false, held: () => waiting.length, release: () => waiting.splice(0).forEach(go => go())};
+    window.fetch = (input, init) => { const answer = real(input, init);
+        if (!String(input?.url || input).includes('/api/chat/history')) return answer;
+        const hold = window.__historyReads.hold;
+        return answer.then((r) => new Promise((resolve) => hold ? waiting.push(() => resolve(r))
+            : setTimeout(() => resolve(r), 150))); }; })()"""
+
+
+@pytest.mark.parametrize('read', ['slow', 'held'])
+def test_docked_the_project_panel_comes_in_with_its_room_and_goes_back_with_it(shell_ui, tmp_path, read):
+    """Owner 20.10 (Q2 A): docked, the panel comes in from the window's right edge once its room has painted (or at
+    its read's bound, with its loading row) and goes back there whole: samples along both real transitions show where
+    it is and what it shows, from the edge to Main and back. A 150 ms read normally paints first, though a busy runner
+    may reach the bound first, which is the designed branch, not a defect; a held read always reaches the bound."""
+    app_js = (setup_browser.WEB / 'app.js').read_text(encoding='utf-8')
+    bound = int(re.search(r'PANEL_ARRIVAL_BOUND_MS = (\d+);', app_js).group(1))
+    page = seed_page(shell_ui, 1143, 790)
+    page.emulate_media(reduced_motion='no-preference')
+    rows = [{'role': 'assistant', 'text': f'Answer {i}. ' + 'Ordinary context. ' * 8,
+             'content': f'Answer {i}.', 'ts': f'2026-10-14T09:{i:02d}:00Z'} for i in range(6)]
+    answers = [row['content'] for row in rows]  # A startup System bubble is not the room's history.
+    page.route('**/api/chat/history*', lambda route: route.fulfill(json={'messages': rows, 'progress': []}))
+    page.add_init_script(HISTORY_READS)
+    facts = {'engine': shell_ui['engine'], 'read': read, 'bound': bound}
+    room = f"() => ({PANEL_SHOWS})(document.getElementById('project-panel'), {json.dumps(answers)})"
+    try:
+        boot(page, shell_ui)
+        width = page.evaluate('innerWidth')
+        page.evaluate('hold => { window.__historyReads.hold = hold; }', read == 'held')
+        facts['opening'] = page.evaluate(PANEL_FRAMES, {'project': PROJECTS[0], 'opening': True, 'answers': answers})
+        facts['held'] = page.evaluate('window.__historyReads.held()')
+        page.evaluate('window.__historyReads.release()')
+        wait_quietly(page, f'() => {{ const shows = ({room})(); return shows.rows === {len(answers)} && !shows.loading; }}')
+        facts['room'] = page.evaluate(room)
+        rest(page)
+        page.locator('#project-panel-close').click(trial=True)
+        facts['closing'] = page.evaluate(PANEL_FRAMES, {'opening': False, 'answers': answers})
+        page.wait_for_function("() => document.getElementById('project-panel').hidden")
+    finally:
+        evidence(tmp_path, f'shell-panel-arrival-{read}-{shell_ui["engine"]}', facts)
+        page.close()
+    opening, closing = facts['opening']['values'], facts['closing']['values']
+    home = opening[-1]['left']
+    assert home < width - 300, ('it ends beside Main', home, width)
+    assert facts['opening']['duration'] > 0 and facts['closing']['duration'] > 0, facts
+    assert abs(opening[1]['left'] - width) <= 1 and abs(closing[-1]['left'] - width) <= 1, facts
+
+    def moving(frames):
+        return [f for f in frames if not f['hidden'] and home + 1 < f['left'] < width - 1]
+    assert len(moving(opening)) >= 3, ('the arrival is seen moving', opening)
+    arriving = opening + facts['opening']['live']
+    leaving = closing + facts['closing']['live']
+    # The slide's first sample is the panel as it set off: its room already painted, or not (then it waited the bound).
+    painted = opening[1]['rows'] == len(answers)
+    if read == 'held':
+        assert facts['held'] >= 1 and not painted, ('its read was still held as it came in', facts)
+    if painted:
+        assert all(f['rows'] == len(answers) for f in moving(arriving)), ('it sets off with its room painted', arriving)
+    else:
+        assert facts['opening']['setOff'] >= bound, ('without its room it waits until the bound', facts['opening'])
+        seen = ''.join('R' if f['rows'] == len(answers) else 'L' if f['loading'] and not f['rows'] else '?'
+                       for f in moving(arriving))
+        assert re.fullmatch('L+R*', seen), ('at the bound it comes in with its loading row, then its room', seen, arriving)
+    assert facts['room'] == {'rows': len(answers), 'loading': False}, ('its read lands in the room', facts['room'])
+    assert len(moving(closing)) >= 3, ('the way back is seen moving', closing)
+    assert all(f['rows'] == len(answers) for f in leaving if not f['hidden']), ('it goes back with its room', leaving)
 
 
 def test_a_project_closed_mid_drag_keeps_its_stored_width(shell_ui, tmp_path):
@@ -828,12 +1051,12 @@ def test_a_row_that_hides_gives_the_keyboard_to_the_projects_toggle(shell_ui, tm
         # lands on the Projects toggle instead of the page.
         page.locator(f'[data-nav-project-id="{pins[0]}"] .nav-project-kebab').focus()
         page.keyboard.press('Enter')
-        page.locator('body > .project-row-menu').wait_for()
+        page.locator('body > .project-row-menu:not([data-leaving])').wait_for()
         facts['in_menu'] = page.evaluate("() => document.activeElement.dataset.prm || ''")
         unpin(pins[1:])
         page.wait_for_function(hidden, arg=pins[0], timeout=20_000)
         settle(page)
-        facts['menus_after'] = page.locator('.project-row-menu').count()
+        facts['menus_after'] = page.locator('.project-row-menu:not([data-leaving])').count()
         facts['focus_after_menu'] = page.evaluate(FOCUS)
         # The keyboard on the other pinned row, which is unpinned too: the list empties, the toggle keeps the keyboard.
         page.locator(f'[data-project-id="{pins[1]}"]').focus()

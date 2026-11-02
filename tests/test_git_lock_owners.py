@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pathlib
 import subprocess
 import sys
 import time
@@ -85,7 +86,7 @@ def _orphan_lock(repo):
 def _live_writer(repo):
     """A real ``git update-index`` that holds ``index.lock`` until its stdin closes."""
     blob = _git(repo, "hash-object", "-w", "--stdin", input="first writer payload\n")
-    lock = repo / ".git" / "index.lock"
+    lock = pathlib.Path(_git(repo, "rev-parse", "--path-format=absolute", "--git-path", "index") + ".lock")
     proc = subprocess.Popen(["git", "update-index", "--index-info"], cwd=repo,  # bytes: no CRLF in the path
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     writer = SimpleNamespace(lock=lock, stderr="")
@@ -107,6 +108,24 @@ def _live_writer(repo):
         if proc.returncode is None:  # not collected by the test
             proc.kill()
             proc.communicate(timeout=10)
+
+
+@contextlib.contextmanager
+def _lock_after_check(monkeypatch, repo, holder="crashed"):
+    from ouroboros.gateway import control
+
+    observed = control._index_lock_precondition
+    state = SimpleNamespace(writer=None)
+    with contextlib.ExitStack() as stack:
+        def check():
+            result = observed()
+            assert result is None  # the real observation saw no lock
+            state.writer = stack.enter_context(_live_writer(repo)) if holder == "live" else None
+            state.lock = state.writer.lock if state.writer else _orphan_lock(repo)
+            state.inode = state.lock.stat().st_ino
+            return result
+        monkeypatch.setattr(control, "_index_lock_precondition", check)
+        yield state
 
 
 def _rows(data, kind):
@@ -304,8 +323,8 @@ def test_a_corrupt_index_beside_a_held_lock_is_left_untouched_by_every_read(tmp_
     assert lock.read_bytes() == b"left by a crashed process\n"
     assert not list((repo / ".git").glob("index.corrupt.*.bak"))
 
-    lock.unlink()  # the owner (or the agent) resolves the lock; the ordinary repair then proceeds
-    assert git_ops.git_capture(["git", "status", "--porcelain"])[0] == 0
+    lock.unlink()  # the fixture owner releases it; only an explicit writer repairs
+    assert git_ops.git_capture(["git", "reset", "--mixed", "HEAD"], repair_index=True)[0] == 0
     assert _git(repo, "ls-files").split() == ["seed.txt"]
     [backup] = (repo / ".git").glob("index.corrupt.*.bak")
     assert backup.read_bytes() == b"invalid index"
@@ -333,7 +352,7 @@ def test_a_rebuild_refused_by_a_lock_taken_meanwhile_never_leaves_a_missing_or_c
         return real_warning(message, *args, **kwargs)
 
     monkeypatch.setattr(git_ops.log, "warning", contender_moves)
-    rc, out, err = git_ops.git_capture(["git", "status", "--porcelain"])
+    rc, out, err = git_ops.git_capture(["git", "reset", "--mixed", "HEAD"], repair_index=True)
 
     assert (rc != 0, out) == (True, "") and "index file smaller than expected" in err  # the original failure
     assert index.read_bytes() == (published if race == "index_published_before_relink" else b"invalid index")
@@ -346,7 +365,7 @@ def test_a_malformed_index_is_still_backed_up_and_rebuilt(tmp_path, monkeypatch)
     monkeypatch.setattr(git_ops, "REPO_DIR", repo)
     (repo / ".git" / "index").write_bytes(b"invalid index")
 
-    rc, _out, err = git_ops.git_capture(["git", "status", "--porcelain"])
+    rc, _out, err = git_ops.git_capture(["git", "reset", "--mixed", "HEAD"], repair_index=True)
 
     assert rc == 0, err
     [backup] = (repo / ".git").glob("index.corrupt.*.bak")
@@ -445,15 +464,15 @@ def replace_scene(tmp_path, monkeypatch, replacement_history):
     return scene
 
 
-def test_a_replace_refused_at_its_first_tree_step_by_a_held_lock_is_abandoned_unapplied(replace_scene):
+def test_a_replace_refused_at_its_first_tree_step_by_a_held_lock_is_abandoned_unapplied(replace_scene, monkeypatch):
     """Not a gate_blocked trap: the tx and intent are cleared, writers reopen, Git's refusal is
     named, and the rescue snapshot and keep ref made before the checkout stay (and are reported)."""
     from supervisor import update_merge
 
     scene = replace_scene
-    with _live_writer(scene.repo) as writer:
-        inode = writer.lock.stat().st_ino
+    with _lock_after_check(monkeypatch, scene.repo, "live") as late:
         status, body = scene.apply(scene.target)
+        writer, inode = late.writer, late.inode
 
         outcome = (status, body.get("reason"), body.get("abandoned"), body.get("rolled_back"))
         assert outcome == (409, "replace_not_applied", True, False), body
@@ -509,13 +528,14 @@ def test_a_lock_that_refuses_a_later_tree_step_keeps_the_fenced_rollback(replace
     assert "checkout_already_restored" not in row  # Git did the restoring this time
 
 
-def test_a_store_switch_deferral_moves_nothing_and_is_untouched_by_a_held_lock(replace_scene):
+def test_a_store_switch_deferral_moves_nothing_and_is_untouched_by_a_later_lock(replace_scene, monkeypatch):
     from ouroboros import store_switch
     from supervisor import update_merge
 
     scene = replace_scene
-    with _live_writer(scene.repo) as writer:
+    with _lock_after_check(monkeypatch, scene.repo, "live") as late:
         status, body = scene.apply(scene.storeless)
+        writer = late.writer
         assert (status, body["status"]) == (200, "ok") and scene.events["fenced"] == []
         assert update_merge.read_update_tx_strict()[1]["phase"] == "pending_boot_smoke"
         assert store_switch.read_switch_intent(scene.data)["target_sha"] == scene.storeless
@@ -540,6 +560,7 @@ def test_only_a_lock_refusal_on_every_attempt_of_a_locking_command_is_typed(tmp_
         returncode, stderr = results.pop(0)
         return subprocess.CompletedProcess(argv, returncode, "", stderr)
 
+    monkeypatch.setattr(git_ops_reset, "effective_index_path", lambda: repo / ".git" / "index")
     monkeypatch.setattr(git_ops_reset.subprocess, "run", fake_run)
     repaired = iter([case == "repair_between"])
     monkeypatch.setattr(git_ops, "_maybe_repair_git_index", lambda *_a, **_k: next(repaired, False))
@@ -652,8 +673,8 @@ def test_deferred_replace_records_git_refusal_after_export_and_retirement(replac
     scene = replace_scene
     ensure_current_store(scene.data)
     assert store.store_ready(scene.data)
-    lock = _orphan_lock(scene.repo)
     status, body = scene.apply(scene.storeless)
+    lock = _orphan_lock(scene.repo)  # another writer arrives after the door
     assert status == 200 and body["status"] == "ok"
     outcome = store_switch.run_switch_seam(scene.data, repo_dir=scene.repo)
     assert outcome["status"] == "switch_failed" and "index.lock" in outcome["message"]
@@ -710,18 +731,16 @@ def update_lanes(replace_scene, monkeypatch):
 @pytest.mark.parametrize("holder", ["crashed", "live"])
 @pytest.mark.parametrize("lane", ["auto_merge", "assisted"])
 def test_an_update_refused_at_its_first_step_rolls_back_in_place_and_keeps_the_core_usable(
-        replace_scene, update_lanes, lane, holder):
+        replace_scene, update_lanes, lane, holder, monkeypatch):
     from ouroboros import server_restart
     from supervisor import update_merge, worker_chat_lane, workers
 
     scene = replace_scene
-    with contextlib.ExitStack() as stack:
-        writer = stack.enter_context(_live_writer(scene.repo)) if holder == "live" else None
-        lock = writer.lock if writer else _orphan_lock(scene.repo)
-        inode = lock.stat().st_ino
+    with _lock_after_check(monkeypatch, scene.repo, holder) as late:
         status, body = update_lanes(lane)
+        writer, lock, inode = late.writer, late.lock, late.inode
 
-        assert (status, body.get("rolled_back"), body.get("restart_required")) == (409, True, None), body
+        assert (status, body.get("rolled_back"), body.get("restart_required")) == (409, False, None), body
         assert "index.lock" in body["error"] and "needed no reset/checkout" in body["rollback"]
         assert scene.events["fenced"] == [_LANE_ROLLBACK[lane]] and scene.events["respawned"] == 1
         assert update_merge.read_update_tx_strict()[0] == "absent"
@@ -736,6 +755,8 @@ def test_an_update_refused_at_its_first_step_rolls_back_in_place_and_keeps_the_c
     assert holder == "crashed" or "first.txt" in _git(scene.repo, "ls-files").split()  # the live write landed
     [row] = _rows(scene.data, "managed_update_rolled_back")
     assert row["checkout_already_restored"] is True and row["pre_update_sha"] == scene.base
+    assert row["outcome"] == "not_applied" and row["before_tree_effects"] is True
+    assert "index.lock" in row["stderr"]
     assert update_merge.finalize_managed_update_on_boot(supervisor_ready=True)["reason"] == "no pending update"
 
 
@@ -783,10 +804,8 @@ def test_owner_work_beside_a_held_lock_is_refused_before_anything_moves(replace_
     lock = _orphan_lock(scene.repo)
     status, body = update_lanes("auto_merge")
 
-    error = body["error"].partition("could not preserve local changes before the update: ")
-    # Git's own words, or the fallback when Git said nothing (Apple Git 2.39 refuses this push silently).
-    assert status == 409 and error[1] and ("index.lock" in error[2] or error[2] == "git stash push failed"), body
-    assert update_merge.read_update_tx_strict()[0] == "absent" and scene.events["respawned"] == 1
+    assert status == 409 and body["reason"] == "index_lock_present" and body["outcome"] == "not_applied"
+    assert update_merge.read_update_tx_strict()[0] == "absent" and scene.events["respawned"] == 0
     assert workers.repo_writer_admission_closed() == "" and scene.events["fenced"] == []
     assert (scene.repo / "seed.txt").read_text(encoding="utf-8") == "owner edit in progress\n"
     assert lock.read_bytes() == b"left by a crashed process\n" and _git(scene.repo, "rev-parse", "HEAD") == scene.base
@@ -921,8 +940,8 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
         _commit(scene.repo, "the store arrives", {"ouroboros/store.py": "# store\n", "ouroboros/dialogue_store.py": "# dialogue\n"})
         scene.base = _commit(scene.repo, "owner work", {"local.txt": "owner commit\n"})
     ensure_current_store(scene.data)
-    lock = _orphan_lock(scene.repo)
     status, body = scene.apply(scene.storeless)
+    lock = _orphan_lock(scene.repo)  # another writer arrives after the door
     assert (status, body["status"]) == (200, "ok"), body
     if seam == "switch_not_performed":  # the process died after the intent was consumed, before its owner ran
         def died(_intent):
@@ -963,14 +982,23 @@ def test_a_store_less_target_the_switch_did_not_reach_is_never_replayed_or_final
     assert lock.exists() is (lock_at_next_boot == "still_held")
 
 
-def test_the_store_switch_itself_still_reaches_a_store_less_target(replace_scene):
-    from ouroboros import store_switch
+@pytest.mark.parametrize("door", ["seam", "restart_exit"])
+def test_the_store_switch_itself_still_reaches_a_store_less_target(replace_scene, door):
+    """At the restart exit the replace owner's rescue and checkout Git start after the begun stop."""
+    from ouroboros import owned_shutdown, store_switch
     from ouroboros.store_import import ensure_current_store
 
     scene = replace_scene
     ensure_current_store(scene.data)
     assert scene.apply(scene.storeless)[0] == 200
-    assert store_switch.run_switch_seam(scene.data, repo_dir=scene.repo)["status"] == "switched"
+    if door == "restart_exit":  # server._check_restart: the generation's one stop, then the seam
+        owned_shutdown.begin_owned_stop(scene.data, cause="restart_requested")
+        census = {"worker_exits": {"unconfirmed": []}, "live_children": [],
+                  "owned_stop": owned_shutdown.stop_owned_work(scene.data)}
+        outcome = store_switch.switch_at_restart(scene.data, scene.repo, census)
+    else:
+        outcome = store_switch.run_switch_seam(scene.data, repo_dir=scene.repo)
+    assert outcome["status"] == "switched", outcome
     assert _git(scene.repo, "rev-parse", "HEAD") == scene.storeless
 
 
@@ -1117,15 +1145,13 @@ def restore_door(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("door", ["ui_rollback", "vcs_rollback"])
 @pytest.mark.parametrize("holder", ["crashed", "live"])
-def test_a_restore_git_refused_at_the_index_lock_returns_writers_without_a_restart(restore_door, holder, door):
+def test_a_restore_git_refused_at_the_index_lock_returns_writers_without_a_restart(restore_door, holder, door, monkeypatch):
     from supervisor import worker_chat_lane, workers
 
     scene = restore_door
-    with contextlib.ExitStack() as stack:
-        writer = stack.enter_context(_live_writer(scene.repo)) if holder == "live" else None
-        lock = writer.lock if writer else _orphan_lock(scene.repo)
-        inode = lock.stat().st_ino
+    with _lock_after_check(monkeypatch, scene.repo, holder) as late:
         status, body = scene.restore(scene.old, door)
+        writer, lock, inode = late.writer, late.lock, late.inode
 
         assert (status, body.get("reason")) == (409, "restore_not_applied") and "restart_required" not in body, body
         assert "index.lock" in body["error"] and "File exists" in body["error"]
@@ -1155,7 +1181,6 @@ def test_a_refused_restore_readmits_writers_only_through_the_aborted_update_guar
     from supervisor import restart_retention, update_merge, workers
 
     scene = restore_door
-    lock = _orphan_lock(scene.repo)
     handoffs = []
     monkeypatch.setattr(restart_retention, "recover_aborted_update",
                         lambda *args: handoffs.append(args) or guard != "saved_work_handoff")
@@ -1170,7 +1195,9 @@ def test_a_refused_restore_readmits_writers_only_through_the_aborted_update_guar
 
         monkeypatch.setattr(git_ops, "git_capture", transaction_appears)
 
-    status, body = scene.restore(scene.old)
+    with _lock_after_check(monkeypatch, scene.repo) as late:
+        status, body = scene.restore(scene.old)
+        lock = late.lock
 
     assert (status, sorted(body), body["reason"]) == (409, ["error", "reason"], "restore_not_applied"), body
     assert body["error"].startswith("the restore was not applied: Git refused its reset: ")
@@ -1251,22 +1278,22 @@ def test_restore_does_not_label_a_repaired_retry_as_an_unchanged_refusal(restore
     from supervisor import workers
 
     scene = restore_door
-    real_run = subprocess.run
+    real_runner = git_ops._run_git_process_bounded  # where Restore's reset and an index rebuild start
     hard_attempts = []
     repairs = []
 
-    def concurrent_index_changes(cmd, *args, **kwargs):
+    def concurrent_index_changes(cmd, **kwargs):
         if cmd[:3] == ["git", "reset", "--hard"]:
             hard_attempts.append(list(cmd))
             if len(hard_attempts) == 1:
                 (scene.repo / ".git" / "index").write_bytes(b"broken")
-        result = real_run(cmd, *args, **kwargs)
-        if cmd[:3] == ["git", "reset", "--mixed"] and result.returncode == 0:
+        result = real_runner(cmd, **kwargs)
+        if cmd[:3] == ["git", "reset", "--mixed"] and result[0] == 0:
             repairs.append(list(cmd))
             _orphan_lock(scene.repo)
         return result
 
-    monkeypatch.setattr(git_ops.subprocess, "run", concurrent_index_changes)
+    monkeypatch.setattr(git_ops, "_run_git_process_bounded", concurrent_index_changes)
     status, body = scene.restore(scene.old)
 
     assert status == 500 and body["restart_required"], body

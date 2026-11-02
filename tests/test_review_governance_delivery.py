@@ -133,11 +133,29 @@ def test_deep_review_carries_it_without_a_checklist_of_its_own(tmp_path):
 
 
 def test_skill_review_packet_does_not_carry_it(tmp_path):
-    from ouroboros import skill_review
+    from ouroboros.tools import review_skill
+    from ouroboros.tools.governance_context import governance_context
 
-    prompt, _stable = skill_review._build_review_prompt(
-        "demo", tmp_path / "demo", "{\"a\": 1}", "hash-one", "plugin.py\nprint('one')")
-    assert SHARED not in prompt
+    rubric = review_skill.skill_rubric()
+    governance = governance_context(REPO, surface="skill", delivery="packet", checklist_section_text=rubric,
+                                    layer="skill", manifest_facts={"type": "script", "declares": []})
+    stable, dynamic = review_skill._brief(rubric, governance, _skill_subject(tmp_path / "demo"), drive_root=tmp_path,
+                                          change=None, goal="", scope="", review_rebuttal="")
+    assert SHARED not in stable + dynamic and stable.count(rubric) == 1
+
+
+def _skill_subject(folder, *, name="demo", content_hash="hash-one", manifest_json='{"a": 1}',
+                   payload="plugin.py\nprint('one')"):
+    """A frozen skill subject without a payload on disk: enough for the brief's two halves."""
+    from ouroboros.tools.review_skill import SKILL_LAYER, FrozenSkillSubject
+    from ouroboros.tools.review_subject import ReviewSubjectSpec
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    spec = ReviewSubjectSpec(root_kind="skill_payload", root=str(folder), kind="skill", governance_root=str(repo),
+                             surface="skill", body_fact="false", body_how="skill_payload", layer=SKILL_LAYER)
+    return FrozenSkillSubject(spec=spec, diff_text=manifest_json, diff_sha="d" * 64, tree_sha=content_hash, parent_sha="",
+                              checkout=str(folder), skill=name, bucket="external", files=(("plugin.py", "s" * 64, 12),),
+                              manifest_json=manifest_json, payload_text=payload)
 
 
 def _plan_prompts(**kwargs):

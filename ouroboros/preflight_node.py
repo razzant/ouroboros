@@ -125,6 +125,7 @@ def run_node_tests(
     # Lazy sibling import: preflight_runner imports this module at its top, so
     # the shared helpers must be reached at call time, not import time.
     from ouroboros import preflight_runner as pr
+    from ouroboros.preflight_inventory import note_lane_process
     from ouroboros.process_containment import ProcessContainer
 
     files = candidate_node_tests(worktree)
@@ -194,6 +195,11 @@ def run_node_tests(
                 reap_error = reap_error or "direct node process did not exit after reap"
         output = capture.finish(returncode=returncode, containment_error=reap_error, argv=argv)
         result["evidence_errors"] = list(capture.errors)
+    except BaseException as exc:
+        if proc is not None and proc.poll() is None:
+            pr._terminate_preflight_tree(proc, temp_root)
+        note_lane_process(exc, container, proc)
+        raise
     finally:
         if proc is not None and proc.poll() is None:
             pr._terminate_preflight_tree(proc, temp_root)

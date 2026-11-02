@@ -53,7 +53,7 @@ def light_route(monkeypatch):
     monkeypatch.setattr(context_fit, "resolve_context_fit_route", lambda task, *, allow_fetch: (
         {"model": task["model"], "provider": "openrouter"},
         CapabilityEvidence(route.window, "confirmed", "test", "route-test", model=task["model"], provider="openrouter")))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
     real = consolidator._call_consolidation_llm
 
     def recording(llm, prompt, label, **kwargs):

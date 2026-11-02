@@ -68,6 +68,7 @@ def test_sleep_refusal_completes_without_hiding_real_blocker(tmp_path, monkeypat
 
 
 def test_foreground_nonzero_completion_is_not_unresolved_effect(tmp_path, monkeypatch):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.task_results import load_task_result
     from supervisor.continuation_admission import conflicting_writers
@@ -85,6 +86,7 @@ def test_foreground_nonzero_completion_is_not_unresolved_effect(tmp_path, monkey
 
 @pytest.mark.parametrize('service', [False, True])
 def test_pause_during_process_preparation_prevents_process_start(tmp_path, monkeypatch, service):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.tools import shell_outputs
     from ouroboros.owner_pause import install_fence

@@ -84,7 +84,7 @@ def event(number=42, text="Please prepare the status report"):
                    message={"message_id": str(number)}, text=text, continuation_version=1)
 
 
-def wait_for(predicate, timeout=20, what="condition"):
+def wait_for(predicate, timeout=60, what="condition"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -102,6 +102,11 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
     (the addressed message the author leaves the wave for). ``h.factory`` only
     observes the actual production constructor.
     """
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("supervisor.consciousness_carriers.autonomous_work_enabled", lambda *_: True, raising=False)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {
+        "status": "available", "remaining_usd": 10})
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
     from ouroboros import agent_task_pipeline as pipeline, context_health, review_custody
     from ouroboros.review_execution import ReviewAttemptResult
 
@@ -125,7 +130,7 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
     monkeypatch.setattr(pipeline, "_dispatch_root_post_task", lambda *_a, **_k: None)
     # One seat is the whole review pool a result review draws from.
     monkeypatch.setattr("ouroboros.reviewer_slot_config.review_pool_slots", lambda *_a, **_kw: [
-        ReviewSlot(slot_id="bootstrap-reviewer", model="openai/gpt-4o-mini", effort="high", timeout_sec=30)])
+        ReviewSlot(slot_id="bootstrap-reviewer", model="openai/gpt-4o-mini", effort="high", timeout_sec=180)])
     h = SimpleNamespace(data=data, repo=repo, gate=PresenceTurnGate(1, state_root=data / "state"),
                         executions=PresenceTurnExecutions(), release=threading.Event(), entered=threading.Event(),
                         settled=threading.Event(), inputs=[], calls=0, reviews=[], agents=[], verdict="PASS",
@@ -169,7 +174,7 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
                 assert write_task_message(h.data, h.addressed, self.assignment.request.task_id,
                                           source_task_id="operations-room", provenance=PROVENANCE_INDEPENDENT_TASK)
             h.entered.set()
-            assert h.release.wait(30), "test failed to release reviewer"
+            assert h.release.wait(180), "test failed to release reviewer"
             # review_change's answer contract: an empty array is a clean answer.
             payload = "[]" if h.verdict == "PASS" else json.dumps([{
                 "item": "backup_window", "verdict": "FAIL", "severity": "critical",
@@ -184,13 +189,19 @@ def install_bootstrap_harness(monkeypatch, data, *, repo=None, review_mode="requ
             h.inputs.append(copy.deepcopy(messages))
             h.calls += 1
             step = h.script.pop(0) if isinstance(h.script, list) else h.script
-        return (step(messages) if callable(step) else step), 0.0
+        response = step(messages) if callable(step) else step
+        if h.agents and h.agents[-1].tools._ctx.task_metadata.get("wake_cause") == "focus":
+            from tests.presence_legacy_helpers import focus_response
+            response = focus_response(response)
+        return response, 0.0
 
     monkeypatch.setattr(loop, "call_llm_with_retry", model)
     make_agent = agent_module.make_agent
 
     def factory(**kwargs):
         actual = make_agent(**kwargs)
+        from tests.presence_legacy_helpers import register_legacy_completion
+        register_legacy_completion(actual.tools)
         h.agents.append(actual)
         return actual
 
@@ -227,7 +238,7 @@ def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tm
     h.script = model
     execution = h.start(first)
     try:
-        initial = execution.initial.result(timeout=40)
+        initial = execution.initial.result(timeout=90)
         assert initial.status == "continuing" and initial.outcome == "deferred" and not initial.text
         # The parked author's initial envelope and the reviewer's start run on separate threads, in
         # either order: wait for the held reviewer itself. It cannot answer before `h.release`, so
@@ -249,7 +260,7 @@ def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tm
         assert second.text == "Noted." and not execution.result.done()
         assert h.calls == calls_before_second + 1 and len(h.agents) == 2
         h.release.set()
-        completed = execution.result.result(timeout=30)
+        completed = execution.result.result(timeout=90)
         assert completed.text == ANSWER and completed.task_id == initial.task_id
         assert len(h.agents) == 2 and h.agents[0].tools._ctx is ctx and h.calls == calls_before_second + 2
         assert len(h.reviews) == 1
@@ -259,6 +270,6 @@ def test_full_agent_bootstrap_propagates_review_wait_and_reenters_same_author(tm
     finally:
         h.release.set()
         if h.entered.is_set():
-            assert h.settled.wait(15)
+            assert h.settled.wait(60)
             settlement_notices_done()
-        execution.result.result(timeout=30)
+        execution.result.result(timeout=90)

@@ -191,11 +191,6 @@ test('reading to the oldest page hides the button; ↓ returns to the present wi
 
 test('a Project final whose page was released mounts again with its Project reference; a mounted one absorbs a retry', async (t) => {
     offScreen(t);
-    // The Project reference sits after the message (`Element.after`), which this stub lacks.
-    ElementStub.prototype.after = function (node) {
-        this.parentNode?.insertBefore(node, this.parentNode.children[this.parentNode.children.indexOf(this) + 1] || null);
-    };
-    t.after(() => { delete ElementStub.prototype.after; });
     const final = row('chat:800', 'Launch › Ship · Completed', { role: 'system', system_type: 'project_completion_summary',
         completion_answer: 'Done: PR #7 merged.', project_id: 'launch', project_name: 'Launch', task_id: 'final-task',
         delivery_id: 'completion:final-task', ts: '2026-09-12T11:00:00.000Z' });
@@ -652,3 +647,64 @@ for (const phase of ['unknown', 'done', 'error', 'warn', 'cancelled']) {
         assert.equal(rows.at(-1).historical_terminal?.status || status, status, 'raw lifecycle is unchanged');
     });
 }
+
+// One saved row, one bubble: a relay's live frame names the row as history does (row_client_message_id),
+// while a host reply's client_message_id names the owner's submission and keys nothing.
+const savedRelay = (seq, text = 'Same words') => row(`chat:${seq}`, text, {
+    task_id: 'receiver', system_type: 'relay_entry', client_message_id: `relay:${seq}:receiver`,
+    row_address: `2:${TS}:${seq}`, relay: { sender: { chat_id: 1, name: 'Main' }, summary: text },
+});
+const liveRelay = (saved) => ({ ...saved, content: saved.text, history_id: undefined, history_position: undefined,
+    client_message_id: undefined, row_client_message_id: saved.client_message_id });
+
+for (const order of ['live, then history', 'history, then live']) {
+    test(`a relay drawn live and from history is one bubble (${order})`, async (t) => {
+        const f = fixture(t);
+        const saved = savedRelay(144070249);
+        if (order.startsWith('live')) {
+            await f.refresh();
+            f.emit(liveRelay(saved));
+            await f.refresh(page([saved]));
+        } else {
+            await f.refresh(page([saved]));
+            f.emit(liveRelay(saved));
+        }
+        assert.equal(f.bubbles().length, 1);
+        assert.equal(f.bubbles()[0].dataset.historyId, saved.history_id);
+        assert.equal(f.bubbles()[0].dataset.clientMessageId, saved.client_message_id);
+    });
+}
+
+test('two relays with the same words to one work stay two notes, live and after history', async (t) => {
+    const f = fixture(t);
+    await f.refresh();
+    const rows = [savedRelay(101), savedRelay(102)];
+    rows.forEach(saved => f.emit(liveRelay(saved)));
+    assert.equal(f.bubbles().length, 2, 'their own names keep them apart');
+    await f.refresh(page(rows));
+    assert.equal(f.bubbles().length, 2);
+});
+
+test('the owner echo and its history row stay one bubble keyed by his id', async (t) => {
+    const f = fixture(t);
+    await f.refresh();
+    const saved = row('chat:201', 'owner text', { role: 'user', client_message_id: 'owner:201', source: 'web' });
+    f.emit({ ...saved, content: saved.text, history_id: undefined });
+    await f.refresh(page([saved]));
+    assert.equal(f.bubbles().length, 1);
+    assert.equal(f.bubbles()[0].dataset.clientMessageId, 'owner:201');
+});
+
+test("a host reply that names the owner's submission is drawn beside his bubble, not into it", async (t) => {
+    const f = fixture(t);
+    await f.refresh();
+    const user = row('chat:301', 'owner request', { role: 'user', client_message_id: 'owner:301', source: 'web' });
+    f.emit({ ...user, content: user.text, history_id: undefined });
+    const reply = row('chat:302', 'Operation accepted', { role: 'system', system_type: 'command_reply',
+        row_address: `2:${TS}:302` });
+    f.emit({ ...reply, content: reply.text, history_id: undefined, client_message_id: 'owner:301' });
+    assert.equal(f.bubbles().length, 2);
+    assert.equal(f.bubbles()[1].dataset.clientMessageId, undefined);
+    await f.refresh(page([user, reply]));
+    assert.equal(f.bubbles().length, 2, 'history adopts the reply instead of adding a third row');
+});

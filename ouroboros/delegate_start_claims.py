@@ -1,41 +1,18 @@
-"""Atomic pre-transport claims for delegated actor and payload starts."""
+"""Atomic custody and zero-run decisions before delegated transport."""
 
 from __future__ import annotations
 
 import pathlib
-import threading
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Dict, Tuple
 
 from ouroboros import delegate_custody as custody
 
 
-_PAYLOAD_CLAIM_LOCK = threading.Lock()
-PAYLOAD_CUSTODY_UNREADABLE = "custody_log_unreadable"
-
-
-def payload_busy_detail(holder: str) -> str:
-    """Explain the same payload refusal at the early check and either claim check."""
-    if holder == PAYLOAD_CUSTODY_UNREADABLE:
-        return (
-            "Custody for the selected payload could not be read. No holder or free "
-            "payload is established; nothing was started. Retry when custody is readable."
-        )
-    return (
-        "Another delegated run holds this exact payload open: its custody is "
-        "not yet settled AND disposed, and its owner task is still live (or its "
-        "terminality cannot be proven from task results). Wait for that task to "
-        "finish, or pick another skill: a non-owner can neither delegate_wait "
-        "that run nor integrate its capture."
-    )
-
-
 def claimed_start_request(
-    drive: pathlib.Path, *, claim_target: str,
-    payload_busy: Callable[[pathlib.Path, pathlib.Path], str],
-    actor_ctx: Any = None, enforce_actor_idle: bool = False,
+    drive: pathlib.Path, *, actor_ctx: Any = None, initial_bootstrap: bool = False,
     **request_row: Any,
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Atomically claim a fresh actor start and optional payload target.
+    """Record an independent invocation without limiting other runs or captures.
 
     A start that continues IN a predecessor's snapshot (``capture_id``) claims
     under that snapshot's one disposition lock, so no apply/reject of the
@@ -50,8 +27,8 @@ def claimed_start_request(
             with snapshot_handover(drive, request_row) as refusal:
                 if refusal:
                     return False, refusal
-                return _claimed(drive, claim_target, payload_busy, actor_ctx, enforce_actor_idle, request_row)
-        return _claimed(drive, claim_target, payload_busy, actor_ctx, enforce_actor_idle, request_row)
+                return _claimed(drive, actor_ctx, initial_bootstrap, request_row)
+        return _claimed(drive, actor_ctx, initial_bootstrap, request_row)
     except BillingAuthorityUnavailable as exc:
         # Refused before any START row or POST; not a budget limit.
         return False, {"reason": "billing_authority_unavailable", "billing_authority": exc.kind, "detail": (
@@ -61,41 +38,8 @@ def claimed_start_request(
                "The authority could not be read; a later start rereads it once the cause is fixed."))}
 
 
-def _claimed(drive: pathlib.Path, claim_target: str, payload_busy: Callable[[pathlib.Path, pathlib.Path], str],
-             actor_ctx: Any, enforce_actor_idle: bool, request_row: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    from ouroboros.platform_layer import (
-        acquire_exclusive_file_lock,
-        release_exclusive_file_lock,
-    )
-
-    def _write_request() -> Tuple[bool, Dict[str, Any]]:
-        if not claim_target:
-            return custody.record_start_requested(drive, **request_row), {}
-        lock_path = pathlib.Path(drive) / "state" / ".payload_delegation_claim.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with _PAYLOAD_CLAIM_LOCK:
-            fd = acquire_exclusive_file_lock(
-                lock_path, timeout_sec=20.0, stale_sec=120.0,
-            )
-            if fd is None:
-                return False, {
-                    "reason": "payload_delegation_busy",
-                    "holder": "payload claim lock unavailable",
-                    "detail": "The payload start claim is currently held by another caller.",
-                }
-            try:
-                holder = payload_busy(drive, pathlib.Path(claim_target))
-                if holder:
-                    return False, {
-                        "reason": "payload_delegation_busy", "holder": holder,
-                        "detail": payload_busy_detail(holder),
-                    }
-                return custody.record_start_requested(drive, **request_row), {}
-            finally:
-                release_exclusive_file_lock(lock_path, fd)
-
-    if not enforce_actor_idle:
-        return _write_request()
+def _claimed(drive: pathlib.Path, actor_ctx: Any, initial_bootstrap: bool,
+             request_row: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     task_id = str(request_row.get("task_id") or "").strip()
     try:
         with custody.actor_decision_lock(drive, task_id):
@@ -104,38 +48,6 @@ def _claimed(drive: pathlib.Path, claim_target: str, payload_busy: Callable[[pat
                     "reason": "replacement_custody_unknown",
                     "custody_log_unreadable": True,
                     "detail": "The host cannot read the actor's custody authority.",
-                }
-            from ouroboros.delegate_recovery import unsettled_start_ids
-
-            blockers = unsettled_start_ids(drive, task_id, continuing=str(
-                request_row.get("continuation_of") or ""))
-            if any(blockers.values()):
-                if claim_target:
-                    holder = payload_busy(drive, pathlib.Path(claim_target))
-                    if holder:
-                        return False, {
-                            "reason": "payload_delegation_busy",
-                            "holder": holder,
-                            "detail": payload_busy_detail(holder),
-                        }
-                live_ids = [
-                    str(v) for key in (
-                        "open_run_ids", "pending_invocation_ids",
-                        "undisposed_patch_run_ids",
-                    ) for v in (blockers.get(key) or [])
-                ]
-                shown = ", ".join(live_ids[:4]) + (
-                    f" (+{len(live_ids) - 4} more)" if len(live_ids) > 4 else "")
-                return False, {
-                    "reason": "replacement_requires_settlement", **blockers,
-                    "detail": (
-                        "The actor already has an unsettled start/run or an "
-                        "undisposed patch"
-                        + (f" ({shown})" if live_ids else "")
-                        + ". Wait for or cancel an open run; replay a pending "
-                        "invocation with retry_of=<invocation id>; dispose a "
-                        "captured patch explicitly (#364)."
-                    ),
                 }
             bootstrap = (
                 getattr(actor_ctx, "_configured_actor_bootstrap", None)
@@ -167,8 +79,14 @@ def _claimed(drive: pathlib.Path, claim_target: str, payload_busy: Callable[[pat
                         "zero_run_evidence_status": "unknown",
                         "zero_run_evidence_gaps": sorted(gaps),
                     }
-            return _write_request()
-    except (TimeoutError, ValueError) as exc:
+            if initial_bootstrap:
+                from ouroboros.delegate_bootstrap_identity import claim_initial_invocation
+
+                refusal = claim_initial_invocation(drive, task_id, request_row)
+                if refusal:
+                    return False, refusal
+            return custody.record_start_requested(drive, **request_row), {}
+    except (OSError, TimeoutError, ValueError) as exc:
         return False, {
             "reason": "replacement_custody_unknown",
             "detail": f"actor decision claim unavailable: {type(exc).__name__}",

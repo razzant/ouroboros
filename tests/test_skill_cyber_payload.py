@@ -4,12 +4,15 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import config
 from ouroboros.skill_loader import SkillPayloadUnreadable, compute_content_hash, load_skill
-from ouroboros.skill_review_packs import _SkillBinaryPayload, _SkillFileUnreadable, _build_skill_file_packs, _read_skill_file
+from ouroboros.skill_review_packs import (
+    _SkillBinaryPayload, _SkillFileUnreadable, _read_skill_file, frozen_payload_files, frozen_payload_source, payload_pack,
+)
 
 
 @pytest.fixture(params=["pro", "cyber_pro"])
@@ -41,13 +44,15 @@ def test_sensitive_named_inert_resource_is_hashed_and_read_in_cyber(tmp_path, ac
         (path.name, hashlib.sha256(path.read_bytes()).digest()) for path in skill.iterdir())
     content_hash = compute_content_hash(skill)
     assert content_hash == expected
-    pack = "\n".join(_build_skill_file_packs(skill, expected_content_hash=content_hash))
+    pack = payload_pack(frozen_payload_files(skill))
     assert f"### {name}\n" in pack and payload.decode() in pack
     assert not load_skill(skill, tmp_path / "data").load_error
     resource.write_bytes(b"INERT_TEST_RESOURCE=second\n")
     assert compute_content_hash(skill) != content_hash
-    with pytest.raises(_SkillFileUnreadable, match="changed after hashing"):
-        _build_skill_file_packs(skill, expected_content_hash=content_hash)
+    # The frozen copy a seat reads is bound to the reviewed hash: bytes that moved past it are unavailable.
+    moved = frozen_payload_source(tmp_path / "data", SimpleNamespace(name="demo", skill_dir=skill,
+                                                                  manifest=SimpleNamespace(entry="", scripts=[])), content_hash)
+    assert "unavailable" in moved and not moved.get("view")
 
 
 @pytest.mark.parametrize("payload", [
@@ -69,7 +74,7 @@ def test_native_magic_resource_has_exact_descriptor_not_decoded_text(tmp_path, a
     assert descriptor["path"] == "notes.txt" and descriptor["size"] == len(payload)
     assert descriptor["sha256"] == hashlib.sha256(payload).hexdigest()
     assert descriptor["format_from_magic"]
-    pack = "\n".join(_build_skill_file_packs(tmp_path, expected_content_hash=content_hash))
+    pack = payload_pack(frozen_payload_files(tmp_path))
     assert "descriptor only, content not inlined" in pack
     assert descriptor["sha256"] in pack and "\0" not in pack
     resource.write_bytes(payload + b"\0")
@@ -84,8 +89,8 @@ def test_binary_content_and_sensitive_name_share_one_cyber_hash_surface(tmp_path
         with pytest.raises(SkillPayloadUnreadable):
             compute_content_hash(tmp_path)
         return
-    content_hash = compute_content_hash(tmp_path)
-    pack = "\n".join(_build_skill_file_packs(tmp_path, expected_content_hash=content_hash))
+    compute_content_hash(tmp_path)  # native bytes were already hashable
+    pack = payload_pack(frozen_payload_files(tmp_path))
     assert hashlib.sha256(payload).hexdigest() in pack
     assert "credentials.json (binary file" in pack
 

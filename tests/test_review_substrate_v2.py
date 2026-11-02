@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-from ouroboros.triad_review import parse_model_review_results
+from ouroboros.triad_review import parse_seat_answers
 
 from tests._review_substrate_shared import FakeLLM
 
@@ -180,6 +180,10 @@ def test_single_configured_reviewer_marks_no_diversity(tmp_path):
 def test_p3_surfaces_ignore_task_acceptance_tier_policy(tmp_path):
     """Defense in depth: even if a caller accidentally carries the task-only
     classify_outcome_tier flag, commit/scope FAILs remain authoritative vetoes."""
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
+
+    coupling_fail = json.dumps([{"item": item, "verdict": "FAIL", "severity": "critical", "reason": "broken caller"}
+                                for item in SCOPE_REQUIRED_ITEMS])
     for surface in ("multi_model_review", "scope_review"):
         result = run_review_request(
             ReviewRequest(
@@ -191,7 +195,8 @@ def test_p3_surfaces_ignore_task_acceptance_tier_policy(tmp_path):
             ),
             slots=[ReviewSlot(slot_id="s0", model="m-0")],
             drive_root=tmp_path,
-            llm=FencedArrayLLM(),
+            llm=FencedArrayLLM() if surface == "multi_model_review" else
+                SimpleNamespace(chat=lambda **_kw: ({"content": coupling_fail}, {})),
         )
         assert result.aggregate_signal == "FAIL"
         assert result.actors[0]["signal"] == "FAIL"
@@ -560,7 +565,7 @@ def test_p3_commit_actor_retries_same_slot_model_once_then_blocks(tmp_path):
     recovered_llm.chat.side_effect = [
         TimeoutError("transient timeout"),
         (
-            {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"ok\"}"},
+            {"content": "[]\nNO_FINDINGS"},
             {"prompt_tokens": 1, "completion_tokens": 1},
         ),
     ]
@@ -631,7 +636,7 @@ def test_p3_api_actor_retries_an_empty_response_once_on_the_same_slot_model(tmp_
     recovered_llm.chat.side_effect = [
         ({"content": ""}, {"prompt_tokens": 0, "completion_tokens": 0}),
         (
-            {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"ok\"}"},
+            {"content": "[]\nNO_FINDINGS"},
             {"prompt_tokens": 1, "completion_tokens": 1},
         ),
     ]
@@ -663,7 +668,7 @@ def _one_seat(llm, model, *, parts, tmp_path, session_task=""):
     retrieving = "coupling" in parts
     model, payload, err = asyncio.run(_query_model(
         llm, model, [] if retrieving else [{"role": "user", "content": "PACKET"}], asyncio.Semaphore(1),
-        ctx=ctx, slot_id="slot_1", route=ReviewRouteKind.API_CHAT,
+        ctx=ctx, slot_id="slot_1", route=ReviewRouteKind.API_CHAT, parts=parts,
         session_task=session_task, session_root=str(tmp_path), native_retrieval=retrieving,
         session_policy={"output_contract": REVIEW_TWO_PART_OBJECT_CONTRACT} if retrieving else None))
     envelope = _parse_model_response(model, payload, err)
@@ -772,14 +777,14 @@ def test_review_substrate_preserves_explicit_zero_budget_rails(tmp_path):
 
 
 def test_triad_actor_records_preserve_review_refs():
-    parsed = parse_model_review_results({
+    parsed = parse_seat_answers({
         "results": [{
             "model": "m1",
             "text": "[{\"item\":\"x\",\"verdict\":\"PASS\",\"severity\":\"advisory\",\"reason\":\"ok\"}]",
             "prompt_ref": {"manifest_ref": {"path": "prompt.json"}},
             "response_ref": {"manifest_ref": {"path": "response.json"}},
         }]
-    })
+    }, {})
 
     actor = parsed.actor_records[0].to_dict()
     assert actor["prompt_ref"]["manifest_ref"]["path"] == "prompt.json"

@@ -24,7 +24,7 @@ import json
 
 import pytest
 
-from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, _shot
+from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, _painted, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import set_viewport
 
@@ -52,7 +52,7 @@ ROW = """() => {
             right: rect(ctx).right, disabled: ctx.dataset.disabled || '',
         },
         eff: { open: eff.dataset.open, fit: eff.dataset.fit || '', shown: shown(eff), right: rect(eff).right, head: eff.querySelector('.chat-capsule-head').textContent },
-        swarmShown: shown(row.querySelector('.chat-composer-pills')),
+        subShown: shown(row.querySelector('.chat-subagents-mode')),  // the third capsule, closed
         menuShown: shown(row.querySelector('.composer-menu')),  // a room's ☰ (the stack layout shows it)
         namesShown: [...row.querySelectorAll('.chat-capsule-name')].map(shown),
         solo: row.dataset.ownerSolo || '', compact: row.dataset.ownerCompact || '',
@@ -240,6 +240,14 @@ def _wait_for_transitions(page, selector: str) -> None:
         .every(animation => !animation.pending && animation.playState !== 'running')""", arg=selector, timeout=5_000)
 
 
+def _morph_settled(page) -> None:
+    # A capsule's morph ends with its glass: the controls that stepped aside leave the line then.
+    page.wait_for_function("""() => { const row = document.querySelector('#page-chat .chat-toolbar-row');
+        return !('ownerLeaving' in row.dataset) && row.getAnimations({subtree: true})
+            .filter(animation => animation.effect?.getComputedTiming().endTime !== Infinity)
+            .every(animation => !animation.pending && animation.playState !== 'running'); }""", timeout=10_000)
+
+
 def _record(tmp_path, name: str, facts) -> None:
     (_evidence_dir(tmp_path) / f"{name}.json").write_text(json.dumps(facts, indent=1), encoding="utf-8")
 
@@ -261,7 +269,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             _open_chat(page, url, width=1440, theme="light")
             closed = _row(page)
             assert closed["ctx"]["head"] == "ContextMax" and closed["ctx"]["checked"] == ["max"], closed
-            assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True], closed
+            assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True, True], closed
             _shot(page, tmp_path, f"capsules-closed-{engine}-light")
             posts = []
             page.on("request", lambda r: posts.append(json.loads(r.post_data)) if r.url.endswith("/api/owner/context-mode") else None)
@@ -269,7 +277,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             _until(page, "r.ctx.open === 'true'")
             page.wait_for_timeout(450)
             opened = _row(page)
-            assert opened["ctx"]["fit"] == "inline" and opened["eff"]["shown"] and opened["swarmShown"], opened
+            assert opened["ctx"]["fit"] == "inline" and opened["eff"]["shown"] and opened["subShown"], opened
             assert opened["oneLine"] and opened["ctx"]["right"] <= opened["rowRight"] + 1 and not opened["docScroll"], opened
             assert posts == [], "opening saves nothing"
             _shot(page, tmp_path, f"capsules-context-open-{engine}-light")
@@ -298,11 +306,12 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             assert "Context mode refused by the test." in page.locator(".toast").first.inner_text()
             _until(page, "r.ctx.mode === 'nano' && r.ctx.disabled === 'false' && r.ctx.checked.join() === 'nano'")
             page.unroute("**/api/owner/context-mode")
-            # The one global value: a reload reads Nano back from /api/state.
-            page.add_init_script("try { localStorage.setItem('ouroboros.theme', 'dark'); } catch (e) {}")
+            # The one global value: a reload reads Nano back from /api/state, in Dark chosen as Settings does.
+            page.evaluate("() => window.ouroTheme.set('dark')")
             page.reload(wait_until="domcontentloaded")
             page.wait_for_function(f"() => document.querySelector('{EFFORT}')?.dataset.known === 'true'", timeout=30_000)
             _until(page, "r.ctx.mode === 'nano' && r.ctx.head === 'ContextNano'", timeout=30_000)
+            assert _painted(page) == ["dark", "dark"], "the dark shots show the dark theme"
             _shot(page, tmp_path, f"capsules-closed-nano-{engine}-dark")
             page.click(f"{CONTEXT} .chat-capsule-head")
             _until(page, "r.ctx.open === 'true'")
@@ -337,14 +346,15 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
                 press(heads[first])
                 _until(page, f"r.{short[first]}.open === 'true'")
                 page.wait_for_timeout(450)
+                _morph_settled(page)  # a slow WebKit runner is still mid-morph after the 450 ms
                 one = _row(page)
                 if one[short[first]]["fit"] == "solo":
                     # Alone on the line: the room's ☰, the pills and the other capsule step aside; an
                     # outside press gives the line back before the other capsule can be reached.
-                    assert one["solo"] == first and not one[short[second]]["shown"] and not one["swarmShown"], one
+                    assert one["solo"] == first and not one[short[second]]["shown"] and not one["subShown"], one
                     assert not one["menuShown"], one
                     press("#chat-messages")
-                    _until(page, f"r.{short[first]}.open === 'false' && r.solo === '' && r.{short[second]}.shown && r.swarmShown"
+                    _until(page, f"r.{short[first]}.open === 'false' && r.solo === '' && r.{short[second]}.shown && r.subShown"
                                  f" && r.menuShown === {str(closed['menuShown']).lower()}")
                 else:
                     assert width > 1000 and one["solo"] == "" and one[short[second]]["shown"], one
@@ -353,6 +363,7 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
                 press(heads[second])
                 _until(page, f"r.{short[second]}.open === 'true' && r.{short[first]}.open === 'false'")
                 page.wait_for_timeout(450)
+                _morph_settled(page)
                 two = _row(page)
                 assert two[short[second]]["shown"] and two["solo"] in ("", second), two
                 assert two["oneLine"] and two[short[second]]["right"] <= two["rowRight"] + 1 and not two["docScroll"], two
@@ -362,7 +373,7 @@ def test_one_capsule_open_at_a_time_and_a_narrow_switch_keeps_both_reachable(dir
                 page.keyboard.press("Escape")
                 _until(page, "r.ctx.open === 'false' && r.eff.open === 'false'")
                 back = _row(page)
-                assert back["ctx"]["shown"] and back["eff"]["shown"] and back["swarmShown"] and back["solo"] == "", back
+                assert back["ctx"]["shown"] and back["eff"]["shown"] and back["subShown"] and back["solo"] == "", back
                 assert back["menuShown"] is closed["menuShown"] and back["oneLine"], back
             _record(tmp_path, f"capsules-switch-{engine}-{width}", seen)
         finally:
@@ -465,7 +476,7 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
             assert facts["narrow"]["oneLine"] and not facts["narrow"]["docScroll"], facts
             assert facts["narrow"]["eff"]["right"] <= facts["narrow"]["rowRight"] + 1, facts
             set_viewport(page, 1440, 900)
-            _until(page, "r.eff.fit === 'inline' && r.solo === '' && r.ctx.shown && r.swarmShown")
+            _until(page, "r.eff.fit === 'inline' && r.solo === '' && r.ctx.shown && r.subShown")
             page.keyboard.press("Escape")
             # Probe both sides of the actual named row's width. System fonts differ between
             # Linux and macOS; 390/340 are not product breakpoints (DESIGN).
@@ -782,15 +793,15 @@ def test_long_closed_values_on_a_320px_phone_give_way_on_one_line(direct_server_
             seen["capped"] = capped = page.evaluate(CAPPED)
             _shot(page, tmp_path, f"capsules-long-values-closed-{engine}-{direction}-320")
             assert closed["oneLine"] and closed["rowHeight"] < 40 and capped["contained"] and not closed["docScroll"], seen
-            assert closed["compact"] == "values" and closed["namesShown"] == [False, False], seen
-            assert closed["swarmShown"] and closed["ctx"]["shown"] and closed["eff"]["shown"], seen
-            context, effort = capped["capsules"]
+            assert closed["compact"] == "values" and closed["namesShown"] == [False, False, False], seen
+            assert closed["subShown"] and closed["ctx"]["shown"] and closed["eff"]["shown"], seen
+            subagents, context, effort = capped["capsules"]
             assert context["word"] == context_word and context["cut"], seen
-            for capsule in (context, effort):  # the cut value keeps clear of both ends of its shell
+            for capsule in (subagents, context, effort):  # a value, cut or whole, keeps clear of both ends of its shell
                 assert capsule["value"][0] >= capsule["shell"][0] + 1 and capsule["value"][1] <= capsule["shell"][1] - 1, seen
-            # The whole word stays the button's: its accessible name, Effort's tooltip, the open strip.
+            # The whole word stays the button's: its accessible name and the open strip (no hover-only title).
             assert context_word in page.locator(f"{CONTEXT} .chat-capsule-head").aria_snapshot(), seen
-            assert effort_word in effort["label"] and effort_word in effort["title"], seen
+            assert effort_word in effort["label"] and not effort["title"], seen
             page.tap(f"{CONTEXT} .chat-capsule-head")
             _until(page, "r.ctx.open === 'true'")
             page.wait_for_timeout(450)

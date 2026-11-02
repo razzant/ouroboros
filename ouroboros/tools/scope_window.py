@@ -48,11 +48,9 @@ def is_designated_default_reviewer(model: str) -> bool:
     nor a model name — grants or removes it."""
     def _normalized(m: str) -> str:
         text = str(m or "").strip()
-        if text.startswith("openrouter::"):
-            text = text[len("openrouter::"):]
         try:
             from ouroboros.provider_models import normalize_model_identity
-            return normalize_model_identity(text)
+            return normalize_model_identity(text)  # folds ``openrouter[@name]::`` like every route spelling
         except Exception:
             return text
     return bool(model) and _normalized(model) == _normalized(SCOPE_MODEL_DEFAULT)

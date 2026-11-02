@@ -136,9 +136,9 @@ def test_a_checkout_a_review_may_still_read_stays(subject, hold):
         _attempt(subject, "reviewing")
     elif hold == "seat_checking":
         seat = subject.data / "state" / "review_checkouts" / "seats" / "seat-1"
-        (seat / "area").mkdir(parents=True)
+        (seat / "area.noindex").mkdir(parents=True)
         (seat / "checking.json").write_text(json.dumps({"task_id": TASK, "operation_id": "op-1", "source": {
-            "kind": "git_tree", "root": str(entry / "repo")}}), encoding="utf-8")
+            "kind": "git_tree", "root": str(entry / "repo.noindex")}}), encoding="utf-8")
     elif hold == "operation_live":
         write_task_result(subject.data, TASK, "completed", review_operations={"op-live": {
             "state": "dispatched", "surface": "multi_model_review", "retry_key": RETRY_KEY,
@@ -230,12 +230,12 @@ def test_checkout_retirement_targets_only_its_registration_and_keeps_an_offline_
     _git(subject.repo, "worktree", "add", "--detach", str(offline), "HEAD")
     offline.rename(offline.with_name("temporarily-unmounted"))
     before = _registered(subject.repo)
-    assert offline in before and entry / "repo" in before
+    assert offline in before and entry / "repo.noindex" in before
 
     report = _prune(subject)
     after = _registered(subject.repo)
     assert report["checkouts_removed"] == 1 and not entry.exists(), report
-    assert entry / "repo" not in after
+    assert entry / "repo.noindex" not in after
     assert offline in after, "another owner's unavailable checkout must retain its registration"
 
 
@@ -243,9 +243,9 @@ def test_checkout_retirement_keeps_a_git_locked_checkout_until_its_registration_
     from ouroboros import server_maintenance as sm
 
     entry = _retain(subject)
-    _git(subject.repo, "worktree", "lock", "--reason", "reader retains this copy", str(entry / "repo"))
+    _git(subject.repo, "worktree", "lock", "--reason", "reader retains this copy", str(entry / "repo.noindex"))
     with pytest.raises(subprocess.CalledProcessError) as refusal:
-        _git(subject.repo, "worktree", "remove", "--force", str(entry / "repo"))
+        _git(subject.repo, "worktree", "remove", "--force", str(entry / "repo.noindex"))
     message = refusal.value.stderr.strip()
     assert "reader retains this copy" in message
     monkeypatch.setattr(sm, "DATA_DIR", subject.data)
@@ -256,8 +256,8 @@ def test_checkout_retirement_keeps_a_git_locked_checkout_until_its_registration_
     report = [event for event in events if event["type"] == "review_checkout_prune"][-1]["report"]
     assert report["errors"] == [f"{entry.name}: Git worktree removal failed: {message}"]
     assert report["checkouts_removed"] == 0
-    assert (entry / "repo" / "a.txt").read_text() == "two\n"
-    _git(subject.repo, "worktree", "unlock", str(entry / "repo"))
+    assert (entry / "repo.noindex" / "a.txt").read_text() == "two\n"
+    _git(subject.repo, "worktree", "unlock", str(entry / "repo.noindex"))
     report = _prune(subject)
     assert not report["errors"] and report["checkouts_removed"] == 1 and not entry.exists()
 
@@ -284,17 +284,17 @@ def test_checkout_of_a_deleted_subject_retires_only_after_review_custody_ends(su
 @pytest.mark.parametrize("damage", ["common_dir", "git_pointer"])
 def test_existing_broken_git_metadata_keeps_the_checkout_and_reports_the_git_error(subject, damage):
     entry = _retain(subject)
-    gitfile = entry / "repo" / ".git"
+    gitfile = entry / "repo.noindex" / ".git"
     registration = pathlib.Path(gitfile.read_text().removeprefix("gitdir: ").strip())
     metadata = registration / "commondir" if damage == "common_dir" else gitfile
     original = metadata.read_bytes()
     _rewrite(metadata, b"unavailable-metadata\n")
     with pytest.raises(subprocess.CalledProcessError) as refusal:
-        _git(entry / "repo", "rev-parse", "--git-common-dir")
+        _git(entry / "repo.noindex", "rev-parse", "--git-common-dir")
 
     report = _prune(subject)
     assert report["errors"] == [f"{entry.name}: Git common directory unavailable: {refusal.value.stderr.strip()}"]
-    assert report["checkouts_removed"] == 0 and (entry / "repo" / "a.txt").read_text() == "two\n"
+    assert report["checkouts_removed"] == 0 and (entry / "repo.noindex" / "a.txt").read_text() == "two\n"
     assert registration.is_dir(), "a Git refusal alone does not prove the registration is gone"
     _rewrite(metadata, original)
     report = _prune(subject)
@@ -308,13 +308,13 @@ def test_published_rejoin_custody_keeps_the_copy_and_a_retired_rejoin_rebuilds_t
         _attempt(subject, "reviewing")  # published before the retirement judgment
         report = _prune(subject)
         assert report["checkouts_removed"] == 0 and report["checkouts_kept"] == 1, report
-        assert pathlib.Path(rejoined.checkout) == entry / "repo"
-        assert (entry / "repo" / "a.txt").read_text() == "two\n"
+        assert pathlib.Path(rejoined.checkout) == entry / "repo.noindex"
+        assert (entry / "repo.noindex" / "a.txt").read_text() == "two\n"
         tree = rejoined.tree_sha
     _attempt(subject, "succeeded")
     assert _prune(subject)["checkouts_removed"] == 1 and not entry.exists()
     with isolated_checkout(subject.ctx, subject.spec, token=lambda _identity: subject.name) as rebuilt:
-        assert pathlib.Path(rebuilt.checkout) == entry / "repo"
-        assert (entry / "repo" / "a.txt").read_text() == "two\n"
+        assert pathlib.Path(rebuilt.checkout) == entry / "repo.noindex"
+        assert (entry / "repo.noindex" / "a.txt").read_text() == "two\n"
         assert rebuilt.tree_sha == tree == _git(rebuilt.checkout, "write-tree")
     assert not entry.exists()

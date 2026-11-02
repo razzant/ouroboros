@@ -75,13 +75,14 @@ def test_live_card_disclosure_is_explicit_user_owned_state():
 def test_live_card_timeline_only_follows_when_pinned():
     src = _read("web/modules/chat_render_batch.js")
     renderer = src[
-        src.index("export function createLiveCardTimelineRenderer"):
+        src.index("export function timelineScroll"):
         src.index("export function createTimelineAnchors")
     ]
-    assert renderer.count("const pinned =") == 2
-    assert "const prevTop = el.scrollTop, newest = el.lastElementChild;" in renderer
-    # Only a new newest line follows; a disclosure or late full output keeps its place.
-    assert "el.scrollTop = pinned && el.lastElementChild !== newest ? el.scrollHeight : prevTop;" in renderer
+    # The place is read before the write: pinned within 24px of the end, the top, the newest line.
+    assert ("pinned: el.scrollHeight - el.scrollTop - el.clientHeight <= 24, top: el.scrollTop, "
+            "newest: el.lastElementChild") in renderer
+    # Only a new newest line follows; a disclosure or late full output keeps its place (history_timeline_dom.test.js).
+    assert "scroll.pinned && el.lastElementChild !== scroll.newest ? el.scrollHeight : scroll.top" in renderer
     assert "record.root.dataset.expanded === '1' && pinned" in renderer
 
 

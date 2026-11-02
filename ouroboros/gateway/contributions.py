@@ -30,12 +30,18 @@ class UiContribution(TypedDict, total=False):
     label: Required[str]
     title: Required[str]
     icon: Required[str]
+    icon_spec: Dict[str, str]
     order: Required[int]
     action: Dict[str, Any]
     source: Dict[str, Any]
     runtime: str
     route_url: str
     destination: str
+    scope: str
+    wakes: List[str]
+    settings: str
+    read_only: str
+    tools: List[Dict[str, Any]]
     languages: List[str]
     formats: List[str]
     install_size: str
@@ -139,6 +145,8 @@ async def api_extension_host_asset(request: Request) -> Response:
     path = str(params.get("path") or "")
     headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
     media_type = HOST_ASSET_TYPES.get(PurePosixPath(path).suffix)
+    if PurePosixPath(path).suffix.lower() == ".svg":
+        headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
     if (not path.startswith("ui/") or not media_type or "\\" in path or "\0" in path
             or any(part in {"", ".", ".."} or part.startswith(".") for part in path.split("/"))):
         return Response(status_code=404, headers=headers)
@@ -160,5 +168,6 @@ class UiPreferencesResponse(TypedDict):
     project_panel_width: int  # px; 0 = CSS default
     project_seen_revision: dict[str, int]  # monotonic paint ACK per active Project
     main_seen_revision: Optional[int]  # Main's monotonic paint ACK; null until a client first sets it
+    read_ahead_revisions: dict[str, list[list[int]]]  # per chat id: revisions read in full in another room (host-owned)
     welcome: dict[str, str]  # install-wide empty-Main UI copy: mode default|hidden|custom and plain text
 

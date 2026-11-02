@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import pathlib
 import tempfile
 import queue as stdqueue
@@ -154,7 +153,7 @@ def _patch_reaper(tmp_path, monkeypatch):
     monkeypatch.setattr(queue, "QUEUE_MAX_RETRIES", 1)
     monkeypatch.setattr(queue, "reconstruct_task_cost", lambda *_a, **_k: _available_cost_fields())
 
-    def _enqueue_task(task, front=False, timeout_retry=False):
+    def _enqueue_task(task, front=False):
         admitted = dict(task)
         pending.append(admitted)
         enqueued.append((admitted, front))
@@ -273,222 +272,6 @@ def test_self_finalized_reaper_event_preserves_managed_update_metadata(
     assert terminal[-1]["metadata"] == {"managed_update": managed}
 
 
-def test_top_level_retry_preserves_logical_root_and_typed_attempt_lineage(
-    tmp_path, monkeypatch,
-):
-    from ouroboros.artifacts import stage_task_attachments
-    from ouroboros.gateway.tasks import _render_attachment_lines
-    from ouroboros.task_results import resolve_task_lineage
-    from ouroboros.task_results import STATUS_SCHEDULED, load_task_result
-    from ouroboros.owner_mailbox import (
-        KIND_HURRY,
-        drain_owner_entries,
-        write_owner_message,
-    )
-    from supervisor.task_reaper import reap_timed_out_task
-
-    _events, enqueued = _patch_reaper(tmp_path, monkeypatch)
-    initial = tmp_path / "initial.txt"
-    initial.write_text("initial-readable", encoding="utf-8")
-    later = tmp_path / "later.txt"
-    later.write_text("later-readable", encoding="utf-8")
-    initial_manifest = stage_task_attachments(
-        tmp_path, "old-root", [{"path": str(initial), "label": "initial"}],
-    )
-    later_manifest = stage_task_attachments(
-        tmp_path, "old-root", [{"path": str(later), "label": "later"}],
-    )
-    initial_report = _render_attachment_lines(initial_manifest)
-    later_report = _render_attachment_lines(later_manifest)
-    write_owner_message(
-        tmp_path,
-        f"exact owner correction\n\n[ATTACHMENTS]\n{later_report}\n[END_ATTACHMENTS]",
-        "old-root",
-        msg_id="owner-1",
-        attachment_manifest=later_manifest,
-    )
-    write_owner_message(
-        tmp_path, "owner_hurry", "old-root", msg_id="hurry-1", kind=KIND_HURRY,
-    )
-    reap_timed_out_task({
-        "worker_id": 4,
-        "proc": None,
-        "task_id": "old-root",
-        "task": {
-            "id": "old-root",
-            "type": "task",
-            "chat_id": 0,
-            "root_task_id": "old-root",
-            "parent_task_id": "",
-            "delegation_role": "root",
-            "text": f"initial task\n\n[ATTACHMENTS]\n{initial_report}\n[END_ATTACHMENTS]",
-            "attachments": [dict(row) for row in initial_manifest],
-            "attachment_images": [],
-            "task_contract": {
-                "attachment_manifest": [dict(row) for row in initial_manifest],
-            },
-            "metadata": {
-                "task_id": "old-root",
-                "root_task_id": "old-root",
-                "parent_task_id": "stale-parent",
-                "delegation_role": "root",
-            },
-        },
-        "task_type": "task",
-        "terminal_reason": "idle_timeout",
-        "attempt": 1,
-        "owner_chat_id": 0,
-        "will_retry": True,
-        "retry_task_id": "new-root",
-    })
-
-    assert len(enqueued) == 1
-    queued, front = enqueued[0]
-    assert front is True
-    assert queued["id"] == "new-root"
-    assert queued["root_task_id"] == "old-root"
-    assert queued["parent_task_id"] == ""
-    assert queued["original_task_id"] == "old-root"
-    assert queued["timeout_retry_from"] == "old-root"
-    retry_entries = drain_owner_entries(
-        tmp_path, "new-root", attempt_key=str(queued["_attempt"]),
-    )
-    assert len(retry_entries) == 1
-    assert retry_entries[0]["text"].startswith("exact owner correction")
-    assert retry_entries[0]["msg_id"] == "owner-1"
-    assert retry_entries[0]["attachment_manifest"][0]["label"] == "later"
-    old_attachment_root = str(
-        tmp_path / "task_results" / "artifacts" / "old-root" / "attachments"
-    )
-    assert old_attachment_root not in queued["text"]
-    assert old_attachment_root not in retry_entries[0]["text"]
-    assert old_attachment_root not in json.dumps(retry_entries[0]["attachment_manifest"])
-    assert old_attachment_root not in json.dumps(queued["task_contract"])
-    from ouroboros.tools.core import _read_file
-    from ouroboros.tools.registry import ToolContext
-
-    tool_ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="new-root")
-    assert "initial-readable" in _read_file(
-        tool_ctx, queued["attachments"][0]["relpath"], root="artifact_store",
-    )
-    assert "later-readable" in _read_file(
-        tool_ctx, later_manifest[0]["relpath"], root="artifact_store",
-    )
-    assert resolve_task_lineage(
-        queued["id"],
-        metadata=queued["metadata"],
-        root_task_id=queued["root_task_id"],
-        parent_task_id=queued["parent_task_id"],
-        delegation_role=queued["delegation_role"],
-        original_task_id=queued["original_task_id"],
-        timeout_retry_from=queued["timeout_retry_from"],
-    )["is_root_task"] is True
-
-    scheduled = load_task_result(tmp_path, "new-root")
-    assert scheduled["status"] == STATUS_SCHEDULED
-    assert scheduled["root_task_id"] == "old-root"
-    assert not scheduled.get("parent_task_id")
-    assert scheduled["original_task_id"] == "old-root"
-    assert scheduled["timeout_retry_from"] == "old-root"
-    assert scheduled["delegation_role"] == "root"
-
-
-def test_top_level_retry_refuses_if_owner_mailbox_handoff_fails(
-    tmp_path, monkeypatch,
-):
-    import ouroboros.owner_mailbox as owner_mailbox
-    from ouroboros.task_results import STATUS_FAILED, load_task_result
-    from supervisor.task_reaper import reap_timed_out_task
-
-    _events, enqueued = _patch_reaper(tmp_path, monkeypatch)
-    monkeypatch.setattr(owner_mailbox, "copy_owner_mailbox_for_retry", lambda *_a, **_k: False)
-
-    reap_timed_out_task({
-        "worker_id": 5,
-        "proc": None,
-        "task_id": "old-mailbox",
-        "task": {"id": "old-mailbox", "type": "task", "chat_id": 0},
-        "task_type": "task",
-        "terminal_reason": "idle_timeout",
-        "attempt": 1,
-        "owner_chat_id": 0,
-        "will_retry": True,
-        "retry_task_id": "new-mailbox",
-    })
-
-    assert enqueued == []
-    for task_id in ("old-mailbox", "new-mailbox"):
-        result = load_task_result(tmp_path, task_id)
-        assert result["status"] == STATUS_FAILED
-        assert result["reason_code"] == "idle_timeout_retry_mailbox_handoff_failed"
-
-
-def test_top_level_retry_refuses_if_attachment_handoff_fails(tmp_path, monkeypatch):
-    import ouroboros.artifacts as artifacts
-    from ouroboros.task_results import STATUS_FAILED, load_task_result
-    from supervisor.task_reaper import reap_timed_out_task
-
-    _events, enqueued = _patch_reaper(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        artifacts, "handoff_task_attachments_for_retry",
-        lambda *_a, **_k: ({}, "copy failed"),
-    )
-    reap_timed_out_task({
-        "worker_id": 6, "proc": None, "task_id": "old-inputs",
-        "task": {"id": "old-inputs", "type": "task", "chat_id": 0},
-        "task_type": "task", "terminal_reason": "idle_timeout", "attempt": 1,
-        "owner_chat_id": 0, "will_retry": True, "retry_task_id": "new-inputs",
-    })
-
-    assert enqueued == []
-    assert load_task_result(tmp_path, "old-inputs")["status"] == STATUS_FAILED
-    assert load_task_result(tmp_path, "new-inputs")["reason_code"] == (
-        "idle_timeout_retry_attachment_handoff_failed"
-    )
-
-
-def test_same_id_subagent_retry_preserves_parent_and_root_lineage(
-    tmp_path, monkeypatch,
-):
-    from supervisor.task_reaper import reap_timed_out_task
-
-    _events, enqueued = _patch_reaper(tmp_path, monkeypatch)
-    child = {
-        "id": "child-retry",
-        "type": "task",
-        "chat_id": 0,
-        "root_task_id": "root",
-        "parent_task_id": "parent",
-        "delegation_role": "subagent",
-        "metadata": {
-            "task_id": "child-retry",
-            "root_task_id": "root",
-            "parent_task_id": "parent",
-            "delegation_role": "subagent",
-        },
-    }
-    reap_timed_out_task({
-        "worker_id": 4,
-        "proc": None,
-        "task_id": "child-retry",
-        "task": child,
-        "task_type": "task",
-        "terminal_reason": "idle_timeout",
-        "attempt": 1,
-        "owner_chat_id": 0,
-        "will_retry": True,
-        "retry_task_id": "child-retry",
-    })
-
-    queued, front = enqueued[0]
-    assert front is True
-    assert queued["id"] == "child-retry"
-    assert queued["root_task_id"] == "root"
-    assert queued["parent_task_id"] == "parent"
-    assert queued["metadata"]["root_task_id"] == "root"
-    assert queued["metadata"]["parent_task_id"] == "parent"
-
-
 def test_retry_terminal_cost_uses_logical_root_authority(tmp_path, monkeypatch):
     from supervisor import events
 
@@ -561,61 +344,6 @@ def test_a_root_narrowed_by_a_childs_open_row_reports_that_rows_count(tmp_path, 
     assert projection["cost_with_children_partial"] is True
     # The cause travels with the flag it explains, and it is the SUBTREE's count.
     assert projection["non_final_rows"] == 3
-
-
-def test_reaper_admission_block_terminalizes_retry(tmp_path, monkeypatch):
-    from ouroboros.artifacts import stage_task_attachments
-    import ouroboros.owner_mailbox as owner_mailbox
-    from ouroboros.owner_mailbox import _mailbox_path, write_owner_message
-    from ouroboros.task_results import STATUS_FAILED, load_task_result
-    from supervisor import queue
-    from supervisor.task_reaper import reap_timed_out_task
-
-    real_cleanup = owner_mailbox.cleanup_task_mailbox
-    events, _ = _patch_reaper(tmp_path, monkeypatch)
-    monkeypatch.setattr(owner_mailbox, "cleanup_task_mailbox", real_cleanup)
-    monkeypatch.setattr(
-        queue,
-        "enqueue_task",
-        lambda *_args, **_kwargs: {"_admission_blocked": "task_acceptance_fence"},
-    )
-    monkeypatch.setattr(
-        "ouroboros.observability.salvaged_output_note",
-        lambda *_args, **_kwargs: "\n\nPreserved admission-block answer.",
-    )
-    source = tmp_path / "fenced.txt"
-    source.write_text("fenced", encoding="utf-8")
-    manifest = stage_task_attachments(
-        tmp_path, "fenced-retry", [{"path": str(source)}],
-    )
-    write_owner_message(tmp_path, "keep this", "fenced-retry", msg_id="owner-fenced")
-
-    reap_timed_out_task({
-        "worker_id": 4,
-        "proc": None,
-        "task_id": "fenced-retry",
-        "task": {
-            "id": "fenced-retry", "type": "task", "chat_id": 0,
-            "attachments": [dict(row) for row in manifest],
-        },
-        "task_type": "task",
-        "terminal_reason": "idle_timeout",
-        "attempt": 1,
-        "owner_chat_id": 0,
-        "will_retry": True,
-        "retry_task_id": "fenced-retry-new",
-    })
-
-    result = load_task_result(tmp_path, "fenced-retry")
-    assert result["status"] == STATUS_FAILED
-    assert result["reason_code"] == "idle_timeout_retry_admission_blocked"
-    assert "Preserved admission-block answer." in result["result"]
-    assert not _mailbox_path(tmp_path, "fenced-retry-new").exists()
-    assert not (
-        tmp_path / "task_results" / "artifacts" / "fenced-retry-new"
-    ).exists()
-    terminal = [event for event in events if event.get("type") == "task_done"]
-    assert terminal and terminal[-1]["status"] == "failed"
 
 
 def test_assign_keeps_unsafe_pending_when_terminal_write_is_not_durable(tmp_path, monkeypatch):
@@ -700,88 +428,10 @@ def test_corrupt_or_integrity_degraded_ledger_never_permits_budget_resume(
         "ok": False,
         "error": expected_error,
         "action": "cancel_or_new_run",
+        "message": {"replay_unsafe": "Resume refused: replay unsafe",
+                    "accounting_unavailable": "Resume refused: accounting unavailable"}[expected_error],
     }
     assert "_budget_pause" in queue.PENDING[0]
-
-
-def test_reaper_rolls_back_retry_and_retains_terminalization_custody(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import task_results
-    from supervisor import queue, workers
-    from supervisor.task_reaper import reap_timed_out_task
-
-    events, enqueued = _patch_reaper(tmp_path, monkeypatch)
-    real_write_task_result = task_results.write_task_result
-    monkeypatch.setattr(
-        task_results,
-        "write_task_result",
-        lambda *_a, **_k: (_ for _ in ()).throw(OSError("durable write failed")),
-    )
-
-    reap_timed_out_task({
-        "worker_id": 7,
-        "proc": None,
-        "task_id": "retry-needs-terminal",
-        "task": {"id": "retry-needs-terminal", "type": "task", "chat_id": 0},
-        "task_type": "task",
-        "terminal_reason": "idle_timeout",
-        "attempt": 1,
-        "owner_chat_id": 0,
-        "will_retry": True,
-        "retry_task_id": "retry-needs-terminal",
-    })
-
-    # Production admission was attempted, then rolled back by identity when the
-    # reciprocal durable result could not be published.  What remains is the
-    # existing non-dispatchable terminalization custody, never a business retry.
-    assert len(enqueued) == 1
-    attempted, front = enqueued[0]
-    assert front is True
-    assert attempted["id"] == "retry-needs-terminal"
-    assert "_terminalization_retry" not in attempted
-    assert len(queue.PENDING) == 1
-    retained = queue.PENDING[0]
-    assert retained["id"] == "retry-needs-terminal"
-    assert retained["_terminalization_retry"]["status"] == "failed"
-    assert retained["_terminalization_retry"]["trigger"] == (
-        "reaper_retry_terminal_persistence"
-    )
-    assert task_results.load_task_result(tmp_path, "retry-needs-terminal") is None
-    assert not any(event.get("type") == "task_done" for event in events)
-
-    # Once durable storage recovers, the retained custody writes the terminal
-    # row and publishes exactly one card-resolution event.  Replaying an empty
-    # custody queue cannot duplicate it.
-    monkeypatch.setattr(task_results, "write_task_result", real_write_task_result)
-    monkeypatch.setattr(
-        workers, "_audit_delegate_terminal_custody", lambda *_a, **_k: None,
-    )
-    assert workers._retry_terminalization_pending() == (
-        ["retry-needs-terminal"], []
-    )
-    assert queue.PENDING == []
-    stored = task_results.load_task_result(tmp_path, "retry-needs-terminal")
-    assert stored["status"] == "failed"
-    terminal = [event for event in events if event.get("type") == "task_done"]
-    assert len(terminal) == 1
-    assert terminal[0]["task_id"] == "retry-needs-terminal"
-    assert terminal[0]["status"] == "failed"
-
-    assert workers._retry_terminalization_pending() == ([], [])
-    assert len([event for event in events if event.get("type") == "task_done"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# The projection/consumer seam.
-#
-# Three times in this range a key was added to a cost projection and a consumer
-# that could not carry it was missed. The suite stayed green each time because
-# every test that reached a consumer handed it a HAND-WRITTEN dict, so no test
-# ever asked whether the object the consumer receives in production is an object
-# the consumer can accept. These drive the real functions with the real
-# projection instead.
-# ---------------------------------------------------------------------------
 
 
 def _real_projection(tmp_path):

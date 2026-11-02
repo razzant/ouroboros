@@ -139,7 +139,7 @@ def test_loop_and_helper_display_keep_the_observed_price_qualifier(monkeypatch, 
     def price(*args, **kwargs):
         calls.append(kwargs.get("processing_mode"))
         return None if kwargs.get("processing_mode") == "unknown" else 0.1
-    monkeypatch.setattr(loop_llm_call, "estimate_cost_optional", price)
+    monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional", price)
     monkeypatch.setattr(search, "estimate_cost_optional", price)
     usage = {"cost": None, "provider": "openrouter", "prompt_tokens": 10, "completion_tokens": 2,
              "processing": {"observed": observed, "observedNative": modes}}

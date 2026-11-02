@@ -43,6 +43,8 @@ def test_kill_saved_warm_sleep_keeps_cause_before_and_after_restore(tmp_path, mo
         return read_checkpoint(*args, **kwargs)
     monkeypatch.setattr(owner_wait, "saved_sleep_checkpoint", after_signal)
     if door == "panic":
+        from tests._work_stop_helpers import live_panic
+        live_panic(tmp_path, monkeypatch)
         (tmp_path / "state" / "panic_stop.flag").write_text("panic")
     # Restart's explicit door must work even when its flag was not written.
     with monkeypatch.context() as failing:
@@ -88,6 +90,9 @@ def test_markerless_saved_sleep_recovery_is_upgraded_by_actual_stop(tmp_path, mo
     flag = tmp_path / "state" / ("owner_restart_no_resume.flag" if door == "restart" else "panic_stop.flag")
     flag.write_text("owner_restart_no_resume" if door == "restart" else "panic")
     if consumer == "kill":
+        if door == "panic":
+            from tests._work_stop_helpers import live_panic
+            live_panic(tmp_path, monkeypatch)
         assert workers.kill_workers(archive_service_logs=False, reconcile_delegate_custody=False,
                                     reconcile_review_custody=False, hold_never_started=door == "restart")
     else:

@@ -65,7 +65,8 @@ def test_missing_roster_is_disclosed_not_an_authoritative_empty_present(tmp_path
     assert live_works_present(tmp_path)["incomplete"] is False
 
 
-def test_routing_metadata_and_new_head_share_present_outside_actual_cache_prefix(tmp_path, monkeypatch):
+def test_the_new_head_reads_the_present_at_capture_outside_the_cache_prefix(tmp_path, monkeypatch):
+    """Routing hands the head no copy of the roster: its context capture builds the present."""
     from ouroboros import context, server_routing_context as routing
     from ouroboros.llm_messages import split_leading_system_prefix
     from tests.test_cache_optimization import _make_env_and_memory
@@ -78,8 +79,7 @@ def test_routing_metadata_and_new_head_share_present_outside_actual_cache_prefix
     import ouroboros.subagent_runtime as subagent_runtime
     monkeypatch.setattr(subagent_runtime, "current_model_visible_subagent_catalog", lambda: {"rows": []})
     md = routing._decision_turn_metadata(ctx, 1, "new-request", {})
-    assert md["live_works_present"]["works"] == live_works_present(env.drive_root)["works"]
-    assert md["live_works_present"]["incomplete"] is False
+    assert "live_works_present" not in md
     task = {"id": "new-head", "type": "task", "text": "Next request", "metadata": md}
     messages, _ = context.build_llm_messages(env=env, memory=memory, task=task)
     wire, moved = split_leading_system_prefix(messages)

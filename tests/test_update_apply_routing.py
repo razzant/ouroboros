@@ -23,6 +23,7 @@ def _reset_writer_admission(monkeypatch):
     from ouroboros import store_switch
 
     monkeypatch.setattr(retention, "_update_returns", {})
+    monkeypatch.setattr(control, "_index_lock_precondition", lambda: None)  # real Git matrix: test_update_preconditions
     # The synthetic SHAs here name no tree: the subject is the ordinary door, whose target
     # carries the store (the authority switch of a store-less target: test_store_activation).
     monkeypatch.setattr(store_switch, "switch_needs", lambda *_a: {"facts": False, "money": False, "handles": False})
@@ -154,14 +155,15 @@ def test_repo_mutations_stay_blocked_for_the_full_durable_update(monkeypatch):
     assert released == [lock]
 
 
-def test_preflight_returns_only_merge_plan(monkeypatch):
+def test_preflight_returns_plan_and_target_bound_effects(monkeypatch):
     import supervisor.update_merge as update_merge
 
     monkeypatch.setattr(update_merge, "plan_managed_update_merge", lambda **_kwargs: _plan())
 
     payload = _body(asyncio.run(control.api_update_preflight(None)))
 
-    assert payload == {"merge_plan": _plan()}
+    assert payload["merge_plan"] == _plan()
+    assert payload["effects"]["target_sha"] == TARGET
 
 
 def test_fetching_update_endpoints_leave_the_event_loop(monkeypatch):

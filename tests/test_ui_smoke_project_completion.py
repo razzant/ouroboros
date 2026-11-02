@@ -441,7 +441,10 @@ def test_ui_folded_completion_excludes_late_table_focus(direct_server_with_data,
             tables.first.evaluate('n => { n.style.minWidth = `${n.clientWidth}px`; n.style.maxWidth = "none"; }')
             page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
             dimensions = tables.first.evaluate('n => [n.clientWidth, n.clientHeight]')
-            message.evaluate("n => n.style.maxHeight = 'none'")
+            # The fold is measured in lines (--project-answer-lines on the bubble, project_answer.js measureFold):
+            # give the bubble enough lines for the whole answer, as a taller fold would.
+            row.evaluate("""n => { const m = n.querySelector('.message');
+                n.style.setProperty('--project-answer-lines', String(Math.ceil(m.scrollHeight / parseFloat(getComputedStyle(m).lineHeight)) + 1)); }""")
             page.evaluate("window.dispatchEvent(new Event('resize'))")
             expect(row).not_to_have_class(re.compile(r'\bis-folded\b'))
             expect(tables.first).to_have_attribute('tabindex', '0')
@@ -512,5 +515,80 @@ def test_ui_folded_completion_excludes_delayed_diagram_fallback(direct_server_wi
             copied = page.evaluate('() => window.__copied.at(-1)')
             assert copied == panel.locator('.md-code-block pre > code').inner_text()
             assert copied.strip() == diagram_source
+        finally:
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("width, theme", [(1100, "dark"), (390, "light")])
+def test_ui_no_answer_ending_keeps_codes_copy_and_project_context(
+    direct_server_with_data, monkeypatch, engine, width, theme,  # noqa: F811
+):
+    """Real producer -> isolated dialogue store -> HTTP -> Main; disclosure, Copy and reload keep their meaning."""
+    import json
+    import os
+    from pathlib import Path
+    from playwright.sync_api import expect, sync_playwright
+    from ouroboros import outcomes
+    from tests.test_project_completion_mirror import _enqueue_row
+    from tests.ui_console_errors import PageErrors
+
+    root = direct_server_with_data["data_dir"]
+    result = {"status": "failed", "reason_code": "example_new_reason", "terminal_origin": "host_salvage",
+              "result": "Two update scenarios remain unchecked.",
+              "outcome_axes": outcomes.terminal_outcome_axes(
+                  lifecycle="failed", execution=outcomes.EXECUTION_INFRA_FAILED,
+                  reason_code="example_new_reason", review_trigger="worker_terminal")}
+    event = _enqueue_row(root, monkeypatch, result)
+    meta = event["progress_meta"]
+    row_data = {**meta, "direction": "system", "chat_id": 1, "user_id": 1,
+                "type": "project_completion_summary", "task_id": "root-project",
+                "text": event["text"], "ts": "2026-10-01T10:00:00Z", "delivery_id": event["delivery_id"]}
+    _store(root, "chat", row_data)
+    evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR") or root / "evidence") / f"ending-{engine}-{width}"
+    evidence.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": width, "height": 750}, reduced_motion="reduce")
+        page.add_init_script("""window.__copied = []; Object.defineProperty(navigator, 'clipboard', {configurable:true,
+            value: {writeText: async text => window.__copied.push(text)}});""")
+        page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+        errors = PageErrors(page, engine)
+        try:
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            row = page.locator('#chat-messages .chat-bubble[data-task-id="root-project"][data-system-type="project_completion_summary"]')
+            for stage in ("history", "reload"):
+                _wait_status(page, "Online", timeout=30_000)
+                expect(row.locator('.project-ending')).to_be_visible()
+                row.scroll_into_view_if_needed()
+                assert "system" in row.get_attribute('class').split()
+                expect(row.locator('.sender')).to_have_text('System')
+                expect(row.locator('.project-ending-title')).to_have_text(meta['task_name'])
+                expect(row.locator('.ui-status')).to_have_text('Failed')
+                expect(row.locator('.project-ending-cause')).to_have_text('The recorded reason has no description yet.')
+                expect(row.locator('.project-ending-salvage')).to_have_text(meta['completion_notice']['salvage'])
+                assert row.inner_text().count(meta['project_name']) == 1
+                assert 'example_new_reason' not in row.inner_text()
+                disclosure = row.locator('.project-ending-details')
+                summary = disclosure.locator('summary')
+                summary.focus()
+                page.keyboard.press('Enter')
+                expect(disclosure).to_have_attribute('open', '')
+                expect(disclosure.locator('p')).to_have_text('Recorded reason: example_new_reason')
+                assert page.locator('#chat-messages').evaluate('n => n.scrollWidth <= n.clientWidth + 1')
+                row.screenshot(path=str(evidence / f'{stage}.png'))
+                if stage == 'history':
+                    row.locator('.chat-message-copy').click()
+                    page.wait_for_function('window.__copied.length === 1')
+                    assert page.evaluate('window.__copied[0]') == event['text']
+                    page.reload(wait_until='domcontentloaded')
+            reference = row.locator('[data-intent="open-project"]')
+            assert reference.count() == 1
+            reference.focus()
+            page.keyboard.press('Enter')
+            expect(page.locator('#project-panel-title')).to_have_text(meta['project_name'])
+            (evidence / 'page-errors.json').write_text(json.dumps(list(errors)), encoding='utf-8')
+            assert not errors.unexpected(), errors
         finally:
             browser.close()

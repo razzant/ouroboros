@@ -85,6 +85,7 @@ def test_headless_public_export_list_preserves_extraction_and_terminal_file_help
         "terminal_task_files_ready",
         "finalize_task_artifacts",
         "task_is_readonly_subagent",
+        "task_requires_workspace_capture",
         "prepare_task_drive",
         "drive_candidates",
         "prune_headless_task_drives",
@@ -193,7 +194,7 @@ def test_current_metadata_race_reuses_unchanged_manifest_publication(tmp_path, m
     assert {path for path in reads if path.endswith(".json.gz")} == {str(source_blob), str(target_blob)}
 
 
-def test_fork_memory_copy_preserves_identity_and_project_patterns(tmp_path):
+def test_fork_memory_copy_preserves_identity_and_gives_a_project_no_global_knowledge(tmp_path):
     files = ["identity.md", "WORLD.md", "registry.md", "knowledge/patterns.md", "knowledge/topic.md"]
     for name in files:
         path = tmp_path / "memory" / name
@@ -203,6 +204,8 @@ def test_fork_memory_copy_preserves_identity_and_project_patterns(tmp_path):
     plain = headless.prepare_task_drive(tmp_path, "plain", "forked")
     for name in files:
         assert (plain / "memory" / name).read_text(encoding="utf-8") == "original " + name
-        if name != "knowledge/topic.md":
+        if not name.startswith("knowledge/"):
             assert (project / "memory" / name).read_text(encoding="utf-8") == "original " + name
+    # A project fork inherits no global knowledge note, the former register included.
     assert not (project / "memory/knowledge/topic.md").exists()
+    assert not (project / "memory/knowledge/patterns.md").exists()

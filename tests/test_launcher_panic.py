@@ -2,13 +2,43 @@
 from __future__ import annotations
 
 import threading
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from ouroboros import launcher_background as background
-from ouroboros import launcher_readiness as readiness
 from tests.test_launcher_background import settings as settings  # explicit shared pytest fixture
+
+
+@pytest.fixture(autouse=True)
+def no_native_process_effects(monkeypatch):
+    """Fake PIDs must never reach signals, a Windows handle or a subprocess."""
+    import os
+    import signal
+    import subprocess
+    import sys
+    from ouroboros import platform_layer
+
+    calls = []
+
+    def refused(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("native process operation in a fake-PID test")
+
+    for name in ("kill", "killpg", "_exit"):
+        if hasattr(os, name):
+            monkeypatch.setattr(os, name, refused)
+    if hasattr(signal, "pidfd_send_signal"):
+        monkeypatch.setattr(signal, "pidfd_send_signal", refused)
+    monkeypatch.setattr(subprocess.Popen, "__init__", refused)
+    monkeypatch.setattr(platform_layer, "terminate_job", refused)
+    winapi = ModuleType("_winapi")
+    winapi.TerminateProcess = refused
+    monkeypatch.setitem(sys.modules, "_winapi", winapi)
+    # No bootstrap owner exists in this fixture, independently of prior tests.
+    monkeypatch.setattr("ouroboros.launcher_bootstrap.stop_bootstrap_commands", lambda **kwargs: [])
+    yield
+    assert calls == [], f"unexpected process operations (all stubbed): {calls}"
 
 
 def disarm_emergency_owners(monkeypatch, events):
@@ -55,7 +85,7 @@ def test_panic_latches_before_starting_any_post_thread(stopped_world, monkeypatc
     threads = []
     monkeypatch.setattr(background.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: threads.append(kw)))
     bg.request_panic()
-    assert bg.shutdown.is_set() and bg.quit.is_set(), "click must fence handoff before the POST thread runs"
+    assert bg.shutdown.is_set() and bg.quit.is_set(), "click must stop admission before the persistence thread runs"
     assert len(threads) == 1 and threads[0]["daemon"] is False
 
 
@@ -76,31 +106,6 @@ def test_early_panic_never_posts_to_the_stale_or_default_port(stopped_world, mon
     assert exited.wait(5), "a foreign server accepting /panic cannot keep this bootstrap alive"
     assert posts == [], "a port file/default is not this generation's endpoint authority"
     assert "census" in events and "ordinary exit" not in events
-
-
-@pytest.mark.parametrize("state", ["absent", "dead", "foreign", "wrong-port", "reused-pid", "owned"])
-def test_panic_endpoint_requires_the_live_current_generation(monkeypatch, tmp_path, state):
-    from ouroboros import server_process
-
-    proc = SimpleNamespace(pid=41, poll=lambda: 0 if state == "dead" else None)
-    binding = {"pid": 42 if state == "foreign" else 41, "port": 9001 if state == "wrong-port" else 9000,
-               "host": "127.0.0.1"}
-    monkeypatch.setattr(server_process, "read_service_bindings", lambda root: {"main": binding})
-    monkeypatch.setattr(server_process, "service_binding_is_live", lambda value: state != "reused-pid")
-    port = readiness.owned_server_port(None if state == "absent" else proc, 9000, tmp_path)
-    assert port == (9000 if state == "owned" else None)
-
-
-@pytest.mark.parametrize("host,owned", [("127.0.0.1", True), ("0.0.0.0", True), ("127.0.0.2", False),
-                                     ("::1", False), ("::", False), (None, False)])
-def test_panic_binding_must_cover_the_http_destination(monkeypatch, tmp_path, host, owned):
-    from ouroboros import server_process
-
-    proc = SimpleNamespace(pid=41, poll=lambda: None)
-    monkeypatch.setattr(server_process, "read_service_bindings",
-                        lambda root: {"main": {"pid": 41, "port": 9000, "host": host}})
-    monkeypatch.setattr(server_process, "service_binding_is_live", lambda value: True)
-    assert readiness.owned_server_port(proc, 9000, tmp_path) == (9000 if owned else None)
 
 
 def test_early_panic_stops_retained_daemon_custody_and_its_work(stopped_world, monkeypatch, tmp_path):
@@ -151,40 +156,62 @@ def test_early_panic_stops_retained_daemon_custody_and_its_work(stopped_world, m
     assert (tmp_path / "state/panic_stop.flag").read_text() == "panic"
 
 
-@pytest.mark.parametrize("has_job", [False, True])
+@pytest.mark.parametrize("windows,has_job", [(False, False), (True, False), (True, True)])
 def test_local_early_panic_requests_the_captured_child_stop_before_persistence(
-        stopped_world, monkeypatch, has_job):
+        stopped_world, monkeypatch, windows, has_job):
     from ouroboros import platform_layer, server_control
 
     bg, events, exited = stopped_world
     proc, job = SimpleNamespace(pid=41, poll=lambda: None), object() if has_job else None
     bg.panic_child = lambda: (proc, job)
-    monkeypatch.setattr(platform_layer, "terminate_job", lambda value: events.append(("job stop", value)))
-    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda value: events.append(("child stop", value)))
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", windows)
+    monkeypatch.setattr(platform_layer, "kill_process_tree",
+                        lambda value: events.append(("captured tree", value, None)))
+    monkeypatch.setattr(platform_layer, "request_process_tree_kill",
+                        lambda value, **kw: events.append(("native request", value, kw["job_handle"])))
+    expected = ("native request" if windows else "captured tree", proc, job)
     write_flag = server_control._write_panic_flag
 
     def persist(root):
-        assert events[0] == (("job stop", job) if has_job else ("child stop", proc))
+        assert events[0] == expected
         write_flag(root)
 
     monkeypatch.setattr(server_control, "_write_panic_flag", persist)
     bg.request_panic()
     assert exited.wait(5)
-    assert events[0] == (("job stop", job) if has_job else ("child stop", proc))
+    assert events[0] == expected
 
 
-def test_window_close_after_panic_post_keeps_the_captured_server_owner_until_flag(settings, monkeypatch):
-    """A 200 only queues Panic: closing the window cannot unload the server's Job before its flag."""
+def test_windows_job_error_still_requests_the_captured_process(stopped_world, monkeypatch):
+    import sys
+    from ouroboros import platform_layer
+
+    bg, events, exited = stopped_world
+    proc = SimpleNamespace(pid=41, poll=lambda: None, _handle=object())
+    job = object()
+    bg.panic_child = lambda: (proc, job)
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", True)
+    monkeypatch.setattr(platform_layer, "terminate_job",
+                        lambda handle: events.append(("job", handle)) or "fixture Job failure")
+    monkeypatch.setattr(sys.modules["_winapi"], "TerminateProcess",
+                        lambda handle, code: events.append(("process", handle, code)))
+    bg.request_panic()
+    assert exited.wait(5)
+    assert events[:2] == [("job", job), ("process", proc._handle, 1)]
+
+
+def test_window_close_after_panic_keeps_the_local_owner_until_flag(settings, monkeypatch):
+    """The actual main() close callback cannot replace the pending emergency owner."""
     import atexit
     import launcher
     import sys, types
-    from tests.test_launcher_background import Answer
+    from ouroboros import server_control, platform_layer
 
     class Booted(Exception):
         pass
 
     owners, events = [], []
-    accepted, waiting, finish = threading.Event(), threading.Event(), threading.Event()
+    waiting, finish = threading.Event(), threading.Event()
     flag = settings.parent / "state" / "panic_stop.flag"
     monkeypatch.setattr(launcher, "DATA_DIR", settings.parent)
     for name in ("_external_host_update", "_external_host_result", "_external_seed_bundle", "_launch_argv", "_launch_intent"):
@@ -196,14 +223,7 @@ def test_window_close_after_panic_post_keeps_the_captured_server_owner_until_fla
         owners.append(bg)
         return bg
 
-    def server_wait(timeout):
-        waiting.set()
-        assert finish.wait(timeout), "test server was not allowed to persist its flag"
-        assert flag.read_text() == "panic"
-        events.append("captured server exited")
-        return 99
-
-    proc = SimpleNamespace(pid=41, wait=server_wait, poll=lambda: None)
+    proc = SimpleNamespace(pid=41, poll=lambda: None)
     monkeypatch.setattr(background, "indicator_class", lambda: None)
     monkeypatch.setattr(background.Background, "listen", lambda *args: None)
     monkeypatch.setattr(atexit, "register", lambda *args: None)
@@ -220,45 +240,109 @@ def test_window_close_after_panic_post_keeps_the_captured_server_owner_until_fla
     with pytest.raises(Booted):
         launcher.main([])
     bg = owners[0]
-    bg.panic_port = lambda: 1
-    monkeypatch.setattr(background.urllib.request, "urlopen", lambda *a, **kw: (accepted.set(), Answer(b""))[1])
-    bg.request_panic()
+    def execute(*args, **kwargs):
+        waiting.set()
+        assert finish.wait(3), "test did not release the emergency owner"
+        server_control._write_panic_flag(kwargs['data_dir'])
+        events.append("local Panic persisted")
+
+    monkeypatch.setattr(platform_layer, "request_process_tree_kill", lambda *a, **kw: {"requested": True})
+    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda *a, **kw: None)
+    monkeypatch.setattr(server_control, "execute_panic_stop", execute)
+    monkeypatch.setattr(background.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("no HTTP Panic"))
+    api = background.DesktopApi()
+    api._background = bg
+    assert api.panic_stop() == {"status": "stopping"}
     try:
-        assert accepted.wait(2)
+        assert waiting.wait(2)
         assert not flag.exists()
-        assert bg.closing() is None  # real launcher's _on_closing: no ordinary teardown over Panic
-        assert waiting.wait(2), "POST 200 must not end the non-daemon Panic owner"
+        assert bg.closing() is False  # the window stays; the quit's closer yields to the accepted Panic
+        closer = next((t for t in threading.enumerate() if t.name == "ouroboros-quit"), None)
+        if closer is not None:
+            closer.join(timeout=3)
         thread = next(t for t in threading.enumerate() if t.name == "ouroboros-indicator-panic")
         assert thread.is_alive() and thread.daemon is False
-        assert events == [] and thread.is_alive()
-        monkeypatch.setattr(launcher, "_agent_proc", SimpleNamespace(wait=lambda **kw: pytest.fail("wrong child")))
-        flag.parent.mkdir(exist_ok=True)
-        flag.write_text("panic")
+        assert events == []
     finally:
         finish.set()
         thread = next((t for t in threading.enumerate() if t.name == "ouroboros-indicator-panic"), None)
         if thread is not None:
             thread.join(timeout=3)
-    assert events == ["captured server exited"]
+    assert events == ["local Panic persisted"]
+    assert flag.read_text() == "panic"
 
 
+@pytest.mark.parametrize("surface", ["tray", "desktop_bridge"])
+def test_delayed_owner_never_reads_a_successor_binding_or_stops_its_child(stopped_world, monkeypatch, surface):
+    import launcher
+    from ouroboros import platform_layer
+    bg, events, exited = stopped_world
+    first, successor = SimpleNamespace(pid=41, poll=lambda: None), SimpleNamespace(pid=42, poll=lambda: None)
+    stops, pending = [], []
+    bg.panic_child = lambda: (first, None)
+    bg.read_port = lambda: pytest.fail("Panic cannot read a mutable port")
+    monkeypatch.setattr(platform_layer, "request_process_tree_kill", lambda proc, **kw: stops.append(proc))
+    monkeypatch.setattr(platform_layer, "kill_process_tree", lambda proc: stops.append(proc))
+    monkeypatch.setattr(background.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("no successor HTTP"))
+    with monkeypatch.context() as held:
+        held.setattr(background.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: pending.append(kw)))
+        if surface == "tray":
+            bg.request_panic()
+        else:
+            api = background.DesktopApi()
+            api._background = bg
+            assert api.panic_stop() == {"status": "stopping"}
+    assert bg.shutdown.is_set() and bg.panic.is_set() and bg.quit.is_set()
+    assert stops == [first] and len(pending) == 1  # native stop precedes worker admission
+    bg.panic_child = lambda: (successor, None)
+    monkeypatch.setattr(launcher, "_shutdown_event", bg.shutdown)
+    monkeypatch.setattr(launcher, "start_agent", lambda *a: pytest.fail("successor admission after Panic"))
+    launcher.agent_lifecycle_loop()
+    pending[0]["target"]()  # arbitrary scheduling delay, with the caller's mutable child replaced
+    assert exited.wait(2) and stops == [first]
+    assert "ordinary exit" not in events
 
-@pytest.mark.parametrize('code', [0, 1, 42, 99])
-def test_panic_post_requires_observed_panic_exit_not_merely_any_exit(stopped_world, monkeypatch, tmp_path, code):
-    from contextlib import nullcontext
+
+@pytest.mark.parametrize("fault", ["thread", "source", "child", "bootstrap"])
+def test_caller_faults_cannot_veto_panic(stopped_world, monkeypatch, fault):
+    from ouroboros import panic_source, launcher_bootstrap
     bg, _, exited = stopped_world
-    waited = threading.Event()
-    bg.panic_port = lambda: 1
-    bg.panic_child = lambda: (SimpleNamespace(poll=lambda: code,
-        wait=lambda **kw: (waited.set(), code)[1]), None)
-    monkeypatch.setattr(background.urllib.request, 'urlopen', lambda *a, **kw: nullcontext())
-    bg.request_panic()
-    assert waited.wait(2)
-    if code != 99:
-        assert exited.wait(3)
-        assert (tmp_path / 'state/panic_stop.flag').read_text() == 'panic'
+    def refused(*a, **kw):
+        raise RuntimeError("fixture refusal")
+    if fault == "thread":
+        thread = background.threading.Thread
+        monkeypatch.setattr(background.threading, "Thread",
+                            lambda **kw: refused() if kw.get("name") == "ouroboros-indicator-panic" else thread(**kw))
+    elif fault == "source":
+        monkeypatch.setattr(panic_source, "record_source", refused)
+    elif fault == "child":
+        bg.panic_child = refused
     else:
-        assert not exited.is_set() and not (tmp_path / 'state/panic_stop.flag').exists()
+        monkeypatch.setattr(launcher_bootstrap, "stop_bootstrap_commands", refused)
+    bg.request_panic()
+    assert bg.shutdown.is_set() and exited.wait(3)
+
+
+def test_stalled_source_writer_cannot_delay_actual_launcher_stop(stopped_world, monkeypatch):
+    from ouroboros import utils
+
+    bg, _, exited = stopped_world
+    entered, release = threading.Event(), threading.Event()
+    append = utils.append_jsonl
+
+    def stalled(path, row, **kwargs):
+        if threading.current_thread().name == "panic-source":
+            entered.set()
+            assert release.wait(5)
+        return append(path, row, **kwargs)
+
+    monkeypatch.setattr(utils, "append_jsonl", stalled)
+    try:
+        bg.request_panic()
+        assert entered.wait(3)
+        assert exited.wait(3), "diagnostic storage must not gate Panic persistence/exit"
+    finally:
+        release.set()
 
 
 def test_tray_quit_closes_the_active_git_setup_loop(settings, monkeypatch):
@@ -274,13 +358,28 @@ def test_tray_quit_closes_the_active_git_setup_loop(settings, monkeypatch):
         owners.append(bg)
         return bg
 
-    window = SimpleNamespace(destroy=lambda: events.append('setup destroyed'))
     webview = types.ModuleType('webview')
-    webview.create_window = lambda *a, **kw: window
+    webview.windows = []
+
+    def destroy():
+        events.append('setup destroyed')
+        webview.windows.remove(window)
+
+    window = SimpleNamespace(destroy=destroy)
+
+    def create_window(*args, **kwargs):
+        webview.windows.append(window)
+        return window
+
+    webview.create_window = create_window
 
     def run_setup(**kwargs):
         owners[0].request_quit()
+        closer = next((t for t in threading.enumerate() if t.name == 'ouroboros-quit'), None)
+        if closer is not None:
+            closer.join(timeout=3)  # its body runs off this UI thread
         assert events == ['setup destroyed'], 'Quit must end the setup window, not just its icon'
+        assert webview.windows == [], 'the real window registry must be emptied'
 
     webview.start = run_setup
     monkeypatch.setitem(sys.modules, 'webview', webview)
@@ -295,6 +394,7 @@ def test_tray_quit_closes_the_active_git_setup_loop(settings, monkeypatch):
                         ('_agent_proc', None), ('_agent_job', None), ('_webview_window', None),
                         ('DATA_DIR', settings.parent), ('acquire_pid_lock', lambda: True),
                         ('automatic_launch_allowed', lambda *a: True), ('Background', owner),
+                        ('paint_room', lambda window: None),  # the macOS leaf; this fake window has no events
                         ('check_git', lambda: False), ('stop_agent', lambda: events.append('ordinary stop'))):
         monkeypatch.setattr(launcher, name, value)
     launcher.main([])

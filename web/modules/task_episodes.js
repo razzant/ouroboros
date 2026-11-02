@@ -10,10 +10,9 @@
  * not a chain.
  */
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { taskDoneIsTerminal, taskPresentation, taskReasonDetail, taskTerminalPhase } from './log_events.js';
+import { reasonCodesNote, taskDoneIsTerminal, taskPresentation, taskReasonCodes, taskReasonDetail, taskTerminalPhase } from './log_events.js';
 import { fmt } from './i18n.js';
 import { outcomeTone } from './task_phase_chip.js';
-import { projectCollapsedActivity, renderCollapsedActivity } from './chat_activity.js';
 
 export function admittedSuccessor(row) {
     const admitted = (link) => (link && typeof link === 'object' && link.state === 'admitted' ? link.successor_task_id : '');
@@ -31,7 +30,10 @@ export function noteEpisodeFacts(previous = {}, row = {}) {
     if (terminal && (row?.outcome_axes || row?.task_terminal_status || row?.status)) {
         next.ended = String(time?.occurred_at || next.ended || row?.ts || '');
         next.phase = taskTerminalPhase(row);
-        next.cause = taskReasonDetail(row) || next.cause || '';
+        // A code no sentence describes yet rides beside its neutral cause, for the expanded card (owner 2A).
+        const cause = taskReasonDetail(row);
+        if (cause) Object.assign(next, { cause, codes: taskReasonCodes(row) });
+        else next.cause ||= '';
     } else if (time?.occurred_at && !next.ended) {
         next.ended = String(time.occurred_at);
     }
@@ -97,8 +99,9 @@ export function renderEpisodes(el, episodes = []) {
  * the hidden physical shell/record stays to take late rows. A successor with no card here runs where
  * this chat sees none of its frames (a Main
  * portal's room): `follow(successorId, predecessor)` may mint its card from the facts it holds.
+ * `renamed(record)` hears each name this module sets: the card's one headline owner paints the line under it, and a portal's Project reference names itself again.
  */
-export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {} }) {
+export function createTaskEpisodes({ records, reanchor, activity, follow = () => false, expand = () => {}, renamed = () => {} }) {
     const predecessors = new Map();  // successor task id -> predecessor task id
 
     function chainOf(taskId) {
@@ -113,7 +116,8 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
 
     // Rehome the ORIGINAL content nodes, not snapshots of their DOM or lifecycle. Their physical
     // record/controller still receives late files, reviews and history. Old controls stay in its
-    // hidden shell; only the current card offers work controls.
+    // hidden shell; only the current card offers work controls. The original Reviews door
+    // is a reading control and follows its original host/controller into the disclosure.
     function disclose(record, chain) {
         const host = record.episodeHistoryEl;
         if (!host) return;
@@ -124,7 +128,9 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
                 disclosure.className = 'chat-episode-history';
                 disclosure.dataset.episodeTask = previous.groupId;
                 const summary = document.createElement('summary');
-                disclosure.appendChild(summary);
+                const codes = document.createElement('p');
+                codes.className = 'chat-episode-codes';
+                disclosure.append(summary, codes);
                 const onToggle = () => { if (disclosure.open) expand(previous); };
                 disclosure.addEventListener('toggle', onToggle);
                 previous.episodeDisclosure = disclosure;
@@ -135,7 +141,10 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
                 episodeSpan(facts.started, facts.ended), facts.phase && taskPresentation(facts.phase).headline,
                 facts.cause].filter(Boolean).join(' · ');
             if (disclosure.firstElementChild.textContent !== label) disclosure.firstElementChild.textContent = label;
-            for (const content of [previous.timelineEl, previous.reviewsHostEl, previous.subagentsEl]) {
+            const codes = disclosure.querySelector('.chat-episode-codes');
+            codes.textContent = reasonCodesNote(facts.codes);
+            codes.hidden = !codes.textContent;
+            for (const content of [previous.timelineEl, previous.reviewSummaryEl, previous.reviewsHostEl, previous.subagentsEl]) {
                 if (content && content.parentNode !== disclosure) disclosure.appendChild(content);
             }
             const position = host.children[index] || null;
@@ -165,9 +174,7 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
         }
         if (name && record.titleEl.textContent !== name) {
             record.titleEl.textContent = name;
-            // An unnamed successor's own latest line stood in for its title; under the work's name it is the line again.
-            renderCollapsedActivity(record, projectCollapsedActivity({ suggestedName: name, headline: record.collapsedActivity,
-                previous: record.collapsedActivity }));
+            renamed(record);  // an unnamed successor's latest line stood in for its title; its owner restores the line
             changed = true;
         }
         for (const predecessor of chain) {
@@ -196,11 +203,7 @@ export function createTaskEpisodes({ records, reanchor, activity, follow = () =>
             let changed = record.suggestedName !== name || titleChanged;
             record.suggestedName = name;
             if (titleChanged) record.titleEl.textContent = name;
-            // Restore the deferred collapsed activity after naming.
-            changed = renderCollapsedActivity(record, projectCollapsedActivity({
-                suggestedName: name, headline: record.collapsedActivity,
-                previous: record.collapsedActivity,
-            })) || changed;
+            changed = Boolean(renamed(record)) || changed;  // the owner restores a line deferred until the card had a name
             changed = sync(record) || changed;
             return Boolean(changed && record.root?.isConnected);
         },

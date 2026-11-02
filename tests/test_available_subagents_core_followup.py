@@ -335,16 +335,24 @@ def test_awake_loop_durably_acks_injected_mailbox_before_next_sleep(tmp_path, me
     assert expected in rendered
 
 
+def _child_attempt(tmp_path, attempt):
+    """One physical attempt of ``child1`` in a context of its own, as
+    ``OuroborosAgent._prepare_task_context`` builds one per attempt: the ids of the
+    mail a transcript holds (``_loop_mailbox_seen_ids``) return only with that
+    transcript's restore."""
+    return SimpleNamespace(
+        task_id="child1", task_attempt=attempt, drive_root=tmp_path,
+        budget_drive_root=str(tmp_path), task_metadata={},
+    )
+
+
 def test_delegate_owner_wake_ack_replays_on_fresh_physical_attempt(tmp_path):
     import ouroboros.delegate_supervision as supervision
     from ouroboros.owner_mailbox import write_owner_message
 
     exact = "delegate owner bytes  \n"
     assert write_owner_message(tmp_path, exact, "child1", msg_id="owner-1")
-    first_ctx = SimpleNamespace(
-        task_id="child1", task_attempt=1, drive_root=tmp_path,
-        budget_drive_root=str(tmp_path), task_metadata={},
-    )
+    first_ctx = _child_attempt(tmp_path, 1)
     wake = json.loads(supervision.supervised_wait(
         first_ctx, "run-1",
         wait_once=lambda *_a, **_k: json.dumps({
@@ -355,13 +363,17 @@ def test_delegate_owner_wake_ack_replays_on_fresh_physical_attempt(tmp_path):
     assert supervision.acknowledge_pending_wake(first_ctx, wake)
     assert supervision._addressed_wakes(first_ctx, supervision.supervision_checkpoint(first_ctx)) == []
 
-    successor = SimpleNamespace(**{**first_ctx.__dict__, "task_attempt": 2})
+    successor = _child_attempt(tmp_path, 2)
     replay = supervision._addressed_wakes(
         successor, supervision.supervision_checkpoint(successor),
     )
     assert [(row["msg_id"], row["text"]) for row in replay] == [
         ("owner-1", exact),
     ]
+    # A successor that restored the first attempt's saved transcript holds the mail already.
+    restored = _child_attempt(tmp_path, 2)
+    restored._loop_mailbox_seen_ids = set(first_ctx._loop_mailbox_seen_ids)
+    assert supervision._addressed_wakes(restored, supervision.supervision_checkpoint(restored)) == []
 
 
 def test_unacknowledged_delegate_wake_replays_before_successor_poll(tmp_path):
@@ -369,19 +381,16 @@ def test_unacknowledged_delegate_wake_replays_before_successor_poll(tmp_path):
     from ouroboros.owner_mailbox import write_owner_message
 
     assert write_owner_message(tmp_path, "pending exact", "child1", msg_id="owner-pending")
-    first_ctx = SimpleNamespace(
-        task_id="child1", task_attempt=1, drive_root=tmp_path,
-        budget_drive_root=str(tmp_path), task_metadata={},
-    )
+    first_ctx = _child_attempt(tmp_path, 1)
     first = json.loads(supervision.supervised_wait(
         first_ctx, "run-1",
         wait_once=lambda *_a, **_k: json.dumps({
             "status": "no_progress", "run_id": "run-1", "last_seq": 0,
         }),
     ).text)
-    successor = SimpleNamespace(**{**first_ctx.__dict__, "task_attempt": 2})
+    successor = _child_attempt(tmp_path, 2)
     assert supervision.acknowledge_pending_wake(successor) is False
-    assert supervision.supervision_checkpoint(successor)["pending_wake"]
+    assert supervision.supervision_checkpoint(successor)["runs"]["run-1"]["pending_wake"]
     replay = json.loads(supervision.supervised_wait(
         successor, "run-1",
         wait_once=lambda *_a, **_k: (_ for _ in ()).throw(
@@ -390,6 +399,40 @@ def test_unacknowledged_delegate_wake_replays_before_successor_poll(tmp_path):
     ).text)
     assert replay["supervision_wake_id"] == first["supervision_wake_id"]
     assert replay["wake_events"][0]["text"] == "pending exact"
+
+
+def test_failed_direct_wake_ack_records_no_exposure(tmp_path, monkeypatch):
+    import ouroboros.delegate_supervision as supervision
+    from ouroboros.owner_mailbox import write_owner_message
+
+    assert write_owner_message(tmp_path, "held owner words", "child1", msg_id="owner-held")
+    ctx = _child_attempt(tmp_path, 1)
+    wake = json.loads(supervision.supervised_wait(
+        ctx, "run-1",
+        wait_once=lambda *_a, **_k: json.dumps({
+            "status": "no_progress", "run_id": "run-1", "last_seq": 0,
+        }),
+    ).text)
+    save = supervision._save_state
+
+    def refuse_ack_save(actual_ctx, state):
+        if state.get("last_acknowledged_wake") and not state.get("pending_wake"):
+            raise OSError(28, "No space left on device")
+        return save(actual_ctx, state)
+
+    monkeypatch.setattr(supervision, "_save_state", refuse_ack_save)
+    with pytest.raises(OSError):
+        supervision.acknowledge_pending_wake(ctx, wake)
+    # The UNKNOWN hold drops this receipt (#2142): a checkpoint saved now must not mark its mail seen.
+    assert not getattr(ctx, "_loop_mailbox_seen_ids", None)
+    restored = _child_attempt(tmp_path, 2)
+    restored._loop_mailbox_seen_ids = set(getattr(ctx, "_loop_mailbox_seen_ids", None) or ())
+    replay = supervision._addressed_wakes(restored, supervision.supervision_checkpoint(restored))
+    assert [(row["msg_id"], row["text"]) for row in replay] == [("owner-held", "held owner words")]
+
+    monkeypatch.setattr(supervision, "_save_state", save)
+    assert supervision.acknowledge_pending_wake(ctx, wake)
+    assert ctx._loop_mailbox_seen_ids == {"owner-held"}
 
 
 @pytest.mark.parametrize("control_kind", ["finalize_now", "hurry"])
@@ -437,7 +480,7 @@ def test_sleeping_control_wakes_then_loop_routes_without_supervision_ack(tmp_pat
         }),
     ).text)
     assert wake["wake_events"][0]["kind"] == kind
-    assert supervision.supervision_checkpoint(ctx)["pending_wake"]["mailbox_ids"] == []
+    assert supervision.supervision_checkpoint(ctx)["runs"]["run-1"]["pending_wake"]["mailbox_ids"] == []
     assert supervision.acknowledge_pending_wake(ctx, wake)
     assert acknowledged_task_message_ids(tmp_path, "child1") == set()
     assert supervision._addressed_wakes(

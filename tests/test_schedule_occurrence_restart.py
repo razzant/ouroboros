@@ -180,7 +180,6 @@ root, repo, folder = base / "data", base / "repo", base / "folder"
 root.mkdir(exist_ok=True); repo.mkdir(exist_ok=True)
 state.init(root)
 workers.init(repo, root, 1)
-queue_schedules.resync_skill_schedules = lambda *_a: {}
 config.get_bg_wakeup_min_sec = lambda: 0
 q = SimpleNamespace(queue=queue, pending=workers.PENDING, root=root)
 assert not hasattr(queue, "REPO_DIR")
@@ -200,6 +199,7 @@ if stage == "claim":
                  "task": {"type": "task", "text": "continue", "project_id": "proj", "chat_id": 42}})
     if crash_point == "prepare_hold":
         folder.rmdir()
+        folder.write_text("a file where the folder was")  # a missing folder starts as its address (#1799)
         queue.check_scheduled_tasks()
         assert next(iter(_rows(q).values()))["hold"]["reason"] == "workspace_unusable"
     else:
@@ -218,6 +218,8 @@ if stage == "claim":
     row = next(iter(_rows(q).values()))
     print(json.dumps({"pid": __import__("os").getpid(), "occurrence": row["occurrence"]}))
 else:
+    if folder.is_file():
+        folder.unlink()
     folder.mkdir(exist_ok=True)
     queue.check_scheduled_tasks()
     queue.check_scheduled_tasks()
@@ -286,12 +288,11 @@ def test_worker_delete_reads_receipt_from_its_canonical_table_root(q, tmp_path, 
     outcome = json.loads(_manage_schedules(ctx, action="delete", schedule_id="s1", reason="owner"))
     assert outcome["ok"] and outcome["running_or_queued"] is None  # no snapshot required for custody
     rows = queue_schedules.load_schedule_store(canonical)["tasks"]
-    if state_kind == "missing":
-        assert outcome["status"] == "deleted" and outcome["schedule"] is None and not rows
-    else:
-        assert outcome["status"] == "delete_deferred" and outcome["schedule"] is not None
-        assert len(rows) == 1 and rows[0]["delete_requested_at"] and not rows[0]["enabled"]
-        assert ("accepted run" in outcome["detail"]) is (state_kind == "accepted")
+    assert outcome["status"] == "withdrawn" and outcome["schedule"] is not None
+    assert len(rows) == 1 and rows[0]["delete_requested_at"] and not rows[0]["enabled"]
+    assert rows[0]["occurrence"] == row["occurrence"] or rows[0]["occurrence"] == {
+        "fingerprint": occurrence.fingerprint(row), **row["occurrence"]}
+
 
 
 @pytest.mark.parametrize("clocks", ["both", "receipt_only", "row_only", "unknown"])
@@ -340,29 +341,6 @@ def test_legacy_accepted_republish_preserves_authored_task_and_known_clocks(q, c
     assert queued["text"] == task["text"] and queued["workspace_root"] == task["workspace_root"]
     stored = load_task_result(q.root, task_id)["schedule_admission"]
     assert stored["task"]["text"] == task["text"] and stored.get("due_at") == expected_due
-
-
-@pytest.mark.parametrize("accepted_in", ["table_root", "unrelated_queue_root"])
-def test_skill_resync_uses_selected_root_for_accepted_receipt(q, tmp_path, accepted_in):  # noqa: F811
-    selected = tmp_path / "selected"
-    row = {"id": "skill-demo-daily", "name": "demo/daily", "enabled": True,
-           "source": "skill_manifest", "skill": "demo",
-           "trigger": {"type": "cron", "expr": "0 * * * *"}, "timezone": "UTC",
-           "task": {"type": "task", "text": "frozen"},
-           "occurrence": {"phase": "claimed", "token": "claimed-token", "task_id": "claimed-task"}}
-    queue_schedules._write_scheduled_tasks({"tasks": [row]}, selected)
-    receipt_root = selected if accepted_in == "table_root" else q.root
-    write_task_result(receipt_root, "claimed-task", "scheduled", schedule_admission={
-        "schedule_id": "skill-demo-daily", "token": "claimed-token", "dispatch": "none",
-        "task": {"id": "claimed-task", "text": "accepted immutable work"}})
-    queue_schedules.sync_skill_schedules([], drive_root=selected)
-    rows = queue_schedules.load_schedule_store(selected)["tasks"]
-    if accepted_in == "table_root":
-        assert len(rows) == 1, "a receipt in the selected root must preserve accepted work"
-        assert rows[0]["enabled"] is False and rows[0]["delete_requested_at"]
-        assert load_task_result(selected, "claimed-task")["schedule_admission"]["task"]["text"] == "accepted immutable work"
-    else:
-        assert rows == [], "a receipt in another root cannot create an obligation here"
 
 
 @pytest.mark.parametrize("mismatch", ["token", "schedule_id"])

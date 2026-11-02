@@ -73,13 +73,55 @@ def retain_owner_message(ctx, row=None, *, client_message_id="") -> None:
 
 
 def persist_held_state(ctx) -> None:
-    """Retain sources and return addresses on an existing canonical task record."""
-    if getattr(ctx, "task_id", "") and getattr(ctx, "drive_root", None):
-        from ouroboros.task_store import patch_document
-        from ouroboros.tool_access import canonical_data_root
-        patch_document(canonical_data_root(ctx), ctx.task_id, lambda current: {
-            **current, "held_owner_messages": copy.deepcopy(getattr(ctx, "_held_owner_messages", {})),
-            "open_relays": copy.deepcopy(getattr(ctx, "_open_relays", {}))} if current else None)
+    """Retain sources and return addresses on an existing canonical task record.
+
+    The context's own maps are the turn's authority; the record is their durable copy for a
+    later Continue. Maps this context already persisted open no write transaction at all (the
+    write gate is the convoy's own contention point); a record that already holds them is not
+    rewritten. A store too busy to
+    take the write (``StoreBusy`` after a confirmed rollback: a reader convoy, never a lost
+    write) must not fail the owner's turn over bookkeeping: the maps stay, the gap is logged
+    once and marked, and the next persist or the loop's terminal save carries them. Other
+    store errors still raise.
+    """
+    if not (getattr(ctx, "task_id", "") and getattr(ctx, "drive_root", None)):
+        return
+    from ouroboros.store import StoreBusy
+    from ouroboros.task_store import patch_document
+    from ouroboros.tool_access import canonical_data_root
+    held = copy.deepcopy(getattr(ctx, "_held_owner_messages", None) or {})
+    relays = copy.deepcopy(getattr(ctx, "_open_relays", None) or {})
+    if getattr(ctx, "_held_state_persisted", None) == (held, relays) and not getattr(ctx, "_held_state_dirty", False):
+        return
+
+    def _mutate(current):
+        if not current or (current.get("held_owner_messages") == held and current.get("open_relays") == relays):
+            return None  # nothing to write: an unchanged record is not rewritten
+        return {**current, "held_owner_messages": held, "open_relays": relays}
+
+    try:
+        patch_document(canonical_data_root(ctx), ctx.task_id, _mutate)
+    except StoreBusy as exc:
+        if getattr(exc, "rollback_confirmed", False) is not True:
+            raise
+        if not getattr(ctx, "_held_state_dirty", False):
+            logging.getLogger(__name__).warning(
+                "Held owner sources of %s not persisted (store busy, %s); kept in memory until the next "
+                "persist or the terminal save", ctx.task_id, exc.reason)
+        ctx._held_state_dirty = True
+        return
+    ctx._held_state_dirty = False
+    ctx._held_state_persisted = (held, relays)
+
+
+def flush_held_state(ctx) -> None:
+    """Carry a held state a busy store refused earlier (``working_checkpoint.save_terminal``)."""
+    if getattr(ctx, "_held_state_dirty", False):
+        try:
+            persist_held_state(ctx)
+        except Exception:
+            logging.getLogger(__name__).warning("Held owner sources of %s still unpersisted at the terminal save",
+                                                getattr(ctx, "task_id", ""), exc_info=True)
 
 
 def quote_rows(ctx, handles) -> tuple[list, str]:
@@ -103,31 +145,62 @@ def owner_quote(root, row: dict, *, address: str = "") -> dict:
                         "address": address or format_address(row_address(row)),
                         "client_message_id": str(row.get("client_message_id") or "")},
              "owner_row": copy.deepcopy(row)}
+    if isinstance(row.get("reply_to"), dict) and row["reply_to"]:  # what the owner was replying to, as the host resolved it
+        quote["reply_to"] = copy.deepcopy(row["reply_to"])
     if row.get("type") == "quiz_answer":
         from ouroboros.owner_quiz import recorded_answer_frame
         quote["question_frame"] = recorded_answer_frame(row["quiz"])
     return quote
 
 
-def relay_envelope(relay_id: str, quotes: list, *, chat_id: int) -> dict:
+def relay_envelope(relay_id: str, quotes: list, *, chat_id: int, summary: str = "", label: str = "Main") -> dict:
     # The singular UI shape carries the first quote; the additive list retains
     # every selected source independently (never splice different owner rows).
+    # `summary` is the teller's one line for the owner, which the room shows in place of the note.
     visible = [{k: copy.deepcopy(v) for k, v in q.items() if k != "owner_row"} for q in quotes]
     first = visible[0] if visible else {"text": "", "attachments": [], "source": {
-        "chat_id": chat_id, "label": "Main", "ts": "", "client_message_id": "", "address": ""}}
-    return {"relay_id": relay_id, **first, "quotes": visible}
+        "chat_id": chat_id, "label": label, "ts": "", "client_message_id": "", "address": ""}}
+    return {"relay_id": relay_id, **first, "quotes": visible, **({"summary": summary} if summary else {})}
+
+
+def relay_sender_facts(root, teller_task_id: str) -> dict:
+    """Where a note was written, for the receiving room's note card: the teller's room, else its name ("" for a
+    nameless work: the card says `Another work`)."""
+    from ouroboros.task_results import load_task_result
+    task = load_task_result(root, teller_task_id) if teller_task_id else None
+    if not task:
+        return {}
+    facts = relay_target_facts(root, teller_task_id, task)
+    name = (facts["target_titles"] or [""])[0] if facts["project_chat_id"] == 0 else facts["project_name"]
+    return {"task_id": teller_task_id, "chat_id": facts["project_chat_id"], "name": name}
+
+
+def _source_label(root, chat_id: int) -> str:
+    """The room a note without owner quotes came from, for its card: Main, else that Project's name. A registry
+    that cannot be read names no Project ("Project"): presentation never refuses the owner's words."""
+    if int(chat_id) == 1:
+        return "Main"
+    from ouroboros.projects_registry import list_reserved_projects
+    try:
+        return next((str(p.get("name") or "Project") for p in list_reserved_projects(root) if p.get("chat_id") == chat_id),
+                    "Main")
+    except Exception:
+        logging.getLogger(__name__).debug("Relay source label of chat %s unreadable", chat_id, exc_info=True)
+        return "Project"
 
 
 def write_relay(root, task_id: str, *, relay_id: str, note: str, quotes: list, chat_id: int,
-                teller_task_id: str, canonical_root=None, sender_origin=None, client_surface=None) -> tuple[dict, bool]:
+                teller_task_id: str, canonical_root=None, sender_origin=None, client_surface=None,
+                summary: str = "") -> tuple[dict, bool]:
     """Mail lock: dedupe then append; caller bumps generation only on a new quote."""
     from ouroboros.owner_mailbox import _mailbox_path, mailbox_lines
     from ouroboros.task_custody import task_mail_lock
     from ouroboros.utils import append_jsonl, utc_now_iso
     path = _mailbox_path(Path(root), task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
+    label = {} if quotes else {"label": _source_label(canonical_root or root, chat_id)}
     entry = {"kind": KIND_RELAY, "msg_id": f"relay:{relay_id}:{task_id}", "ts": utc_now_iso(),
-             "text": note, "relay": relay_envelope(relay_id, quotes, chat_id=chat_id),
+             "text": note, "relay": relay_envelope(relay_id, quotes, chat_id=chat_id, summary=summary, **label),
              "owner_rows": [q["owner_row"] for q in quotes], "source_task_id": teller_task_id,
              "relay_canonical_root": str(canonical_root or root)}
     if client_surface:
@@ -157,6 +230,9 @@ def inject_relay(ctx, entry: dict, messages: list) -> None:
         address = format_address(row_address(row))
         loop._record_owner_directive(ctx, source="owner_mailbox", content=owner_text(row), msg_id=address)
         body = f"[Owner words quoted verbatim; handle {address}]\n{owner_text(row)}"
+        if isinstance(row.get("reply_to"), dict) and row["reply_to"]:
+            body += ("\n[Host reference: the message these owner words reply to; context, not the owner's words]\n"
+                     + json.dumps(row["reply_to"], ensure_ascii=False))
         if row.get("type") == "quiz_answer":
             from ouroboros.owner_quiz import recorded_answer_frame
             body += "\n[Host question frame]\n" + recorded_answer_frame(row["quiz"])
@@ -194,6 +270,41 @@ def quote_content(ctx, entry, row, body):
     return build_incoming_user_content({"text": body, "attachment_manifest": manifest}, ctx.drive_root, ctx.task_id)
 
 
+def quoted_inputs(root, refs: list) -> list:
+    """The owner files a relay's quoted rows carried (their saved chat uploads, which ``quote_content`` stages on
+    delivery), as rows another task's own copy reads (``artifacts.materialize_inherited_attachment_manifest``): each
+    upload verified against its saved identity and named by its unique upload id, so two same-named files stay two. One
+    gone or changed is a rejected ``source_missing`` row under its name, never other bytes; a secret-named one is
+    refused as staging refuses it (``secret_source``)."""
+    import re
+
+    from ouroboros.artifacts import stream_artifact_file
+    from ouroboros.chat_uploads import file_media, upload_id, uploads_dir
+    from ouroboros.workspace_patch_rules import _sensitive_untracked_reason
+
+    rows = []
+    for ordinal, ref in enumerate(refs):
+        uid = upload_id(ref.get("upload"))
+        path, original = uploads_dir(root) / uid, re.sub(r"^[0-9a-f]{32}_", "", uid)
+        row = {"ordinal": ordinal, "label": str(ref.get("name") or "attachment"),
+               **{key: ref[key] for key in ("mime", "size", "sha256") if key in ref}}
+        if uid and (reason := _sensitive_untracked_reason(original)):
+            rows.append({**row, "status": "rejected", "reason": "secret_source",
+                         "rule": f"uploaded file name {original!r}: {reason}"})
+            continue
+        try:
+            if not uid:
+                raise OSError("the quoted row names no saved upload")
+            stream_artifact_file(path, expected=ref)
+            mime, kind = file_media(path)
+        except OSError:
+            rows.append({**row, "status": "rejected", "reason": "source_missing"})
+            continue
+        rows.append({**row, "status": "staged", "root": "artifact_store", "relpath": f"attachments/{uid}",
+                     "abs_path": str(path), "mime": mime, "is_image": kind == "image"})
+    return rows
+
+
 def select_return(ctx, relay_id: str) -> tuple[dict, str]:
     relays = getattr(ctx, "_open_relays", None) or {}
     if relay_id and relay_id in relays:
@@ -214,28 +325,40 @@ def acknowledge_relay(root, target: str, entry: dict) -> None:
                                    **relay_target_facts(root, target))
 
 
+def work_display_name(task) -> str:
+    """The work's name as the UI shows it (room_work.js: its suggested name, then its title); never its id or its text."""
+    return str((task or {}).get("suggested_name") or (task or {}).get("title") or "").strip()
+
+
 def relay_target_facts(root, target: str, task=None) -> dict:
     from ouroboros.projects_registry import project_chat_for_task, list_reserved_projects
     from ouroboros.task_results import load_task_result
     task = task or load_task_result(root, target) or {}
     chat_id = project_chat_for_task(root, target) or task.get("chat_id", 1)
     project = next((p for p in list_reserved_projects(root) if p["chat_id"] == chat_id), {})
+    name = work_display_name(task)  # never the work's text or id: a nameless work is the receipt's `the work`
     return {"project_id": str(project.get("id") or ""), "project_name": str(project.get("name") or ("Main" if chat_id else "Hidden")),
-            "project_chat_id": int(chat_id), "target_task_ids": [target],
-            "target_titles": [str(task.get("title") or task.get("text") or target)]}
+            "project_chat_id": int(chat_id), "target_task_ids": [target], "target_titles": [name] if name else []}
 
 
 def publish_relay_ack(root, target: str, relay: dict, bridge) -> None:
-    """The receiver's saved ACK updates the same source annotation live."""
+    """The receiver's saved ACK updates the same source annotation live, with the row as saved (#968),
+    never a second read of the work. A read row the sidecar could not take still goes out from the
+    work's facts, as before: the mailbox ACK is the authority."""
     if bridge is None:
         return
-    facts = relay_target_facts(root, target)
+    from ouroboros.project_dialogue import ROUTING_RECEIPT_FIELDS, chat_annotation_receipt
     for quote in relay.get("quotes") or []:
         source = quote["source"]
         if source.get("client_message_id"):
-            bridge.send_routing_ack(source["chat_id"], client_message_id=source["client_message_id"],
-                                    action="steer_task", target=target, status="read",
-                                    routing_token=relay["relay_id"], **facts)
+            try:
+                saved = chat_annotation_receipt(root, source["client_message_id"], relay["relay_id"])
+            except OSError:  # an unreadable sidecar sends the ack from the work's facts, as before
+                saved = {}
+            fields = ({key: saved[key] for key in ROUTING_RECEIPT_FIELDS if key in saved} if saved.get("status") == "read"
+                      else {"action": "steer_task", "target": target, "status": "read",
+                            "routing_token": relay["relay_id"], **relay_target_facts(root, target)})
+            bridge.send_routing_ack(source["chat_id"], client_message_id=source["client_message_id"], **fields)
 
 
 def publish_relay(root, target: str, entry: dict, bridge, task=None) -> None:
@@ -244,6 +367,8 @@ def publish_relay(root, target: str, entry: dict, bridge, task=None) -> None:
     from supervisor.message_bus import log_chat
     from ouroboros import dialogue_store
     from ouroboros.chat_references import projection_fields
+    from ouroboros.task_results import load_task_result
+    task = task or load_task_result(root, target) or {}
     facts = relay_target_facts(root, target, task)
     with _INGRESS_LOCK:
         # The saved row of this relay id, by its indexed client id: an append-before-receipt crash
@@ -251,9 +376,17 @@ def publish_relay(root, target: str, entry: dict, bridge, task=None) -> None:
         stored = next((dict(found.row) for found in dialogue_store.rows_by_client_id(root, entry["msg_id"])
                        if found.row.get("type") == KIND_RELAY), None)
         if stored is None:
+            # The saved row also names the room the note came from and the work it was written for, by the name
+            # the UI showed then (the mailbox entry keeps its identity bytes; Main's note card reads the receiver
+            # from it, and says `this work` for a work without a readable name).
+            sender = relay_sender_facts(root, str(entry.get("source_task_id") or ""))
+            title = work_display_name(task)
+            receiver = {"task_id": target, **({"title": title} if title else {})}
             stored = log_chat("out", facts["project_chat_id"], 0, entry["text"], ts=entry["ts"],
                               task_id=target, record_type=KIND_RELAY, client_message_id=entry["msg_id"],
-                              message_meta={"relay": entry["relay"]}, drive_root=root, require_write=True)
+                              message_meta={"relay": {**entry["relay"], **({"sender": sender} if sender else {}),
+                                                      "target": receiver}},
+                              drive_root=root, require_write=True)
     if bridge is not None and stored["chat_id"]:
         try:
             bridge.send_message(stored["chat_id"], stored["text"], task_id=target, ts=stored["ts"],

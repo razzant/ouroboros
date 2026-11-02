@@ -186,7 +186,8 @@ export function installCardDom({ innerHeight = 800 } = {}) {
         listeners: (type) => windowListeners.get(type)?.size || 0,
     };
     const store = new Map();
-    const storage = { getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)), store };
+    const storage = { getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)),
+        removeItem: (key) => store.delete(key), store };
     const define = (key, value) => Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
     define('document', doc);
     define('window', win);

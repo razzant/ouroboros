@@ -80,8 +80,66 @@ test('verbatim unsent draft survives full instance destruction and is keyed by t
         assert.equal(fx.calls.length, 0);
         const foreign = fx.decision.buildQuizCard({ ...WS_MSG, task_id: 'different' });
         assert.equal(field(foreign).value, '');
-        card.querySelector('.chat-quiz-clear').click();
+        // No separate control clears a draft (owner 19.10, A): emptying the field releases it.
+        assert.equal(card.querySelector('.chat-quiz-clear'), null);
+        edit(card, '');
         assert.equal(field(card).value, ''); assert.equal(storage.rows.size, 0);
+    } finally { fx.restore(); }
+});
+
+test('emptying the unsent words releases a refusal about them, as the retired Clear did', async () => {
+    const storage = store();
+    const fx = fixture({ storage, fetchImpl: async () => ({ ok: false, status: 422, json: async () => ({ error: 'refused' }) }) });
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const note = card.querySelector('.chat-quiz-submission-note');
+        edit(card, 'my words'); choose(card); await turn();
+        assert.match(note.textContent, /Answer not accepted/);
+        assert.equal(field(card).value, 'my words', 'a refused answer keeps its draft');
+        edit(card, 'my words, edited');
+        assert.match(note.textContent, /Answer not accepted/, 'an edit keeps the refusal beside the words it describes');
+        edit(card, '');
+        assert.equal(note.textContent, '');
+        assert.equal(card.querySelector('.chat-quiz-feedback').hidden, true, 'nothing left to say takes no line');
+        assert.equal(storage.rows.size, 0);
+    } finally { fx.restore(); }
+});
+
+test('typing never clears a frozen attempt: an unconfirmed answer keeps its words, note and recovery', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const fx = fixture({ fetchImpl: () => new Promise(() => {}), fetchDetail: async () => detail() });
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        edit(card, 'frozen words'); choose(card);
+        mock.timers.tick(15001); await turn(); await turn();
+        assert.equal(card.dataset.submission, 'unknown');
+        const note = card.querySelector('.chat-quiz-submission-note').textContent;
+        assert.ok(note);
+        edit(card, '');
+        assert.equal(field(card).value, 'frozen words');
+        assert.deepEqual([card.dataset.submission, card.querySelector('.chat-quiz-submission-note').textContent], ['unknown', note]);
+        assert.equal(card.querySelector('.chat-quiz-forget').hidden, false);
+    } finally { fx.restore(); mock.timers.reset(); }
+});
+
+test('the feedback follows the answer it describes: Forget first and quiet, the server actions last', async () => {
+    const fx = fixture({ fetchImpl: async () => { throw new Error('lost'); }, fetchDetail: async () => detail() });
+    try {
+        const card = fx.decision.buildQuizCard(WS_MSG);
+        const box = card.querySelector('.chat-quiz-comment-box');
+        const feedback = card.querySelector('.chat-quiz-feedback');
+        // One frame holds the words and Send; the field is named and grows through the composer's sizing.
+        assert.deepEqual(box.children.map((node) => node.className), ['chat-quiz-comment', 'chat-quiz-send ui-hit-area']);
+        assert.equal(field(card).getAttribute('aria-label'), 'Your answer');
+        assert.ok(['content', 'fit'].includes(field(card).dataset.sizing));
+        assert.equal(box.nextElementSibling, feedback);
+        assert.equal(feedback.hidden, true, 'nothing to say takes no line');
+        assert.deepEqual(feedback.children.map((node) => node.className), ['chat-quiz-submission-note', 'chat-quiz-storage-note',
+            'chat-quiz-forget btn btn-xs btn-ghost', 'chat-quiz-check btn btn-xs btn-default', 'chat-quiz-retry btn btn-xs btn-default']);
+        choose(card); await turn(); await turn();
+        assert.equal(card.dataset.submission, 'unknown');
+        assert.equal(feedback.hidden, false);
+        assert.deepEqual(['forget', 'check', 'retry'].map((name) => card.querySelector(`.chat-quiz-${name}`).hidden), [false, false, false]);
     } finally { fx.restore(); }
 });
 
@@ -194,6 +252,23 @@ test('Project recovery requires its existing project binding; foreign and unknow
             card = fx.decision.buildQuizCard(WS_MSG); await turn();
             card.querySelector('.chat-quiz-retry').click(); await turn();
             assert.equal(fx.calls.length, 0); assert.equal(card.dataset.submission, 'unknown');
+        } finally { fx.restore(); }
+    }
+});
+
+test('a private Main question its Project also shows recovers there; another Project never does', async () => {
+    for (const [also, posts] of [[['p1'], 1], [['other'], 0]]) {
+        const storage = store();
+        let fx = baseFixture({ storage, projectId: 'p1', chatId: 23, fetchImpl: async () => { throw new Error('lost'); } });
+        let card = fx.decision.buildQuizCard(WS_MSG); choose(card); await turn(); fx.restore();
+        fx = baseFixture({ storage, projectId: 'p1', chatId: 23, rawDetail: true, fetchDetail: async () => ({
+            task_id: 't-1', owner_quiz: { 'qz-1': WS_MSG },
+            question_rooms: { 'qz-1': { state: 'known', chat_id: 1, project_id: '', also_project_ids: also } },
+        }) });
+        try {
+            card = fx.decision.buildQuizCard(WS_MSG); await turn();
+            card.querySelector('.chat-quiz-retry').click(); await turn();
+            assert.equal(fx.calls.length, posts, also.join());
         } finally { fx.restore(); }
     }
 });

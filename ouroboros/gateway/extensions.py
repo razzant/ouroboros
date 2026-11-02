@@ -25,6 +25,7 @@ from ouroboros.gateway._helpers import (
 )
 from ouroboros.gateway.extension_receipts import extension_process_receipt, extension_reconcile_receipt
 from ouroboros.skill_lifecycle_queue import queue_snapshot
+from ouroboros.skill_review_history import review_history_detail as _skill_review_history_detail_sync
 from ouroboros.skill_loader import (
     discover_skills,
     find_skill,
@@ -33,11 +34,6 @@ from ouroboros.skill_loader import (
     skill_review_gate,
     _sanitize_skill_name,
 )
-from ouroboros.skill_review_usage import (
-    skill_review_attempt_coverage,
-    skill_review_usage_markdown,
-)
-
 log = logging.getLogger(__name__)
 _CHILD_DISPATCH_HEADER_DENYLIST = {
     "authorization",
@@ -270,7 +266,6 @@ def _build_extensions_index(drive_root, repo_path):
         return datetime.fromtimestamp(min(stamps), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
     from ouroboros.extension_health import read_extension_health
-    from ouroboros.gateway.presence_settings import presence_runtime_card_projection
     from ouroboros.skill_review_runner import skill_review_ui_projection
     from ouroboros.tools.github import github_token_from_env_or_settings
     # Request-invariant: resolve the github-token state ONCE for the whole index, not
@@ -373,9 +368,6 @@ def _build_extensions_index(drive_root, repo_path):
                 else grant_status_for_skill(drive_root, s)
             ),
         })
-        presence_runtime = presence_runtime_card_projection(drive_root, s)
-        if presence_runtime is not None:
-            entry["presence_runtime"] = presence_runtime
         # Durable OuroborosHub publication receipt (state-plane, survives bucket
         # moves). Collision rows above deliberately never read state, so these
         # fields are absent there. published=null when no valid record exists;
@@ -684,7 +676,8 @@ class _ApiReviewCtx:
         self.current_chat_id = 0
         self.pending_events: list = []
         self.emit_progress_fn = None
-        self.event_queue = None  # _emit_usage_event falls back to pending_events
+        self.event_queue = None  # no task queue: other review events stay on pending_events
+        self.server_usage_bus = True  # its llm_usage rows reach the server bus (review_helpers)
         self.messages: list = []
 
 
@@ -718,7 +711,7 @@ async def _run_owner_skill_action(request: Request, skill_name: str, action: str
 
 
 async def api_skill_review(request: Request) -> JSONResponse:
-    """Queue tri-model skill review from the UI without blocking the event loop."""
+    """Queue the skill review from the UI without blocking the event loop."""
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)
@@ -758,179 +751,6 @@ async def api_skill_lifecycle_queue(_request: Request) -> JSONResponse:
     The queue snapshot only: polled every second while a lifecycle action is
     pending, so it heals nothing (the review-job owners do)."""
     return JSONResponse(queue_snapshot())
-
-
-def _skill_review_history_detail_sync(
-    drive_root: pathlib.Path, skill_name: str, job_id: str,
-) -> Dict[str, Any]:
-    """Locate ONE terminal review record by job_id and render its markdown.
-
-    Read-only over the append-only ``review_history.jsonl``. Raw reviewer text
-    never leaves the history file: findings are the already-normalized
-    ``parsed_items`` rows, and degraded (non-responsive) reviewers are
-    disclosed by model + status with a pointer instead of the raw body.
-    """
-    from ouroboros import skill_review_history
-    from ouroboros.skill_review import render_skill_review_block
-    from ouroboros.skill_review_status import (
-        STATUS_BLOCKERS,
-        STATUS_CLEAN,
-        STATUS_PENDING,
-        STATUS_WARNINGS,
-    )
-
-    record, lookup_status = skill_review_history.find_history_job_bounded(
-        drive_root, skill_name, job_id,
-    )
-    if lookup_status == "absent":
-        return {"error": "no review history for skill", "status_code": 404}
-    if lookup_status == "io_error":
-        return {
-            "error": "review history is temporarily unavailable; retry the detail",
-            "status_code": 503,
-        }
-    if record is None:
-        error = (
-            "review record unavailable outside the bounded history window"
-            if lookup_status == "unavailable"
-            else "review record not found"
-        )
-        return {"error": error, "status_code": 404}
-    raw_actors = [
-        actor for actor in (record.get("raw_actor_records") or [])
-        if isinstance(actor, dict)
-    ]
-    actor_models = [
-        str(actor.get("model_id") or actor.get("model") or "reviewer")
-        for actor in raw_actors
-    ]
-    duplicate_models = {
-        model for model in actor_models if actor_models.count(model) > 1
-    }
-    duplicate_occurrences: Dict[str, int] = {}
-    labeled_actors = []
-    for actor in raw_actors:
-        model = str(actor.get("model_id") or actor.get("model") or "reviewer")
-        slot_id = str(actor.get("slot_id") or "")
-        duplicate_occurrences[model] = duplicate_occurrences.get(model, 0) + 1
-        qualifier = slot_id or f"legacy-actor-{duplicate_occurrences[model]}"
-        label = f"{model} [{qualifier}]" if model in duplicate_models else model
-        labeled_actors.append((actor, label))
-    findings = [
-        {**item, "model": label}
-        for actor, label in labeled_actors
-        for item in (actor.get("parsed_items") or [])
-        if isinstance(item, dict)
-    ]
-    reviewer_models = [
-        label for _actor, label in labeled_actors
-    ]
-    degraded_actors = [
-        {
-            "model_id": label,
-            "status": str(actor.get("status") or "unknown"),
-            "raw_text": "(raw reviewer output withheld from chat; stored in review_history.jsonl)",
-        }
-        for actor, label in labeled_actors
-        if str(actor.get("status") or "") != "responded"
-    ]
-    status = str(record.get("status") or "pending")
-    terminal_reason = str(record.get("terminal_reason") or "")
-    lifecycle_status = str(
-        record.get("job_status") or record.get("lifecycle_status") or ""
-    ).strip().lower()
-    lifecycle_failed = lifecycle_status in {
-        "failed", "error", "timeout", "interrupted", "cancelled",
-    }
-    # Interrupted/timeout/failed records carry no review verdict; surface the
-    # terminal reason honestly instead of pretending a review body exists.
-    error_note = (
-        terminal_reason or lifecycle_status or status
-        if lifecycle_failed
-        else ("" if status in {
-            STATUS_CLEAN, STATUS_WARNINGS, STATUS_BLOCKERS, STATUS_PENDING,
-        } else (terminal_reason or status))
-    )
-    attempt = int(record.get("snapshot_attempt") or 1)
-    outcome = {
-        "skill": skill_name,
-        "status": status,
-        "content_hash": str(record.get("content_hash") or ""),
-        "findings": findings,
-        "reviewer_models": reviewer_models,
-        "review_round": int(record.get("review_round") or attempt),
-        "snapshot_attempt": attempt,
-        "snapshot_revised": bool(record.get("snapshot_revised")),
-        "raw_actor_records": degraded_actors,
-        "error": error_note,
-    }
-    markdown = render_skill_review_block(outcome, attempt_idx=attempt)
-    if degraded_actors:
-        markdown += (
-            "\n\n_A terminal reviewer slot that never started or refused has no "
-            "physical-attempt ledger row; incomplete attempt coverage can therefore be final._"
-        )
-    # Max-Review-Cycles accounting facts (Q16/Q17 auditability) ride the
-    # free-form markdown detail: the response contract
-    # (SkillReviewHistoryDetailResponse) is typed to exactly four fields, so
-    # adding response keys would need an api_types version bump — the rendered
-    # detail string is the additive channel. Legacy rows without the facts
-    # render nothing.
-    accounting = []
-    usage_detail = ""
-    replayed = bool(record.get("replayed_from_ts"))
-    if replayed:
-        accounting.append(
-            f"free replay of the {record.get('replayed_from_ts')} verdict; "
-            "no physical reviewer dispatch for this replay"
-        )
-    elif record.get("paid"):
-        accounting.append("paid panel dispatch (counts toward Max Review Cycles)")
-        if record.get("usage_attribution_schema") == "physical_attempt_v1":
-            from ouroboros.usage_accounting import skill_review_usage
-
-            try:
-                usage = skill_review_usage(
-                    drive_root, review_skill=skill_name,
-                    review_wave_id=str(record.get("wave_id") or job_id),
-                )
-                if usage.get("attempt_ids"):
-                    known, expected, recorded = skill_review_attempt_coverage(record, usage)
-                    usage_detail = skill_review_usage_markdown(
-                        usage, coverage_known=known, expected=expected, recorded=recorded,
-                    )
-                else:
-                    accounting.append(
-                        "no canonical physical-attempt rows are recorded yet; "
-                        "cash and finality are unavailable"
-                    )
-            except Exception:
-                log.debug("skill review physical-attempt detail unavailable", exc_info=True)
-                accounting.append("exact physical-attempt accounting is currently unavailable")
-        else:
-            accounting.append(
-                "exact per-wave physical-attempt attribution was unavailable in this version"
-            )
-    if record.get("review_contract_fingerprint"):
-        accounting.append(
-            f"panel contract {str(record.get('review_contract_fingerprint'))[:12]}…"
-        )
-    if record.get("rebuttal_sha256"):
-        accounting.append(f"rebuttal sha256 {str(record.get('rebuttal_sha256'))[:12]}…")
-    if accounting:
-        markdown += "\n\n_Review accounting: " + "; ".join(accounting) + "._"
-    if usage_detail:
-        markdown += "\n\n" + usage_detail
-    elif replayed:
-        markdown += "\n\n_Cost: $0 (free replay)._"
-    else:
-        markdown += "\n\n_Cost unavailable._"
-    return {
-        "markdown": markdown,
-        "status": status,
-        "content_hash": outcome["content_hash"],
-        "job_status": str(record.get("job_status") or ""),
-    }
 
 
 async def api_skill_review_history_detail(request: Request) -> JSONResponse:
@@ -992,14 +812,6 @@ async def api_skill_reconcile(request: Request) -> JSONResponse:
     _broadcast_extension_lifecycle(
         request, skill_name, state.get("action"), state.get("reason"),
     )
-    # Reconcile can flip grants/load state: refresh schedule readiness off the
-    # event loop because the schedule resync waits for a lock.
-    try:
-        from supervisor.queue import resync_skill_schedules
-
-        await asyncio.to_thread(resync_skill_schedules, drive_root)
-    except Exception:
-        log.debug("api_skill_reconcile schedule sync failed", exc_info=True)
     return JSONResponse(extension_reconcile_receipt(skill_name, state))
 
 

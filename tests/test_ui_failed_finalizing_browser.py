@@ -5,11 +5,11 @@ real WebSocket reconnect and on a narrow light page — then settles once.
 
 Only model judgment is a fixture. The provider refusal is a real HTTP 401 on
 the model wire, the host's provider-unavailable rail preserves intermediate work,
-and the one event-held call is the root's post-task scratchpad compression
-(identified by the production prompt's line over a scratchpad seeded past its
-threshold — there is no paid summary and no reflection), so synthesis is
-provably open while the browser looks. Nothing is timed: every wait is an event
-or a bounded DOM poll.
+and the one event-held call is the root's post-task evolution chooser, which
+this fixture's owner settings enable (identified by the production prompt's first
+line — there is no paid summary, no reflection and, since #918, no scratchpad
+compression), so synthesis is provably open while the browser looks. Nothing is
+timed: every wait is an event or a bounded DOM poll.
 """
 import json
 
@@ -17,7 +17,6 @@ import pytest
 
 from devtools.benchmarks.common.server_runner import _api
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
-from ouroboros.memory import Memory
 from tests._shared import producer_evidence_dir
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests.system_e2e.harness import (
@@ -29,7 +28,7 @@ wait_clone = clone_fixture
 pytestmark = [pytest.mark.serial, pytest.mark.browser]
 
 MARKER = "FAILED_FINALIZING_REAL_ACTOR"
-SCRATCHPAD_MARKER = "The scratchpad working memory has"  # ouroboros/consolidator.py::consolidate_scratchpad
+CHOOSER_MARKER = "You decide whether Ouroboros should run ONE reviewed self-improvement"  # post_task_evolution._DECISION_PROMPT
 SALVAGE_MARKER = "[PROVIDER_UNAVAILABLE]"  # ouroboros/loop.py::_provider_unavailable_result
 NEUTRAL = "Nothing further to record for this fixture."
 TITLE = "Provider outage proof"
@@ -76,7 +75,7 @@ class _OutageModel(ScriptedStubModel):
     class, so no backoff retries) on every later tool round of the marked task AND on
     the host's forced outage final (``[PROVIDER_UNAVAILABLE]``): the provider is down
     for that call too, so the host's terminal incident preserves the intermediate
-    output (``host_salvage``). The post-task scratchpad compression is never refused —
+    output (``host_salvage``). The post-task evolution chooser is never refused —
     it is the one call the gate holds."""
 
     def __init__(self, gate):
@@ -104,16 +103,16 @@ class _OutageModel(ScriptedStubModel):
         self._server.RequestHandlerClass = Handler
 
     def _answer(self, body, seq):
-        if SCRATCHPAD_MARKER in body_text(body):
+        if CHOOSER_MARKER in body_text(body):
             # The held late-phase call answers as the production prompt asks, so the
-            # phase completes instead of recording a failed scratchpad upkeep.
-            return "scratchpad", {"role": "assistant", "content": json.dumps(
-                {"compressed_block": "Compressed fixture working notes."})}
+            # phase completes instead of recording a failed chooser stage.
+            return "chooser", {"role": "assistant", "content": json.dumps(
+                {"promote": False, "objective": "", "requires_plan_review": False, "backlog_id": ""})}
         return super()._answer(body, seq)
 
     def _refuse(self, body):
         text = body_text(body)
-        if MARKER not in text or SCRATCHPAD_MARKER in text:
+        if MARKER not in text or CHOOSER_MARKER in text:
             return False
         later_tool_round = bool(body.get("tools")) and any(
             isinstance(m, dict) and m.get("role") == "tool" for m in body.get("messages") or [])
@@ -177,14 +176,14 @@ def test_failed_root_reads_failed_then_finalizing(wait_clone, tmp_path, monkeypa
         "XDG_CONFIG_HOME": str(fake_home / ".config")})
     # Only diagnostics leave the managed scratch; the fake HOME and server inputs do not.
     shots = producer_evidence_dir(tmp_path / "screenshots", "failed-finalizing")
-    # A scratchpad past its compression threshold: the root's late phase buys that one call.
-    for index in range(4):
-        Memory(root).append_scratchpad_block(f"{MARKER} working note {index}: " + "w" * 9_000, source=f"fixture-{index}")
-    gate = ModelGate(lambda body: SCRATCHPAD_MARKER in body_text(body) and MARKER in body_text(body), timeout=300)
+    # The owner-enabled post-task chooser: the root's late phase buys that one call.
+    gate = ModelGate(lambda body: CHOOSER_MARKER in body_text(body), timeout=300)
     facts = {}
     with _OutageModel(gate) as model:
         settings_path = root / "settings.json"
-        write_settings_file(settings_path, keyless_settings(model, OUROBOROS_MAX_WORKERS=2))
+        # The chooser runs only outside Light access, with the owner's post-task evolution on.
+        write_settings_file(settings_path, keyless_settings(model, OUROBOROS_MAX_WORKERS=2, OUROBOROS_RUNTIME_MODE="advanced",
+                                                            OUROBOROS_POST_TASK_EVOLUTION="true"))
         server = KeylessIsolatedServer(wait_clone, root, settings_path)
         server.start(ready_timeout=120)
         oracle = ArtifactOracle(root)
@@ -202,7 +201,7 @@ def test_failed_root_reads_failed_then_finalizing(wait_clone, tmp_path, monkeypa
                         "memory_mode": "forked", "metadata": {"delegation_role": "root"}})
                     task_id = str(created.get("task_id") or "")
                     assert task_id, created
-                    # The held compression IS the open synthesis: the early final already left.
+                    # The held chooser call IS the open synthesis: the early final already left.
                     assert gate.arrived.wait(180), (model.kinds(), oracle.task_result(task_id))
                     # The worker's own (forked) row already settled Failed; the canonical
                     # row stays live until task_done, and carries the open checkpoint.

@@ -25,10 +25,11 @@ export function renderMobileNavToggle({ inComposer = false } = {}) {
  * The one header of every page AND the Project panel (docs/DESIGN.md "Shell", plan P5): one row, one height,
  * one title style, one close control. `☰ · title · status … actions · ×`: the leading slot holds ☰ (the stack
  * layout shows it), the title row takes the room's status after the title (room_work.js), the toolbar and the
- * trailing slot end the row. A page has no caption line: the sidebar's row and its tabs name it. A tab strip is
- * its own strip under the row, so the row stays one row. `named` says the sidebar's chosen row already names this place: on a desk such a header shows no
- * title (the h2 stays for readers) and, with no actions, no bar at all; a Project keeps its name. No icon anywhere:
- * the place is named by words, never a glyph (owner 5A).
+ * trailing slot end the row. A page has no caption line: the sidebar's row and its tabs name it. `named` says the
+ * sidebar's chosen row already names this place: on a desk such a header shows no title (the h2 stays for readers)
+ * and its lead slot takes the title's place with the page's own navigation (bindPageHeader); a header with nothing
+ * to show draws no bar. A tab strip is written under the row, where the stack layout keeps it. A Project keeps its
+ * name. No icon anywhere: the place is named by words, never a glyph (owner 5A).
  */
 export function renderPageHeader({
     page = '',   // a registry id: the title is its label unless `title` says otherwise
@@ -61,7 +62,7 @@ export function renderPageHeader({
         : '';
     const facts = [
         named ? ' data-sidebar-names' : '',
-        named && !toolbar && !trailing ? ' data-empty' : '',
+        named && !toolbar && !trailing && !tabs ? ' data-empty' : '',
     ].join('');
     const id = titleId ? ` id="${escapeHtml(titleId)}"` : '';
     return `
@@ -70,7 +71,7 @@ export function renderPageHeader({
             <div class="app-page-title-block">
                 <div class="app-page-title-row">
                     <h2 class="app-page-title"${id}>${escapeHtml(words)}</h2>
-                </div>
+                </div>${named ? '<div class="app-page-lead"></div>' : ''}
             </div>
             ${toolbar}
             ${trailing}
@@ -79,37 +80,92 @@ export function renderPageHeader({
     `;
 }
 
-/** A bar narrower than this (px) cannot hold Restart, Panic, More and the budget on one row with the status. */
+/**
+ * A page's own navigation in its bar (docs/DESIGN.md "Page header", owner 19.10 A): on a desk the bar of a page the
+ * sidebar names starts with the page's tabs or location, where the hidden title stood, and ends with its actions, so
+ * it has two ends as Main's bar has; in the stack layout the same nodes return under the row, where a phone keeps
+ * them. Navigation sharing a toolbar also returns there when the content column is too narrow (including a
+ * sidebar drag). `lead` defaults to what renderPageHeader wrote under the row (the tab strip); `actions` join the toolbar's
+ * start. Nodes move and are never re-rendered, so their listeners, selection and focus stay theirs; the selected
+ * tab is revealed again by its strip's own observer. Returns the disposer.
+ */
+export function bindPageHeader(header, { lead = null, actions = null } = {}) {
+    const doc = header?.ownerDocument;
+    const under = header?.nextElementSibling?.classList?.contains('app-page-tabs') ? header.nextElementSibling : null;
+    const moves = [[lead || under?.firstElementChild, header?.querySelector('.app-page-lead'), 'append'],
+        [actions, header?.querySelector('.app-page-toolbar'), 'prepend']]
+        .filter(([node, bar]) => node && bar)
+        .map(([node, bar, how]) => {
+            // A mark holds each node's home under the row.
+            const home = doc.createComment('');
+            node.before(home);
+            return { node, bar, how, home };
+        });
+    if (!moves.length) return () => {};
+    const toolbar = header.querySelector('.app-page-toolbar');
+    let docked = null;
+    const place = (layout) => {
+        // Navigation competes with both moved actions (Files) and actions already in the bar (Skills).
+        // A tab-only bar can scroll at any column width; a toolbar needs its own row in a narrow column.
+        const narrow = toolbar && header.clientWidth > 0 && header.clientWidth < 440;
+        const desk = (typeof layout === 'string' ? layout : currentLayout()) === 'docked';
+        header.toggleAttribute('data-narrow', desk && narrow);
+        const next = desk && !narrow;
+        if (next === docked) return;
+        docked = next;
+        const active = doc.activeElement;
+        for (const { node, bar, how, home } of moves) {
+            if (docked) bar[how](node); else home.after(node);
+        }
+        header.toggleAttribute('data-lead', docked);  // the bar's two ends: style.css lays them on one line
+        // An engine drops focus from a node it moves: the owner's place in the page stays where it was.
+        if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
+    };
+    place();
+    const offLayout = onLayoutChange(place);
+    const view = doc.defaultView;
+    let frame = 0;
+    // Moving the nodes can change the bar's height. Do that in the next frame, outside observer delivery.
+    const observer = view?.ResizeObserver && toolbar ? new view.ResizeObserver(() => {
+        view.cancelAnimationFrame(frame);
+        frame = view.requestAnimationFrame(place);
+    }) : null;
+    observer?.observe(header);
+    return () => { offLayout(); observer?.disconnect(); if (frame) view.cancelAnimationFrame(frame); };
+}
+
+/** A bar narrower than this (px) cannot hold the status, the consciousness chip, Restart, Panic and the budget. */
 export const HEADER_FULL_ROW_MIN_WIDTH = 640;
 
 /**
- * Main's header controls by the room the bar has (owner Q4=A): a bar wide enough keeps Restart in the row and the
- * budget after the actions; the stack layout, and a docked content column narrower than
- * HEADER_FULL_ROW_MIN_WIDTH, move the same two nodes into the ⋯ menu (the budget first, Restart last), so the bar
- * stays one row and each control keeps its one handler and its one id. The bar's width is measured (a
+ * Main's Restart and budget by the room the bar has (owner 25.10, 4A): a bar wide enough keeps them in its row; the
+ * stack layout, and a docked content column narrower than HEADER_FULL_ROW_MIN_WIDTH, move the same two nodes into the
+ * room status's Shade (`shade.extras`, room_work.js), Restart first, so the bar keeps the status, the consciousness
+ * chip and Panic, and no ⋯. Each control keeps its one handler and its one id. The bar's width is measured (a
  * ResizeObserver), never a viewport breakpoint. Returns the disposer.
  */
-export function bindHeaderControlPlacement({ headerActions, budgetPill = null, bar = headerActions?.closest?.('.app-page-header') } = {}) {
+export function bindHeaderControlPlacement({ headerActions, budgetPill = null, shade = null, bar = headerActions?.closest?.('.app-page-header') } = {}) {
     const restart = headerActions?.querySelector?.('[data-chat-command="restart"]');
     const panic = headerActions?.querySelector?.('[data-chat-command="panic"]');
-    const menu = headerActions?.querySelector?.('.chat-header-menu');
+    const extras = shade?.extras;
     const toolbar = budgetPill?.parentElement || null;
-    if (!restart || !menu) return () => {};
+    if (!restart || !extras) return () => {};
     let placed = '';
     const compact = (layout) => layout === 'stack'
         || (Number(bar?.clientWidth) > 0 && bar.clientWidth < HEADER_FULL_ROW_MIN_WIDTH);
     // Called with the layout name by the layout switch, with entries by the observer, with nothing at bind.
     const place = (arg) => {
-        const next = compact(typeof arg === 'string' ? arg : currentLayout()) ? 'menu' : 'row';
+        const next = compact(typeof arg === 'string' ? arg : currentLayout()) ? 'shade' : 'row';
         if (next === placed) return;
         placed = next;
-        if (next === 'menu') {
-            if (budgetPill) menu.prepend(budgetPill);
-            menu.append(restart);
+        if (next === 'shade') {
+            extras.append(restart);
+            if (budgetPill) extras.append(budgetPill);
         } else {
             headerActions.insertBefore(restart, panic);
             if (budgetPill && toolbar) toolbar.insertBefore(budgetPill, headerActions.nextSibling);
         }
+        shade.update?.();
     };
     place();
     const offLayout = onLayoutChange(place);
@@ -208,8 +264,11 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
     const disposeFade = bindScrollFade(strip, { axis: 'x' });
     const tabs = () => Array.from(strip.querySelectorAll(`[role="tab"][${dataAttr}]`))
         .filter((tab) => tab.closest('[role="tablist"]') === strip);
-    const enabled = (tab) => !tab.disabled && tab.getAttribute('aria-disabled') !== 'true'
-        && !tab.closest('[hidden], [inert]');
+    // External navigation may select a tab before its page becomes interactive.
+    // A disabled/hidden choice itself stays unavailable on either path.
+    const selectable = (tab) => !tab.disabled && tab.getAttribute('aria-disabled') !== 'true'
+        && !tab.matches('[hidden], [inert]');
+    const enabled = (tab) => selectable(tab) && !tab.closest('[hidden], [inert]');
     let selected = null;
     function revealSelected() {
         if (disposed || !strip.clientWidth) return;
@@ -230,7 +289,8 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
     function select(value, { focus = false } = {}) {
         if (disposed) return false;
         const all = tabs();
-        const next = all.find((tab) => tab.getAttribute(dataAttr) === String(value) && enabled(tab));
+        const allowed = focus ? enabled : selectable;
+        const next = all.find((tab) => tab.getAttribute(dataAttr) === String(value) && allowed(tab));
         if (!next) return false;
         selected = next.getAttribute(dataAttr);
         all.forEach((tab) => {
@@ -277,8 +337,8 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
     const Observer = strip.ownerDocument?.defaultView?.ResizeObserver;
     const observer = Observer ? new Observer(revealSelected) : null;
     observer?.observe(strip);
-    const initial = tabs().find((tab) => enabled(tab) && tab.getAttribute('aria-selected') === 'true')
-        || tabs().find(enabled);
+    const initial = tabs().find((tab) => selectable(tab) && tab.getAttribute('aria-selected') === 'true')
+        || tabs().find(selectable);
     if (initial) select(initial.getAttribute(dataAttr));
     return {
         select,

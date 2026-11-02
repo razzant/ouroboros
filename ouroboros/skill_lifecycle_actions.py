@@ -94,15 +94,6 @@ def _caller_action_error(ctx: Any, action: str, owner_actor: str, owner_source: 
     return "", resolved
 
 
-def _sync_schedules(drive_root: Path, repo_path: str) -> None:
-    try:
-        from supervisor.queue import sync_skill_schedules
-
-        sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
-    except Exception:
-        log.debug("skill action schedule sync failed", exc_info=True)
-
-
 def _reconcile(skill: Any, drive_root: Path, repo_path: str, *, enabling: bool = False) -> dict[str, Any]:
     from ouroboros import extension_loader
     from ouroboros.config import load_settings
@@ -150,7 +141,6 @@ def _toggle(skill: Any, drive_root: Path, repo_path: str, enabled: bool, actor: 
     save_enabled(drive_root, skill.name, enabled, actor=actor, reason=reason)
     skill.enabled = enabled
     state = _reconcile(skill, drive_root, repo_path, enabling=enabled)
-    _sync_schedules(drive_root, repo_path)
     failed = enabled and state.get("action") == "extension_load_error"
     return {
         "ok": not failed, **facts, "enabled": enabled and not failed,
@@ -270,7 +260,6 @@ def _grant(skill: Any, drive_root: Path, repo_path: str, items: list[str], *, pr
             state = _reconcile(skill, drive_root, repo_path)
         except Exception as exc:
             state = {"reason": "reconcile_call_failed", "load_error": str(exc)}
-        _sync_schedules(drive_root, repo_path)
         turn_on = reconcile_turn_on_when_ready(drive_root, skill.name, repo_path=repo_path, reason="grants approved", progress=progress)
     return {
         "turn_on_when_ready": turn_on["action"],

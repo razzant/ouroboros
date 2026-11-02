@@ -475,7 +475,27 @@ def _candidate_symlink_escapes(
     return sorted(set(escapes)), ""
 
 
-def integrate_payload_patch(
+def integrate_payload_patch(ctx: ToolContext, **params: Any) -> str:
+    """Serialize the live target's CAS, mutation and disposition publication across captures."""
+    from hashlib import sha256
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    if params.get("decision") != "apply":
+        return _integrate_payload_patch(ctx, **params)
+    target = pathlib.Path(params["entry"].target_root).resolve()
+    key = sha256(str(target).encode("utf-8")).hexdigest()
+    path = pathlib.Path(params["drive"]) / "state" / "delegate_payload_mutations" / f"{key}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = acquire_exclusive_file_lock(path, timeout_sec=20.0, owner_aware_stale=True)
+    if fd is None:
+        return "⚠️ INTEGRATE_DELEGATED_TARGET_BUSY: payload mutation lock unavailable; capture retained."
+    try:
+        return _integrate_payload_patch(ctx, **params)
+    finally:
+        release_exclusive_file_lock(path, fd)
+
+
+def _integrate_payload_patch(
     ctx: ToolContext, *, drive: pathlib.Path, entry: _RunCustody, rid: str,
     decision: str, reason: str, cap_dir: pathlib.Path,
     manifest: Dict[str, Any], patch_path: pathlib.Path,
@@ -714,7 +734,7 @@ def integrate_payload_patch(
             "integrate_delegated_patch(decision='reject') to release the snapshot "
             "while keeping the patch artifact. Finalizing your task while this run is "
             "neither applied nor rejected leaves your custody audit unreconciled (Done "
-            "with warnings, reason delegated_custody_unreconciled). "
+            "with warnings, the run listed in delegated_runs_unreconciled beside your own reason). "
             f"Verdict: {verdict_path or '(unwritten)'}.")
     if result_hash and live_after != result_hash:
         try:
@@ -766,8 +786,8 @@ def integrate_payload_patch(
             "to release the snapshot while keeping the patch artifact). The snapshot "
             "and the patch are preserved as forensic material. Finalizing your task "
             "while this run is neither applied nor rejected leaves your custody audit "
-            "unreconciled (the task completes as Done with warnings, reason "
-            f"delegated_custody_unreconciled). Verdict: {verdict_path or '(unwritten)'}.")
+            "unreconciled (the task completes as Done with warnings, the run listed in "
+            f"delegated_runs_unreconciled beside your own reason). Verdict: {verdict_path or '(unwritten)'}.")
     return _finalize_payload_apply(
         ctx, rid=rid, reason=reason, target=target, touched=touched,
         ordered=ordered, manifest=manifest, state_root=state_root,

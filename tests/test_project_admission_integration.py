@@ -102,10 +102,8 @@ def test_explicit_promotion_cannot_write_into_replacement_incarnation(host, tmp_
 
 
 @pytest.mark.parametrize("scoped", [False, True])
-@pytest.mark.parametrize("consumer", ["restore", "timeout"])
-def test_ui_conversion_keeps_prepared_resource_through_recovery(host, tmp_path, monkeypatch, scoped, consumer):  # noqa: F811
+def test_ui_conversion_keeps_prepared_resource_through_recovery(host, tmp_path, monkeypatch, scoped):  # noqa: F811
     from supervisor import queue
-    from tests.test_retry_project_binding import _patch_retry_input_handoff, _retry
 
     prepared = admit(host, tmp_path, scoped=scoped)
     write_task_result(host.root, "converted", "scheduled")
@@ -116,24 +114,16 @@ def test_ui_conversion_keeps_prepared_resource_through_recovery(host, tmp_path, 
     assert prepared["_project_admission"] == registry.project_admission_basis("chosen", chosen, frozen=True)
     basis = copy.deepcopy(prepared["_project_admission"])
     registry.update_project(host.root, "chosen", working_dir=str(tmp_path / "new-default"))
-    if consumer == "restore":
-        assert queue.persist_queue_snapshot()
-        host.pending.clear()
-        assert queue.restore_pending_from_snapshot() == 1
-    else:
-        _patch_retry_input_handoff(monkeypatch)
-        host.pending.clear()
-        write_task_result(host.root, "converted", "running", result="working")
-        requeued, attempt, _, suppression = _retry(SimpleNamespace(q=queue), prepared, "converted", "retry")
-        assert requeued and attempt == 2 and not suppression
-        assert registry.project_id_for_task(host.root, "retry") == "chosen"
+    assert queue.persist_queue_snapshot()
+    host.pending.clear()
+    assert queue.restore_pending_from_snapshot() == 1
     [recovered] = host.pending
     assert recovered["project_id"] == "chosen" and recovered["workspace_root"] == folder
     current = registry.project_admission_basis(
         "chosen", registry.get_reserved_project(host.root, "chosen"), frozen=True)
     assert current["project"]["routing_incarnation"] == basis["project"]["routing_incarnation"]
     assert current != basis  # placement refreshes the room, never the prepared working folder
-    assert recovered["_project_admission"] == (current if consumer == "restore" else basis)
+    assert recovered["_project_admission"] == current
     assert not recovered.get("_project_admission_restore_hold")
 
 

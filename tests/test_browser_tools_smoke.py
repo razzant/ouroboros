@@ -161,7 +161,8 @@ _WIDGET_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8"><title>sr
 <body><h1>VISIBLE_PARENT_CONTROL</h1><iframe id="plain" src="/plain.html"></iframe>
 <section><div id="mount"></div></section><pre id="status">Loading</pre>
 <script type="module">import {mountModuleWidget} from '/web/modules/widget_module.js';
-window.dispose = await mountModuleWidget(document.querySelector('#mount'), {skill: 'repro', ws_prefix: 'repro.'},
+window.dispose = await mountModuleWidget(document.querySelector('#mount'),
+  {skill: 'repro', ws_prefix: 'repro.', tab_id: 'main', generation: 'g1'},
   {kind: 'module', entry: 'widget.js', height: 240});
 document.querySelector('#status').textContent = 'Parent mounted';
 window.probe = () => { const f = document.querySelector('#mount iframe');
@@ -185,6 +186,21 @@ def widget_page_url():
             body, kind = bodies[self.path][0].encode(), bodies[self.path][1]
             self.send_response(200)
             self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802 - stdlib callback name
+            # The parent's lease controls; a classic mount mints its route lease before it frames the module.
+            if not self.path.startswith("/api/widgets/asset-leases"):
+                return self.send_error(404)
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            token = "t" * 43
+            reply = {"ok": True} if self.path.endswith("/revoke") else {
+                "token": token, "base_url": f"/api/widget-resources/{token}/", "expires_in": 120, "renew_after": 40}
+            body = json.dumps(reply).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -248,3 +264,52 @@ def test_builtin_renders_the_production_srcdoc_widget_and_its_bridge(tmp_path, m
             (tmp_path / f"srcdoc-widget-{engine}.png").write_bytes(raw)  # retained for visual inspection
         finally:
             executor.submit(cleanup_browser, registry._ctx).result()
+
+
+# R7: the real extraction (Playwright text, DOM, the markdown walker and a caller's expression) is returned
+# whole, never cut by the handler before the loop's exact-source delivery.
+_BIG_MARKERS = ("BIG_HEAD_41d2", "BIG_MIDDLE_7f3a", "BIG_TAIL_9c1d")
+
+
+@pytest.fixture()
+def large_page_url():
+    paragraphs = [f"<p>{('p%05d ' % i) * 10}</p>" for i in range(1600)]  # ~120 000 characters of text
+    paragraphs.insert(800, f"<p>{_BIG_MARKERS[1]}</p>")
+    body = f"<html><body><p>{_BIG_MARKERS[0]}</p>{''.join(paragraphs)}<p>{_BIG_MARKERS[2]}</p></body></html>".encode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - stdlib callback name
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_real_chromium_large_page_outputs_are_returned_whole(tmp_path, large_page_url):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    try:
+        for output, floor in (("text", 100_000), ("markdown", 100_000), ("html", 110_000)):
+            text = _browse_page(ctx, url=large_page_url, output=output)
+            if text.startswith("⚠️ BROWSER_INFRA_ERROR"):
+                pytest.skip(text[:300])
+            assert len(text) > floor and "[truncated]" not in text, (output, len(text))
+            assert all(marker in text for marker in _BIG_MARKERS), output
+        evaluated = _browser_action(ctx, action="evaluate", value="'E'.repeat(25000) + 'EVAL_TAIL_5a5a'")
+        assert "E" * 25_000 + "EVAL_TAIL_5a5a" in evaluated and "[truncated]" not in evaluated  # host notes may follow
+    finally:
+        cleanup_browser(ctx)

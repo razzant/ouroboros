@@ -16,7 +16,7 @@ import { markView } from '../modules/status_mark.js';
 import { summarizeRoom } from '../modules/project_activity.js';
 import {
     OUTCOME_TONES, activityWord, applyCardWorkViews, cardControls, cardMenuActions, cardWorkView, clock, emptyWorkState,
-    ownStopPress, reasonText, reconcileWorkState, resumeTargets, roomStatusView, workControls, workLine,
+    memberState, ownStopPress, reasonText, reconcileWorkState, resumeTargets, roomStatusView, workControls, workLine,
     workMenuActions, workQuestion, workRowView,
 } from '../modules/work_status.js';
 import { SERVER_REASONS, room, serverMark, work as builtWork } from './work_fixture.js';
@@ -111,6 +111,28 @@ test('only the client facts overlay the room, each with its mark: socket closed,
         'a press on work that does not work changes no word');
 });
 
+// A direct turn before its first model request: every surface says Preparing with the start step the turn stands
+// at (the bar keeps it apart from its word, to drop first); once its Main call started it says the word its census
+// move gives, never Sending or Thinking before the census sees the request go out.
+test('a turn still preparing says its start step beside Preparing on the bar and on every other surface', () => {
+    const state = stateOf('direct_preparing', 1);
+    const bar = roomStatusView(state);
+    assert.deepEqual([bar.text, bar.step, bar.tone, bar.mark], ['Preparing', 'Building context', 'live', 'moving']);
+    assert.equal(summarizeRoom(state.room, state.works).label, 'Preparing · Building context');
+    const row = workRowView(state.works[0]);
+    assert.deepEqual([row.word, row.secondary], ['Preparing', 'Building context']);
+    const card = cardWorkView(state.works[0]);
+    assert.deepEqual([card.text, card.secondary], ['Preparing', 'Building context']);
+    assert.equal(roomStatusView(state, { stopping: 'immediate' }).text, 'Cancelling…', 'the owner\'s own Stop says only its word');
+    const called = stateOf('direct_requested', 1);
+    assert.deepEqual([roomStatusView(called).text, workRowView(called.works[0]).secondary], ['Working', '']);
+    assert.ok(!('step' in roomStatusView(called)) && !('step' in roomStatusView(stateOf('working_call'))),
+        'a working room says no start step');
+    // Only a preparing room says a line in the bar: a working room's reason stays beside its work.
+    assert.equal(workLine(stateOf('held_continue').works[0]), 'Continue starts when 3 helpers of the earlier attempt finish');
+    assert.equal(roomStatusView(stateOf('held_continue')).text, 'Working');
+});
+
 test('reasons read their code through the catalog; counts stay parameters; an unknown code reads its sentence', () => {
     const held = work('held_continue');
     assert.equal(reasonText(held.because[0]), 'Continue starts when 3 helpers of the earlier attempt finish');
@@ -119,7 +141,7 @@ test('reasons read their code through the catalog; counts stay parameters; an un
     assert.equal(reasonText(null), '');
     // The episode's own sentence, as the server says it: who paused, and Ouroboros in its own words.
     assert.equal(reasonText(work('paused_by_owner').because[0]), 'You paused it');
-    assert.equal(reasonText(work('paused_by_mind').because[0]), 'Ouroboros: pause before the update you asked for');
+    assert.equal(reasonText(work('paused_by_mind').because[0]), 'Ouroboros paused it: pause before the update you asked for');
     assert.equal(reasonText(work('spending_limit').because[0]), 'Spending limit reached');
     // A Pause that declared nobody says nothing, never its code.
     assert.equal(reasonText(work('paused_unattributed').because[0]), '');
@@ -148,7 +170,7 @@ test('reasons read their code through the catalog; counts stay parameters; an un
         assert.equal(reasonText(work('model_access').because[0]), 'Модели нужен вход');
         assert.equal(reasonText(work('paused_by_owner').because[0]), 'Вы поставили на паузу');
         // Ouroboros's sentence is its own prose: only the frame is translated, never its words, never by its code.
-        assert.equal(reasonText(work('paused_by_mind').because[0]), 'Уроборос: pause before the update you asked for');
+        assert.equal(reasonText(work('paused_by_mind').because[0]), 'Поставлено на паузу Уроборосом: pause before the update you asked for');
         assert.equal(reasonText({ code: 'paused_by_mind', text: 'Ouroboros paused it' }), 'Поставлено на паузу Уроборосом');
         assert.equal(reasonText(work('paused_unattributed').because[0]), '');
         assert.equal(reasonText({ code: 'brand_new_reason', text: 'Unknown sentence' }), 'Unknown sentence');
@@ -190,6 +212,21 @@ test('the owner\'s own Stop press on a work\'s card says itself on the row at on
     assert.equal(workRowView(work('paused_by_owner'), { stopping: 'immediate' }).word, 'Paused');
 });
 
+test('a sleep whose chosen helper still awaits its own Resume says so beside Waiting, with no new door or turn', () => {
+    const state = stateOf('sleeping_on_paused_helper');
+    const row = workRowView(state.works[0]);
+    assert.deepEqual(row, { word: 'Waiting', tone: 'held', mark: 'still', owner: false, outcome: '', focus: '',
+        secondary: 'Sleeping until it is woken · 1 helper it waits for is paused until Ouroboros resumes it' });
+    // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
+    const grouped = workControls(state.works[0]);
+    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
+    assert.deepEqual([roomStatusView(state).owner, roomStatusView(state).amber], [false, '']);
+    // A translation keeps the count; the helper's own Activity sentence is unchanged.
+    assert.equal(reasonText({ code: 'awaited_helpers_mind', count: 3, text: 'x' }),
+        '3 helpers it waits for are paused until Ouroboros resumes them');
+    assert.equal(memberState(state, 'sw-c').because[0].code, 'awaiting_selection');
+});
+
 test('a reusable slot gets no control by its id; a real target keeps its own', () => {
     const slot = { controls: [{ action: 'stop', target: 'active' }, { action: 'pause', target: 'active' },
         { action: 'stop', target: 't-1' }] };
@@ -225,7 +262,7 @@ test('rows: their word, the line beside it, tone, mark and the owner\'s move fro
     assert.deepEqual(row('paused_by_owner'), { word: 'Paused', secondary: `You paused it · ${PRESSED}`, tone: 'held',
         mark: 'pause', ...quiet });
     assert.deepEqual([row('paused_by_mind').word, row('paused_by_mind').secondary],
-        ['Paused', 'Ouroboros: pause before the update you asked for']);
+        ['Paused', 'Ouroboros paused it: pause before the update you asked for']);
     assert.deepEqual([row('paused_unattributed').word, row('paused_unattributed').secondary], ['Paused', ''],
         'a Pause that declared nobody names nobody');
     assert.deepEqual(row('spending_limit'), { word: 'Paused', secondary: 'Spending limit reached', tone: 'held', mark: 'pause',
@@ -346,12 +383,40 @@ test('a card menu reads its work, else its own task controls without Resume', ()
     assert.equal(cardControls(state, 'loose').resume, false);
 });
 
+test('a released answered tree selects helpers individually, never through its work Resume', () => {
+    const held = { ...work('helper_after_parent'), controls: [
+        { action: 'stop', target: 'p', scope: 'cascade' },
+        { action: 'resume', target: 'child-a', scope: 'single' },
+        { action: 'resume', target: 'child-b', scope: 'single' },
+    ] };
+    assert.equal(workControls(held).resume, '', 'a work press must not choose the first helper');
+    assert.deepEqual([...resumeTargets({ works: [held] })], ['child-a', 'child-b']);
+});
+
+test('a nonexecuting pause offers Resume and says the unresolved model request beside Paused', () => {
+    const paused = work('paused_model_handoff');
+    assert.equal(workRowView(paused).word, 'Paused');
+    assert.equal(workControls(paused).resume, 'mh');
+    assert.equal(paused.live, false);
+    assert.match(workLine(paused), /a model request has no recorded result/);
+});
+
+test('Activity reads each member from the server, so only an executing helper says Pausing', () => {
+    const data = body('pausing_with_queued_helper');
+    assert.equal(workRowView(memberState(data, 'pc-new')).word, 'Paused');
+    assert.equal(workRowView(memberState(data, 'pc-run')).word, 'Pausing…');
+    assert.equal(memberState(data, 'absent'), null);
+    const sleeping = memberState(body('sleeping'), work('sleeping').episode.task_id);
+    assert.equal(workRowView(sleeping).word, 'Waiting');
+    assert.equal(workLine(sleeping), 'Sleeping until it is woken');
+});
+
 test('a parent that finished while its helper works keeps the Stop its work offers; an ended work offering nothing gives none', () => {
     const helper = stateOf('helper_after_parent');
     assert.equal(work('helper_after_parent').episode.live, false, 'the server says the parent\'s episode ended');
     const card = cardControls(helper, 'p');
     assert.deepEqual([card.menu, card.resume, card.work?.work_id], [true, false, 'p']);
-    assert.deepEqual(cardMenuActions(helper, { groupId: 'p' }), [ACTION_STOP_NOW]);
+    assert.deepEqual(cardMenuActions(helper, { groupId: 'p' }), [ACTION_PAUSE, ACTION_STOP_NOW]);
     // An ended work that offers nothing (the server may also offer its open runs' Stop) gives none:
     // the card keeps its own controls.
     const ended = stateOf('ended_with_runs', 42, { works: [{ ...work('ended_with_runs'), controls: [] }] });
@@ -425,7 +490,7 @@ test('a work card says its work\'s word alone, its line beside it; plain running
     const view = (name, index = 0) => cardWorkView(work(name, index));
     const said = (name, index = 0) => [view(name, index).text, view(name, index).secondary];
     assert.deepEqual([...said('paused_by_owner'), view('paused_by_owner').classes], ['Paused', `You paused it · ${PRESSED}`, 'paused']);
-    assert.deepEqual(said('paused_by_mind'), ['Paused', 'Ouroboros: pause before the update you asked for']);
+    assert.deepEqual(said('paused_by_mind'), ['Paused', 'Ouroboros paused it: pause before the update you asked for']);
     assert.deepEqual(said('paused_unattributed'), ['Paused', '']);
     assert.deepEqual([...said('spending_limit'), view('spending_limit').classes], ['Paused', 'Spending limit reached', 'warn']);
     assert.deepEqual(said('sleeping'), ['Waiting', 'Sleeping until it is woken']);
@@ -606,4 +671,19 @@ test('the line\'s clock: the time today, the date as well on another day; second
     // The owner's press is said with its time; no other reason gets one.
     assert.equal(workLine(work('paused_by_owner')), `You paused it · ${clock(work('paused_by_owner').because[0].since)}`);
     assert.equal(workLine(work('spending_limit')), 'Spending limit reached');
+});
+
+test('a recorded Stop says itself on the row and the card of a press no card saw, beside the word it still is', () => {
+    const work = { activity: 'working', transition: 'none', call: '', confirmed: true, mark: 'moving', turn: [], tails: [],
+        episode: { task_id: 'turn', live: true },
+        because: [{ code: 'stop_requested', text: 'Stop requested: it ends at its next step' }] };
+    const row = workRowView(work);
+    assert.equal(row.word, 'Working');
+    assert.equal(row.secondary, 'Stop requested: it ends at its next step');
+    assert.equal(cardWorkView(work).secondary, 'Stop requested: it ends at its next step');
+    // The owner's own press on a loaded card keeps its immediate word, and says nothing twice.
+    assert.equal(workRowView(work, { stopping: 'immediate' }).word, 'Cancelling…');
+    assert.equal(workRowView(work, { stopping: 'immediate' }).secondary, '');
+    // Without the fact a working work's card keeps its own chip: nothing invents a Stop.
+    assert.equal(cardWorkView({ ...work, because: [] }), null);
 });

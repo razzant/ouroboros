@@ -643,7 +643,7 @@ def main() -> int:
                         rows.append(fut.result())
                         (out_dir / "runs.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
         finally:
-            server.stop()
+            teardown_unconfirmed = server.stop()
 
         rows.sort(key=lambda r: r["run"])
         summary = _summarize(rows)
@@ -661,7 +661,7 @@ def main() -> int:
         if not args.keep:
             _log("(pass --keep to retain workspaces/logs; keeping run root because results live there)"
                  if not args.out else "cleaning run root")
-            if args.out:
+            if args.out and not teardown_unconfirmed:  # an unconfirmed stop keeps its root for inspection
                 shutil.rmtree(run_root, ignore_errors=True)
     return 0
 

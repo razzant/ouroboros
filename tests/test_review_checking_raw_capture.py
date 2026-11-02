@@ -14,7 +14,7 @@ import pytest
 from ouroboros import review_checking as rc
 from ouroboros.config import CLAUDEXOR_DELEGATED_WORKSPACE_ROOT_MIN_VERSION
 from ouroboros.subagents import delegated_run_shape
-from tests.test_review_checking import _author_state, _git, author  # noqa: F401
+from tests.test_review_checking import _author_state, _git, author, old_clone_seat  # noqa: F401
 
 
 def _bytes_git(root, *args):
@@ -86,8 +86,9 @@ def test_linked_source_and_linked_reviewer_index_leave_source_controls_unchanged
     control_before = linked_index.read_bytes()
     # The reviewer index may even point to source controls: it is never copied,
     # read or written by host capture. Its worktree bytes are the evidence.
-    (area / ".git" / "index").unlink()
-    (area / ".git" / "index").symlink_to(linked_index)
+    area_index = pathlib.Path(_git(area, "rev-parse", "--path-format=absolute", "--git-path", "index"))
+    area_index.unlink()
+    area_index.symlink_to(linked_index)
     raw = b"linked checking bytes\r\n\x00"
     (area / "f.txt").write_bytes(raw)
     evidence = rc.capture_seat_evidence(data, "task", "linked")
@@ -102,10 +103,12 @@ def test_linked_source_and_linked_reviewer_index_leave_source_controls_unchanged
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink privileges vary on Windows")
 @pytest.mark.parametrize("control", ["config", "objects"])
-def test_linked_reviewer_control_is_refused_without_touching_source(author, tmp_path, control):  # noqa: F811
+def test_an_older_clone_seats_linked_control_is_refused_without_touching_source(author, tmp_path, control):  # noqa: F811
+    """A seat made before linked worktrees keeps its own Git controls; one the reviewer replaced
+    with a link is refused (its capture would read through it), and the copy stays recoverable."""
     data = tmp_path / "data"
     source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
-    area = pathlib.Path(rc.prepare_seat_area(data, "task", "linked-control", source))
+    area = old_clone_seat(data, author, source, "linked-control")
     before = _author_state(author)
     config_before = (author / ".git" / "config").read_bytes()
     target = area / ".git" / control

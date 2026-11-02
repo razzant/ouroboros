@@ -68,6 +68,8 @@ def quiet_tick(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
     monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [time.time()])
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
+    # Not this fixture's duty: the real child's own thread would outlive the test (it has its own tests).
+    monkeypatch.setattr(sm, "_tick_maintenance_child", lambda: None)
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(workers, "WORKERS", {})
@@ -161,11 +163,11 @@ def test_the_delegated_reconciler_reads_its_candidates_before_it_reads_liveness(
     from ouroboros import delegate_custody_reconcile as dcr
 
     live: set[str] = set()
-    run = SimpleNamespace(task_id="late-task", run_id="run-1", settled=False)
+    run = dc.RunCustody(task_id="late-task", run_id="run-1", route_id="fixture", model="m")
     seen: list = []
 
     def reading_candidates(root, where="", params=()):
-        assert (where, params) == ("state=?", ("held",))
+        assert (where, params) == (current.HELD_WHERE, ("held",))
         live.add("late-task")  # admitted while current candidates are read
         return {run.run_id: run}
 
@@ -313,44 +315,65 @@ def test_reconcile_cadence_is_stamped_when_the_pass_ends(quiet_tick, monkeypatch
 
     sm = quiet_tick
     clock = [1_000_000.0]
-    monkeypatch.setattr(sm.time, "time", lambda: clock[0])
-    monkeypatch.setattr("ouroboros.observability.retry_pending_child_ref_promotions", lambda root, **kwargs: {})
+    monkeypatch.setattr(sm, "time", SimpleNamespace(time=lambda: clock[0]))  # this module's clock only
     monkeypatch.setattr(sm, "_STEP_FAILURES", {})
+    _quiet_reconcile_steps(monkeypatch, sm, [])
+    for leaf in ("supervisor.workspace_preparation.recover_interrupted_preparations",
+                 "ouroboros.review_operation.retire_dead_review_pointers_softly",
+                 "ouroboros.late_review_marks.replay_owed_late_reviews"):
+        monkeypatch.setattr(leaf, lambda root, **kwargs: None)
+    # The tick's other passes are not this cadence's: each opens its own latch at once.
+    monkeypatch.setattr(sm, "_run_schedule_duty", lambda stop_event, latch: latch.release())
+    monkeypatch.setattr(sm, "_run_terminal_duty", lambda root, step, latch, stop_event: latch.release())
     threads = _track_threads(monkeypatch)
-    calls = []
+    calls, entered, release, held = [], threading.Event(), threading.Event(), []
 
-    def slow_pass(**kwargs):
-        calls.append(kwargs)
+    def slow_last_stage():
+        # The pass's LAST stage, held (#2121): a stamp or release placed anywhere earlier shows while it waits.
+        calls.append(threading.current_thread().name)
         clock[0] += 400.0
+        entered.set()
+        held.append(release.wait(5))
         if len(calls) == 2:
             raise RuntimeError("the pass itself failed")
 
-    monkeypatch.setattr(sm, "_periodic_zombie_reconcile", slow_pass)
+    monkeypatch.setattr(sm, "_tick_maintenance_child", slow_last_stage)
     last_custody_reap = [clock[0] + 10_000]  # the 600 s sweep is not due
 
-    def tick(marker):
+    def tick(marker, *, due=False):
+        entered.clear()
+        release.clear()
+        before = marker[0]
         sm._periodic_supervisor_maintenance(last_custody_reap, marker)
-        for thread in threads:
-            thread.join(5)
+        try:
+            if due:
+                assert entered.wait(5), "the due pass reached its last stage"
+                assert marker[0] == before and sm._RECONCILE_SWEEP_LOCK.locked(), "stamped or released before the END"
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(5)
+        assert all(not thread.is_alive() for thread in threads), "a maintenance pass did not end"
 
     marker = [clock[0] - 301]
-    tick(marker)
+    tick(marker, due=True)
     assert len(calls) == 1 and marker[0] == clock[0]  # stamped at the END of the 400 s pass
     tick(marker)
     assert len(calls) == 1, "a pass slower than its cadence must not re-arm on the next tick"
 
     clock[0] += 301.0
     with caplog.at_level(logging.WARNING):
-        tick(marker)
+        tick(marker, due=True)
     assert len(calls) == 2 and marker[0] == clock[0], "a failing pass still stamps when it ends"
     assert not sm._RECONCILE_SWEEP_LOCK.locked(), "and still releases its latch"
     assert any("Periodic reconcile_sweep failed (failure 1 in a row)" in r.getMessage() for r in caplog.records)
     tick(marker)
     assert len(calls) == 2
     clock[0] += 301.0
-    tick(marker)
+    tick(marker, due=True)
     assert len(calls) == 3, "the next eligible run still happens after the cadence"
     assert all(not thread.is_alive() for thread in threads)
+    assert held == [True] * 3 and set(calls) == {"reconcile-maintenance"}, (held, calls)
 
 
 def _quiet_reconcile_steps(monkeypatch, sm, done: list, *, heal=None):

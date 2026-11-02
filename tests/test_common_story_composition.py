@@ -98,11 +98,25 @@ def test_resident_composition_is_bounded_while_exact_reader_retains_twenty_four_
             assert f"source page {source} (room {row['chat_id']}): revision {source} used" in exact
         assert f"replaces {count}: " + ", ".join(pages) + ";" in exact
         assert f"selection {selection} by mind" in exact and ACCOUNT in exact
-        # The common view reaches children identically; room detail remains independently usable.
+        # A selected account replaces local resident detail too; exact source versions stay readable.
         assert _story(root, KID) == story
-        local = mv.render_room(_snapshot(root, {"id": "rootA001", "chat_id": rows[-1]["chat_id"]}))
-        assert f"Local account {count - 1}: We recorded the proposed repair" in local
+        local_task = {"id": "rootA001", "chat_id": rows[-1]["chat_id"]}
+        local = _snapshot(root, local_task)
+        for n, source in enumerate(pages):
+            body = f"Local account {n}: We recorded the proposed repair and the observation separately."
+            assert body not in story and body not in mv.render_room(local)
+            source_text, _ = _read_all(root, source, revision=source)
+            assert f"as of revision {source}: the original alone" in source_text
+            assert "text:\n" + body in source_text
         assert _journal(root) == journal
+        assert _write(root, kind="selection", target_id=account, replaces=pages, shown=False,
+                      reason="Return to the separate room accounts.")["ok"]
+        restored = _snapshot(root, local_task)
+        restored_story = mv.render_story(restored)
+        assert ACCOUNT not in restored_story
+        for n in range(count):
+            assert f"Local account {n}: We recorded the proposed repair" in restored_story
+        assert "Local account" not in mv.render_room(restored)  # restored pages render once, in the story
     # Growing both source and replacement lists changes counts, never the resident line population.
     assert len(blocks[0].splitlines()) == len(blocks[1].splitlines())
     assert abs(len(blocks[1]) - len(blocks[0])) < 20

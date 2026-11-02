@@ -14,7 +14,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, List
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ def invocation_outcome(source: Any, name: str, operation_id: str = "", *, future
             "tool": name, "claimed_at": utc_now_iso(), "source": source,
             "local_owner": ({"pid": os.getpid(), "process_birth": owner.answer_owner_birth,
                              "task_attempt": owner.attempt} if bound else {}),
+            "owner_proof": owner_proof(),
             "memory_owned": future_owned and bound, "lock": threading.RLock(),
             # Phase transitions never wait for the durable lock's store I/O.
             "phase_lock": threading.Lock(),
@@ -74,9 +75,46 @@ def submit_tool_future(ctx: Any, operation_id: str, tool: str, submit: Any, func
     return future, release
 
 
+_OWNER_PROOF: dict = {}
+
+
+def owner_proof() -> dict:
+    """This process's death-proof evidence, recorded BESIDE a claim's ``local_owner``.
+
+    ``local_owner`` keeps its exact three keys: retirement compares that dict for
+    equality, older releases included. The kernel birth (``process_identity``)
+    survives exec, so the custody session tells the image that wrote a claim from
+    the one that now runs under the same pid. Older releases ignore this key.
+    """
+    global _OWNER_PROOF
+    from ouroboros.process_custody import current_custody_session_id
+
+    proof = _OWNER_PROOF
+    if (proof.get("pid") != os.getpid() or proof.get("session") != current_custody_session_id()
+            or not proof.get("kernel_birth")):  # a forked child, an adopted session, or an unread birth
+        from ouroboros.process_identity import process_kernel_birth
+
+        _OWNER_PROOF = proof = {"pid": os.getpid(), "kernel_birth": process_kernel_birth(os.getpid()) or "",
+                                "session": current_custody_session_id()}
+    return dict(proof)
+
+
+def written_by_this_image(proof: Any) -> bool:
+    """A row whose ``owner_proof`` names this very process image: its writer is alive by definition.
+
+    No death proof may select it, whatever pid or birth it shares with an ended
+    image (an exec keeps both; only the custody session is new).
+    """
+    from ouroboros.process_custody import current_custody_session_id
+
+    return (isinstance(proof, dict) and proof.get("pid") == os.getpid()
+            and bool(proof.get("session")) and proof.get("session") == current_custody_session_id())
+
+
 def _claim(outcome: dict) -> dict:
     return {key: outcome[key] for key in
-            ("tool", "task_id", "root_task_id", "claimed_at", "local_owner")} | {"state": "claimed"}
+            ("tool", "task_id", "root_task_id", "claimed_at", "local_owner")} | {
+                "state": "claimed", "owner_proof": dict(outcome.get("owner_proof") or {})}
 
 
 def retain_invocation(outcome: dict, update=None) -> None:
@@ -84,6 +122,10 @@ def retain_invocation(outcome: dict, update=None) -> None:
     from ouroboros.task_store import exists, patch_handoff
     from ouroboros.owner_pause import OwnerPauseRefused
 
+    from ouroboros import custody_owed
+
+    if custody_owed.pending():
+        custody_owed.drain()  # this process's next write is a chance for what it still owes
     with outcome["lock"]:
         root = outcome["claim_root"]
         if not root or not outcome["task_id"]:
@@ -104,13 +146,30 @@ def retain_invocation(outcome: dict, update=None) -> None:
         patch_handoff(root, outcome["claim_task"], "launch_handoffs", outcome["operation_id"], mutate)
 
 
+def _returned_claim(root: Any, returned_at: str, confirmed: frozenset):
+    """The settlement mutator: one positive local return, idempotent and never a replay."""
+    from ouroboros.task_store import DELETE_ROW
+
+    def settle(claim):
+        if claim is None:
+            return None  # an absent claim is never recreated
+        pending = {key: value for key, value in (claim.get("external_pending") or {}).items()
+                   if key not in confirmed}
+        claim = {**claim, "state": "returned", "returned_at": claim.get("returned_at", returned_at),
+                 "external_pending": pending}
+        return claim if claim_still_owns_effect(root, claim) else DELETE_ROW
+    return settle
+
+
 def settle_invocation(outcome: dict) -> None:
-    """Retry only this idempotent completion within one store budget, never work.
+    """Write this invocation's return within one store budget; owe it after that, never forget it.
 
     Store acquisitions do not wait; the durable lock is released between tries.
-    A permanent refusal keeps the result and its unresolved durable custody.
+    A store that stays busy or refuses hands the SAME fact (stable ``returned_at``,
+    confirmed tokens) to ``custody_owed``, whose drivers write it later: a
+    returned call never stays «running» because one write lost a race.
     """
-    from ouroboros.task_store import DELETE_ROW, patch_handoff
+    from ouroboros.task_store import patch_handoff
     from ouroboros.utils import utc_now_iso
     from ouroboros.store import StoreBusy, STORE_WAIT_SEC, acquisition_budget
     from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
@@ -125,27 +184,52 @@ def settle_invocation(outcome: dict) -> None:
                            ("not_started", "settled", "local_extension_returned", "mcp_call_returned")):
                     return
                 returned_at = outcome.setdefault("returned_at", utc_now_iso())
-                def settle(claim):
-                    if claim is None:
-                        return None
-                    pending = {key: value for key, value in (claim.get("external_pending") or {}).items()
-                               if key not in outcome.get("confirmed_external", set())}
-                    claim = {**claim, "state": "returned", "returned_at": claim.get("returned_at", returned_at),
-                             "external_pending": pending}
-                    return claim if claim_still_owns_effect(outcome["claim_root"], claim) else DELETE_ROW
-                patch_handoff(outcome["claim_root"], outcome["claim_task"], "launch_handoffs",
-                              outcome["operation_id"], settle)
+                patch_handoff(outcome["claim_root"], outcome["claim_task"], "launch_handoffs", outcome["operation_id"],
+                              _returned_claim(outcome["claim_root"], returned_at,
+                                              frozenset(outcome.get("confirmed_external", set()))))
             return
         except StoreBusy as exc:
             remaining = end - time.monotonic()
             if exc.reason == "contention" and remaining > 0:
                 time.sleep(min(ACQUISITION_SLICE_SEC, remaining))
                 continue
-            log.warning("Invocation custody settlement retained for %s", outcome["operation_id"], exc_info=True)
-            return
+            log.warning("Invocation custody settlement owed for %s; retried by this process",
+                        outcome["operation_id"], exc_info=True)
         except Exception:
-            log.warning("Invocation custody settlement retained for %s", outcome["operation_id"], exc_info=True)
-            return
+            log.warning("Invocation custody settlement owed for %s; retried by this process",
+                        outcome["operation_id"], exc_info=True)
+        _owe_settlement(outcome)
+        return
+
+
+def _owe_settlement(outcome: dict) -> None:
+    from ouroboros import custody_owed
+    from ouroboros.utils import utc_now_iso
+
+    with outcome["lock"]:
+        root, holder, op = outcome["claim_root"], outcome["claim_task"], outcome["operation_id"]
+        settle = _returned_claim(root, outcome.setdefault("returned_at", utc_now_iso()),
+                                 frozenset(outcome.get("confirmed_external", set())))
+    custody_owed.owe(("settle", str(root), str(holder), str(op)),
+                     lambda: _patch_owed(root, holder, op, settle), label=str(op))
+
+
+def _patch_owed(root: Any, holder: str, op: str, change) -> None:
+    """One bounded acquisition for an owed row write; a failure raises and the fact stays owed.
+
+    A task whose lifecycle row is gone has nothing left to change: that fact is discharged.
+    """
+    from ouroboros import task_store
+    from ouroboros.store import acquisition_budget
+    from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+
+    try:
+        with acquisition_budget(ACQUISITION_SLICE_SEC):
+            task_store.patch_handoff(root, holder, "launch_handoffs", op, change)
+    except LookupError as exc:
+        if type(exc) is not LookupError:  # a KeyError or IndexError is a defect, never "the task is gone"
+            raise
+        log.warning("Owed custody write for %s dropped: task %s no longer exists", op, holder)
 
 
 def _update_active_claim(update) -> None:
@@ -178,17 +262,14 @@ def external_handoff(kind: str):
             outcome.setdefault("confirmed_external", set()).add(token)
             if discharged:
                 return
-            def remove(claim):
-                pending = dict(claim.get("external_pending") or {})
-                if token not in pending:
-                    return None  # confirmation cannot manufacture an absent duty
-                pending.pop(token, None)
-                return {**claim, "external_pending": pending}
+            remove = _without_token(token)
             try:
                 retain_invocation(outcome, remove)
                 discharged = True
             except Exception:
-                log.warning("External custody confirmation retained for %s", token, exc_info=True)
+                log.warning("External custody confirmation owed for %s; retried by this process", token,
+                            exc_info=True)
+                _owe_confirmation(outcome, token, remove)
         if outcome.get("closed"):
             # This receipt ends only its external duty, not a live runner or
             # callback owned by the enclosing Future.
@@ -213,6 +294,28 @@ def external_handoff(kind: str):
         confirmed()  # no caller acquired this external start
         raise
     return confirmed
+
+
+def _without_token(token: str):
+    """An exact external receipt's removal: idempotent, also once its claim settled away."""
+    def remove(claim):
+        pending = dict((claim or {}).get("external_pending") or {})
+        if claim is None or token not in pending:
+            return None  # confirmation cannot manufacture an absent duty
+        pending.pop(token, None)
+        return {**claim, "external_pending": pending}
+    return remove
+
+
+def _owe_confirmation(outcome: dict, token: str, remove) -> None:
+    """An exact external receipt whose write failed: the same removal stays owed."""
+    from ouroboros import custody_owed
+
+    root, holder, op = outcome.get("claim_root"), outcome.get("claim_task"), outcome.get("operation_id")
+    if not root or not holder:
+        return
+    custody_owed.owe(("confirm", str(root), str(holder), str(op), token),
+                     lambda: _patch_owed(root, holder, op, remove), label=str(op))
 
 
 def hold_invocation():
@@ -241,18 +344,19 @@ def local_producers_settled() -> bool:
     """The idle-retirement probe's non-review half, process-wide and O(live rows).
 
     Every registered tool future, including one its finished attempt forgot, has
-    reached its final ``settled`` event: callback/runner holds released and its
-    durable invocation settled (``budget_pause._finish_tool_row`` sets the event
-    only after ``settle_invocation``, outside the lock). No sender an owner Pause
-    abandoned still settles its paid answer. A returned task is not proof of either.
+    reached its final ``settled`` event (callback/runner holds released: the
+    PHYSICAL end), and this process owes no custody write (``custody_owed``: a
+    durable settlement or receipt that met a busy store). No sender an owner
+    Pause abandoned still settles its paid answer. A returned task is not proof
+    of any of these.
     """
-    from ouroboros import budget_pause
+    from ouroboros import budget_pause, custody_owed
     from ouroboros._usage_wait import _ABANDONED_SENDS
 
     with budget_pause._TOOL_LOCK:
         unsettled = any(not row["settled"].is_set()
                         for rows in budget_pause._TOOL_FUTURES.values() for row in rows.values())
-    return not unsettled and not _ABANDONED_SENDS
+    return not unsettled and not _ABANDONED_SENDS and not custody_owed.pending()
 
 
 def retain_unconfirmed_host_operation(reason: str) -> None:
@@ -290,9 +394,45 @@ def claim_still_owns_effect(root: Any, claim: dict) -> bool:
         else:
             observed = wait_for_routing_annotation(Path(root), receipt.get("client_message_id", ""),
                                                    token, timeout_sec=0)
-        if observed.get("status") not in {"scheduled", "delivered", "rejected", "needs_manual_target"}:
+        # ``read`` follows the receiver's durable acknowledgement: delivered and acknowledged.
+        if observed.get("status") not in {"scheduled", "delivered", "read", "rejected", "needs_manual_target"}:
             return True
     return False
+
+
+_EFFECT_WORDS = {"shell_process": "started process", "mcp_transport": "MCP request",
+                 "promote_chat_to_task": "task promotion", "steer_task": "message to a task",
+                 "tell_task": "message to a task", "ensure_project_scope": "project placement"}
+
+
+def tool_handoff_reason(claim: dict) -> dict:
+    """Why one held claim blocks, as facts the owner can act on; ``work_stop`` and the UI word them.
+
+    ``local_call_live``: its worker still runs (the call, or its unrecorded return);
+    ``local_completion_unknown``: no evidence the worker lives or ended;
+    ``owner_ended_effect_unknown`` / ``returned_effect_unconfirmed``: the local call is
+    over and a named outside effect is not confirmed. A passive read: nothing is written.
+    """
+    from ouroboros.local_custody_repair import owner_live
+
+    effects = sorted({_EFFECT_WORDS.get(str(kind), str(kind)) for kind in
+                      [*(claim.get("external_pending") or {}).values(),
+                       *(str((receipt or {}).get("type") or "") for receipt in claim.get("control_receipts") or [])]
+                      if kind} | ({"host operation"} if claim.get("host_unconfirmed") else set()))
+    state = claim.get("state")
+    if state == "returned":
+        reason = "returned_effect_unconfirmed"
+    elif state == "owner_dead":
+        reason = "owner_ended_effect_unknown"
+    else:
+        owner = claim.get("local_owner") if isinstance(claim.get("local_owner"), dict) else {}
+        proof = claim.get("owner_proof") if isinstance(claim.get("owner_proof"), dict) else {}
+        try:
+            live = owner_live(owner.get("pid") or proof.get("pid"), owner.get("process_birth"), proof)
+        except Exception:
+            live = False  # an unreadable probe proves nothing either way
+        reason = "local_call_live" if live else "local_completion_unknown"
+    return {"reason": reason, "tool": str(claim.get("tool") or "tool"), "effects": effects}
 
 
 def retained_tool_custody(root: Any, task_id: str, row: dict, *, excluding: str = "") -> list[dict]:
@@ -303,7 +443,8 @@ def retained_tool_custody(root: Any, task_id: str, row: dict, *, excluding: str 
             continue
         if (claim.get("state") not in {"returned", "owner_dead"}
                 or claim_still_owns_effect(root, claim)):
-            blockers.append({"kind": "tool_handoff", "task_id": task_id, "operation": claim})
+            blockers.append({"kind": "tool_handoff", "task_id": task_id, "operation": claim,
+                             "operation_id": operation_id, **tool_handoff_reason(claim)})
     from ouroboros.merge_receipts import effect_is_definite
     for receipt in row.get("merge_receipts") or []:
         if receipt.get("launch_operation_ids") and not effect_is_definite(receipt):
@@ -312,45 +453,103 @@ def retained_tool_custody(root: Any, task_id: str, row: dict, *, excluding: str 
     return blockers
 
 
-def retire_tool_invocations(root: Any, task_id: str, root_task_id: str, *,
-                            pid: int, process_birth: str, task_attempt: int, holder: str = "") -> None:
-    """Called only with positive evidence the exact local owner ended; exact claim match.
+def _retire_owned_claims(root: Any, holder: str, owned) -> List[str]:
+    """Turn the ``claimed`` rows ``owned`` selects into ``owner_dead``: effect unknown, never replayed.
 
-    Evidence: a retained-Process confirmed death, or ``local_custody_repair``'s
-    witness / platform-qualified absence. ``holder`` names the task result the
-    claim lives on when it is not the member's own (a member not yet published
-    claims on its root's row). Keep unknown-effect history and independent
-    custody. Legacy/unattributable claims are not evidence and remain untouched.
+    A known return stays ``returned`` and an already retired row is not rewritten:
+    the death of a writer never erases what it had already reported. Returns the
+    operation ids this write retired.
     """
     from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
     from ouroboros.task_store import patch_document
     from ouroboros.utils import utc_now_iso
 
-    if not pid or not process_birth or type(task_attempt) is not int:
-        return
-    identity = {"pid": pid, "process_birth": process_birth, "task_attempt": task_attempt}
+    landed: List[str] = []
+
     def retire(current):
         require_writable_task_result_schema(current)
-        if current.get("task_id") != (holder or task_id) or not current.get("status"):
+        if current.get("task_id") != holder or not current.get("status"):
             raise ValueError("tool_invocation_authority_unreadable")
+        landed.clear()
         claims = dict(current.get("launch_handoffs") or {})
         retired = dict(current.get("retired_tool_invocations") or {})
         for op, claim in list(claims.items()):
-            if (not isinstance(claim, dict) or claim.get("local_owner") != identity or claim.get("task_id") != task_id
-                    or claim.get("root_task_id") != root_task_id):
+            if not isinstance(claim, dict) or claim.get("state") != "claimed" or not owned(claim):
                 continue
             fact = {**claim, "state": "owner_dead", "retired_at": utc_now_iso(),
                     "effect_outcome": "unknown", "replay_authorized": False}
             retired[op] = fact
+            landed.append(op)
             if claim_still_owns_effect(root, fact):
                 claims[op] = fact
             else:
                 claims.pop(op)
-        if retired == current.get("retired_tool_invocations", {}):
+        if not landed:
             return None
         return stamp_task_result_schema({**current, "launch_handoffs": claims,
                                          "retired_tool_invocations": retired})
-    patch_document(root, holder or task_id, retire)
+    patch_document(root, holder, retire)
+    return list(landed)
+
+
+def claim_owned_by_process(claim: dict, *, pid: int, process_birth: str, kernel_birth: str = "") -> bool:
+    """Whether ``claim`` was written by the exact process ``(pid, birth)``, kernel evidence first.
+
+    Both kernel births present decide alone (``owner_proof``); otherwise the
+    recorded ``local_owner`` must name the same pid and the same non-empty birth
+    spelling. Attempt is a scope of the work, not of the process. A claim this
+    very image wrote is never selected: an earlier image of this pid shares its
+    pid and births, not its session (``written_by_this_image``).
+    """
+    proof = claim.get("owner_proof") if isinstance(claim.get("owner_proof"), dict) else {}
+    owner = claim.get("local_owner") if isinstance(claim.get("local_owner"), dict) else {}
+    if written_by_this_image(proof):
+        return False
+    if kernel_birth and proof.get("kernel_birth"):
+        return proof.get("pid") == pid and proof["kernel_birth"] == kernel_birth
+    return bool(process_birth) and owner.get("pid") == pid and owner.get("process_birth") == process_birth
+
+
+def retire_process_invocations(root: Any, *, pid: int, process_birth: str, kernel_birth: str = "") -> List[str]:
+    """The one claim retirement: every open claim the ended process wrote, across tasks and attempts.
+
+    Called only with positive evidence that exact process ended (a joined
+    retained Process, or ``local_custody_repair.owner_ended``); the open set is
+    the claimed rows, never task history. Returns the retired operation ids.
+    """
+    import json
+    import pathlib
+
+    from ouroboros.store import open_store
+
+    def owned(claim):
+        return claim_owned_by_process(claim, pid=pid, process_birth=process_birth, kernel_birth=kernel_birth)
+    with open_store(pathlib.Path(root), write=False) as txn:
+        rows = txn.conn.execute("SELECT task_id, facts FROM task_handoffs "
+                                "WHERE kind='launch_handoffs' AND state='claimed'").fetchall()
+    holders = set()
+    for row in rows:
+        try:
+            claim = json.loads(row[1])
+        except (TypeError, ValueError):
+            continue  # an unreadable row is not this process's; it stays held
+        if isinstance(claim, dict) and owned(claim):
+            holders.add(str(row[0]))
+    retired: List[str] = []
+    refused: List[Exception] = []
+    from ouroboros.store import StoreBusy
+
+    for holder in sorted(holders):  # one refusing row never starves the others; the fact stays owed for it
+        try:
+            retired += _retire_owned_claims(root, holder, owned)
+        except StoreBusy:
+            raise  # a busy store refuses every row alike: retry the whole fact later, not each row now
+        except Exception as exc:
+            log.debug("Claims of ended process %s on %s not retired yet", pid, holder, exc_info=True)
+            refused.append(exc)
+    if refused:
+        raise refused[0]
+    return retired
 
 def task_process_blockers(drive_root: Any, task_ids: set[str]) -> list[dict]:
     """Strict read of existing canonical executor custody without backend I/O.

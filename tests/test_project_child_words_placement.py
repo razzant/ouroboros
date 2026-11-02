@@ -100,6 +100,7 @@ def _child_registry(room, monkeypatch, mode: str, profile: str = "acting_subagen
     """The child's own tool registry and context, gated by the real dispatch."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     repo, drive, worktree = (room.root / "child" / name for name in ("repo", "data", "wt"))
     for path in (repo, drive, worktree):
         path.mkdir(parents=True, exist_ok=True)

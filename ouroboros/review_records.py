@@ -106,6 +106,11 @@ def validate_author_disposition(
             normalized["review_reference"] = json.loads(json.dumps(record["review_reference"], allow_nan=False))
         except (TypeError, ValueError):
             return None
+    from ouroboros.review_doctrine import carry_recorded_doctrine
+
+    normalized = carry_recorded_doctrine(normalized, record)
+    if normalized is None:
+        return None
     expected = str(subject_hash or "").strip()
     if expected and normalized["subject_hash"] != expected and not allow_stale:
         return None
@@ -134,13 +139,18 @@ def recorded_author_stop(decision: Any) -> bool:
 def build_author_disposition_from_mapping(
     value: Any, *, subject_hash: str, reviewer_signal: str = "", enforcement: str = "",
 ) -> Dict[str, Any]:
-    """Parse the public two-field author finish envelope."""
-    if not isinstance(value, dict) or set(value) - {"disposition", "rationale"}:
+    """Parse the public author finish envelope, including an optional helper claim."""
+    if not isinstance(value, dict) or set(value) - {"disposition", "rationale", "subagent_check"}:
         raise ValueError("AUTHOR_DISPOSITION_INVALID: envelope fields are invalid")
-    return build_author_disposition(
+    built = build_author_disposition(
         disposition=value.get("disposition", ""), rationale=value.get("rationale", ""),
         subject_hash=subject_hash, reviewer_signal=reviewer_signal, enforcement=enforcement,
     )
+    if "subagent_check" in value:
+        from ouroboros.review_doctrine import parse_subagent_check
+
+        built["subagent_check"] = parse_subagent_check(value.get("subagent_check"))
+    return built
 
 
 def review_outcome_received(actors: Any, *, findings: Any = (), terminal: bool = False) -> bool:
@@ -332,6 +342,8 @@ class ReviewActorRecord:
     status: str
     raw_text: str = ""
     parsed: Any = None
+    # The declared contract is finalized once, before producer persistence.
+    outcome: Dict[str, Any] = field(default_factory=dict)
     # Per-actor parsed verdict (PASS/FAIL/DEGRADED/UNKNOWN). Carried here so a
     # reader can take only the actors that CONTRIBUTED to the aggregate
     # (``review_verdict._contributing_actors``) instead of re-deriving the verdict.
@@ -357,6 +369,9 @@ class ReviewActorRecord:
     # (``run_failure_cause``); "" when nothing was reported. Opaque: shown, never branched on.
     # The ledger row keeps a plain fallback from the error text (``review_failure_facts``).
     reported_cause: str = ""
+    # Full safe structured refusal, before the short reported_cause view.
+    # These are evidence, never retry-policy inputs.
+    failure_details: Dict[str, Any] = field(default_factory=dict)
     parse_status: str = ""
     semantic_verdict: str = ""
     provider: str = ""
@@ -446,4 +461,22 @@ HARDNESS_LABEL_ONLY = "label_only"              # recorded on the objective axis
 HARDNESS_HARD_GATE = "hard_gate"                # blocking commit/scope immune gate (unchanged)
 
 
-TYPED_FAILURE_FACT_KEYS = ("failure_code", "reset_at", "http_status", "transport_status", "reported_cause")
+TYPED_FAILURE_FACT_KEYS = ("failure_code", "reset_at", "http_status", "transport_status", "reported_cause", "failure_details")
+
+
+def review_failure_summary(row: Mapping[str, Any]) -> str:
+    """A failed seat's saved facts for author handback, without a retry diagnosis."""
+    import json
+    from ouroboros.observability import redact_projection
+
+    seat = str(row.get("slot_id") or row.get("seat_id") or "unknown seat")
+    model = str(row.get("model_id") or row.get("model") or "model not reported")
+    parts = [f"{seat} ({model})", str(row.get("status") or "unknown")]
+    parts.extend(f"{key}={row[key]}" for key in TYPED_FAILURE_FACT_KEYS
+                 if key != "failure_details" and row.get(key) not in (None, ""))
+    details = row.get("failure_details")
+    if isinstance(details, dict) and details:
+        parts.append(json.dumps(details, ensure_ascii=False, sort_keys=True))
+    elif not row.get("reported_cause"):
+        parts.append(str(row.get("error") or row.get("raw_text") or "No cause was recorded."))
+    return str(redact_projection(" · ".join(parts)).value)

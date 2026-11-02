@@ -230,7 +230,8 @@ def test_worker_obeys_existing_controls_before_park_ack(tmp_path, monkeypatch, c
     if control == "cancelled":
         request_cancel(tmp_path, env.task["id"], source="pre-ack-test")
     elif control == "panic":
-        (tmp_path / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+        from ouroboros import model_wait
+        monkeypatch.setattr(model_wait, "current_model_wait", lambda: SimpleNamespace(control_reason=lambda: "panic"))
     else:
         env.ctx.model_wait_context.task["deadline_at"] = "2000-01-01T00:00:00+00:00"
     polls = []
@@ -330,7 +331,6 @@ def test_pending_park_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
         finally:
             conn.execute("ROLLBACK")
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     reaps = stdqueue.Queue()
@@ -340,7 +340,7 @@ def test_pending_park_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
     queue._enforce_task_timeouts_locked(workers, time.time(), 0, {})
     if hard_axis:
         job = reaps.get_nowait()
-        assert job["terminal_reason"] == hard_axis and not job["will_retry"]
+        assert job["terminal_reason"] == hard_axis and not {"will_retry", "retry_task_id"} & set(job)
     else:
         assert reaps.empty() and workers.RUNNING["owner"] is pool.meta
         assert pool.original.active_capacity and pool.original.in_q.empty()

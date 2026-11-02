@@ -14,6 +14,11 @@ if [ ! -x "$PAYLOAD_DIR/Ouroboros" ]; then
     exit 1
 fi
 
+if [ "${OUROBOROS_BUNDLE_LINUX_GTK:-1}" != 0 ] && [ ! -f "$PAYLOAD_DIR/_internal/linux-gtk/manifest.json" ]; then
+    echo "ERROR: bundled GTK/WebKit closure is missing; run scripts/bundle_linux_gtk.py first." >&2
+    exit 1
+fi
+
 rm -rf "$APPDIR"
 mkdir -p \
     "$APPDIR/usr/lib" \

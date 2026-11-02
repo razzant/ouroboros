@@ -5,8 +5,8 @@ queue publication; the page loads the production Activity module and stylesheets
 against routes that call the gateway's own queue and census readers. Control POSTs
 are answered at the route (Stop and Resume keep their own server suites): what is
 checked here is that a click or key on a row reaches that row's endpoint with the
-same arguments it always sent, and that partial or failed reads keep the queue's own
-words. Screenshots (light and dark, desktop and narrow, per engine) go to
+same arguments it always sent, and that partial or failed reads keep the queue's rows
+without inventing activity. Screenshots (light and dark, desktop and narrow, per engine) go to
 ``OUROBOROS_UI_EVIDENCE_DIR`` before anything is asserted, so a failing run still
 leaves its picture.
 """
@@ -61,8 +61,9 @@ def _seed(root, monkeypatch):
         # The real terminal writer: the answer is stored, root post-task work is still owed.
         _store_task_result(env, task, text, usage, {"tool_calls": [], "reasoning_notes": []}, review_evidence={})
         workers.RUNNING[task_id] = {"task": task, "started_at": time.time() - 42, "attempt": 1}
-    # A warm model sleep is a queue fact the census does not carry: it must stay beside the answer.
-    workers.RUNNING["sleep-root"]["owner_wait"] = {"state": "waiting", "reason": "sleep", "sleep": {"mode": "warm"}}
+    # A warm model sleep is a physical queue fact: the work projection must keep it beside the answer.
+    workers.RUNNING["sleep-root"]["owner_wait"] = {
+        "state": "waiting", "reason": "sleep", "sleep": {"mode": "warm"}, "task_attempt": 1}
     child = {"id": "child-1", "type": "task", "chat_id": 1, "root_task_id": "failed-root",
              "parent_task_id": "failed-root", "delegation_role": "subagent", "title": "Collect figures"}
     write_task_result(root, "child-1", "running", root_task_id="failed-root", parent_task_id="failed-root",
@@ -158,13 +159,17 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                     expect(failed).to_have_attribute("role", "status")
                     expect(failed).to_have_attribute("aria-label", "Task status: Failed, Finalizing…")
                     expect(row("failed-root").locator(".chat-live-phase-secondary")).to_have_text("Finalizing…")
+                    assert row("failed-root").inner_text().count("Finalizing…") == 1
+                    expect(row("failed-root")).to_contain_text("1 helper still working")
                     expect(row("done-root").locator("[data-activity-phase]")).to_have_text("Done")
                     # The queue's own wait outranks the census's generic finalization.
-                    expect(row("sleep-root").locator(".chat-live-phase-secondary")).to_have_text("sleeping")
+                    expect(row("sleep-root").locator(".chat-live-phase-secondary")).to_have_text("Waiting")
+                    expect(row("sleep-root")).to_contain_text("Sleeping until it is woken")
                     # Its own row has no result yet: the child keeps its occupancy word.
                     expect(row("child-1").locator("[data-activity-phase]")).to_have_count(0)
-                    expect(row("child-1")).to_contain_text("running")
-                    expect(row("paused-root")).to_contain_text("paused (budget)")
+                    expect(row("child-1")).to_contain_text("Working")
+                    expect(row("paused-root")).to_contain_text("Paused")
+                    expect(row("paused-root")).to_contain_text("Spending limit reached")
                     # The outcome chip is drawn in the error pair with the failed dot, the second fact in the quiet
                     # meta ink; Stop… is the neutral shared trigger, never a danger button.
                     colours = page.evaluate("""() => {
@@ -242,12 +247,12 @@ def test_activity_outcome_rows_and_their_controls_in_a_real_browser(tmp_path, mo
                     "[data-activity-phase]")).to_have_text("Failed")
 
                 queue = page.locator('[data-activity-section="queue"]')
-                # A partial census still describes its own rows; every other row keeps its queue word.
+                # A partial census describes its own rows; missing work projections stay unconfirmed.
                 reads["state"] = "partial"
                 load()
                 expect(queue.locator("[data-activity-phase]")).to_have_count(1)
                 expect(queue.locator("[data-activity-phase]")).to_have_text("Failed")
-                expect(page.locator('[data-id="done-root"]').locator("xpath=../..")).to_contain_text("running")
+                expect(page.locator('[data-id="done-root"]').locator("xpath=../..")).to_contain_text("Activity unconfirmed")
                 expect(queue).not_to_contain_text("Nothing running")
                 # An unreadable census proves nothing: no outcome chip, every queue row and control stays.
                 reads["state"] = "failed"

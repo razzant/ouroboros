@@ -168,6 +168,8 @@ class Node extends Events {
     get firstElementChild() { return this.children[0] || null; }
     getClientRects() { return this.isConnected && !this.closest('[hidden]') && !this.hidden ? [this.rect] : []; }
     getBoundingClientRect() { return this.rect; }
+    get offsetWidth() { return this.rect?.width ?? 0; }
+    get offsetHeight() { return this.rect?.height ?? 0; }
     focus() { if (this.isConnected) this.ownerDocument.activeElement = this; }
     click() { if (!this.disabled) this.emit('click', { target: this }); }
     dispatchEvent(event) { return !this.emit(event.type, { native: event }).defaultPrevented; }

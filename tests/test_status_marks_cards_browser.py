@@ -260,8 +260,19 @@ def test_cards_activity_logs_and_budget_speak_the_status_marks(tmp_path, engine)
                     assert pill.get_attribute("data-attention") == "1"
                     assert color(budget_text) == tokens["--status-warn-fg"]
                     assert color(budget_fill, "backgroundColor") == tokens["--amber"]
-                    panic = page.locator('[data-chat-command="panic"]')
-                    assert color(panic, "backgroundColor") == tokens["--tone-red"]
+                    panic = page.locator('[data-chat-command="panic"]')  # the fixture page's one Panic
+                    # Light adds its red tint; dark's neutral danger veil is already in the floating capsule.
+                    paint = panic.evaluate("""(el, theme) => {
+                        const probe = document.createElement('span'); document.body.append(probe);
+                        probe.style.background = theme === 'light'
+                            ? 'linear-gradient(var(--tone-red), var(--tone-red)), var(--chip-float)' : 'var(--chip-float)';
+                        probe.style.color = 'var(--panic-ink)';
+                        const read = node => { const s = getComputedStyle(node);
+                            return [s.backgroundColor, s.backgroundImage, s.color]; };
+                        const expected = read(probe); probe.remove();
+                        return {actual: read(el), expected};
+                    }""", theme)
+                    assert paint["actual"] == paint["expected"], paint
                     page.screenshot(path=str(evidence / f"cards-surfaces-{engine}-{theme}-{motion}.png"))
                     page.close()
             finally:

@@ -119,7 +119,9 @@ def test_repair_button_records_owner_intent_and_runs_the_installed_skill(tmp_pat
                     wait_until(lambda: oracle._json(f"state/skills/{name}/enabled.json").get("enabled"), 30)
                     companions = wait_until(lambda: _api(server.base_url, "GET", "/api/skills/daemons").get("companions", {}).get(name + ":worker"), 30)
                     assert companions["pid"] > 0
-                    assert (drive / "state" / "skills" / name / "ready.txt").read_text() == "ready"
+                    # The pid exists from the spawn; the file is the worker's first act once Python is up.
+                    ready = drive / "state" / "skills" / name / "ready.txt"
+                    assert wait_until(lambda: ready.is_file() and ready.read_text() == "ready", 30), "the companion never wrote ready.txt"
                     # The hash is a one-time entry pointer; app navigation owns
                     # later page changes in the already-loaded SPA.
                     page.click('[data-nav-page="widgets"]')

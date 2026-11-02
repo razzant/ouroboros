@@ -2,7 +2,6 @@
 task's author closure still renders by the host trigger its record carries."""
 import asyncio
 import copy
-from types import SimpleNamespace
 
 import pytest
 
@@ -26,15 +25,11 @@ def test_an_old_author_closure_renders_by_its_recorded_host_trigger(mode, adviso
     assert "had not signed it off" in project_dialogue._completion_verdict(record, {})
 
 
-def test_real_custody_overlay_preserves_rail_and_explains_current_debt(tmp_path, monkeypatch):
-    from ouroboros import agent_task_pipeline as pipeline
-
-    monkeypatch.setattr(pipeline, "load_task_result", lambda *_: {"delegated_runs_unreconciled": ["run-1"]})
-    record = _record("rail")
-    record["reason_code"] = "round_limit"
-    record["outcome_axes"]["execution"].update(status="best_effort", reason_code="round_limit")
-    result = pipeline._apply_terminal_custody_outcome(SimpleNamespace(drive_root=tmp_path), {"id": "rail"}, record)
-    assert result["reason_code"] == "round_limit"
+def test_a_rail_keeps_its_cause_and_the_notice_explains_current_debt():
+    """#1583: the debt is the row's current list beside the rail, never its reason."""
+    result = _record("rail")
+    result["reason_code"] = "round_limit"
+    result["outcome_axes"]["execution"].update(status="best_effort", reason_code="round_limit")
     result["delegated_runs_unreconciled"] = ["run-1"]
     before = copy.deepcopy(result)
     row = terminal_projection._project_row("rail", result, {}, {"chat_id": 1})

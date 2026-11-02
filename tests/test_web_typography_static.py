@@ -139,6 +139,7 @@ def _migrated_sources() -> dict[str, str]:
         "web/model_wait.css": _decommented(_read("web/model_wait.css")),
         "web/room_work.css": _decommented(_read("web/room_work.css")),
         "web/cards.css": _decommented(_read("web/cards.css")),
+        "web/consciousness.css": _decommented(_read("web/consciousness.css")),
         "web/style.css (migrated regions)": _migrated_style_region(),
     }
 
@@ -330,7 +331,7 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     directions. The regions have to actually contain the migrated rules —
     including the chat surface and its `.chat-live-executor-chip`, which
     migrated with the chat typography pass — and they must not creep over
-    neighbours (skills, marketplace, logs, evolution) that still carry their
+    neighbours (marketplace, logs, widgets) that still carry their
     historical literals. Marker-pair structure itself (as many ends as begins,
     strictly alternating) is asserted by ``_style_marker_spans`` on every call
     that reads a region."""
@@ -342,6 +343,9 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     assert ".updates-restore-row" in region
     # Dashboard -> Storage (#1418) was written on the scale; its slice stays guarded.
     assert ".storage-place-label" in region
+    # Dashboard -> Evolution was rewritten on the scale (the time line of versions); its slice stays guarded.
+    assert ".evo-campaign" in region
+    assert ".evo-detail-title" in region
     # Chat migrated on 2026-09-01 (frontend sprint, Q1=B): page chrome,
     # transcript/bubbles/live cards/composer, and the structured-delivery +
     # quiz-card slice, executor chip now included.
@@ -355,10 +359,10 @@ def test_migrated_region_markers_do_not_swallow_unmigrated_surfaces() -> None:
     assert ".skills-installed-card" in region
     assert ".skills-head-card" in region
     assert ".skills-source-row" in region
-    # Unmigrated neighbours stay out until their own pass. (`.log-entry` and
-    # `.evo-runtime-pill` are NOT in this list: the shared status-tone rules
-    # inside the chat region legitimately name them as co-selectors.)
-    for selector in (".widgets-card", ".evo-runtime-card"):
+    # Unmigrated neighbours stay out until their own pass. (`.log-entry` is NOT
+    # in this list: the shared status-tone rules inside the chat region
+    # legitimately name it as a co-selector.)
+    for selector in (".widgets-card",):
         assert selector not in region, (
             f"{selector} is an unmigrated surface; a marker crept over it"
         )

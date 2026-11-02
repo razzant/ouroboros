@@ -359,9 +359,12 @@ def _evolution_test_publication_stop(ctx: ToolContext, commit_sha: str, test_war
     """Withhold an evolution push that lacks full green proof of this exact commit.
 
     Unlike lost authority this keeps the reviewed commit's provenance and settles the
-    attempt; only publication waits, and adoption still refuses the commit without it.
+    attempt; only publication waits. A bound candidate's commit is never pushed here,
+    so nothing waits: its local adoption checks its own (possibly selected) evidence.
     """
-    if str(ctx.current_task_type or "") != "evolution":
+    from ouroboros import body_candidate
+
+    if str(ctx.current_task_type or "") != "evolution" or body_candidate.is_bound(ctx):
         return ""
     from ouroboros.preflight_qualification import full_proof_error
 

@@ -26,6 +26,7 @@ import pytest
 
 from ouroboros import dialogue_store
 from tests._work_projection_shared import with_work_fields
+from tests.test_reconnect_feed_browser import HISTORY_LANDED
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import _OBSERVE_STATE_READS, _wait_state_reads_quiescent
 
@@ -104,14 +105,14 @@ _CLICK_CONTEXT_MODE = """() => {
 def _start_stale_state_response_episode(page):
     """Hold the page-wide /api/state read, prove the gate, then make it stale.
 
-    One read is in flight page-wide (chat_activity.js createStateSnapshotSequencer
+    One read is in flight page-wide (state_snapshots.js createStateSnapshotSequencer
     .gate): a forced chat refresh that lands behind the held app read starts no
-    second read and coalesces into ONE follow-up that begins once the held read
-    settles. The socket's own generation bump is the only thing that outruns a
-    held read, so a synthetic first-connection `open` (no reconnect rebuild, so
-    the feed and its live cards survive) makes the held read stale. Afterwards
-    index 0 is that stale read and index 1 the follow-up, which starts only when
-    index 0 is settled — the order the gate produces.
+    second read and coalesces into ONE follow-up. The socket's own generation bump
+    is the only thing that outruns a held read: a synthetic first-connection `open`
+    (no reconnect rebuild, so the feed and its live cards survive) retires the held
+    read, cancelling its transport, and the follow-up starts at once. Afterwards
+    index 0 is that stale read and index 1 the follow-up. Settling index 0 still
+    delivers the server's answer, which the page has abandoned.
     """
     page.route(
         "**/api/owner/context-mode",
@@ -141,7 +142,9 @@ def _start_stale_state_response_episode(page):
                 const item = pending[index];
                 if (!item || item.settled) return false;
                 item.settled = true;
-                const response = await realFetch(item.input, item.init);
+                // The page may have cancelled this read (a retired one); the server still answers it.
+                const { signal, ...init } = item.init || {};
+                const response = await realFetch(item.input, init);
                 const payload = await response.json();
                 Object.assign(payload, patch || {});
                 payload.active_chat_activities = activities;
@@ -236,12 +239,12 @@ def test_ui_smoke_stale_history_rebuild_keeps_owner_bubble(direct_server_with_da
                 assert "Message saved for task" in annotation.inner_text()
 
                 # Reconnect-driven full rebuild replays the STALE response.
+                page.evaluate(HISTORY_LANDED)
                 page.evaluate(
                     "() => window.__ouroWs.emit('open', { previouslyConnected: true })"
                 )
-                page.wait_for_selector(
-                    '.chat-bubble[data-system-type="reconnect"]', timeout=10_000
-                )
+                page.wait_for_function("() => window.historyLanded > 0", timeout=10_000)
+                assert page.locator('[data-system-type="reconnect"]').count() == 0
                 survivor = page.locator(
                     f'.chat-bubble.user[data-client-message-id="{cmid}"]'
                 )
@@ -346,8 +349,8 @@ def test_ui_smoke_snapshot_apply_time_cannot_resurrect_root(
                 page.wait_for_function("() => window.__stateResponsePending.length === 2")
                 assert page.locator(f"{card} [data-cancel-run]").count() == 1
                 assert page.evaluate("() => window.__taskDetailCalls.length") == 0
-                # The follow-up began only once the stale read settled; its own
-                # request barrier is what the same empty census is judged against.
+                # The open started the follow-up when it retired the stale read; its
+                # own request barrier is what the same empty census is judged against.
                 assert page.evaluate("() => window.__settleStateResponse(1, [])")
                 page.evaluate("() => { Date.now = window.__realDateNow; }")
                 page.wait_for_function("() => window.__taskDetailCalls.length === 1")
@@ -427,12 +430,12 @@ def test_ui_smoke_reversed_state_responses_do_not_resurrect_main_root(
                 page.wait_for_function("() => window.__stateResponsePending.length === 2")
                 assert page.locator('[data-project-id="stale-project"]').count() == 0
                 assert page.evaluate("() => !window.__ouroTaskBindings['stale-binding']")
-                assert not page.locator('[data-chat-command="evolve"]').evaluate(
-                    "(node) => node.classList.contains('on')"
+                assert page.locator("#page-chat .cx-chip").evaluate(
+                    "(node) => node.dataset.evolving !== 'true'"
                 )
                 assert page.locator(f"{card} [data-cancel-run]").count() == 1
 
-                # The follow-up N+1, started only once N settled, proves queue
+                # The follow-up N+1, started when the open retired N, proves queue
                 # loss and carries the fresh binding.
                 assert page.evaluate(
                     """() => window.__settleStateResponse(1, [], {
@@ -487,7 +490,7 @@ def test_ui_smoke_reversed_state_responses_do_not_resurrect_main_root(
                     success_index,
                 )
                 page.wait_for_function(
-                    "() => document.querySelector('[data-chat-command=evolve]').classList.contains('on')"
+                    "() => document.querySelector('#page-chat .cx-chip')?.dataset.evolving === 'true'"
                 )
                 # The chat's own forced read (or a header poll that beat it to the
                 # free gate: both are chat reads) is held, then made stale by the
@@ -503,8 +506,8 @@ def test_ui_smoke_reversed_state_responses_do_not_resurrect_main_root(
                     "(index) => window.__failStateResponse(index)", failed_index
                 )
                 page.wait_for_timeout(100)
-                assert page.locator('[data-chat-command="evolve"]').evaluate(
-                    "(node) => node.classList.contains('on')"
+                assert page.locator("#page-chat .cx-chip").evaluate(
+                    "(node) => node.dataset.evolving === 'true'"
                 )
                 # The failure released the gate: the coalesced follow-up starts
                 # and a current read applies as usual.
@@ -517,8 +520,8 @@ def test_ui_smoke_reversed_state_responses_do_not_resurrect_main_root(
                         window.__stateResponsePending.length - 1, [], {evolution_enabled: true})"""
                 )
                 page.wait_for_timeout(100)
-                assert page.locator('[data-chat-command="evolve"]').evaluate(
-                    "(node) => node.classList.contains('on')"
+                assert page.locator("#page-chat .cx-chip").evaluate(
+                    "(node) => node.dataset.evolving === 'true'"
                 )
             finally:
                 browser.close()
@@ -837,9 +840,8 @@ def test_ui_smoke_queue_loss_converges_terminal_card_once(direct_server_with_dat
                 assert page.locator(f"{progress_card} .chat-live-phase").inner_text().strip() == "Done"
                 _wait_status(page, "Online")
 
-                # A kind-stamped known subagent still gains no convergence
-                # authority, and its frame alone mints no parent card (A5: a parent card
-                # comes only from the parent's OWN evidence) — so no parent-root read.
+                # A missing child reconciles through its OWN detail. Its frame alone
+                # mints no parent card (A5), nor does its outcome settle that parent.
                 state["activities"] = []
                 page.evaluate(
                     """() => {
@@ -857,11 +859,21 @@ def test_ui_smoke_queue_loss_converges_terminal_card_once(direct_server_with_dat
                         window.__ouroWs.emit('projects_changed', {});
                     }"""
                 )
-                page.wait_for_timeout(200)
+                page.wait_for_function("() => window.__taskDetailCalls.length === 7")
                 assert page.evaluate("() => window.__taskDetailCalls") == [
                     "truth-root", "truth-root", "truth-root", "rehome-root", "active",
-                    "progress-only-root",
+                    "progress-only-root", "child-root",
                 ]
+                child_card = '.chat-live-card.subagent[data-task-id="child-root"]'
+                assert page.locator(child_card).get_attribute("data-finished") == "0"
+                assert page.evaluate("() => window.__settleTaskDetail({status: 'completed'}, 200)")
+                page.wait_for_function(
+                    "(sel) => document.querySelector(sel)?.dataset.finished === '1'", arg=child_card)
+                assert page.locator(f"{child_card} .chat-live-phase").inner_text().strip() == "Done"
+                page.evaluate("() => window.__ouroWs.emit('projects_changed', {})")
+                _wait_state_reads_quiescent(page)
+                _wait_status(page, "Online")
+                assert page.evaluate("() => window.__taskDetailCalls.length") == 7
                 assert page.locator('.chat-live-card[data-task-id="parent-root"]').count() == 0
             finally:
                 browser.close()
@@ -1145,7 +1157,7 @@ def test_ui_smoke_project_pointer_is_a_main_root_affordance(direct_server_with_d
 def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data):  # noqa: F811
     """Open/close cycles keep one live panel, flat ws listeners, and flat DOM.
 
-    P3 lifecycle concrete: closing or switching a project DESTROYS its chat
+    P3 lifecycle concrete: after its exit, closing or switching a project DESTROYS its chat
     instance (disposing every ws.on subscription, the ResizeObserver, the
     window/document listeners, and all timers), so repeated open/close cycles
     cannot accumulate hidden panels, listeners, or DOM nodes. Panels marked
@@ -1191,6 +1203,7 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
                     page.wait_for_selector(
                         f'[id="panel-pchat-{project_id}"]:not([hidden])', timeout=30_000
                     )
+                    page.wait_for_function("() => !document.querySelector('.chat-instance-panel[data-leaving]')")
 
                 def close_project():
                     page.click("#project-panel-close")
@@ -1199,6 +1212,7 @@ def test_ui_smoke_project_panel_lifecycle_does_not_leak(direct_server_with_data)
                         ".classList.contains('open')",
                         timeout=30_000,
                     )
+                    page.wait_for_function("() => !document.querySelector('.chat-instance-panel[data-leaving]')")
 
                 # Baseline AFTER one full open/close cycle so one-time lazy
                 # registrations cannot masquerade as leaks.

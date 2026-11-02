@@ -293,10 +293,11 @@ def test_clawhub_fresh_install_rolls_back_payload_on_dependency_failure(monkeypa
 
 @pytest.mark.parametrize('basis', ['trusted', 'owner_skip'])
 @pytest.mark.parametrize('floor_ok', [False, True])
-def test_registry_acceptance_floor_precedes_package_execution(monkeypatch, tmp_path, basis, floor_ok):
+@pytest.mark.parametrize('mode', ['advanced', 'cyber_pro'])
+def test_registry_acceptance_floor_precedes_package_execution(monkeypatch, tmp_path, basis, floor_ok, mode):
     from ouroboros.skill_source_install import accept_and_turn_on
 
-    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'advanced')
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', mode)
     monkeypatch.setenv('OUROBOROS_SKILLS_REPO_PATH', '')
     storage = _patch_clawhub_install_pipeline(monkeypatch, tmp_path,
         auto_specs=[{'kind': 'pip', 'package': 'ddgs', 'bins': []}])
@@ -527,73 +528,3 @@ def test_a_blocked_review_never_queues_an_automatic_repair(monkeypatch, tmp_path
     assert response.status_code == 200 and _json_response_payload(response)["review_status"] == "blockers"
     assert sent == [] and not (tmp_path / "state" / "skills" / "demo" / "auto_repair.json").exists()
     assert not any(name.startswith("_maybe_enqueue") for name in vars(marketplace_api))
-
-
-def test_uninstall_handler_waits_for_the_queue_lock_off_the_event_loop(monkeypatch, tmp_path):
-    """While the post-uninstall schedule resync waits for a held supervisor
-    queue lock, another request (GET /api/widgets) completes on the same loop;
-    the resync still runs, after the uninstall step, on a worker thread."""
-    import threading
-
-    import supervisor.queue as supervisor_queue
-    from ouroboros.gateway.widgets import api_widgets
-
-    _stub_marketplace_roots(monkeypatch, tmp_path)
-    _run_lifecycle_inline(monkeypatch)
-    order: list[str] = []
-    resync_threads: list[int] = []
-    entered = threading.Event()
-    held = threading.Event()
-    release = threading.Event()
-    holding = {"value": False}
-
-    def uninstall_skill(_drive_root, *, sanitized_name):
-        order.append("uninstall")
-        return SimpleNamespace(ok=True, sanitized_name=sanitized_name, error="")
-
-    def resync_skill_schedules(_drive_root=None):
-        resync_threads.append(threading.get_ident())
-        entered.set()
-        with supervisor_queue._queue_lock:  # the real mirror waits here too
-            order.append("resync")
-
-    monkeypatch.setattr(marketplace_api, "uninstall_skill", uninstall_skill)
-    monkeypatch.setattr(supervisor_queue, "resync_skill_schedules", resync_skill_schedules)
-
-    def hold_lock():
-        with supervisor_queue._queue_lock:
-            holding["value"] = True
-            held.set()
-            release.wait(timeout=10)
-            holding["value"] = False
-
-    async def scenario():
-        loop_thread = threading.get_ident()
-        uninstall = asyncio.create_task(
-            marketplace_api.api_marketplace_uninstall(_BodyRequest(path_params={"name": "demo"}))
-        )
-        await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
-        assert entered.is_set(), "the handler never reached the schedule resync"
-        # GET /api/widgets reads the owner's kept cards from the request's data root.
-        widgets_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(drive_root=tmp_path)))
-        other = await asyncio.wait_for(api_widgets(widgets_request), 5)
-        still_held = holding["value"]
-        release.set()
-        response = await uninstall
-        return loop_thread, other, still_held, response
-
-    holder = threading.Thread(target=hold_lock, daemon=True)
-    holder.start()
-    assert held.wait(timeout=5)
-    try:
-        loop_thread, other, still_held, response = asyncio.run(scenario())
-    finally:
-        release.set()
-        holder.join(timeout=5)
-
-    assert other.status_code == 200
-    assert still_held, "the other request finished only after the lock was released: the loop was blocked"
-    assert response.status_code == 200
-    assert _json_response_payload(response)["ok"] is True
-    assert order == ["uninstall", "resync"]
-    assert resync_threads and resync_threads[0] != loop_thread

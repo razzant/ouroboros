@@ -995,9 +995,7 @@ def test_zero_run_and_fresh_start_share_one_atomic_actor_decision(tmp_path):
         barrier.wait()
         return claimed_start_request(
             drive,
-            claim_target="",
             actor_ctx=ctx,
-            enforce_actor_idle=True,
             run_id="",
             task_id=ctx.task_id,
             idempotency_key="actor-claim-invocation",

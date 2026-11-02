@@ -192,7 +192,7 @@ def test_context_section_without_section_unchanged(tmp_path):
 
 def test_bundled_skills_declare_model_experience():
     for rel in ("skills/telegram/SKILL.md", "skills/unix_computer_use/SKILL.md", "skills/windows_computer_use/SKILL.md",
-                "skills/ui_design/SKILL.md", "skills/design_demo/SKILL.md"):
+                "skills/ui_design/SKILL.md"):
         manifest = parse_skill_manifest_text((REPO / rel).read_text(encoding="utf-8"))
         section = manifest.model_experience
         assert section, f"{rel} lacks the Model Experience section"

@@ -3,9 +3,10 @@
 The inventory boundary between path admission (containment, name, size) and
 source-fact extraction lets the two token operations scan current sources under
 their own deadline instead of first parsing the whole repository. Selector
-ordering parses only the token-matched files. A bounded inventory refresh keeps
-valid unvisited facts as disposable cache only. Other operations keep their
-eager inventory (an explicit residual, witnessed below).
+ordering parses only the token-matched files. Definition parses only sources whose
+current bytes can hold the name, under the inventory's own admission. A bounded
+inventory refresh keeps valid unvisited facts as disposable cache only. Other
+outline operations keep their eager inventory (an explicit residual, witnessed below).
 """
 from __future__ import annotations
 
@@ -100,19 +101,80 @@ def test_cold_parse_cost_no_longer_starves_callers_under_the_same_deadline(proje
     _needle_project(repo)
     write(repo, "c.py", "x = 1\n")
     clock, cost = fake_clock(monkeypatch), [16.0]
-    count_parses(monkeypatch, clock, cost)  # three cold parses would exceed the 45 s budget
+    parsed = count_parses(monkeypatch, clock, cost)  # three cold parses would exceed the 45 s budget
     callers = _query_code(ctx, "callers", query="needle")
     assert "QUERY_CODE_TRUNCATED" not in callers and "b.py:2:1" in body(callers), callers
     assert "3 text-scanned" in callers and clock[0] == 0.0
-    # Residual, explicit: an eager-outline operation still pays the cold parse first.
+    # Definition parses only sources whose bytes can hold the name, so c.py spends
+    # nothing and the name-field scan still runs inside the original budget.
     clock[0] = 0.0
     definition = _query_code(ctx, "definition", query="needle")
-    assert "QUERY_CODE_TRUNCATED" in definition and "wall budget hit" in definition, definition
+    assert "QUERY_CODE_TRUNCATED" not in definition and "\nlimits:" not in definition, definition
+    assert body(definition) == "a.py:1 function needle() [outline]", definition
+    assert "coverage: indexed=2, name_absent=1" in definition and "3 text-scanned" in definition, definition
+    assert parsed == Counter({"a.py": 1, "b.py": 1}) and clock[0] == 32.0, parsed
+    # Residual, explicit: an eager-outline operation still pays every cold parse first.
+    clock[0] = 0.0
+    callees = _query_code(ctx, "callees", query="needle")
+    assert "QUERY_CODE_TRUNCATED" in callees and "wall budget hit" in callees, callees
     # Selector ordering spends the SAME deadline; rows survive a partial order.
     clock[0], cost[0] = 0.0, 30.0
     ordered = _query_code(ctx, "callers", query="needle", path="a.py")
     assert "b.py:2:1" in body(ordered), ordered
     assert "import candidate ordering time limit; partial heuristic order" in ordered, ordered
+
+
+def test_definition_outline_equals_the_eager_outline_where_the_scanner_cannot_read(project, monkeypatch):
+    """Name preparation keeps the inventory's admission, not the 1 MiB scanner's."""
+    repo, ctx = project
+    _needle_project(repo, unrelated=30)
+    write(repo, "ligature.py", "def ﬁx():\n    return 1\n")  # the AST name is NFKC: fix
+    write(repo, "big.py", "def needle():\n    pass\n" + "#" * 1_500_000 + "\n")  # outline 2 MB, scan 1 MiB
+    write(repo, "lib.min.js", "function needle(){ return 1 }\n")  # outlined; SEARCH_SKIP_GLOBS for the scanner
+    write(repo, "other.js", "function unrelated(){ return 1 }\n")
+    try:
+        (repo / "alias.py").symlink_to("a.py")  # contained file link: the outline follows, the scanner never
+        linked = True
+    except OSError:
+        linked = False
+    parsed = count_parses(monkeypatch)
+
+    def outline(result):
+        return [row for row in body(result).splitlines() if row.endswith("[outline]")]
+
+    def limits(result):
+        return result.split("\nlimits: ", 1)[1].split("\n", 1)[0].split("; ")
+
+    cache = ci.inventory_cache_path(repo, ctx.drive_root)
+    cold = {query: _query_code(ctx, "definition", query=query) for query in ("needle", "fix")}
+    assert parsed == Counter(dict.fromkeys(["a.py", "b.py", "big.py", "ligature.py"] + ["alias.py"] * linked, 1)), parsed
+    # Thirty unrelated modules, ligature.py and other.js cannot hold `needle`; nothing is cached.
+    assert "name_absent=32" in cold["needle"] and not cache.exists(), cold["needle"]
+    assert outline(cold["fix"]) == ["ligature.py:1 function fix() [outline]"], cold["fix"]
+    parsed.clear()
+    eager = {query: _query_code(ctx, "symbols", query=query) for query in ("needle", "fix")}
+    assert sum(parsed.values()) == 34 + linked and cache.exists()
+    for query, result in cold.items():
+        assert outline(result) == body(eager[query]).splitlines(), (query, result)
+    assert ["alias.py:1 function needle() [outline]"] * linked + [
+        "big.py:1 function needle() [outline]", "lib.min.js:1 function function needle(){ return 1 } [outline]",
+    ] == [row for row in outline(cold["needle"]) if not row.startswith("a.py")]
+    assert {"excluded_name: 1", "oversized: 1"} <= set(limits(cold["needle"])), cold["needle"]
+    # Warm: valid cached facts are reused as they stand; current bytes still decide.
+    parsed.clear()
+    write(repo, "late.py", "class needle:\n    pass\n")
+    warm = _query_code(ctx, "definition", query="needle", kind="class")
+    assert body(warm) == "late.py:1 class class needle [outline]" and parsed == Counter({"late.py": 1}), warm
+    write(repo, "late.py", "class other:\n    pass\n")
+    assert not body(_query_code(ctx, "definition", query="needle", kind="class")) and parsed["late.py"] == 1
+    # Cold and without tree-sitter, the Python outline remains and only a JavaScript
+    # file able to hold the name is disclosed as lacking an outline.
+    cache.unlink()
+    monkeypatch.setattr(ci, "_ts_parser", lambda grammar: None)
+    bare = _query_code(ctx, "definition", query="needle", lang="javascript")
+    assert not body(bare) and "name_absent=1" in bare and "structural_unavailable:javascript: 1" in limits(bare), bare
+    assert outline(_query_code(ctx, "definition", query="needle", lang="python")) == [
+        row for row in outline(cold["needle"]) if not row.startswith("lib.min.js")]
 
 
 def test_path_only_views_equal_parsed_views_with_admission_and_ordering(project):

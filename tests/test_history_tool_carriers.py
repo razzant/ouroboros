@@ -532,3 +532,45 @@ def test_answered_root_with_open_late_work_is_not_readdressed_at_the_page_end(tm
     _write(tmp_path / "logs/tools.jsonl", [_tool("root")])
     carrier = _read(tmp_path)["messages"][-1]
     assert carrier["system_type"] == "task_evidence" and carrier["task_id"] == "root" and carrier["ts"] == ""
+
+
+def test_rotated_out_calls_reach_the_card_as_host_totals_on_reload_and_reconnect(tmp_path):
+    """#2400 end to end: a finished run's rows rotated past the archives one history read opens,
+    so the response carries its host totals with no per-call rows; the Chat card rebuilt from
+    that response (``chat_activity_block.test.js``) counts them without inventing unknown outcomes,
+    while a run whose start alone was read still says outcome unknown."""
+    import os
+    import pathlib
+    import shutil
+
+    from tests.group_run import run_in_group
+
+    summary = {"direction": "system", "type": "task_summary", "chat_id": 1, "ts": TS}
+    _write(tmp_path / "logs/chat.jsonl", [
+        {"direction": "out", "task_id": "archived-run", "text": "Health check done.", "chat_id": 1, "ts": TS},
+        {**summary, "task_id": "archived-run", "text": "Checked.", "tool_calls": 14, "tool_errors": 0,
+         "tool_call_counts": {"read_file": 10, "run_command": 4}},
+        {**summary, "task_id": "started-run", "text": "Stopped.", "tool_calls": 1, "tool_errors": 0},
+    ])
+    calls = [_tool("archived-run", fact, invocation_id=f"archived-{n}", tool="read_file" if n < 10 else "run_command")
+             for n in range(14) for fact in ("tool_call_started", "tool_call")]
+    _write(tmp_path / "archive/tools_20261028T063749.jsonl", calls)  # the oldest of five: never opened
+    for stamp in ("064239", "070101", "073012", "080455"):
+        _write(tmp_path / f"archive/tools_20261028T{stamp}.jsonl", [_tool(f"other-{stamp}")])
+    _write(tmp_path / "logs/tools.jsonl", [_tool("started-run", "tool_call_started", invocation_id="s1")])
+    response = history._assemble_history_response(tmp_path, 1, 50, 50)
+    carriers = {row["task_id"]: row for row in json.loads(response)["messages"] if row.get("tool_evidence")}
+    archived, started = carriers["archived-run"], carriers["started-run"]
+    assert archived["tool_calls"] == 14 and archived["tool_evidence"]["observations"] == []
+    coverage = archived["tool_evidence"]["coverage"]
+    assert (coverage["archives_bounded"], coverage["archives"], coverage["archives_available"], coverage["gaps"]) == (
+        True, 3, 5, [])
+    assert [row["fact"] for row in started["tool_evidence"]["observations"]] == ["started"]
+    produced = tmp_path / "history.json"
+    produced.write_bytes(response)
+    node = shutil.which("node")
+    assert node, "Node is required for the real Chat consumer proof"
+    result = run_in_group([node, "--test", "--test-reporter=tap", "--test-name-pattern=reload and reconnect keep a bounded card",
+                           "web/tests/chat_activity_block.test.js"], cwd=pathlib.Path(__file__).resolve().parents[1],
+                          env={**os.environ, "OURO_TEST_BOUNDED_TOOL_HISTORY": str(produced)}, timeout=60)
+    assert result.returncode == 0 and "# pass 1" in result.stdout + result.stderr, result.stdout + result.stderr

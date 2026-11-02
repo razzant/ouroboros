@@ -62,7 +62,9 @@ export function createHistoryReveal({ pager, reading, feed, records, present, ex
             const record = records.get(node.dataset.taskId);
             if (node.matches?.('.chat-live-card') && record) expand(record);
         }
-        return target && !target.closest?.('[hidden]') && target.getClientRects?.().length !== 0 ? target : null;
+        // A relay deck owns this row's visibility: its caller opens the deck before positioning/focusing it.
+        return target && !target.closest?.('[hidden]')
+            && (target.getClientRects?.().length !== 0 || target.dataset.deckTucked === '1') ? target : null;
     }
 
     return {

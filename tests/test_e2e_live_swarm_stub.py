@@ -14,9 +14,9 @@ from ouroboros.context import build_user_content
 @pytest.mark.parametrize("quoted_legacy_marker", [False, True])
 def test_swarm_managed_root_starts_agent_script_over_loopback(quoted_legacy_marker):
     task = {"id": "managed-root", "root_task_id": "managed-root", "text": SW1_OBJECTIVE,
-            "metadata": {"force_plan": True, "force_plan_source": "swarm"}}
+            "metadata": {"subagents_mode": "swarm"}}
     content = build_user_content(task)
-    assert content.startswith("[SWARM_INITIATIVE]")
+    assert "[SWARM_INITIATIVE]" not in content
     assert content.endswith(SW1_OBJECTIVE)
     if quoted_legacy_marker:
         content += '\nHistorical diagnostic quoted by the root: "promoted_task_toolset".'

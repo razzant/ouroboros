@@ -203,6 +203,20 @@ test('Project panel: seeds from the page snapshot instead of a literal Online', 
     } finally { offline.close(); }
 });
 
+test('Project panel: a working room opened from its row says Working from its first paint, never a guessed Online', () => {
+    const working = { activity: 'working', transition: 'none', call: '', turn: [], amber: false, mark: 'moving',
+        confirmed: true, works: ['w1'] };
+    const body = { supervisor_ready: true, works_complete: true, works: [{ work_id: 'w1', room: 7, activity: 'working' }],
+        rooms: { 7: working } };
+    const panel = mountChat({ asPanel: true, latest: body });
+    try {
+        assert.equal(panel.status(), 'Working', 'the page\'s latest body already says what this room does');
+    } finally { panel.close(); }
+    // Nothing listed for this room in a complete body: it is quiet.
+    const quiet = mountChat({ asPanel: true, latest: { ...body, works: [], rooms: {} } });
+    try { assert.equal(quiet.status(), 'Online'); } finally { quiet.close(); }
+});
+
 test('Project panel: a late mount after a reconnect never seeds from the body before the drop', async () => {
     // The page wiring (web/app.js): the one sequencer fans every applied body to
     // the open chats and retires its newest body on each socket close and open.

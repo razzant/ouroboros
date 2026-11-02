@@ -113,7 +113,7 @@ def test_real_loop_keeps_authority_interruption_resumable_after_contention(tmp_p
         assert attempts[0] is attempts[1]
         state = json.loads(read_actor_source_bytes(tmp_path, "member", parked.value.pause["source_ref"]))
         assert state["messages"][0]["role"] == "user"
-        assert state["messages"][0]["content"][0]["text"] == "keep this thought"
+        assert state["messages"][0]["content"] == "keep this thought"
     finally:
         release()
         bp.end_dispatch_fence("member")
@@ -128,18 +128,20 @@ def test_contention_hold_obeys_real_task_controls(tmp_path, monkeypatch, stage, 
     publish(tmp_path, document("member", status="running"))
     ctx, limit = _loop_ctx(tmp_path, "member")
     task = {"id": "member", "_attempt": 1}
+    requested = [""]
 
     def stop(_ctx):
         if control == "cancelled":
             request_cancel(tmp_path, "member", source="contention-test")
         elif control == "panic":
-            (tmp_path / "state" / "panic_stop.flag").write_text("panic")
+            requested[0] = "panic"
         else:
             task["deadline_at"] = "2000-01-01T00:00:00+00:00"
 
     attempts, failures, holds, release = _contended_save(tmp_path, monkeypatch, stage, "begin", on_hold=stop)
     try:
-        with task_model_wait_scope(task=task, drive_root=tmp_path, event_queue=None, worker_slot_held=True):
+        with task_model_wait_scope(task=task, drive_root=tmp_path, event_queue=None, worker_slot_held=True,
+                                   owner_control=lambda: requested[0]):
             with pytest.raises(ModelWaitInterrupted) as stopped:
                 bp.request_pause(limit, rail=bp.RAIL_BILLING_AUTHORITY, scope="task", reason_text="unreadable")
         assert stopped.value.control_reason == control

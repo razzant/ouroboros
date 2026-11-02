@@ -509,10 +509,10 @@ def direct_commit(paused_env, monkeypatch):
     monkeypatch.setattr(git, "_auto_tag_on_version_bump", lambda *_a, **_kw: effects.append(("tag",)) or "")
     monkeypatch.setattr(git, "_managed_post_commit_tests_gate", lambda *_a, **_kw: None)
     monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: effects.append(("post-commit-tests",)))
-    monkeypatch.setattr(git, "_auto_push", lambda *_a: effects.append(("push",)) or "")
+    monkeypatch.setattr(git, "_auto_push", lambda *_a, **_kw: effects.append(("push",)) or "")
     monkeypatch.setattr(git, "_publish_reviewed_commit", lambda _ctx, _msg, _sha, tag, _warning, _paths, push: "committed" + tag + push)
     monkeypatch.setattr(git, "record_bound_commit_success", lambda *_a: None)
-    monkeypatch.setattr("ouroboros.body_candidate.record_reviewed_commit", lambda *_a: None)
+    monkeypatch.setattr("ouroboros.body_candidate.record_reviewed_commit", lambda *_a, **_kw: None)
     monkeypatch.setattr(config, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr("ouroboros.tools.review_admission.admit_commit_gate_wave", lambda *_a: None)
     # The one commit wave: a retrieving seat asked both parts of the one brief (contract B).

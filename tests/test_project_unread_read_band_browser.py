@@ -636,6 +636,7 @@ def test_an_ordinary_reopen_reads_its_room_while_an_old_question_reveal_is_held(
                 page.locator("#project-panel .attach-name").filter(has_text="kept.txt").wait_for()
                 page.locator(_COMPOSER).fill(DRAFT)
                 page.locator("#project-panel-close").click()
+                page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state='attached')
                 assert page.locator('.chat-instance-panel[data-pending-work="1"]').count() == 1
                 dialogue_store.append(data, "chat", {"ts": "2026-09-28T10:30:00Z", "direction": "out", "chat_id": chat_id,
                                                      "text": "Reply while closed"})
@@ -649,6 +650,8 @@ def test_an_ordinary_reopen_reads_its_room_while_an_old_question_reveal_is_held(
             page.wait_for_timeout(500)
             assert seen() == before, "landing on the question is not reading"
             page.locator("#project-panel-close").click()
+            parked = page.locator('.chat-instance-panel[data-pending-work="1"]') if retained else messages
+            parked.wait_for(state="attached" if retained else "detached")
             row.evaluate("el => el.click()")
             if not retained:
                 page.locator(_COMPOSER).fill(DRAFT)

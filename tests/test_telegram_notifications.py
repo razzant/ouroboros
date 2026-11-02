@@ -109,6 +109,22 @@ def _write_rows(data, rows):
         ds.append(data, "chat", row)
 
 
+def test_effectively_quiet_runs_skip_push_but_notice_bearing_runs_notify(tmp_path, monkeypatch):
+    nt = _load(); api, data = _api(tmp_path); _Rec.sent = []
+    monkeypatch.setattr(nt, "TelegramClient", _Rec)
+    _write_rows(data, [
+        _root("quiet", "done", wake_silent=True, quiet_effective=True),
+        _root("notice", "warn", wake_silent=True, quiet_effective=False,
+              completion_notice={"neutral": False, "detail": "A tool failed.", "phase": "warn"}),
+        _root("ordinary", "done", wake_silent=False, quiet_effective=False),
+    ])
+    state = {"notified_task_ids": []}
+    asyncio.run(nt._check_tasks_notify(api, {"TELEGRAM_NOTIFY_TASKS": "on"}, 42, state, "en"))
+    assert len(_Rec.sent) == 2
+    assert "A tool failed." in _Rec.sent[0][1] and "ordinary" in _Rec.sent[1][1]
+    assert state["notified_task_ids"] == ["quiet", "notice", "ordinary"]
+
+
 def test_off_suppresses_every_phase_and_consumes_every_id(tmp_path, monkeypatch):
     """OFF includes failures/cancellations; seen IDs prevent a backlog on enable."""
     nt = _load(); api, data = _api(tmp_path); _Rec.sent = []

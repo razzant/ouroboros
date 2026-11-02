@@ -7,16 +7,16 @@ from tests._skills_page_harness import (
     URL, capture, fixture, no_overflow, open_skills, skills_browser as skills_browser,
 )
 from tests.test_skill_install_checks import registry_release as registry_release
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 MATRIX = [(engine, width, theme) for engine in ("chromium", "webkit")
           for width in (1280, 390) for theme in ("light", "dark")]
 
 
-def _open(browser, width, theme, rows, sources=None):
+def _open(browser, engine, width, theme, rows, sources=None):
     page = browser.new_page(viewport={"width": width, "height": 900}, has_touch=width == 390)
-    errors = []
-    page.on("pageerror", lambda error: errors.append(str(error)))
+    errors = PageErrors(page, engine)
     page.add_init_script("window.prompt = window.confirm = window.alert = () => { throw Error('native dialog used'); };")
     skills = open_skills(page, extensions=rows, sources=sources)
     page.goto(URL, wait_until="networkidle")
@@ -62,7 +62,7 @@ def test_registry_rejected_release_from_host_listing_can_skip_review(
     browser = getattr(skills_browser, engine).launch(headless=True)
     skills = None
     try:
-        page, skills, errors = _open(browser, width, theme, [row])
+        page, skills, errors = _open(browser, engine, width, theme, [row])
         card = page.locator('.skills-card[data-skill="demo"]')
         skip = card.get_by_role("button", name="Update without review", exact=True)
         expect(skip).to_be_enabled()
@@ -138,7 +138,7 @@ def test_publication_visibility_survives_saved_sources_confirmation_and_task(ski
     browser = getattr(skills_browser, engine).launch(headless=True)
     skills = None
     try:
-        page, skills, errors = _open(browser, width, theme, [row, origin], sources)
+        page, skills, errors = _open(browser, engine, width, theme, [row, origin], sources)
         for index, target in enumerate(("saved", "origin", "hub", "public", "private", "reopened"), start=1):
             if target == "reopened":
                 # A fresh page sees only the saved source, which carries no visibility.
@@ -148,7 +148,7 @@ def test_publication_visibility_survives_saved_sources_confirmation_and_task(ski
             page.locator("#skills-installed-search").fill(name)
             card = page.locator(f'.skills-card[data-skill="{name}"]')
             card.locator("[data-skill-menu-trigger]").click()
-            page.locator("body > .skills-card-menu-dialog .skills-submit-hub").click()
+            page.locator("body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub").click()
             dialog = page.locator(".skills-dialog")
             dialog.wait_for()
             repository = "owner/ouroboros-skills"
@@ -209,6 +209,6 @@ def test_publication_visibility_survives_saved_sources_confirmation_and_task(ski
             toast.wait_for()
             toast.click()
             toast.wait_for(state="detached")
-        assert errors == []
+        assert errors.unexpected() == [], errors
     finally:
         skills.close(browser) if skills else browser.close()

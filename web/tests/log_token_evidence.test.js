@@ -48,6 +48,18 @@ for (const type of ['llm_usage', 'llm_round', 'llm_round_finished']) {
     }
 }
 
+test('a session row shows its whole input from its split, unknown when the split has no total', () => {
+    const session = { type: 'llm_usage', record_contract_version: 2, prompt_tokens: 596, completion_tokens: 289411,
+        cached_tokens: 146374357, input_token_usage: { total_tokens: 146374953, cache_read_tokens: 146374357,
+            cache_write_tokens: null } };
+    assert.match(meta(session), /146374953→289411 tok/);
+    assert.doesNotMatch(meta(session), /596→/);
+    const unsplit = { ...session, input_token_usage: { total_tokens: null, cache_read_tokens: null, cache_write_tokens: null } };
+    assert.match(meta(unsplit), /\?→289411 tok/);
+    // A direct call has no split: its prompt_tokens already is the whole input.
+    assert.match(meta({ type: 'llm_usage', record_contract_version: 2, prompt_tokens: 7, completion_tokens: 3 }), /7→3 tok/);
+});
+
 test('task_done ledger totals never borrow the usage passport or cache noise', () => {
     const done = { type: 'task_done', task_id: 't1', status: 'completed', prompt_tokens: 0, completion_tokens: 0 };
     assert.doesNotMatch(meta(done), /tok|not reported|unknown|cache/);
@@ -58,4 +70,7 @@ test('task_done ledger totals never borrow the usage passport or cache noise', (
     const partial = meta({ ...done, prompt_tokens: 12, completion_tokens: 0 });
     assert.match(partial, /12→0 tok/);
     assert.doesNotMatch(partial, /legacy|\?|not reported/);
+    // A sum no row reported (a session without its input split) is unknown, never a zero.
+    assert.match(meta({ ...done, prompt_tokens: null, completion_tokens: 300 }), /\?→300 tok/);
+    assert.doesNotMatch(meta({ ...done, prompt_tokens: null, completion_tokens: null }), /tok/);
 });

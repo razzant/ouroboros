@@ -227,6 +227,11 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             page.wait_for_selector(WELCOME)
             assert _welcome_text(page) == DEFAULT
 
+            # A changed-code reload's notice is chrome, not conversation: the greeting stays.
+            _open_main(page, url + '/?_ouro_reason=sha-change')
+            page.locator('[data-system-type="reconnect"]', has_text='Restart complete').wait_for()
+            assert page.locator(WELCOME).count() == 1
+
             # (h) A hand edit the endpoint would refuse reads as the default and keeps the rest.
             _edit_welcome(prefs_file, {"mode": "Hidden", "text": ""})
             _open_main(page, url)
@@ -254,7 +259,6 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
                 && document.querySelector('#chat-messages .chat-load-older')?.getAttribute('aria-busy') === 'true'
                 && document.querySelector('#chat-messages .chat-load-older-btn')
                 ?.textContent.includes('Loading saved history') === true"""
-            notices = "document.querySelectorAll('.chat-bubble[data-system-type=\"reconnect\"]').length"
 
             def settle(mode):
                 late.wait_for_function(held)
@@ -264,9 +268,11 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
                 late.wait_for_function(loading)
                 assert late.locator(ANY_WELCOME).count() == 0
 
-            def wait_notices(count):
-                late.wait_for_function(f"() => {notices} >= {count}")
+            def wait_recovery():
+                late.wait_for_function("""() => !window.__historyHeld.length
+                    && !document.querySelector('#chat-messages .chat-load-older[aria-busy="true"]')""")
                 _settle(late)
+                assert late.locator('[data-system-type="reconnect"]').count() == 0
 
             def retry():
                 # Retry reads again unless another hydration trigger already does; one
@@ -296,7 +302,7 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             assert late.locator(ANY_WELCOME).count() == 0
             retry()
             settle("partial")
-            wait_notices(1)
+            wait_recovery()
             assert late.locator(ANY_WELCOME).count() == 0
             _edit_welcome(prefs_file, {"mode": "custom", "text": RECONNECT_CUSTOM})
             reconnect()
@@ -304,23 +310,23 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             settle("complete")
             late.wait_for_selector(WELCOME)
             assert _welcome_text(late) == RECONNECT_CUSTOM
-            # The ephemeral reconnect notice is chrome, not conversation.
-            wait_notices(2)
+            # Ordinary reconnects preserve the empty state without adding a row.
+            wait_recovery()
             assert late.locator(WELCOME).count() == 1
-            # A later reconnect over the greeting and its notices withdraws it while
+            # A later reconnect over the greeting withdraws it while
             # its read is held, whatever that read then answers.
             reconnect()
             held_empty_read()
             late.evaluate(TRANSITIONS_DONE)
             late.screenshot(path=str(evidence / "main-reconnect-held-desktop.png"))
             settle("partial")
-            wait_notices(3)
+            wait_recovery()
             assert late.locator(ANY_WELCOME).count() == 0
             reconnect()
             held_empty_read()
             settle("complete")
             late.wait_for_selector(WELCOME)
-            wait_notices(4)
+            wait_recovery()
             reconnect()
             held_empty_read()
             settle("error")
@@ -330,13 +336,13 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             settle("complete")
             late.wait_for_selector(WELCOME)
             assert _welcome_text(late) == RECONNECT_CUSTOM
-            wait_notices(5)
+            wait_recovery()
             reconnect()
             held_empty_read()
             settle("message")
             late.locator(".chat-bubble", has_text="Late history message.").wait_for()
             late.wait_for_selector(ANY_WELCOME, state="detached")
-            wait_notices(6)
+            wait_recovery()
             # A painted transcript keeps its messages under a held read, without loading chrome.
             reconnect()
             late.wait_for_function(held)
@@ -344,7 +350,7 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             assert late.locator("#chat-messages .chat-load-older[aria-busy]").count() == 0
             assert late.locator(ANY_WELCOME).count() == 0
             settle("message")
-            wait_notices(7)
+            wait_recovery()
             assert late.evaluate("() => window.__welcomeMounts") == ["true"] * 4
             late.close()
             _edit_welcome(prefs_file, {"mode": "default", "text": ""})
@@ -355,10 +361,11 @@ def test_empty_main_greeting_contract(direct_server_with_data, engine):
             page.wait_for_selector(WELCOME)
             page.fill("#chat-input", "First owner message")
             page.click("#chat-send")
-            page.locator(".chat-bubble.user", has_text="First owner message").wait_for()
+            # The feed's own row: the sent draft's copy rising into it (send_flight.js) is not a row.
+            page.locator("#chat-messages .chat-bubble.user", has_text="First owner message").wait_for()
             page.wait_for_selector(ANY_WELCOME, state="detached")
             _open_main(page, url)
-            page.locator(".chat-bubble.user", has_text="First owner message").wait_for()
+            page.locator("#chat-messages .chat-bubble.user", has_text="First owner message").wait_for()
             assert page.locator(ANY_WELCOME).count() == 0
             body = page.request.get(url + "/api/chat/history").text()
             for copy in (DEFAULT, "Second line", FILE_CUSTOM, RECONNECT_CUSTOM):

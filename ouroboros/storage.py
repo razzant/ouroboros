@@ -54,6 +54,7 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
 from ouroboros.storage_free import StorageFree  # the tray's envelope, homed with its owner; resolved for the contract schema
+from ouroboros.storage_removers import StorageRemover  # each place's removers, homed with their reader
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ class StoragePlace(TypedDict):
     rest: StorageRest
     growth_bytes: NotRequired[Optional[int]]  # against the previous finished count, when both have it
     growth_flag: NotRequired[Literal["unreadable"]]  # either count had unreadable items here
+    undecided: NotRequired[str]  # why its default folder cannot be chosen (launch_roots): unknown, never empty
 
 
 class StorageVolume(TypedDict):
@@ -152,7 +154,7 @@ class StorageCount(TypedDict):
 
 
 class StorageCounting(TypedDict):
-    """A running count: where it is, and the places already finished in this run."""
+    """A running count: where it is; ``done`` lists only finished places with a known size."""
 
     started_at: str
     place: str
@@ -181,6 +183,7 @@ class StorageResponse(TypedDict):
     volume: StorageVolume
     retention_days: int
     free: "StorageFree"
+    removers: Dict[str, List["StorageRemover"]]  # place id -> its removers, read on every answer (``storage_removers``)
     started: NotRequired[bool]
     reason: NotRequired[str]
 
@@ -420,19 +423,25 @@ def _walk_roots(roots: List[Tuple[str, Tuple[str, ...]]], walk: _Walk, named: Tu
 
 def place_roots(data_root: Any) -> List[Dict[str, Any]]:
     """The place table resolved for DATA_ROOT: ``{"id", "group", "roots": [(base, parts)]}`` in
-    walk order; configured roots come from ``config`` getters, never from the client."""
+    walk order; configured roots come from ``config`` getters, never from the client. A default
+    work root that cannot be chosen carries the refusal as ``undecided`` and no root to walk."""
     from ouroboros import config
+    from ouroboros.launch_roots import WorkRootUnavailable
 
     data = os.path.realpath(os.fspath(data_root))
     rows = []
     for place_id, group, spec in PLACES:
+        undecided = ""
         if isinstance(spec, str):
             configured = getattr(config, spec)
-            configured = configured() if callable(configured) else configured
+            try:
+                configured = configured() if callable(configured) else configured
+            except WorkRootUnavailable as refusal:  # counted as unknown, never guessed
+                configured, undecided = None, str(refusal)
             roots = [(os.path.realpath(os.fspath(configured)), ())] if configured else []
         else:
             roots = [(data, tuple(parts)) for parts in spec]
-        rows.append({"id": place_id, "group": group, "roots": roots})
+        rows.append({"id": place_id, "group": group, "roots": roots, **({"undecided": undecided} if undecided else {})})
     return rows
 
 
@@ -484,7 +493,7 @@ def measure(data_root: Any, *, places: Optional[List[Dict[str, Any]]] = None, io
         def send(current: str, counted: int, files: int) -> None:
             if progress is not None:
                 progress({"started_at": started_at, "place": place_id, "current": current,
-                          "places_done": len(done), "places_total": len(table),
+                          "places_done": len(results), "places_total": len(table),
                           "bytes": totals[0] + counted, "files": totals[1] + files, "done": list(done)})
         return send
 
@@ -497,8 +506,11 @@ def measure(data_root: Any, *, places: Optional[List[Dict[str, Any]]] = None, io
         place: StoragePlace = {"id": row["id"], "group": row["group"],
                                "roots": [os.path.join(base, *parts) for base, parts in roots],
                                "same_volume": same_volume, **counted}
+        if row.get("undecided"):  # a root that could not be chosen: one unread item of unknown size
+            place.update(present=True, bytes=None, unreadable=place["unreadable"] + 1, undecided=row["undecided"])
         results.append(place)
-        done.append({"name": row["id"], "bytes": counted["bytes"] or 0, "files": counted["files"]})
+        if place["bytes"] is not None:
+            done.append({"name": row["id"], "bytes": place["bytes"], "files": place["files"]})
         totals[0] += counted["bytes"] or 0
         totals[1] += counted["files"]
     return {
@@ -650,10 +662,10 @@ class StorageCounter:
 
     def projection(self, data_root: Any, *, count_token: Optional[str] = None,
                    free: Optional[Any] = None) -> StorageResponse:
-        """Passive: the saved count with growth, the running count, the last error, fresh free space
-        and the free-space tray (``free``: a ``storage_free.FreeSpace``, the module's own by default);
-        ``count_token`` equal to the latest ``finished_at`` omits the unchanged count."""
-        from ouroboros import storage_free
+        """Passive: the saved count with growth, the running count, the last error, fresh free space,
+        the free-space tray (``free``: a ``storage_free.FreeSpace``, the module's own by default) and
+        each place's removers; ``count_token`` equal to the latest ``finished_at`` omits the unchanged count."""
+        from ouroboros import storage_free, storage_removers
 
         saved = self.saved(data_root)
         latest = with_growth(saved["latest"], saved["previous"]) if saved else None
@@ -663,6 +675,7 @@ class StorageCounter:
         response: StorageResponse = {  # type: ignore[typeddict-item]
             "counting": counting, "error": error, "volume": _volume(data_root),
             "retention_days": _retention_days(), "free": (free or storage_free.free).projection(data_root),
+            "removers": storage_removers.place_removers(data_root, recent=True),  # 1 s polls share one engine read
         }
         if not (latest and count_token and count_token == latest["finished_at"]):
             response["count"] = latest
@@ -787,21 +800,45 @@ count = StorageCounter()
 
 # ---- the child half -------------------------------------------------------------------------
 
+def utility_io(*, thread: bool = False) -> Optional[Callable[[], None]]:
+    """macOS: the disk policy of this process, or with THREAD of the calling thread alone, becomes
+    IOPOL_UTILITY and it never materializes dataless (cloud-evicted) files, so a mass read or rewrite
+    never starves the Mac's foreground IO. Returns what puts back the two policies it replaced, None when
+    nothing took; a no-op elsewhere. The count child keeps the process scope for its life; the
+    ``record_compression`` job takes the thread scope around its own run and restores it after."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+
+        # <sys/resource.h>: IOPOL_UTILITY is 4 (5 is IOPOL_STANDARD; a thread's 0 is "as its process").
+        IOPOL_TYPE_DISK, IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES = 0, 3
+        IOPOL_UTILITY, IOPOL_MATERIALIZE_DATALESS_FILES_OFF = 4, 1
+        scope = 1 if thread else 0  # IOPOL_SCOPE_THREAD, IOPOL_SCOPE_PROCESS
+        libc = ctypes.CDLL(None, use_errno=True)
+        kinds = (IOPOL_TYPE_DISK, IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES)
+        replaced = [(kind, libc.getiopolicy_np(kind, scope)) for kind in kinds]
+        if libc.setiopolicy_np(IOPOL_TYPE_DISK, scope, IOPOL_UTILITY) != 0:
+            return None
+        libc.setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, scope, IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+    except (OSError, AttributeError, ValueError):
+        log.debug("Utility disk policy unchanged", exc_info=True)
+        return None
+
+    def restore() -> None:
+        for kind, policy in replaced:
+            if policy >= 0:
+                libc.setiopolicy_np(kind, scope, policy)
+
+    return restore
+
+
 def _lower_io_priority() -> str:
     """Best-effort disk priority of this count child; the policy applied, ``unchanged`` when none
     took. Function-local platform calls under ``sys.platform`` guards (DEVELOPMENT 10)."""
     try:
         if sys.platform == "darwin":
-            import ctypes
-
-            # <sys/resource.h>: the disk policy of this process, then never materialize dataless
-            # (cloud-evicted) files. IOPOL_UTILITY is 4; 5 is IOPOL_STANDARD, the default tier.
-            IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_UTILITY = 0, 0, 4
-            IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_MATERIALIZE_DATALESS_FILES_OFF = 3, 1
-            libc = ctypes.CDLL(None, use_errno=True)
-            if libc.setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_UTILITY) == 0:
-                libc.setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS,
-                                    IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+            if utility_io() is not None:
                 return "utility"
         elif sys.platform.startswith("linux"):
             import ctypes

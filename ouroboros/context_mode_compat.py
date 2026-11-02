@@ -75,12 +75,8 @@ def normalize_and_persist_context_mode_compat(
     )
     if not changed:
         return normalized
-    if not lock_held:
-        log.warning(
-            "Context settings were normalized in memory, but the canonical compatibility "
-            "pair was not persisted because the settings lock was unavailable; migration "
-            "will retry on the next load."
-        )
+    if not lock_held:  # a lock-free read persists nothing: the boot's read or the next owner write does
+        log.debug("Context settings normalized in memory; the canonical pair persists at boot or the next write.")
         return normalized
     from ouroboros.config import serialize_settings  # bound late: config imports this module
 

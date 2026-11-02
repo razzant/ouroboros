@@ -3,7 +3,8 @@
 It is read through the builder every review surface uses (``review_pool_slots``), so the mind sees the pool its own
 commit, plan and result review would run — never a last-execution receipt and never settings saved after the
 task started. The pool is the catalog's marked rows (contract §1.3): there is no default panel any more, and
-with none marked the Main model reviews alone (``main_self_review``).
+with none marked the Main model reviews alone (``main_self_review``). What every settled review changes — a
+seat's price and last review — rides in ``## Review seat activity`` in the changing part, never in the cached B.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from ouroboros.configured_subagents import SUBAGENTS_SETTING, roster_handles
 from ouroboros.settings_integrity import task_settings_snapshot
 from ouroboros.subagent_runtime import (
     COST_UNKNOWN_HINT,
+    REVIEW_ACTIVITY_HEADER,
     SESSION_SEAT_COST_HINT,
     review_facts_block,
     review_records_block,
@@ -25,6 +27,7 @@ from ouroboros.subagent_runtime import (
 from tests.test_doc_context import _make_env_and_memory
 
 _HEADER = "## Review\n\n"
+_ACTIVITY_HEADER = REVIEW_ACTIVITY_HEADER + "\n\n"
 
 
 def _row(subagent_id: str, target: str, *, kind: str = "api_model", effort: str = "", marked: bool = True,
@@ -61,6 +64,16 @@ def _block(snapshot=None) -> tuple[dict, str]:
     text = review_facts_block(snapshot)
     assert text.startswith(_HEADER)
     return _decode(text), text
+
+
+def _activity(snapshot=None) -> dict:
+    """The changing-part block: each seat's price and last review, by ``seat_id``."""
+    out: list = []
+    review_facts_block(snapshot, activity_out=out)
+    (text,) = out
+    assert text.startswith(_ACTIVITY_HEADER)
+    block, _end = json.JSONDecoder().raw_decode(text.split(_ACTIVITY_HEADER, 1)[1])
+    return {seat.pop("seat_id"): seat for seat in block["seats"]}
 
 
 _RECORDS_HEADER = "## Review records\n\n"
@@ -107,20 +120,28 @@ def test_the_pool_is_the_marked_rows_named_by_their_catalog_handle(tmp_path, mon
     # seat_id is the stored row id (the identity the records carry); subagent_id
     # is the roster handle ``## Available subagents`` shows.
     assert first == {"seat_id": "critic-key", "subagent_id": handles["critic-key"], "model": "openai/gpt-5.6-terra",
-                     "effort": "medium", "delivery": "native", "cost_hint": first["cost_hint"], "cost_usd": None, "cost_kind": "unknown", "last_review": "unknown"}
+                     "effort": "medium", "delivery": "native"}
     assert second == {"seat_id": "packet-key", "subagent_id": handles["packet-key"], "model": "openai/gpt-5.6-sol",
-                      "effort": "high", "delivery": "packet", "cost_hint": second["cost_hint"], "cost_usd": None, "cost_kind": "unknown", "last_review": "unknown"}
+                      "effort": "high", "delivery": "packet"}
     assert third == {"seat_id": "session-key", "subagent_id": handles["session-key"], "model": "codex=gpt-5.6-sol",
-                     "effort": "high", "delivery": "session", "cost_hint": SESSION_SEAT_COST_HINT, "cost_usd": None, "cost_kind": "subscription", "last_review": "unknown"}
+                     "effort": "high", "delivery": "session"}
     assert "helper-key" not in text and "gpt-5.6-luna" not in text, "an unmarked row is not a reviewer"
+    # The price and the last review are each seat's changing facts, beside the pool, never inside it.
+    activity = _activity()
+    assert list(activity) == ["critic-key", "packet-key", "session-key"]
+    assert activity["session-key"] == {"cost_hint": SESSION_SEAT_COST_HINT, "cost_usd": None,
+                                       "cost_kind": "subscription", "last_review": "unknown"}
     # An api seat's hint is the wave's own estimate or an honest unknown — never a price table.
-    for row in (first, second):
+    for seat in ("critic-key", "packet-key"):
+        row = activity[seat]
+        assert (row["cost_usd"], row["cost_kind"], row["last_review"]) == (None, "unknown", "unknown")
         assert row["cost_hint"] == COST_UNKNOWN_HINT or row["cost_hint"].startswith("≈$")
     # The preflight and /review seat whichever enabled catalog row is named per call
     # (decision 3A): the block names that rule, not a second panel.
     assert "catalog row" in block["surfaces"]["preflight"] and "Main" in block["surfaces"]["system_review"]
     assert block["omitted"] == {"rows": 0} and "recent_records" not in block
-    assert block["full_source"] == {"pool": "GET /api/review-pool", "records": "## Review records"}
+    assert block["full_source"] == {"pool": "GET /api/review-pool", "activity": REVIEW_ACTIVITY_HEADER,
+                                    "records": "## Review records"}
     assert _records(tmp_path) == {"recent_records": [], "omitted": {"records": 0}, "full_source": "state/review_ledger/"}
 
 
@@ -141,7 +162,8 @@ def test_the_cost_hint_of_a_cold_seat_never_waits_on_the_provider_catalog(tmp_pa
 
     (seat,) = block["pool"]
     assert seat["seat_id"] == "cold-key"
-    assert seat["cost_hint"] == COST_UNKNOWN_HINT or seat["cost_hint"].startswith("≈$")
+    hint = _activity()["cold-key"]["cost_hint"]
+    assert hint == COST_UNKNOWN_HINT or hint.startswith("≈$")
 
 
 def test_the_pool_ignores_the_catalog_switch_and_reads_only_enabled_rows(monkeypatch):
@@ -228,11 +250,12 @@ def test_recent_execution_is_a_fact_without_replacing_the_configured_seat(monkey
         "critic-key": {"status": "ok", "ts": "2026-10-19", "cost_usd": 0.023,
                        "requested": {"model": "old-model"}, "effective": {"model": "old-model"}}})
     monkeypatch.setenv(SUBAGENTS_SETTING, _POOL)
-    block, _text = _block()
-    row = block["pool"][0]
-    assert row["model"] == "openai/gpt-5.6-terra"
+    block, text = _block()
+    assert block["pool"][0]["model"] == "openai/gpt-5.6-terra"
+    row = _activity()["critic-key"]
     assert row["cost_usd"] == 0.023 and row["cost_kind"] == "measured"
     assert row["last_review"] == {"status": "ok", "ts": "2026-10-19", "cost_usd": 0.023}
+    assert "2026-10-19" not in text and "0.023" not in text, "the stable block keeps no execution"
 
 
 def test_the_block_reads_the_task_snapshot_not_settings_saved_after_the_task_started(tmp_path, monkeypatch):
@@ -270,9 +293,40 @@ def test_both_context_paths_carry_the_block(tmp_path, monkeypatch):
     assert _decode(shared.semi_stable_text)["source"] == "structured"
     assert _decode(declared.semi_stable_text) == _decode(shared.semi_stable_text)
     assert _HEADER not in shared.dynamic_text + declared.dynamic_text
-    # The task's records are a changing fact: both paths carry them in the dynamic part only.
-    assert _RECORDS_HEADER in shared.dynamic_text and _RECORDS_HEADER in declared.dynamic_text
-    assert _RECORDS_HEADER not in shared.semi_stable_text + declared.semi_stable_text
+    # The task's records and each seat's price and last review are changing facts: both paths
+    # carry them in the dynamic part only.
+    for header in (_RECORDS_HEADER, _ACTIVITY_HEADER):
+        assert header in shared.dynamic_text and header in declared.dynamic_text
+        assert header not in shared.semi_stable_text + declared.semi_stable_text
+
+
+def test_a_settled_review_changes_no_cached_block(tmp_path, monkeypatch):
+    """A review settling between two starts changes its seat's price and last review. They ride in the changing
+    part (C), so the cached blocks A', D and B keep their bytes on both send paths — the ``cache_control``-marked
+    blocks and the OpenAI-family/Claudexor system items (``split_leading_system_prefix``). While they sat in
+    ``## Review`` inside B, any review on the install re-sent B uncached at every focus's next start."""
+    from ouroboros import context, review_price, reviewer_slot_config
+    from ouroboros.llm_messages import split_leading_system_prefix
+
+    monkeypatch.setenv(SUBAGENTS_SETTING, _POOL)
+    env, memory = _make_env_and_memory(tmp_path)
+    settled = {"critic-key": {"status": "ok", "ts": "2026-10-29T08:00:00+00:00", "cost_usd": 0.4321}}
+    price = review_price.ReviewPrice(usd=0.4321, reviews=2, low=0.21, high=0.65)
+    sends = []
+    for last, measured in (({}, None), (settled, price)):
+        monkeypatch.setattr(reviewer_slot_config, "reviewer_slot_last_executions", lambda last=last: last)
+        monkeypatch.setattr(review_price, "review_price", lambda *_a, measured=measured: measured)
+        messages, _ = context.build_llm_messages(env=env, memory=memory, task={"id": "root", "type": "task", "text": "w"})
+        marked = [block["text"] for block in messages[0]["content"] if block.get("cache_control")]
+        wire, moved = split_leading_system_prefix(messages)
+        assert moved > 0
+        sends.append((marked, [row for row in wire if row["role"] == "system"],
+                      json.dumps([row for row in wire if row["role"] != "system"], ensure_ascii=False)))
+    (marked_before, system_before, _tail), (marked_after, system_after, tail_after) = sends
+    assert len(marked_before) >= 2 and marked_before == marked_after, "the cache-marked A', D and B keep their bytes"
+    assert system_before == system_after, "the leading system items keep their bytes"
+    assert "0.4321" in tail_after and "2026-10-29T08:00:00" in tail_after, "the settled review rides in C"
+    assert "0.4321" not in json.dumps([marked_after, system_after], ensure_ascii=False)
 
 
 @pytest.mark.parametrize("enforcement, mode, blocks, opening", [
@@ -310,14 +364,20 @@ def test_a_fourteen_seat_pool_keeps_every_seats_delivery_cost_and_reliability(tm
               "effective": {"model": "old-model", "profile": "p" * 500}} for key in keys})
     block, text = _block()
     rows = block["pool"]
+    activity = _activity()
 
     assert block["omitted"] == {"rows": 0} and "recent_records" not in block
     records = _records(tmp_path)
     assert records["omitted"]["records"] == "1+" and len(records["recent_records"]) == 5
-    assert len(rows) == 14 and all({"seat_id", "model", "delivery", "cost_usd", "cost_kind", "last_review"} <= row.keys() and len(row["seat_id"]) == 64 for row in rows)
+    assert len(rows) == 14 and all({"seat_id", "model", "delivery"} <= row.keys() and len(row["seat_id"]) == 64 for row in rows)
     assert block["full_source"]["pool"] == "GET /api/review-pool"
-    assert all(row["last_review"] == last for row in rows)
+    assert list(activity) == [row["seat_id"] for row in rows]
+    assert all({"cost_hint", "cost_usd", "cost_kind", "last_review"} <= seat.keys() and seat["last_review"] == last
+               for seat in activity.values())
     assert len(text.encode("utf-8")) < 12_000, "full large roster must not copy execution projections"
+    out: list = []
+    review_facts_block(activity_out=out)
+    assert "p" * 500 not in out[0] and len(out[0].encode("utf-8")) < 12_000, "nor does its activity block"
 
 
 _LANES_KEY = "OUROBOROS_REVIEWER_SLOTS"

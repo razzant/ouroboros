@@ -1,5 +1,6 @@
-/** Dependency-free owner-decision contracts: request/reply shapes and their quiz frames.
- * Re-exported by ./api_types.js; the decision family stays here under one owner. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.decision_contracts`: the one owner-decision
+ * ingress body and reply, re-exported by ./api_types.js beside the frames they answer, and the
+ * integration-secret form's request, reply and metadata. */
 
 /**
  * POST /api/decisions body — the ONE answer ingress for owner decision cards
@@ -72,65 +73,94 @@
 
 /**
  * An integration-secret request (showSecretHitl) on its question card; metadata only, never a value.
+ * A save writes only while the skill still maps these field ids to these keys.
  * @typedef {Object} SecretRequestMeta
  * @property {string} plugin_name
  * @property {SecretRequestField[]} fields
- * @property {string} content_hash
  */
 
 /**
- * The host's typed completion of a secret request (secret_filled after Settings kept the values,
- * secret_cancelled with nothing saved). grant_missing names saved keys the skill's current grant
- * does not cover; saving grants nothing.
+ * Whether an asked key holds a value in Settings now: a boolean, never a value or prefix.
+ * @typedef {Object} SecretKeyState
+ * @property {string} id
+ * @property {string} setting_key
+ * @property {boolean} configured
+ */
+
+/**
+ * An installed skill that reads an asked key, and what its current grant covers (facts, never a grant).
+ * @typedef {Object} SecretConsumer
+ * @property {string} name
+ * @property {boolean} enabled
+ * @property {string[]} reads
+ * @property {string[]=} granted
+ * @property {boolean=} unsupported
+ * @property {boolean=} grant_unknown
+ */
+
+/**
+ * The host's typed completion of a secret request: secret_filled or secret_replaced after Settings
+ * kept the values (replaced_fields held a value just before), or secret_cancelled. consumers is what
+ * the readers' grants covered after the save (saving grants nothing), or consumers_unknown when they
+ * could not be read, never an empty list; late marks a save after the asking task ended, which
+ * resumed nothing.
  * @typedef {Object} SecretOutcome
- * @property {"secret_filled"|"secret_cancelled"} event
+ * @property {"secret_filled"|"secret_replaced"|"secret_cancelled"} event
  * @property {string} pluginName
  * @property {string[]} fields
  * @property {string} at
  * @property {string[]} settings_keys
- * @property {string[]=} grant_missing
- * @property {boolean=} grant_unknown
- * @property {boolean=} grant_unsupported
+ * @property {string[]=} replaced_fields
+ * @property {SecretConsumer[]=} consumers
+ * @property {boolean=} consumers_unknown
+ * @property {boolean=} late
  * @property {boolean=} interrupted_save
  */
 
 /**
- * The screenshot's event payload: plugin and field ids, never a value.
+ * The outcome's public event payload: plugin and field ids, never a value.
  * @typedef {Object} SecretEvent
  * @property {string} pluginName
  * @property {string[]} fields
  */
 
 /**
- * POST /api/decisions/secret body — saveSecretToken. values carries exactly the asked field ids
- * on save; action "cancel" carries none. Reuse request_id only for unchanged values.
+ * POST /api/decisions/secret body — saveSecretToken. A save carries values for exactly the asked
+ * field ids and observed (per field, whether the form showed its key as set); it writes only while
+ * Settings still says that, so Replace is explicit. status and cancel carry neither; status needs no
+ * request_id. Reuse request_id only for unchanged values.
  * @typedef {Object} SecretDecisionRequest
- * @property {string} request_id
+ * @property {string=} request_id
  * @property {string} decision_id
- * @property {("save"|"cancel")=} action
+ * @property {("save"|"cancel"|"status")=} action
  * @property {Object<string, string>=} values
+ * @property {Object<string, boolean>=} observed
  */
 
 /**
- * Secret form reply; saved is present on both sides of the Settings commit. saved true with
- * secret_save_unverified or secret_completion_unrecorded is a written value not reported filled;
- * saved null with secret_save_unconfirmed is an attempt of unknown outcome. Read status first;
- * only a new request saves again.
+ * Secret form reply; every save and cancel reply and every refusal carries saved on both sides of the
+ * Settings commit, a status read only the lifecycle and form facts. A status read and a refusal on a
+ * request that still takes a save add keys and consumers (or keys_unknown/consumers_unknown). saved
+ * true with secret_save_unverified, secret_not_retained or secret_completion_unrecorded wrote Settings
+ * without reporting a save; saved null with secret_save_unconfirmed is an attempt of unknown outcome.
+ * Read status first; only a new request saves again.
  * @typedef {Object} SecretDecisionResponse
  * @property {boolean=} ok
  * @property {(boolean|null)=} saved
  * @property {string=} decision_id
  * @property {string=} state
  * @property {boolean=} duplicate
+ * @property {SecretRequestMeta=} secret_request
  * @property {SecretEvent=} secret_filled
+ * @property {SecretEvent=} secret_replaced
  * @property {SecretEvent=} secret_cancelled
  * @property {SecretOutcome=} secret_outcome
- * @property {string[]=} settings_keys
- * @property {string[]=} grant_missing
- * @property {boolean=} grant_unknown
- * @property {boolean=} grant_unsupported
- * @property {boolean=} interrupted_save
+ * @property {SecretKeyState[]=} keys
+ * @property {boolean=} keys_unknown
+ * @property {SecretConsumer[]=} consumers
+ * @property {boolean=} consumers_unknown
  * @property {boolean=} save_unconfirmed
+ * @property {boolean=} answered_after_terminal
  * @property {string=} closed_reason
  * @property {string=} closed_at
  * @property {string=} closed_actor
@@ -140,70 +170,3 @@
  * @property {string=} error
  * @property {string=} reason_code
  */
-
-/**
- * @typedef {Object} QuizOption
- * @property {string} label
- * @property {string=} detail
- * @property {boolean=} recommended
- */
-
-/**
- * @typedef {Object} QuizOutbound
- * @property {Array<Object>=} materials Validated existing artifact references.
- * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
- * @property {string=} closed_reason
- * @property {string=} closed_at
- * @property {string=} closed_by_task_id
- * @property {string=} closed_actor
- * @property {string=} closed_request_id
- * @property {"quiz"} type
- * @property {"assistant"} role
- * @property {string} quiz_id
- * @property {string} question
- * @property {QuizOption[]} options
- * @property {string} stake
- * @property {string} assumption
- * @property {boolean=} wait_for_answer
- * @property {string} state
- * @property {string} ts
- * @property {number=} answered_index
- * @property {string=} comment
- * @property {string=} host_facts
- * @property {number=} chat_id
- * @property {string=} task_id
- * @property {boolean=} project_thread
- * @property {Object=} transport
- * @property {string=} row_address
- * @property {Object=} reply_to
- * @property {Object=} relay
- * @property {string=} reply_to_relay
- * @property {string=} kind
- * @property {import('./decision_types.js').SecretRequestMeta=} secret_request An integration-secret request: answered only by its protected form.
- */
-
-/**
- * Lifecycle update for an already-rendered quiz card (WS "quiz_state") —
- * a separate discriminator so a state change never dedupes as (or spawns)
- * a second card. answered_index rides only with state "answered".
- * @typedef {Object} QuizStateOutbound
- * @property {{kind:'publication'|'answer'|'closure',state:'owed'|'delivered',reason_code?:string,dismissed?:boolean}=} question_delivery Canonical settlement delivery fact.
- * @property {string=} closed_reason
- * @property {string=} closed_at
- * @property {string=} closed_by_task_id
- * @property {string=} closed_actor
- * @property {string=} closed_request_id
- * @property {"quiz_state"} type
- * @property {string} quiz_id
- * @property {string} task_id
- * @property {string} state
- * @property {string} ts
- * @property {number=} answered_index
- * @property {string=} comment
- *   The owner's recorded free-text answer, when one was recorded.
- * @property {boolean=} wait_for_answer
- *   False once a bounded wait closed and the task resumed; the card stays open and answerable.
- * @property {number=} chat_id
- * @property {import('./decision_types.js').SecretOutcome=} secret_outcome A secret request's typed completion, metadata only.
- */
-

@@ -77,7 +77,8 @@ def test_one_identity_read_refuses_unknown_then_resumes_the_tree(
         first = queue.resume_budget_paused_task(running["id"])
     assert reads == ["held"], "one root classification per grant, never a second fence classification"
     if fault != "readable":
-        assert first == {"ok": False, "error": "owner_pause_custody_unreadable"}, first
+        assert first == {"ok": False, "error": "owner_pause_custody_unreadable",
+                         "message": "Resume refused: owner pause custody unreadable"}, first
         assert budget_pause.budget_pause_row(host.root, running["id"]) == before
         assert queue.BUDGET_ROOT_FENCES == latch_before
         assert not _assign(host, monkeypatch), "neither the root nor unselected child dispatches"

@@ -73,8 +73,8 @@ def test_real_escalation_bridge_history_detail_and_answer(tmp_path, monkeypatch)
     main = json.loads(_assemble_history_response(tmp_path, 1, 10, 0))["messages"]
     assert main[0]["quiz_state"] == "answered" and main[0]["answered_index"] == 1
     assert main[0]["question"] == "Which storage?" and main[0]["options"] == ["Local", "Shared"]
-    # Owed to the live asker until its saved read; that read settles it.
-    assert main[0]["text"] == "Answer recorded · delivery pending in Question Project"
+    # Saved in the live asker's mailbox until its saved read; that read settles it.
+    assert main[0]["text"] == "Answer saved · the task reads it when it continues in Question Project"
     from ouroboros.owner_mailbox import acknowledge_transcript_entry, drain_owner_entries
     [entry] = drain_owner_entries(tmp_path, "task-1")
     assert entry["kind"] == "quiz_answer" and acknowledge_transcript_entry(tmp_path, "task-1", entry)
@@ -332,8 +332,7 @@ def test_project_question_pointer_display_fields_share_one_contract():
                                        {"id": "p", "chat_id": 12, "name": "Project"}, None)
     # Secret metadata is optional on ordinary questions, but must survive the same producer.
     assert browser_fields - {"secret_request"} <= set(pointer), sorted(browser_fields - set(pointer) - {"secret_request"})
-    secret_request = {"plugin_name": "telegram", "content_hash": "h",
-                      "fields": [{"id": "botToken", "setting_key": "TELEGRAM_BOT_TOKEN"}]}
+    secret_request = {"plugin_name": "telegram", "fields": [{"id": "botToken", "setting_key": "TELEGRAM_BOT_TOKEN"}]}
     protected = project_question_pointer({"task_id": "t", "quiz_id": "q"},
                                         {**block, "options": [], "secret_request": secret_request},
                                         {"id": "p", "chat_id": 12, "name": "Project"}, None)

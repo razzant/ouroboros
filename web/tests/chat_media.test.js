@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { bindComposerFileTargets, safeHttpUrl } from '../modules/chat_media.js';
+import { bindComposerFileTargets, decorateContactSource, safeHttpUrl } from '../modules/chat_media.js';
 import { createComposerAttachments } from '../modules/chat_attachments.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, fixture } from './helpers/media_dom.js';
@@ -15,6 +15,50 @@ test('safeHttpUrl accepts only absolute HTTP(S) URLs', () => {
     assert.equal(safeHttpUrl('/relative'), '');
     assert.equal(safeHttpUrl('javascript:alert(1)'), '');
     assert.equal(safeHttpUrl('data:text/plain,no'), '');
+});
+
+test('a framed question joins its Project to the voice and ends on its time alone', () => {
+    const fx = fixture({ formatMsgTime: () => ({ short: '15:18', full: '19 Oct 2026, 15:18' }) });
+    try {
+        const part = (className) => { const node = document.createElement('span'); node.className = className; return node; };
+        const card = part('chat-quiz-card');
+        const reference = part('chat-quiz-project');
+        const msg = { role: 'assistant', ts: '2026-10-19T15:18:00Z' };
+        const bubble = fx.controller.bubbleFrameNode(msg, card, { voice: [reference] });
+        const classes = (node) => node.children.map((child) => child.className);
+        assert.deepEqual(classes(bubble), ['chat-bubble-voice', 'chat-quiz-card', 'msg-time']);
+        assert.deepEqual(classes(bubble.children[0]), ['sender', 'chat-quiz-project']);
+        // Without parts the frame is the one every other delivery gets.
+        const plain = fx.controller.bubbleFrameNode(msg, part('chat-quiz-card'));
+        assert.deepEqual(classes(plain), ['sender', 'chat-quiz-card', 'msg-time']);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('private contact source stays in the voice line, separate from authored words', () => {
+    const fx = fixture();
+    try {
+        const body = document.createElement('div');
+        body.className = 'message';
+        body.textContent = 'Exact authored words';
+        const origin = { task_id: 'source-work', binding_id: 'place', source_event_id: 'event',
+            label: '<script>external label</script>', url: 'https://example.test/source' };
+        const bubble = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: origin }, body);
+        const link = bubble.querySelector('.sender').querySelector('.md-link');
+        assert.equal(link.textContent, origin.label);
+        assert.equal(link.href, origin.url);
+        assert.equal(link.title, 'Source work: source-work');
+        assert.equal(body.textContent, 'Exact authored words');
+        const replay = fx.controller.bubbleFrameNode({ role: 'assistant', quiz: { presence_contact: origin } }, document.createElement('div'));
+        assert.equal(replay.querySelector('.sender').querySelector('.md-link').href, origin.url);
+        const plain = fx.controller.bubbleFrameNode({ role: 'assistant' }, document.createElement('div'));
+        decorateContactSource(plain, { ...origin, url: 'javascript:alert(1)' });
+        assert.equal(plain.querySelector('.md-link'), null);
+        const unknown = fx.controller.bubbleFrameNode({ role: 'assistant', presence_contact: { label: 'unbound' } }, document.createElement('div'));
+        assert.equal(unknown.querySelector('.sender').children.length, 0);
+    } finally { fx.controller.destroy(); fx.restore(); }
 });
 
 test('photo grouping is keyed by role and task without cross-task merging', () => {
@@ -204,7 +248,7 @@ test('media and document builders render upgraded DOM shapes with type-anchored 
             file_base64: 'aGVsbG8=', size_bytes: 5,
         });
         assert.match(document.innerHTML, /class="chat-file-grid"/);
-        assert.match(document.innerHTML, /class="chat-file-card"/);
+        assert.ok(document.querySelector('.chat-file-card'));
         assert.match(document.innerHTML, /PDF · 5 B/);
         const actions = Array.from({ length: 13 }, (_value, index) => ({
             label: `Link ${index}`,

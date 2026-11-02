@@ -57,19 +57,11 @@ def test_host_salvage_automatic_authority_is_bounded_but_explicit_read_is_full(
 
     assert validate_task_authority_sources(env, task) == {}
     automatic = task["predecessor_authority"]
-    result = automatic["result"]
-    assert result["kind"] == "unreviewed_host_salvage"
-    assert len(result["preview"]) <= _AUTOMATIC_HOST_SALVAGE_RESULT_CHARS
-    assert result["full_chars"] >= len(full_result)  # serialized chars
-    assert result["source_ref"] == {**source, "field": "authority.result"}
-    # The carried prefix is byte-exact and SUBSTANTIAL - a preview carrying a
-    # token prefix plus a marker would pass a startswith(200) check while
-    # discarding the budget it promises.
-    carried = len(result["preview"].split("\n\u26a0", 1)[0])
-    assert carried > _AUTOMATIC_HOST_SALVAGE_RESULT_CHARS - 1_000
-    assert result["preview"].startswith(full_result[:carried])
-    assert "OMISSION NOTE" in result["preview"]
-    assert tail not in json.dumps(automatic)
+    # A Continue successor inherits notes and addresses (THESIS I-7, owner 19.10): the salvaged
+    # answer stays behind the exact reader with its size named, never as a preview in the brief.
+    assert "result" not in automatic and automatic["omitted_fields"]["result"] > 0
+    assert automatic["source"] == source
+    assert tail not in json.dumps(automatic) and "unreviewed provider output" not in json.dumps(automatic)
     assert len(json.dumps(automatic)) < 25_000
     # The bounded continuation envelope (delegation-usefulness, owner
     # 2026-08-30): identity + digest + pull source instead of the recursive
@@ -99,13 +91,11 @@ def test_host_salvage_automatic_authority_is_bounded_but_explicit_read_is_full(
     assert tail in explicit["authority"]["result"]
 
 
-def test_automatic_authority_rides_whole_or_pointer(tmp_path):
-    """Decoupled contract (delegation-usefulness, owner 2026-08-30): the
-    automatic predecessor injection is a bounded envelope for EVERY origin.
-    A result that fits one ordinary tool-result budget rides whole (no pull
-    round for small hops); a bigger one rides as a bounded preview beside the
-    named pull source - the full body stays in task_results, explicitly
-    readable (the sibling salvage test pins that half)."""
+def test_automatic_authority_carries_every_answer_as_its_reader(tmp_path):
+    """The automatic predecessor injection is a bounded envelope for EVERY origin
+    (owner 2026-08-30). A Continue successor inherits notes and addresses (THESIS
+    I-7, owner 19.10): small and big answers alike stay behind the named pull
+    source with their size, explicitly readable (the sibling salvage test pins that half)."""
     from ouroboros.agent_startup_checks import (
         _AUTOMATIC_HOST_SALVAGE_RESULT_CHARS,
         validate_task_authority_sources,
@@ -129,17 +119,9 @@ def test_automatic_authority_rides_whole_or_pointer(tmp_path):
         assert validate_task_authority_sources(env, task) == {}
         automatic = task["predecessor_authority"]
         assert automatic["kind"] == "bounded_continuation_envelope"
-        if full_result is small_result:
-            assert automatic["result"] == full_result, "small hops ride whole"
-        else:
-            assert automatic["result"]["kind"] == "bounded_field_preview"
-            # full_chars counts the SERIALIZED body (escapes included).
-            assert automatic["result"]["full_chars"] >= len(full_result)
-            preview = automatic["result"]["preview"]
-            carried = len(preview.split("\n\u26a0", 1)[0])
-            assert carried > _AUTOMATIC_HOST_SALVAGE_RESULT_CHARS - 1_000
-            assert preview.startswith(full_result[:carried])
-            assert "OMISSION NOTE" in preview
+        assert "result" not in automatic and automatic["omitted_fields"]["result"] > 0
+        assert automatic["source"] == _authority_source(task_id)
+        assert full_result[:20] not in json.dumps(automatic)
 
 
 def test_legacy_collapse_fires_only_on_growth_carriers_and_is_idempotent():
@@ -248,12 +230,12 @@ def test_plan_review_authority_core_preserves_an_unknown_schema_version():
     assert plan_review_authority_core(state) is state
 
 
-def test_automatic_plan_review_authority_carries_claims_not_reviewer_transport(tmp_path):
-    """The continuation envelope's `plan_review_state` must reach the acceptance claims
-    and blocking finding ids; reviewer transport used to fill the preview before them."""
+def test_automatic_plan_review_authority_stays_behind_its_reader(tmp_path):
+    """A Continue successor never inherits the predecessor's review history (THESIS I-7,
+    owner 19.10): the brief names `plan_review_state` and its size beside the reader,
+    and the explicit read returns the complete state."""
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.contracts.task_contract import build_task_contract
-    from ouroboros.task_results import plan_review_authority_core as plan_core
     from ouroboros.tools.control import _get_task_result
     from ouroboros.tools.registry import ToolContext
 
@@ -269,23 +251,10 @@ def test_automatic_plan_review_authority_carries_claims_not_reviewer_transport(t
         "predecessor_authority_source": _authority_source("planned"),
     }
     assert validate_task_authority_sources(env, task) == {}
-    carried = task["predecessor_authority"]["plan_review_state"]
-    text = json.dumps(carried)
-    projection = carried["projection"]
-    assert projection["projected_from"] == "plan_review_authority_core"
-    assert projection["dropped_keys"] == [
-        "actors", "actors_degraded", "evidence_manifest", "health_epoch", "reasons", "retry_key",
-    ]
-    assert projection["full_chars"] == len(json.dumps(state, ensure_ascii=False, sort_keys=True, default=str))
-    assert projection["source_ref"] == {
-        **_authority_source("planned"), "field": "authority.plan_review_state",
-    }
-    assert all("actors" not in wave for wave in carried["waves"])
-    for claim in (*claims, "f1", "REVIEW_REQUIRED"):
-        assert claim in text, claim
-    if isinstance(carried, dict) and carried.get("kind") == "bounded_field_preview":
-        assert carried["source_ref"]["field"] == "authority.plan_review_state"
-        assert carried["full_chars"] >= len(json.dumps(plan_core(state)))
+    brief = task["predecessor_authority"]
+    assert "plan_review_state" not in brief and brief["omitted_fields"]["plan_review_state"] > 0
+    assert brief["source"] == _authority_source("planned")
+    assert not any(claim in json.dumps(brief) for claim in claims)
 
     # The named pull source stays complete, and a minted envelope rebuilds untouched.
     explicit = json.loads(_get_task_result(
@@ -293,6 +262,7 @@ def test_automatic_plan_review_authority_carries_claims_not_reviewer_transport(t
         "planned", include_authority=True,
     ))
     assert explicit["authority"]["plan_review_state"]["waves"][-1]["actors"]
+    assert explicit["authority"]["plan_review_state"]["waves"][-1]["spec"]["acceptance_claims"] == claims
     envelope = task["predecessor_authority"]
     again = build_task_contract({"objective": "next", "predecessor_authority": envelope})
     assert again["predecessor_authority"] == envelope

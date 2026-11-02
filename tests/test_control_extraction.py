@@ -68,6 +68,7 @@ _MOVED_OWNERS = {
     "_toggle_evolution": control_runtime,
     "_update_identity": control_runtime,
     "_update_scratchpad": control_runtime,
+    "_update_world": control_runtime,
     # D07 half (oracle rows 2537-2556, 2569-2579 re-cut on tip bytes).
     "VALID_SUBTASK_MEMORY_MODES": control_subagent_spec,
     "schedule_subagent_properties": control_subagent_spec,
@@ -147,6 +148,7 @@ def test_control_catalog_handler_owners_point_at_the_carried_leaves():
         "update_scratchpad": (control_runtime, "_update_scratchpad"),
         "send_user_message": (control_runtime, "_send_user_message"),
         "update_identity": (control_runtime, "_update_identity"),
+        "update_world": (control_runtime, "_update_world"),
         "toggle_evolution": (control_runtime, "_toggle_evolution"),
         "toggle_consciousness": (control_runtime, "_toggle_consciousness"),
         "switch_model": (control_runtime, "_switch_model"),

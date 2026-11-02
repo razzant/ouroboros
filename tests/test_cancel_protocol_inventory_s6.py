@@ -52,12 +52,13 @@ _TERMINAL_TOKENS = (
 # constant from the sticky set; "dynamic" is a variable or expression that can
 # carry one, which counts because the reducer, not the caller, decides.
 TERMINAL_WRITERS = {
-    # Advances only derived fan-out facts; the locked projector preserves the
-    # CURRENT status, including a concurrently completed terminal result.
-    ('ouroboros/swarm_rollup.py::load_swarm_rollup', 'row["status"]'): 'dynamic',
     # Selects an already retained actor account; its locked projector preserves
     # CURRENT lifecycle, including terminal state, and compares the prior pointer.
     ('ouroboros/review_history_view.py::publish_review_history_view', '"running"'): 'dynamic',
+    # Writes the admission title with the status it just read; write_task_result
+    # refuses a status regression (_is_status_regression), so a stale read
+    # cannot reopen a finished wake.
+    ('supervisor/worker_chat_lane.py::name_wake_on_admission', 'current.get("status") or STATUS_RUNNING'): 'dynamic',
     # Names the mind's surviving notes after an applied fold; its locked projector
     # preserves CURRENT lifecycle, including terminal state, and writes only the pointer.
     ('ouroboros/main_context_authority.py::publish_working_notes', '"running"'): 'dynamic',
@@ -79,6 +80,10 @@ TERMINAL_WRITERS = {
     # Preparation markers land only on a row still in the named non-terminal
     # status (requested by default); the projector refuses any other row.
     ('supervisor/workspace_preparation.py::_transition', 'status'): 'dynamic',
+    # #1376: the host-composed diagnostic's create-only "requested" receipt, the
+    # same seed a schedule_subagent request writes; create_only refuses any
+    # existing row, so it can neither end nor overwrite a task.
+    ('supervisor/silence_attention.py::_admit', '"requested"'): 'dynamic',
     # F6 upstream sync: the cursor/backfill refresh rewrites a stale stored
     # disclosure without changing the task's terminal status (same preserved
     # read as its record_terminal_reconciliation sibling).
@@ -144,14 +149,10 @@ TERMINAL_WRITERS = {
     # Recovery of a dead attempt whose answer the host already holds (owed/delivered/unreadable
     # registry evidence): the attempt is finalized from the outbox's bytes as failed /
     # infra_failed / finalization_incomplete instead of re-running the prompt (both the
-    # timeout reaper's retry admission and dead-worker recovery route through it).
+    # hard-timeout reaper and dead-worker recovery route through it).
     ('ouroboros/working_checkpoint.py::adopt_registered_answer', 'STATUS_FAILED'): 'terminal',
     ('supervisor/cancel_publication.py::_finalize_cancel_intent_on_miss', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/events_project_routing.py::_persist_promote_rejection', 'STATUS_FAILED'): 'terminal',
-    # The promoter's force_plan transfer is a locked field projection like its
-    # review-evidence sibling above: it preserves the status it reads (possibly
-    # terminal) and only records where the planning obligation went.
-    ('supervisor/events_project_routing.py::_record_obligation_transfer', '"running"'): 'dynamic',
     ('supervisor/events_schedule_task.py::_reject_schedule_task', 'status'): 'dynamic',
     ('supervisor/events_task_done.py::_finish_task_done_dispatch', 'STATUS_FAILED'): 'terminal',
     ('supervisor/events_task_done.py::_resolve_lifecycle_fault', 'STATUS_FAILED'): 'terminal',
@@ -169,9 +170,6 @@ TERMINAL_WRITERS = {
     ('supervisor/task_admission.py::terminalize_invalid_depth_restore', 'STATUS_FAILED'): 'terminal',
     ('supervisor/task_lifecycle.py::_finish_captured_pending', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/task_lifecycle.py::_finish_captured_running', 'STATUS_CANCELLED'): 'terminal',
-    ('supervisor/task_reaper.py::_enqueue_retry', 'STATUS_FAILED'): 'terminal',
-    ('supervisor/task_reaper.py::_run_retry_admission_transaction', 'STATUS_CANCELLED'): 'terminal',
-    ('supervisor/task_reaper.py::_run_retry_admission_transaction', 'STATUS_FAILED'): 'terminal',
     ('supervisor/task_reaper.py::reap_timed_out_task', 'STATUS_FAILED'): 'terminal',
     ('supervisor/worker_assignment.py::_cancel_unauthorized_evolution', 'STATUS_CANCELLED'): 'terminal',
     ('supervisor/worker_assignment.py::assign_tasks', 'STATUS_CANCELLED'): 'terminal',
@@ -222,8 +220,6 @@ NO_DELIVERABLE_LANES = {
         'restored pending work refused before assignment; terminalization retry retains custody, no answer exists',
     'supervisor/task_admission.py::terminalize_invalid_depth_restore':
         'an invalid-depth restore is refused at admission; no answer exists',
-    'supervisor/task_reaper.py::_run_retry_admission_transaction':
-        'a refused retry admission terminalizes the retry, not an owner answer',
     'supervisor/workers.py::_terminalize_invalid_pending_depth':
         'an invalid-depth pending row is terminalized before it ever ran',
     'ouroboros/tools/control_delegation.py::record_depth_limit_refusal':

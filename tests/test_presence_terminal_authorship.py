@@ -13,7 +13,7 @@ from ouroboros.presence_authority import presence_ceiling_payload
 from ouroboros.presence_runner import PresenceTurnError, _cached_result, build_presence_result_event
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.task_finalization import provider_terminal_body
-from ouroboros.tools.registry import ToolRegistry
+from tests.presence_legacy_helpers import legacy_registry as ToolRegistry
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 from tests.test_presence_completion import _call
 from tests.test_presence_failed_handoff import _failed_parent
@@ -194,6 +194,8 @@ def native_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_module, "validate_task_authority_sources", lambda *_a: None)
     monkeypatch.setattr(agent_module.OuroborosAgent, "_start_task_heartbeat_loop", lambda *_a: None)
     agent = agent_module.OuroborosAgent(agent_module.Env(repo_dir=tmp_path, drive_root=tmp_path))
+    from tests.presence_legacy_helpers import register_legacy_completion
+    register_legacy_completion(agent.tools)
     ctx = agent.tools._ctx
     monkeypatch.setattr(agent, "_prepare_task_context", lambda *_a: (ctx, [], {}))
     return agent, ctx
@@ -291,3 +293,9 @@ def test_empty_deferred_final_keeps_only_confirmed_child_polling(tmp_path, monke
     assert result["outcome"] == cached.outcome == ("deferred" if admission == "scheduled" else "silent")
     assert result["work_ref"] == cached.work_ref == ("managed-child" if admission == "scheduled" else "")
     assert result["text"] == cached.text == ""
+
+
+@pytest.fixture(autouse=True)
+def _focus_authority_available(monkeypatch):
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})

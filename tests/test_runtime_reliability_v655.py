@@ -101,6 +101,7 @@ def _run_gate(monkeypatch, tmp_path, *, mode: str, tool: str):
 
     monkeypatch.setattr(safety_mod, "_run_llm_check", _fake_llm_check)
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     # A non-whitelisted command so CONDITIONAL does not take the deterministic
     # safe-subject bypass on its own.
     allowed, msg = safety_mod.check_safety(
@@ -134,6 +135,7 @@ def test_safety_mode_light_safe_subject_emits_no_skip_audit(tmp_path, monkeypatc
 
     monkeypatch.setattr(safety_mod, "_run_llm_check", _fake_llm_check)
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     allowed, msg = safety_mod.check_safety(ctx=ctx, tool_name="run_command", arguments={"cmd": "ls -la"})
     assert allowed is True and msg == ""
     assert calls == []
@@ -191,23 +193,14 @@ def test_safety_mode_owner_post_route_decodes_percent_encoding():
 
 
 # ---------------------------------------------------------------------------
-# 1.2 — response_format is droppable request intent in LLMClient
+# 1.2 — response_format is optional intent the model catalogue may report unsupported
 
 
 def test_response_format_in_droppable_params():
-    from ouroboros.llm import _OPTIONAL_DROPPABLE_PARAMS, LLMClient
+    from ouroboros.llm import _OPTIONAL_DROPPABLE_PARAMS
 
     assert "response_format" in _OPTIONAL_DROPPABLE_PARAMS
-    assert "reasoning_effort" in _OPTIONAL_DROPPABLE_PARAMS  # round 6: rejected effort hint strips, not fails
-    exc = RuntimeError("Error code: 400 - response_format is an unsupported parameter")
-    assert LLMClient._parameter_rejection_error(exc) is True
-    payload = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
-    retry = LLMClient()._retry_without_optional_sampling(payload, "prov/model-rf-test", exc)
-    assert retry is not None and "response_format" not in retry
-    # Remembered rejection strips it from the next payload for the same model.
-    fresh = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
-    LLMClient._apply_rejected_param_cache(fresh, "prov/model-rf-test")
-    assert "response_format" not in fresh
+    assert "reasoning_effort" in _OPTIONAL_DROPPABLE_PARAMS  # catalogue says unsupported: dropped at send, not failed
 
 
 def test_chat_signature_accepts_response_format():
@@ -491,6 +484,7 @@ def test_shell_cwd_block_message_names_resolved_paths(tmp_path):
     from ouroboros.tool_access import shell_cwd_block_message
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     msg = shell_cwd_block_message(ctx, "/nonexistent/guessed", operation="shell")
     assert "SHELL_CWD_BLOCKED" in msg
     # Labels are rendered as label=<resolved path>, not bare labels.
@@ -525,6 +519,7 @@ def test_resolve_user_file_path_rejects_absolute_outside_home(tmp_path, monkeypa
     fake_home.mkdir()
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(fake_home))
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     outside = tmp_path / "elsewhere" / "app" / "main.go"
     # Non-external ctx: the NEW actionable early rejection (not the later
     # opaque relative_to crash class).
@@ -562,6 +557,7 @@ def test_dispatch_auto_routes_user_files_read_under_workspace(tmp_path):
     from ouroboros.tools.registry import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     target = tmp_path / "system" / "src" / "x.py"
     args = {"root": "user_files", "path": str(target)}
     note = _normalize_dispatch_path_args(ctx, "read_file", args)
@@ -573,6 +569,7 @@ def test_dispatch_redirects_user_files_write_under_workspace(tmp_path):
     from ouroboros.tools.registry import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     target = tmp_path / "system" / "src" / "x.py"
     args = {"root": "user_files", "path": str(target)}
     note = _normalize_dispatch_path_args(ctx, "write_file", args)
@@ -584,6 +581,7 @@ def test_dispatch_leaves_query_code_and_true_user_files_alone(tmp_path, monkeypa
     from ouroboros.tools.registry import _normalize_dispatch_path_args
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     target = tmp_path / "system" / "src" / "x.py"
     assert _normalize_dispatch_path_args(ctx, "query_code", {"root": "user_files", "path": str(target)}) == ""
     fake_home = tmp_path / "home"
@@ -606,6 +604,7 @@ def _clamp(tools_ctx, name, base):
 
 def test_deadline_clamp_is_inert_without_deadline(tmp_path):
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     assert _clamp(ctx, "web_search", 540) == 540
     assert _clamp(ctx, "run_command", 540) == 540
 
@@ -658,23 +657,47 @@ def _deadline_skip_events(events):
     return [e for e in drained if e.get("type") == "plan_task_deadline_skip"]
 
 
-def test_plan_task_skips_under_tight_deadline(harness, monkeypatch):
-    # 400 s left gives a 100 s planning window, under the 300 s useful floor: the ask is the
+@pytest.mark.parametrize("seconds", [60, -5], ids=["inside-reserve", "expired"])
+def test_plan_task_skips_only_a_spent_deadline(harness, monkeypatch, seconds):
+    # A deadline spent down to its finalization reserve leaves no dispatch: the ask is the
     # paid act, so the whole write+ask call is refused before anything is written or sent.
-    monkeypatch.setenv("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", "300")
+    monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     substrate = harness.install({})
-    text, result = _write(_deadline_ctx(harness, 400), ask="council")
+    text, result = _write(_deadline_ctx(harness, seconds), ask="council")
     assert "PLAN_ASK_SKIPPED_DEADLINE" in text and "PLAN_TASK_SKIPPED_DEADLINE" in text
     assert result.code == "CAPABILITY_UNAVAILABLE" and "Nothing was written" in text
     assert substrate.calls == []
     assert _record(harness)["revisions"] == [] and _record(harness)["asks"] == []
     [event] = _deadline_skip_events(harness.events)
-    assert event["task_id"] == "task-1" and event["min_useful_sec"] == 300
+    assert event["task_id"] == "task-1" and event["reserve_sec"] == 120.0
+    assert "min_useful_sec" not in event and "scaled_ceiling_sec" not in event
 
 
-@pytest.mark.parametrize("seconds", [None, 86_400], ids=["no-deadline", "roomy-deadline"])
+def test_the_retired_plan_floor_has_no_getter_and_a_stored_value_is_stripped(tmp_path, monkeypatch):
+    """R4 retires OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC with no successor: a document that saved
+    its 300 default (nearly every install) loads without it, and the env cannot bring it back."""
+    import json
+
+    from ouroboros import config
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS, RETIRED_SETTING_SUCCESSORS
+
+    key = "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC"
+    assert key in RETIRED_SETTING_KEYS and key not in RETIRED_SETTING_SUCCESSORS
+    assert key not in config.SETTINGS_DEFAULTS and not hasattr(config, "get_plan_task_deadline_min_sec")
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({key: 300, "OUROBOROS_MAX_WORKERS": 7}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", settings_path)
+    monkeypatch.setenv(key, "900")
+    loaded = config.load_settings()
+    assert int(loaded["OUROBOROS_MAX_WORKERS"]) == 7 and key not in loaded
+
+
+# Retired pin (R4): 400 s left was refused as "a 100 s planning window under the 300 s useful
+# floor" of the quarter-window wait that no longer exists; 1199 s and 600 s are council time.
+@pytest.mark.parametrize("seconds", [None, 86_400, 1_199, 600, 400],
+                         ids=["no-deadline", "roomy-deadline", "1199s", "600s", "400s"])
 def test_plan_task_no_deadline_does_not_skip(harness, monkeypatch, seconds):
-    monkeypatch.setenv("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", "300")
+    monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     substrate = harness.install({})
     text, result = _write(_deadline_ctx(harness, seconds), ask="council")
     assert result.status == "ok" and "SKIPPED_DEADLINE" not in text
@@ -692,6 +715,7 @@ def test_subagent_slot_note_reads_snapshot(tmp_path):
     from ouroboros.tools.control import _subagent_slot_note
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     state = tmp_path / "data" / "state"
     state.mkdir(parents=True, exist_ok=True)
     snap = {
@@ -743,6 +767,7 @@ def test_list_files_hard_failure_is_first_class_error(tmp_path, monkeypatch):
     from ouroboros.tools import core_file_tools as core_mod
 
     ctx = _ctx(tmp_path)
+    ctx.task_metadata = {"work_kind": "owner"}
     boom = tmp_path / "data" / "task_drives" / "t-v655"
     boom.mkdir(parents=True, exist_ok=True)
 

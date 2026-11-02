@@ -7,6 +7,7 @@ seams are always spied, and process enumeration is always faked.
 import inspect
 import logging
 import os
+import re
 import sys
 import types
 
@@ -401,11 +402,16 @@ def test_a_proven_survivor_skips_start_agent_for_that_generation(monkeypatch):
 
 
 def test_main_leaves_predecessor_cleanup_to_the_lifecycle_loop():
-    """main() no longer runs its own preflight copy: the loop's first generation does it."""
+    """main() runs no preflight copy of its own: each generation's loop resolves its predecessor.
+
+    main() may still stop the generation its own startup recorded when that startup is quit,
+    aborted or fails; those calls name their teardown reason, never the preflight's "startup"."""
     import launcher
 
     src = inspect.getsource(launcher.main)
-    assert "_cleanup_recorded_server_process(" not in src and "_reap_same_install_strays(" not in src
+    assert "_pre_generation_cleanup(" not in src and "_reap_same_install_strays(" not in src
+    reasons = set(re.findall(r"_cleanup_recorded_server_process\(([^)]*)\)", src))
+    assert reasons <= {'"startup_quit"', '"startup_abort"', '"startup_failure"'}, reasons
 
 
 def test_the_panic_and_window_close_path_performs_no_stray_sweep():

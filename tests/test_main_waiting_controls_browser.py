@@ -55,7 +55,7 @@ def _session(candidate, tmp_path, stub, name, stages, *, engine="chromium", seed
         with sync_playwright() as pw:
             browser = getattr(pw, engine).launch()
             page = browser.new_page(viewport={"width": 1100, "height": 900}, reduced_motion="reduce")
-            _nf_observe(page, facts)
+            _nf_observe(page, facts, engine)
             try:
                 page.goto(server.base_url, wait_until="domcontentloaded")
                 page.locator("#chat-input").wait_for(state="visible", timeout=30000)

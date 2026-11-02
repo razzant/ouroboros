@@ -93,7 +93,7 @@ _REVIEW_SUBSTRATE_PATHS = frozenset({
     "ouroboros/code_intelligence.py", "ouroboros/context_budget.py", "ouroboros/deadline_utils.py",
     "ouroboros/llm.py", "ouroboros/openrouter_attribution.py", "ouroboros/outcomes.py",
     "ouroboros/platform_layer.py", "ouroboros/pricing.py", "ouroboros/provider_models.py",
-    "ouroboros/preflight_runner.py", "ouroboros/review_actor_aggregation.py", "ouroboros/review_dispatch.py",
+    "ouroboros/preflight_runner.py", "ouroboros/review_seat_outcome.py", "ouroboros/review_wave.py", "ouroboros/review_dispatch.py",
     "ouroboros/test_evidence.py", "ouroboros/safe_test_supervisor.py",
     "ouroboros/review_execution.py", "ouroboros/review_execution_projection.py", "ouroboros/review_native_episode.py",
     "ouroboros/review_slot_cancel.py", "ouroboros/review_verdict_extraction.py", "ouroboros/reviewer_slot_config.py",
@@ -114,6 +114,7 @@ _REVIEW_SUBSTRATE_PATHS = frozenset({
     "ouroboros/tools/governance_context.py", "ouroboros/review_session_reads.py",
     "ouroboros/tools/scope_window.py", "ouroboros/claudexor_daemon.py", "ouroboros/delegate_custody.py",
     "ouroboros/delegate_custody_usage.py", "ouroboros/delegate_output.py", "ouroboros/gateways/claudexor.py",
+    "ouroboros/gateways/claudexor_identity.py",
     "ouroboros/review_evidence.py", "ouroboros/review_evidence_sections.py", "ouroboros/subagents.py",
     "ouroboros/review_model_routes.py", "ouroboros/review_run_isolation.py", "ouroboros/settings_integrity.py",
     "ouroboros/settings_setup_contract.py", "ouroboros/usage_admission.py",
@@ -525,14 +526,14 @@ def _assert_contributor_review_config(resolved_config: dict) -> None:
 
 def _configured_openrouter_models(resolved_config: dict) -> list[str]:
     """OpenRouter API rows that need the wrapper's provider-specific key probe."""
-    from ouroboros.provider_models import provider_for_model
+    from ouroboros.provider_models import parse_model_route
 
     models: list[str] = []
     for row in list(resolved_config.get("pool_slots") or []):
         route = row.get("route") or {}
-        model = str(route.get("target_id") or "")
-        if route.get("kind") == "api_chat" and provider_for_model(model) == "openrouter":
-            models.append(model.removeprefix("openrouter::"))
+        parsed = parse_model_route(str(route.get("target_id") or ""))
+        if route.get("kind") == "api_chat" and parsed.kind == "openrouter" and not parsed.connection:
+            models.append(parsed.model)  # the wrapper probes the built-in OpenRouter key only
     return list(dict.fromkeys(models))
 
 
@@ -767,19 +768,18 @@ def _review_evidence_and_cost(actors: list[tuple[str, dict]]) -> tuple[list[dict
 
 
 def _seat_records(record: dict | None, drive_root: pathlib.Path) -> list[dict]:
-    """Every seat row of the record with its retained answer, in full."""
-    from ouroboros.review_ledger import read_source
+    """Every seat row of the record with its retained answer (else failure or pending note), in full."""
+    from ouroboros.review_ledger import read_source, seat_text_source
 
     seats = []
     for row in (record or {}).get("rows") or []:
-        answer = ""
-        for ref in row.get("source_refs") or []:
-            if isinstance(ref, dict) and ref.get("role") == "response" and ref.get("status") == "retained":
-                try:
-                    answer = read_source(drive_root, str(record.get("task_id") or ""), ref).decode(
-                        "utf-8", errors="replace")
-                except Exception as exc:
-                    answer = f"<retained answer unreadable: {type(exc).__name__}: {exc}>"
+        answer, ref = "", seat_text_source(row)
+        if ref is not None and ref.get("status") == "retained":
+            try:
+                answer = read_source(drive_root, str(record.get("task_id") or ""), ref).decode(
+                    "utf-8", errors="replace")
+            except Exception as exc:
+                answer = f"<retained answer unreadable: {type(exc).__name__}: {exc}>"
         seats.append({**row, "answer": answer})
     return seats
 
@@ -1385,6 +1385,7 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
     open after the cycle."""
     from ouroboros.tools.commit_gate import preflight_reviewer_error
     from ouroboros.tools.git import _run_non_committing_review_cycle
+    from ouroboros.tools.registry import ToolRegistry
     from ouroboros.tools.review_subject import ReviewSubjectSpec, isolated_checkout
 
     refusal = preflight_reviewer_error(args.preflight_reviewer.strip()) if args.preflight_reviewer.strip() else ""
@@ -1393,6 +1394,10 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
         _write_json(output_dir / "outcome.json", {"exit_code": 2, "outcome": {
             "status": "failed", "block_reason": "tool_arg_error", "message": f"TOOL_ARG_ERROR: {refusal}"}})
         return 2
+    # Like a worker, load every tool module before the gate mints its test proof: the browser module's
+    # packaged-browser default joins the environment that proof binds, and the panel's first registry
+    # would otherwise change it before the record reads the tests fact (#2363).
+    ToolRegistry(repo_dir=host_ctx.repo_dir, drive_root=review_drive_root)
     spec = ReviewSubjectSpec(root_kind="system_repo", root=str(REPO), kind="index", surface="commit_gate")
     retained: dict = {}
     outcome: dict = {}

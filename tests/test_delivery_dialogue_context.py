@@ -53,8 +53,10 @@ def test_real_send_producer_is_a_separate_exact_row_after_the_completed_batch(ma
     assert facts["delivery_confirmation"] == facts["read_confirmation"] == "unknown"
     assert not pending_owner_dialogue(f.ctx)
     assert all(exact not in str(d) for d in getattr(f.ctx, "_owner_directives", []))
-    # Appending explicit dialogue does not rewrite any earlier byte of history.
-    assert after[:len(before)] == before
+    # Appending explicit dialogue does not rewrite any earlier byte of history; only the seal's
+    # host-only boundary mark (a message-level cache_control) moves on to the newest row.
+    unmarked = lambda rows: [{k: v for k, v in m.items() if k != "cache_control"} for m in rows]  # noqa: E731
+    assert unmarked(after[:len(before)]) == unmarked(before)
 
 
 @pytest.mark.parametrize("recovery", ["authored", "emergency"])

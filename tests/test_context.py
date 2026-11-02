@@ -1,6 +1,6 @@
 """The health invariants ouroboros.context builds, and where they must appear.
 
-This module owns the cache hit-rate invariant, the remote context overflow it reports,
+This module owns the sent-history changes fact (no provider cache verdict), the remote context overflow,
 the rest of the invariant coverage, and the rule that
 the invariants come first in both the dynamic and the background-consciousness context.
 
@@ -25,7 +25,7 @@ from tests._context_shared import _make_health_env
 
 
 
-class TestCacheHitRateInvariant:
+class TestSentHistoryHealth:
     def _make_env(self, tmp_path, events_lines):
         class FakeEnv:
             def drive_path(self, p):
@@ -56,131 +56,70 @@ class TestCacheHitRateInvariant:
         (tmp_path / "logs" / "events.jsonl").write_text("\n".join(events_lines) + "\n", encoding="utf-8")
         return FakeEnv()
 
-    def test_cache_hit_rate_good(self, tmp_path):
-        lines = [json.dumps({"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 600}) for _ in range(15)]
-        env = self._make_env(tmp_path, lines)
+    def test_health_names_who_changed_sent_history_under_the_running_code(self, tmp_path):
+        from ouroboros import transcript_prefix
+
+        env = self._make_env(tmp_path, [])
+        assert "SENT HISTORY CHANGES" not in build_health_invariants(env)
+        for task_id, origin in (("t1", "superseded_skill_snapshot"), ("t2", "superseded_skill_snapshot"),
+                                ("t2", "compaction")):
+            transcript_prefix.count_history_change(
+                {}, {"round": 3, "kind": "rewritten", "sanctioned_by": origin}, drive_root=tmp_path, task_id=task_id)
+        line = next(row for row in build_health_invariants(env).splitlines() if "SENT HISTORY CHANGES" in row)
+        assert line.startswith("- INFO: SENT HISTORY CHANGES under the running code ("), line
+        assert ", first at " in line and "the round facts name each change" in line
+        first = line.split(", first at ", 1)[1].split(")", 1)[0]
+        assert len(first) == 17 and first.endswith("Z"), first  # minutes, labelled UTC
+        assert "superseded_skill_snapshot 2 in 2 tasks; compaction 1 in 1 task" in line
+
+    def test_another_codes_record_is_not_this_codes_history(self, tmp_path):
+        from ouroboros import transcript_prefix
+        from ouroboros.utils import atomic_write_json
+
+        env = self._make_env(tmp_path, [])
+        path = transcript_prefix.history_changes_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, {"code": "an-older-commit", "first": "2026-10-20T17:00:00Z", "origins": {
+            "superseded_skill_snapshot": {"count": 193, "tasks": ["t1"]}}})
+        assert "SENT HISTORY CHANGES" not in build_health_invariants(env)
+        transcript_prefix.count_history_change(
+            {}, {"round": 2, "kind": "shrunk", "sanctioned_by": "compaction"}, drive_root=tmp_path, task_id="t9")
         result = build_health_invariants(env)
-        assert "cache hit rate" in result.lower()
-        assert "60%" in result or "60.0%" in result
+        assert "compaction 1 in 1 task" in result and "superseded_skill_snapshot" not in result
 
-    def test_cache_hit_rate_warning_below_30(self, tmp_path):
-        lines = [json.dumps({"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 200}) for _ in range(15)]
-        env = self._make_env(tmp_path, lines)
-        result = build_health_invariants(env)
-        assert "LOW CACHE HIT RATE" in result
+    def test_a_tree_without_git_names_its_version(self, tmp_path, monkeypatch):
+        from ouroboros import transcript_prefix, utils
 
-    def _emit_producer_rounds(self, tmp_path, reported, count=6):
-        """Rounds in the PRODUCER's exact shape.
+        monkeypatch.setattr(utils, "get_git_info", lambda _root: ("", ""))
+        transcript_prefix._running_code.cache_clear()
+        try:
+            env = self._make_env(tmp_path, [])
+            transcript_prefix.count_history_change(
+                {}, {"round": 1, "kind": "rewritten", "sanctioned_by": "compaction"}, drive_root=tmp_path, task_id="t1")
+            assert "under the running code (version " in build_health_invariants(env)
+        finally:
+            transcript_prefix._running_code.cache_clear()
 
-        `loop_llm_call.call_llm_with_retry` is the only emitter of `llm_round`,
-        so a synthesized row proves nothing about what the health line reads:
-        the first version of this rule was inert because the producer stamped
-        `cached_tokens` on every event, including rounds where the provider had
-        reported no cache at all. `reported=None` is a provider that says
-        nothing about caching.
-        """
-        from ouroboros.loop_llm_call import call_llm_with_retry
-
-        class _LLM:
-            def chat(self, **_kwargs):
-                usage = {"provider": "openrouter", "resolved_model": "m",
-                         "prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.0}
-                if reported is not None:
-                    usage["cached_tokens"] = reported
-                return {"content": "ok"}, usage
-
-        for index in range(count):
-            call_llm_with_retry(
-                _LLM(), [{"role": "user", "content": "hi"}], "m", None, "medium", 1,
-                tmp_path / "logs", "cache-probe", index, None, {}, "task", False,
-            )
-
-    def test_no_provider_reported_a_cache_leaves_the_share_unknown(self, tmp_path):
-        """Absence is not a measured zero: a run whose provider never reported a
-        cache rendered as an honest 0% and read as a caching regression nobody
-        had measured."""
-        from ouroboros.context_health import _compute_cache_hit_rate
+    def test_the_task_list_is_capped_and_says_so(self, tmp_path):
+        from ouroboros import transcript_prefix
 
         env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, None)
-        assert _compute_cache_hit_rate(env) is None
-        assert "cache hit rate" not in build_health_invariants(env).lower()
+        for index in range(40):
+            transcript_prefix.count_history_change(
+                {}, {"round": 1, "kind": "rewritten", "sanctioned_by": None}, drive_root=tmp_path, task_id=f"t{index}")
+        assert "origin not recorded 40 in 32+ tasks" in build_health_invariants(env)
 
-    def test_an_explicitly_reported_zero_is_still_a_real_zero(self, tmp_path):
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, 0)
-        assert _compute_cache_hit_rate(env) == 0.0
-        assert "LOW CACHE HIT RATE" in build_health_invariants(env)
-
-    def test_historical_cache_zeros_are_not_measured_misses(self, tmp_path):
-        """Record contract LEGACY_RULE (#1578): an unstamped or v1 zero may be an older
-        writer's unknown-to-zero projection, so after an upgrade those rounds must not
-        read as measured misses and fire LOW CACHE HIT RATE. Their positive counts and
-        every v2 count, a v2 zero included, stay measurements; null and malformed
-        counters measure nothing and void no neighbour."""
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        legacy_zero = [{"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 0, **stamp}
-                       for stamp in ({}, {"record_contract_version": 1}) * 3]
-        legacy_hit = [{"type": "llm_round", "prompt_tokens": 1000, "cached_tokens": 600}] * 5
-        unknown = [{"type": "llm_round", "record_contract_version": 2, "prompt_tokens": 1000, "cached_tokens": bad}
-                   for bad in (None, -1, True)]
-        env = self._make_env(tmp_path, [json.dumps(row) for row in legacy_zero])
-        assert _compute_cache_hit_rate(env) is None
-        assert "cache hit rate" not in build_health_invariants(env).lower()
-        env = self._make_env(tmp_path, [json.dumps(row) for row in legacy_zero + legacy_hit + unknown])
-        assert _compute_cache_hit_rate(env) == 0.6
-        assert "OK: cache hit rate (60%)" in build_health_invariants(env)
-        self._emit_producer_rounds(tmp_path, 0, count=7)  # the real producer's v2 zeros ARE misses
-        assert _compute_cache_hit_rate(env) == pytest.approx(3000 / 12000)
-        assert "LOW CACHE HIT RATE" in build_health_invariants(env)
-
-    def test_a_window_with_fewer_than_five_reporting_rounds_stays_unknown(self, tmp_path):
-        """The five-round threshold counts MEASUREMENTS, not rounds. Three
-        reporters beside three silent rounds are still too thin a sample to
-        publish a share, so the invariant says nothing rather than a number the
-        window cannot support."""
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, None, count=3)
-        self._emit_producer_rounds(tmp_path, 600, count=3)
-        assert _compute_cache_hit_rate(env) is None
-
-    def test_silent_rounds_stay_out_of_the_reporters_denominator(self, tmp_path):
-        """A mixed install reads the reporters' own ratio.
-
-        Charging a silent round's prompt tokens to the denominator turned a
-        provider that never measured a cache into measured misses: the share
-        collapsed and "LOW CACHE HIT RATE" fired for a regression no round had
-        measured. Five reporters at 600 cached of 1000 prompt are 60%, whatever
-        the silent rounds beside them spent."""
-        from ouroboros.context_health import _compute_cache_hit_rate
-
-        env = self._make_env(tmp_path, [])
-        self._emit_producer_rounds(tmp_path, None, count=3)
-        self._emit_producer_rounds(tmp_path, 600, count=5)
-        assert _compute_cache_hit_rate(env) == 0.6
-
-    @pytest.mark.parametrize("reports, expected_rate", [
-        ([None] * 6, None),
-        ([0] * 6, 0.0),
-        ([600] * 6, 0.6),
-        ([None] * 10 + [600] * 5, 0.6),
+    @pytest.mark.parametrize("reports", [
+        [None] * 6, [0] * 6, [600] * 6, [None] * 10 + [600] * 5,
     ], ids=["unknown", "measured_zero", "measured_hit", "mixed"])
-    def test_nullable_adapter_cache_reaches_durable_and_live_rounds(
-        self, tmp_path, reports, expected_rate,
-    ):
+    def test_nullable_adapter_cache_reaches_durable_and_live_rounds(self, tmp_path, reports):
         """The real adapter uses a present null key for an unreported cache.
 
         Omitted-key fixtures alone missed the producer turning that null into
-        zero. Both round events must preserve the measurement before health
-        computes its share over the reporting rounds.
+        zero. Both round events preserve the measurement; health draws no share
+        or verdict from them.
         """
         from queue import Queue
-        from ouroboros.context_health import _compute_cache_hit_rate
         from ouroboros.llm_claudexor import _usage
         from ouroboros.loop_llm_call import call_llm_with_retry
 
@@ -215,7 +154,7 @@ class TestCacheHitRateInvariant:
                 live.append(event["data"]["cached_tokens"])
         assert durable == reports
         assert live == reports
-        assert _compute_cache_hit_rate(env) == expected_rate
+        assert "cache hit rate" not in build_health_invariants(env).lower()
 
 
 def test_health_invariants_reports_remote_context_overflow(tmp_path):

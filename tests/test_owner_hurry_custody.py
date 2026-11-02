@@ -17,7 +17,7 @@ import pathlib
 import tempfile
 import types
 
-from ouroboros.owner_hurry import force_plan_decision, plan_review_disclosure
+from ouroboros.owner_hurry import plan_gate_decision, plan_review_disclosure
 from ouroboros.task_results import write_task_result
 
 _FINGERPRINTS = {"REVISE_PLAN": "a" * 64, "REVIEW_REQUIRED": "b" * 64, "DEGRADED": "c" * 64}
@@ -62,7 +62,7 @@ def test_a_three_wave_series_discloses_the_open_state_never_a_past_tense() -> No
     ctx = _ctx_over(
         [_wave("REVISE_PLAN"), _wave("REVIEW_REQUIRED"), _wave("DEGRADED", findings=[_blocking("s2")])], "DEGRADED",
     )
-    decision = force_plan_decision(ctx, {}, hard_rail="round_limit", enforcement="blocking")
+    decision = plan_gate_decision(ctx, {}, hard_rail="round_limit", enforcement="blocking")
 
     disclosure = plan_review_disclosure(decision, "round_limit")
 
@@ -71,7 +71,7 @@ def test_a_three_wave_series_discloses_the_open_state_never_a_past_tense() -> No
     assert "remained" not in disclosure and "DEGRADED" not in disclosure
     assert "`round_limit`" in disclosure
 
-    settled = force_plan_decision(
+    settled = plan_gate_decision(
         _ctx_over([_wave("REVISE_PLAN"), _wave("REVIEW_REQUIRED"), _wave("DEGRADED")], "DEGRADED"), {},
         hard_rail="round_limit", enforcement="blocking",
     )
@@ -86,14 +86,14 @@ def test_a_late_result_still_owed_reaches_the_owner_line() -> None:
         [_wave("DEGRADED", custody_pending=True, reasons=["review_late_result_pending"])],
         "DEGRADED",
     )
-    decision = force_plan_decision(ctx, {}, hard_rail="round_limit", enforcement="blocking")
+    decision = plan_gate_decision(ctx, {}, hard_rail="round_limit", enforcement="blocking")
 
     assert decision["pending_asks"] == ["legacy wave " + "c" * 12]
     disclosure = plan_review_disclosure(decision, "round_limit")
     assert "answers still on their way for ask(s) legacy wave cccccccccccc" in disclosure
     assert "`round_limit`" in disclosure
 
-    quiet = force_plan_decision(
+    quiet = plan_gate_decision(
         _ctx_over([_wave("DEGRADED")], "DEGRADED"), {},
         hard_rail="round_limit", enforcement="blocking",
     )
@@ -105,7 +105,7 @@ def test_advisory_enforcement_also_states_what_is_open() -> None:
     """Advisory never holds: an open objection of the legacy wave is disclosed as open NOW;
     a settled wave with no finding discloses nothing."""
     ctx = _ctx_over([_wave("DEGRADED", findings=[_blocking()])], "DEGRADED")
-    decision = force_plan_decision(ctx, {}, enforcement="advisory")
+    decision = plan_gate_decision(ctx, {}, enforcement="advisory")
 
     disclosure = plan_review_disclosure(decision)
 
@@ -114,7 +114,7 @@ def test_advisory_enforcement_also_states_what_is_open() -> None:
     assert "remained" not in disclosure and "DEGRADED" not in disclosure
     assert "advisory enforcement" in disclosure
 
-    quiet = force_plan_decision(_ctx_over([_wave("DEGRADED")], "DEGRADED"), {}, enforcement="advisory")
+    quiet = plan_gate_decision(_ctx_over([_wave("DEGRADED")], "DEGRADED"), {}, enforcement="advisory")
     assert quiet["allow"] is True and quiet["status"] == "clear" and plan_review_disclosure(quiet) == ""
 
 

@@ -83,6 +83,7 @@ def restart_case(tmp_path, monkeypatch):
     requested.set()
     monkeypatch.setattr(server_restart, "_restart_requested", requested)
     monkeypatch.setattr(server_restart, "_owner_restart_requested", owner_requested)
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
     monkeypatch.delenv(delegate_recovery.PLANNED_RESTART_TRANSACTION_ENV, raising=False)
 
     task_id, attempt, started = "native-owner-a", 3, time.time() - 4000
@@ -380,7 +381,8 @@ def test_old_snapshot_never_revives_unproven_or_spent_wait(restart_case, monkeyp
         return
     [row] = workers.PENDING
     if refusal == "bad_source":
-        assert restored == 1 and budget_hold_fact(row)["dispatchable"] is False
+        from ouroboros.work_stop import continuation_refusal
+        assert restored == 1 and continuation_refusal(row) and not row.get("_resume_selection")
         assert row["_owner_wait_resume"]["source_ref"] == case.wait["source_ref"]
         assert path.read_bytes() == b"broken source", "holding must not rewrite the original"
         commands = stdqueue.Queue()
@@ -394,7 +396,7 @@ def test_old_snapshot_never_revives_unproven_or_spent_wait(restart_case, monkeyp
         assert budget_hold_fact(row) is None
         return
     assert budget_hold_fact(row)["reason"] == HOLD_SAVED_WORK, "held for an explicit Resume"
-    assert budget_hold_fact(row)["stop_cause"] == ("panic" if refusal == "panic" else "app_stop")
+    assert budget_hold_fact(row)["door"] == ("panic" if refusal == "panic" else "app_stop")
     assert not row.get("_owner_wait_resume"), "never the cold wait handoff the stop refused"
     assert row["_working_recovery"]["source_ref"] == case.wait["source_ref"]
     assert row["_attempt"] == case.attempt + 1
@@ -539,7 +541,12 @@ def test_project_wait_recovers_once_after_registry_hold(restart_case, monkeypatc
     case = restart_case
     restored = restore_project_wait(case, monkeypatch)
     if owner_restart:  # owner 2026-10-08 (quiz d2f7532b): the owner's Restart returns the work it named
-        (case.root / "state" / "owner_restart_no_resume.flag").write_text("owner_restart", encoding="utf-8")
+        from ouroboros import delegate_recovery
+        tx = delegate_recovery._read_restart_transaction(
+            case.root, restored["_owner_wait_resume"]["restart_transaction_id"])
+        tx.update(door="owner_restart", generation="previous", door_applied_at="")
+        delegate_recovery._write_restart_transaction(case.root, tx)
+        delegate_recovery.consume_owner_restart(case.root, tx)
     handoff = dict(restored["_owner_wait_resume"])
     original = read_actor_source_bytes(case.root, case.task_id, handoff["source_ref"])
     sent = worker(SimpleNamespace(root=case.root), monkeypatch)
@@ -588,7 +595,7 @@ def test_project_wait_unreadable_authority_stays_same_id_then_recovers(restart_c
 
 
 @pytest.mark.serial
-@pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "panic", "deadline", "ceiling",
+@pytest.mark.parametrize("refusal", ["unacknowledged", "spent_wait", "owner_restart", "deadline", "ceiling",
                                    "ceiling_unreadable_transaction", "stop"])
 def test_project_wait_positive_refusal_uses_existing_custody(restart_case, monkeypatch, refusal):
     from ouroboros.cancel_intents import request_cancel
@@ -607,9 +614,9 @@ def test_project_wait_positive_refusal_uses_existing_custody(restart_case, monke
     elif refusal == "spent_wait":
         owner_wait.set_owner_wait(case.root, case.task_id, {**case.wait, "state": "resumed"},
                                   expected_wait_id=case.wait["wait_id"])
-    elif refusal in {"panic", "owner_restart"}:
-        name = "panic_stop.flag" if refusal == "panic" else "owner_restart_no_resume.flag"
-        (case.root / "state" / name).write_text(refusal, encoding="utf-8")
+    elif refusal == "owner_restart":
+        from tests._work_stop_helpers import live_restart
+        live_restart(case.root, monkeypatch)
     elif refusal == "deadline":
         restored["deadline_at"] = "2000-01-01T00:00:00Z"
     elif refusal.startswith("ceiling"):
@@ -728,7 +735,8 @@ def test_project_wait_refusal_retains_custody_until_cancel_intent_is_durable(res
 
     case = restart_case
     restored = restore_project_wait(case, monkeypatch)
-    (case.root / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+    transaction = delegate_recovery._read_restart_transaction(case.root, case.transaction_id)
+    delegate_recovery._write_restart_transaction(case.root, {**transaction, "status": "prepared"})
     sent = worker(SimpleNamespace(root=case.root), monkeypatch)
     with monkeypatch.context() as patch:
         def unavailable(*args, **kwargs):

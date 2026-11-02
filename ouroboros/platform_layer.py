@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 from typing import Any, Callable, List, Optional
+from ouroboros.platform_peer import local_connection_peer  # noqa: F401 — platform facade
 
 log = logging.getLogger(__name__)
 
@@ -25,18 +26,15 @@ IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
 
 PATH_SEP = ";" if IS_WINDOWS else ":"
-_SUBPROCESS_NO_WINDOW = (
-    getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
-)
+SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+_SUBPROCESS_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if IS_WINDOWS else 0
 _PATH_BOOTSTRAPPED = False
 
 # POSIX signal numbers -> names, the same on every platform. ``signal.Signals``
 # knows only the host's own signals, so a child that died of SIGKILL would be
 # named "SIG9" wherever the reader lacks that signal (Windows).
-_POSIX_SIGNAL_NAMES = {
-    1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT", 9: "SIGKILL",
-    11: "SIGSEGV", 13: "SIGPIPE", 14: "SIGALRM", 15: "SIGTERM",
-}
+_POSIX_SIGNAL_NAMES = {1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT", 9: "SIGKILL",
+                       11: "SIGSEGV", 13: "SIGPIPE", 14: "SIGALRM", 15: "SIGTERM"}
 
 
 def posix_signal_name(signum: int) -> str:
@@ -54,11 +52,7 @@ def posix_signal_name(signum: int) -> str:
 def executable_name_candidates(name: str) -> List[str]:
     """Platform spellings for an executable stored in a known directory."""
     base = str(name or "").strip()
-    if not base:
-        return []
-    if IS_WINDOWS:
-        return [f"{base}.cmd", f"{base}.exe", f"{base}.bat", base]
-    return [base]
+    return ([f"{base}.cmd", f"{base}.exe", f"{base}.bat", base] if IS_WINDOWS else [base]) if base else []
 
 
 def local_zoneinfo():
@@ -481,14 +475,24 @@ def open_path_external(path: pathlib.Path) -> None:
     elif IS_WINDOWS:
         os.startfile(str(target))  # type: ignore[attr-defined]
     else:
-        subprocess.Popen(["xdg-open", str(target)])
+        from ouroboros.desktop_media import host_environment
+
+        subprocess.Popen(["xdg-open", str(target)], env=host_environment())
+
+
+def app_location_labels(path) -> list:
+    """What is measured about where an app copy runs: ``translocated`` (an ``AppTranslocation`` path component),
+    ``read-only mount`` (``statvfs`` sets ``ST_RDONLY``; a path that cannot be measured gets no label)."""
+    labels = ["translocated"] if any("AppTranslocation" in pathlib.Path(p).parts for p in (path, os.path.realpath(path))) else []
+    try:
+        return labels + (["read-only mount"] if os.statvfs(path).f_flag & os.ST_RDONLY else [])
+    except (OSError, AttributeError):  # Windows has no statvfs
+        return labels
 
 
 def is_unstable_macos_app_path(path: pathlib.Path) -> bool:
-    """Return whether a macOS app path is likely a DMG/AppTranslocation mount."""
-    raw = str(path).replace("\\", "/")
-    resolved = str(path.resolve()).replace("\\", "/")
-    return any("AppTranslocation" in p or p.startswith("/Volumes/") for p in (raw, resolved))
+    """Whether an app copy is translocated or on a read-only mount (a disk image); a writable volume is not."""
+    return bool(app_location_labels(path))
 
 
 def ensure_windows_user_path(path: pathlib.Path) -> None:
@@ -784,10 +788,10 @@ def kill_process_tree(proc: subprocess.Popen, *, exclude_pids: "set[int] | None"
 
 
 def terminate_process_tree(proc: subprocess.Popen) -> None:
-    """Gracefully terminate a subprocess and its process tree."""
-    if IS_WINDOWS:
+    """Gracefully terminate a subprocess and its process tree; a child in the caller's own group gets SIGTERM alone."""
+    if IS_WINDOWS or (pgid := process_group_id(proc.pid)) == current_process_group_id():
         proc.terminate()
-    elif pgid := process_group_id(proc.pid):
+    elif pgid:
         terminate_process_group_id(pgid)
 
 
@@ -939,8 +943,7 @@ def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None, *,
     """Caller selects retained subtrees; PID callers kill selectively, Popen also uses unspared groups."""
     if IS_WINDOWS and not exclude_pids:
         try:
-            _hidden_run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                        capture_output=True, timeout=10)
+            _hidden_run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10)
         except Exception:
             pass
         return
@@ -948,7 +951,8 @@ def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None, *,
     targets, spared = _tree_kill_targets(pid, exclude_pids)
     if include_process_group and not IS_WINDOWS:
         pgid = process_group_id(pid)
-        if pgid > 0 and not any(process_group_id(p) == pgid for p in spared):
+        # A child left in the caller's own group dies by PID below: a killpg there would kill the caller (#2353).
+        if pgid > 0 and pgid != current_process_group_id() and not any(process_group_id(p) == pgid for p in spared):
             kill_process_group_id(pgid)
     for dpid in targets:
         force_kill_pid(dpid)
@@ -1057,11 +1061,13 @@ def kill_process_on_port(port: int) -> None:
     """Kill any process listening on the given TCP port."""
     try:
         if IS_WINDOWS:
-            res = _hidden_run(["netstat", "-ano"], capture_output=True, text=True, timeout=5)
-            listeners = [
-                line.split()[-1] for line in res.stdout.splitlines()
-                if f":{port}" in line and "LISTENING" in line and line.split()
-            ]
+            # psutil's socket table, not netstat's text, whose state words and code page are localized.
+            import psutil
+
+            listeners = list(dict.fromkeys(  # a dual-stack listener has an IPv4 and an IPv6 row
+                conn.pid for conn in psutil.net_connections(kind="tcp")
+                if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port == port and conn.pid
+            ))
         else:
             # -sTCP:LISTEN scopes the sweep to the listener (a bare tcp:PORT
             # selector also matches ESTABLISHED client sockets — on browser
@@ -1071,12 +1077,8 @@ def kill_process_on_port(port: int) -> None:
                 ["lsof", "-nP", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
                 capture_output=True, text=True, timeout=5,
             )
-            listeners = res.stdout.split()
-        for pid_str in listeners:
-            try:
-                pid = int(pid_str)
-            except ValueError:
-                continue
+            listeners = [int(pid) for pid in res.stdout.split() if pid.isdigit()]
+        for pid in listeners:
             if pid != os.getpid():
                 force_kill_pid(pid)
     except Exception:
@@ -1301,9 +1303,8 @@ def install_shutdown_signal_handlers(handler) -> None:
     """Install SIGINT and POSIX SIGTERM handlers that only set a flag/event.
 
     The caller's main thread owns teardown, never the signal frame."""
-    signal.signal(signal.SIGINT, handler)
-    if not IS_WINDOWS:
-        signal.signal(signal.SIGTERM, handler)
+    for signum in SHUTDOWN_SIGNALS[:1] if IS_WINDOWS else SHUTDOWN_SIGNALS:
+        signal.signal(signum, handler)
 
 
 def subprocess_hidden_kwargs() -> dict:

@@ -344,16 +344,17 @@ def _no_store_wait():
     return acquisition_budget(0)
 
 
-def accept(evt: Dict[str, Any], ctx: Any, route: Dict[str, Any]) -> bool:
+def accept(evt: Dict[str, Any], ctx: Any, route: Dict[str, Any], *, admission: Optional[Callable] = None) -> bool:
     """Claim a subagent request for this generation's lanes; False keeps the inline path.
 
     Event-loop work only, memory only: the reservation under Q (the row's own
     freshness is read on the lane) and a nonblocking submit. A duplicate
     coalesces with its live claim; an id another owner holds is ignored. The
     event is consumed here and never re-put: the lane retries its own storage
-    gaps at the head of its queue.
+    gaps at the head of its queue. An already-composed host child supplies its
+    admission callback; on this lane it runs inline under the same claim.
     """
-    generation = _CURRENT[0]
+    generation = current_generation()
     if (generation is None or str(route.get("delegation_role") or "") != "subagent"
             or not str(evt.get("task_id") or "").strip()):
         return False
@@ -372,7 +373,11 @@ def accept(evt: Dict[str, Any], ctx: Any, route: Dict[str, Any]) -> bool:
         if claim.generation.closed():
             _refuse_at_entry(claim, INTERRUPTED_BY_GENERATION_EXIT)
             return True
-        submitted = claim.submitted = claim.generation.submit(functools.partial(_run, claim), claim.lane)
+        if admission is not None and generation.current_lane() == claim.lane:
+            submitted = claim.submitted = True
+            _run(claim, admission=admission)
+        else:
+            submitted = claim.submitted = claim.generation.submit(functools.partial(_run, claim, admission=admission), claim.lane)
         if not submitted:
             _refuse_at_entry(claim, EXECUTOR_UNAVAILABLE)
         return True
@@ -393,7 +398,7 @@ def _refuse_at_entry(claim: "PreparationClaim", reason: str) -> None:
                     claim.task_id, reason, exc_info=True)
 
 
-def _run(claim: "PreparationClaim") -> None:
+def _run(claim: "PreparationClaim", *, admission: Optional[Callable] = None) -> None:
     """The lane job: the ``queued`` marker, then the existing schedule owner under the claim."""
     from supervisor.events_schedule_task import _handle_schedule_task
 
@@ -403,7 +408,10 @@ def _run(claim: "PreparationClaim") -> None:
         if landed is not True:
             claim.unrecorded(landed)
             return
-        _handle_schedule_task(claim.event, claim.ctx, preparation=claim)
+        if admission is None:
+            _handle_schedule_task(claim.event, claim.ctx, preparation=claim)
+        else:
+            admission(claim)
 
     _guarded(claim, step)
 
@@ -787,7 +795,7 @@ def _row_references(row: Dict[str, Any], resource: Dict[str, Any]) -> bool:
 
 def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
     """Remove exactly the copy ``resource`` names; a different or unknown holder is kept."""
-    from ouroboros import subagent_worktrees
+    from ouroboros import genesis_project, subagent_worktrees
 
     surface, path = str(resource.get("surface") or ""), str(resource.get("path") or "")
     try:
@@ -803,7 +811,7 @@ def _dispose_resource(task_id: str, resource: Dict[str, Any]) -> str:
                                   check=False) if pathlib.Path(path).is_dir() else None
             if head is None or head.returncode != 0 or head.stdout.strip() != str(resource.get("base_sha") or ""):
                 return "retained_not_owned"
-            return "removed" if subagent_worktrees.remove_genesis_project(path) else "retained_remove_failed"
+            return "removed" if genesis_project.remove_genesis_project(path, task_id=task_id) else "retained_remove_failed"
     except Exception:
         log.warning("Prepared copy %s of %s was kept: disposal failed", path, task_id, exc_info=True)
         return "retained_remove_failed"

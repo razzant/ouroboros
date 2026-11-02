@@ -42,7 +42,7 @@ def test_direct_warm_root_can_select_saved_child(tmp_path, monkeypatch, exact_ch
         assert not any(row['id'] == 'saved-root' for row in q.PENDING)
         outcome = q.resume_budget_paused_task('first', selected_by='saved-root')
         assert outcome['ok'], outcome
-        carrier = child.get('_budget_pause_resume') or child[eb.BUDGET_HOLD_KEY]
+        carrier = child.get('_budget_pause_resume') or child[eb.SELECTION_KEY]
         assert carrier['root_grant_id'] == resumed['grant_id']
         assert eb.budget_hold_fact(rows['second'])
         # A queue/durable record alone cannot make a completed direct actor a lender.

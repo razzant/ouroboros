@@ -49,6 +49,15 @@ def test_normalizer_keeps_closed_keys_and_drops_unknown():
     }
 
 
+def test_normalizer_keeps_the_interface_size_and_pixel_ratio_as_bounded_numbers():
+    fact = normalize_client_surface({"interface_size": 125, "device_pixel_ratio": 2.4999, "ua": "x"})
+    assert fact["interface_size"] == 125 and fact["device_pixel_ratio"] == 2.5
+    bounded = normalize_client_surface({"interface_size": 10_000, "device_pixel_ratio": 1e9, "ua": "x"})
+    assert bounded["interface_size"] == 500 and bounded["device_pixel_ratio"] == 16.0
+    dropped = normalize_client_surface({"interface_size": True, "device_pixel_ratio": "2", "ua": "x"})
+    assert "interface_size" not in dropped and "device_pixel_ratio" not in dropped
+
+
 def test_normalizer_empty_and_non_dict_are_none():
     assert normalize_client_surface({}) is None
     assert normalize_client_surface(None) is None

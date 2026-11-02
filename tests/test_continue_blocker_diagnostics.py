@@ -64,7 +64,7 @@ RUNNING = {"kind": "delegated_run", "run_id": "run-leaf", "invocation_id": "", "
     ("running_and_unknown_start", [RUNNING, UNBOUND]),
 ])
 def test_the_held_continue_and_its_resume_refusal_carry_the_observed_facts(tmp_path, monkeypatch, blocker, facts):
-    from ouroboros.budget_pause import budget_hold_fact
+    from ouroboros.work_stop import hold_fact as budget_hold_fact
     from ouroboros.gateway.task_continue import api_task_continue
     from ouroboros.gateway.tasks import api_task_resume
 
@@ -138,14 +138,15 @@ PAUSED_HELD = {"running": "running_delegated_leaf", "unknown": "unbound_unknown_
                "running_and_unknown": "running_and_unknown_start"}
 
 
-@pytest.mark.parametrize("condition", ["settled", "running", "unknown", "running_and_unknown", "other_hold"])
+@pytest.mark.parametrize("condition", ["settled", "running", "unknown", "running_and_unknown", "point_refusal"])
 def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_path, monkeypatch, condition):
     from ouroboros import owner_pause
-    from ouroboros.budget_pause import budget_hold_fact
+    from ouroboros.work_stop import hold_fact as budget_hold_fact
     from ouroboros.gateway.task_continue import api_task_continue
     from ouroboros.gateway.task_pause import api_task_pause
     from ouroboros.gateway.tasks import api_task_resume
     from supervisor.events_budget import hold_budget_row
+    from ouroboros.work_stop import continuation_refusal, current_stop
 
     queue, workers = _held(tmp_path, monkeypatch, PAUSED_HELD.get(condition, "running_delegated_leaf"))
     status, ack = _http(api_task_continue, PRED, {"action_nonce": NONCE})
@@ -156,15 +157,17 @@ def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_pat
     assert status in {200, 202} and pause["ok"]
     fence = owner_pause.read_fence(tmp_path, successor)
     assert owner_pause.fence_closed(fence)
-    if condition in {"settled", "other_hold"}:
+    if condition in {"settled", "point_refusal"}:
         assert dc.emit(tmp_path, dc.SETTLED, {"run_id": "run-leaf", "task_id": PRED, "route": "codex",
                                             "model": "leaf-model", "state": "completed"})
         dc._CUSTODY.clear()
-    if condition == "other_hold":
+    if condition == "point_refusal":
         hold_budget_row(held, reason="separate_owner_hold", result_root=tmp_path)
+        # An unknown name is a point refusal, not an owner-only stop (A1).
+        assert continuation_refusal(held)["reason"] == "separate_owner_hold"
     status, result = _http(api_task_resume, successor)
     print("paused Continue Resume:", condition, status, result)
-    if condition == "settled":
+    if condition in {"settled", "point_refusal"}:
         assert status == 200 and result["ok"], result
         assert result["same_generation"] and result["owner_pause_released"]
         assert held in workers.PENDING and budget_hold_fact(held) is None
@@ -175,24 +178,23 @@ def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_pat
     else:
         assert status != 200 and held in workers.PENDING
         assert owner_pause.read_fence(tmp_path, successor) == fence
-        assert budget_hold_fact(held)
-        if condition != "other_hold":
-            # The same reply as the unpaused held Continue: the census facts, advice only for running work.
-            facts = {"running": [RUNNING], "unknown": [UNBOUND], "running_and_unknown": [RUNNING, UNBOUND]}
-            expected = sorted(({**fact, "task_id": PRED, "review_owned": False} for fact in facts[condition]),
-                              key=json.dumps)
-            assert status == 409 and result["error"] == "predecessor_writers_unsettled", result
-            assert sorted(result["blockers"], key=json.dumps) == expected
-            assert result.get("action") == ("wait_or_stop_the_previous_work" if condition == "running" else None)
-        else:
-            assert result["error"] == "separate_owner_hold"
+        # Pause replaced the writer wait; a refusal keeps this current tree stop (A6).
+        assert budget_hold_fact(held) is None
+        assert current_stop(held, {"owner": fence})["cause"] == "pause"
+        # The same reply as the unpaused held Continue: the census facts, advice only for running work.
+        facts = {"running": [RUNNING], "unknown": [UNBOUND], "running_and_unknown": [RUNNING, UNBOUND]}
+        expected = sorted(({**fact, "task_id": PRED, "review_owned": False} for fact in facts[condition]),
+                          key=json.dumps)
+        assert status == 409 and result["error"] == "predecessor_writers_unsettled", result
+        assert sorted(result["blockers"], key=json.dumps) == expected
+        assert result.get("action") == ("wait_or_stop_the_previous_work" if condition == "running" else None)
 
 
 def test_a_census_past_twenty_rows_reaches_every_continue_consumer_whole(tmp_path, monkeypatch):
     """21 running delegated leaves and then an author model request with no result (the census lists
     model attempts after every delegated run): the Continue answer, its persisted hold, its Activity
     row and the held successor's refused Resume carry all 22 facts, and the advice stays withheld."""
-    from ouroboros.budget_pause import budget_hold_fact
+    from ouroboros.work_stop import hold_fact as budget_hold_fact
     from ouroboros.gateway.task_continue import api_task_continue
     from ouroboros.gateway.tasks import api_task_resume
     from tests.test_continue_independent_review import _open_attempt

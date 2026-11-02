@@ -19,16 +19,52 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
-def _target() -> dict:
-    """Read the existing settings/route owners without load_settings' migrations."""
+def _saved_settings() -> dict:
+    """The saved OpenRouter keys, built-in and added, read without load_settings' migrations."""
     from ouroboros import config
-    from ouroboros.llm_routing import _ProviderRoutingMixin
+    from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_integrity import read_settings_json_verified
 
-    raw = read_settings_json_verified(config.SETTINGS_PATH) if config.SETTINGS_PATH.exists() else {}
-    settings = {"OPENROUTER_API_KEY": (raw or {}).get("OPENROUTER_API_KEY",
-                                                    config.runtime_setting("OPENROUTER_API_KEY", ""))}
-    return _ProviderRoutingMixin()._resolve_remote_target("openrouter::", settings=settings)
+    raw = (read_settings_json_verified(config.SETTINGS_PATH) if config.SETTINGS_PATH.exists() else {}) or {}
+    return {key: raw[key] if key in raw else config.runtime_setting(key, default)
+            for key, default in (("OPENROUTER_API_KEY", ""), (CONNECTIONS_KEY, None))}
+
+
+def _target() -> dict:
+    """The built-in OpenRouter connection's target."""
+    from ouroboros.llm_routing import resolve_target
+
+    return resolve_target("openrouter::", _saved_settings())
+
+
+def _target_for(row: dict) -> dict:
+    """The saved OpenRouter key the attempt was bought with (its recorded fingerprint), else the built-in one,
+    whose GET then refuses as credential_mismatch: a key that did not buy the row is never sent."""
+    from ouroboros import openrouter_cost as cost
+    from ouroboros.llm_attempt import ConnectionUnavailable
+    from ouroboros.llm_routing import resolve_target
+    from ouroboros.provider_connections import connection_rows
+    from ouroboros.provider_models import CONNECTIONS_KEY
+
+    try:
+        builtin = _target()
+    except ConnectionUnavailable:  # the owner turned the built-in key off: keyless, so its GET is never sent
+        builtin = {"provider": "openrouter", "base_url": "", "api_key": ""}
+    binding = cost.generation_binding(row) or {}
+    wanted = {key: binding.get(key) for key in ("endpoint", "credential_sha256")}
+    if cost.binding_for_target(builtin) == wanted:
+        return builtin
+    settings = _saved_settings()
+    for added in connection_rows(settings.get(CONNECTIONS_KEY)):
+        if added.get("kind") != "openrouter":
+            continue
+        try:
+            target = resolve_target(f"openrouter@{added.get('name')}::", settings)
+        except ConnectionUnavailable:
+            continue  # A turned-off or unknown key stays unsent.
+        if cost.binding_for_target(target) == wanted:
+            return target
+    return builtin
 
 
 def _custody(root: Path, row: dict) -> str | None:
@@ -122,7 +158,7 @@ def reconcile_selected(root: Path, attempt_ids: list[str], *, fetch: bool = Fals
                 if row.get("cost_final") is True:
                     outcomes.append({**outcome, "status": "already_final"})
                     continue
-                receipt = cost.fetch_generation_receipt(root, row, _target())
+                receipt = cost.fetch_generation_receipt(root, row, _target_for(row))
             if receipt is None:
                 outcomes.append({**outcome, "status": "receipt_unavailable"})
                 continue

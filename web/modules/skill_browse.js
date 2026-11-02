@@ -11,11 +11,16 @@ import { skillSourcesApi } from './api_client.js';
 import { installedSkillModel } from './skill_card_renderer.js';
 import { openSkillDetailSheet } from './skill_detail_sheet.js';
 import {
-    buttonHtml, catalogWhoHtml, chipHtml, factsText, officialMarkHtml, plural, relativeAge,
-    skipReviewButtonHtml, statusHtml, trustSentence, versionText,
+    buttonHtml, catalogWhoHtml, chipHtml, connectsServices, connectsText, countsAsYoursText, factsText, officialMarkHtml, plural, relativeAge,
+    skillIconHtml, skipReviewButtonHtml, statusHtml, trustSentence, versionText,
+    skillTitle,
 } from './skill_presentation.js';
 
 const HIDDEN_KEY = 'ouroboros.skills.recommendedHidden';
+// The Connectors chip is derived from each entry's `connects` fact (an installed skill's place declaration, or
+// the Hub entry's), never a typed tag; a catalog category of the same id joins it.
+export const CONNECTORS = 'connectors';
+export const isConnector = (item) => connectsServices(item).length > 0 || (item?.category || []).includes(CONNECTORS);
 const CLAMP_CHARS = 600;
 
 function readHiddenShelf() {
@@ -154,14 +159,19 @@ export function renderBrowseCard(item, { source, state, categoryLabels = new Map
         item.official ? officialMarkHtml({ sourceId: item.source_id }) : '',
     ].join('');
     const facts = factsText(item);
-    const cats = showCategory ? (item.category || []).map((cat) => chipHtml(categoryLabels.get(cat) || cat, 'neutral')).join('') : '';
+    const connects = connectsText(item);
+    const yours = countsAsYoursText(item);
+    const cats = [connects ? chipHtml(connects, 'neutral') : '', ...(showCategory ? (item.category || [])
+        .filter((cat) => cat !== CONNECTORS || !connects).map((cat) => chipHtml(categoryLabels.get(cat) || cat, 'neutral')) : [])].join('');
+    const icon = connects ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(item.icon, 18)}</span>` : '';
     return `<article class="marketplace-card skills-head-card" data-item="${id}" data-source="${escapeHtml(item.source_id)}">
-        <div class="skills-head-title"><button type="button" class="skills-card-name" data-browse-action="open" data-item="${id}">${escapeHtml(item.name)}<span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
+        <div class="skills-head-title">${icon}<button type="button" class="skills-card-name" data-browse-action="open" data-item="${id}"><span data-i18n-authored>${escapeHtml(skillTitle(item))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button>${marks}</div>
         <p class="skills-card-purpose"${long ? ' data-clamped' : ''} data-i18n-authored>${escapeHtml(item.description || '')}</p>
         ${long ? `<button type="button" class="skills-read-more" data-browse-action="open" data-item="${id}">Read more ›</button>` : ''}
         <div class="skills-card-meta-lines">
-            <div class="skills-card-who">${catalogWhoHtml(item)}</div>
+            <div class="skills-card-who"><span data-i18n-authored>${escapeHtml(item.name)}</span> · ${catalogWhoHtml(item)}</div>
             ${facts ? `<div class="skills-card-facts">${escapeHtml(facts)}</div>` : ''}
+            ${yours ? `<div class="skills-card-facts">${escapeHtml(yours)}</div>` : ''}
             ${cats ? `<div class="skills-card-cats">${cats}</div>` : ''}
         </div>
         <div class="settings-action-row skills-card-action-row">${state.status}<div class="skills-card-actions-end">${state.action || ''}</div></div>
@@ -207,7 +217,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     const categoriesEl = pane.querySelector('[data-browse-categories]');
 
     const sourceById = () => new Map(state.sources.map((source) => [source.id, source]));
-    const categoryLabels = () => new Map((state.catalog?.categories || []).map((cat) => [cat.id, cat.label || cat.id]));
+    const categoryLabels = () => new Map([...(state.catalog?.categories || []).map((cat) => [cat.id, cat.label || cat.id]), [CONNECTORS, 'Connectors']]);
     const catalogItems = () => (Array.isArray(state.catalog?.items) ? state.catalog.items : []);
     const allKnownItems = () => {
         const seen = new Map(catalogItems().map((item) => [item.id, item]));
@@ -234,11 +244,13 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
     }
 
     function paintCategories() {
-        const categories = Array.isArray(state.catalog?.categories) ? state.catalog.categories : [];
+        const categories = (Array.isArray(state.catalog?.categories) ? state.catalog.categories : []).filter((cat) => cat.id !== CONNECTORS);
         const counts = categoryCounts(catalogItems(), categories);
-        const chips = [['all', 'All', catalogItems().length], ...categories.filter((cat) => counts.get(cat.id)).map((cat) => [cat.id, cat.label || cat.id, counts.get(cat.id)])];
+        const connectors = catalogItems().filter(isConnector).length;
+        const chips = [['all', 'All', catalogItems().length], ...(connectors ? [[CONNECTORS, 'Connectors', connectors]] : []),
+            ...categories.filter((cat) => counts.get(cat.id)).map((cat) => [cat.id, cat.label || cat.id, counts.get(cat.id)])];
         if (!chips.some(([id]) => id === state.category)) state.category = 'all';
-        categoriesEl.hidden = !categories.length;
+        categoriesEl.hidden = chips.length < 2;
         categoriesEl.innerHTML = chips.map(([id, label, count]) => `<button type="button" class="filter-chip skills-category${id === state.category ? ' active' : ''}" aria-pressed="${id === state.category ? 'true' : 'false'}" data-browse-category="${escapeHtml(id)}">${escapeHtml(label)}<span class="skills-category-count">${count}</span></button>`).join('');
     }
 
@@ -249,7 +261,7 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
         if (state.query && state.search) for (const item of state.search.items || []) if (!map.has(item.id)) map.set(item.id, item);
         return [...map.values()].filter((item) => (state.source === 'all' || item.source_id === state.source)
             && (!state.officialOnly || item.official)
-            && (state.category === 'all' || (item.category || []).includes(state.category)));
+            && (state.category === 'all' || (state.category === CONNECTORS ? isConnector(item) : (item.category || []).includes(state.category))));
     }
 
     // The registry a search also asks (ClawHub by default); none connected, none asked.
@@ -537,6 +549,8 @@ export function createSkillBrowse({ pane, chrome, host, api = skillSourcesApi })
             searchRegistry();
         },
         itemFor(sourceId, name) { return catalogItems().find((item) => item.source_id === sourceId && item.name === name) || null; },
+        /** Show one category, Connectors included (the place Connect flow's way here). */
+        async showCategory(id) { await loaded; state.category = id; render(); },
         catalogItems,
         destroy() {
             destroyed = true;

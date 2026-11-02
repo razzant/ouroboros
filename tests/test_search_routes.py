@@ -42,6 +42,7 @@ def test_generic_extension_search_executes_when_builtin_search_is_unavailable(tm
     skill = find_skill(drive_root, 'research_provider', repo_path=str(skills_root))
     assert extension_loader.load_extension(skill, lambda: {}, drive_root=drive_root) is None
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
     name = extension_loader.extension_surface_name('research_provider', 'search')
     assert search._available_web_search_backends() == []
     assert registry.get_schema_by_name(name)['function']['name'] == name

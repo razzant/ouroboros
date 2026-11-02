@@ -122,14 +122,14 @@ def test_warm_owner_pause_registry_and_fence_reach_the_rendered_card(tmp_path, m
             assert requested[0]["phase"] == ("preparing" if kind == "direct_chat" else "budget_pausing")
             assert not requested[0].get("finishing_reviews"), "a requested Pause is not yet a paused author"
             set_owner_wait(tmp_path, task["id"], {"wait_id": "pause-wait", "state": "waiting", "reason": "owner_pause"})
+            if kind == "managed_task":
+                supervisor_queue.RUNNING[task["id"]]["owner_wait"] = {"state": "waiting", "reason": "owner_pause"}
             settling = gateway_state._chat_activities_snapshot_safe(tmp_path)[0]
-            assert settling["phase"] == "budget_pausing" and not settling.get("finishing_reviews")
+            assert settling["phase"] == "budget_paused" and not settling.get("finishing_reviews")
             # A review the parked author already sent still runs while the Pause settles: its work says it and stays
             # live, for a direct turn and a managed member alike; an unreadable operation proves none and drops no work.
             from ouroboros import review_operation
 
-            if kind == "managed_task":
-                supervisor_queue.RUNNING[task["id"]]["owner_wait"] = {"state": "waiting", "reason": "owner_pause"}
             with monkeypatch.context() as patch:
                 patch.setattr(review_operation, "task_has_live_review_operation",
                               lambda root, task_id, sent_only=False, **_: sent_only and task_id == task["id"])
@@ -142,7 +142,8 @@ def test_warm_owner_pause_registry_and_fence_reach_the_rendered_card(tmp_path, m
                 patch.setattr(review_operation, "task_has_live_review_operation", unreadable)
                 [work] = _state_body(tmp_path)["works"]
                 assert (work["activity"], work["transition"], work["live"], work["tails"]) == (
-                    "working", "pausing", False, [])
+                    "paused", "none", False, [])
+                assert "resume" in [control["action"] for control in work["controls"]]
             supervisor_queue.RUNNING.get(task["id"], {}).pop("owner_wait", None)
             # One reviewer as the census records it: its task (delegated run or live
             # operation) and its own model send. Mixed ids are never a reviewer count.
@@ -166,8 +167,10 @@ def test_warm_owner_pause_registry_and_fence_reach_the_rendered_card(tmp_path, m
     assert _js_pause_cards(samples) == [
         {"phase": "Paused", "line": "Review work finishing", "resume": True, "mark": "pause/ink"},
         {"phase": "Paused", "line": "", "resume": True, "mark": "pause/ink"},
-        # A resumed direct turn reads its own census phase (``preparing``), a managed task ``working``.
-        {"phase": "Preparing" if kind == "direct_chat" else "Working", "line": "", "resume": False, "mark": "moving/ink"},
+        # A resumed direct turn reads its own census phase (``preparing``) beside the start step it stands at (registered,
+        # never started), a managed task ``working``.
+        {"phase": "Preparing" if kind == "direct_chat" else "Working",
+         "line": "Setting up the turn" if kind == "direct_chat" else "", "resume": False, "mark": "moving/ink"},
     ]
 
 

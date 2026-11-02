@@ -170,7 +170,6 @@ def test_failed_registration_publishes_no_contributions(tmp_path):
 
 def test_owner_toggle_invalidates_instruction_contributions(tmp_path, monkeypatch):
     skill = installed(tmp_path, kind="instruction", enabled=False)
-    monkeypatch.setattr("ouroboros.skill_lifecycle_actions._sync_schedules", lambda *args: None)
     with client(tmp_path, monkeypatch) as http:
         assert http.get("/api/ui/contributions").json()["contributions"] == []
         for enabled in (True, False):

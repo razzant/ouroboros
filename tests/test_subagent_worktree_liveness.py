@@ -1,6 +1,7 @@
 """C10: a plain working copy past retention goes only with proof its task is over (the supervisor's
 liveness probe, a terminal row, no lineage process); a checkout that survives its removal keeps its
-row and pin; the registry is written only when something changed; ``only`` leaves other rows alone."""
+record and pin; a record file is written only when its copy changed, and a pass locks only the
+records it selected; ``only`` leaves other copies alone."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ import pytest
 
 from ouroboros import body_candidate
 from ouroboros import subagent_worktrees as sw
+from ouroboros.platform_layer import _lock_identity
 from ouroboros.task_results import write_task_result
 
 
@@ -45,12 +47,15 @@ def _copy(world, task_id):
     return pathlib.Path(sw.provision_worktree(repo_dir=repo, task_id=task_id, worktree_root=root, data_dir=data).path)
 
 
+def _set(data, task_id=None, **fields):
+    """Rewrite the record of every copy (or of ``task_id``'s) with ``fields``."""
+    for row in sw._records(data):
+        if task_id is None or row.get("task_id") == task_id:
+            sw._put_record({**row, **fields}, data)
+
+
 def _age(data, *, created_at=1.0):
-    path = data / "state" / "subagent_worktrees.json"
-    rows = json.loads(path.read_text())
-    for row in rows["worktrees"]:
-        row["created_at"] = created_at
-    path.write_text(json.dumps(rows))
+    _set(data, created_at=created_at)
 
 
 def _prune(world, **kwargs):
@@ -58,8 +63,14 @@ def _prune(world, **kwargs):
     return sw.prune_orphans(worktree_root=root, data_dir=data, **kwargs)
 
 
-def _registry_mtime(data):
-    return (data / "state" / "subagent_worktrees.json").stat().st_mtime_ns
+def _records_state(data):
+    """Every record file's name, bytes and mtime: what a pass that changed nothing leaves alone."""
+    return sorted((f.name, f.read_bytes(), f.stat().st_mtime_ns)
+                  for f in (data / "state" / "private_copies").glob("*.json") if not f.name.startswith("."))
+
+
+def _lock_held(path, data):
+    return bool(_lock_identity(sw._record_file(path, data).with_suffix(".lock")))
 
 
 @pytest.mark.parametrize("retention_days", [7, 0])
@@ -88,18 +99,14 @@ def test_an_old_copy_stays_while_its_task_runs_is_pending_unknown_or_unreadable(
 
 @pytest.mark.parametrize("retention_days", [7, 0])
 def test_an_old_copy_goes_once_its_task_is_terminal_and_proven_not_live(world, retention_days):
-    """L3, the removing half, and the registry written once for a changed row set."""
+    """L3, the removing half: only the retired copy's record goes."""
     repo, data, root = world
     done, fresh = _copy(world, "done"), _copy(world, "fresh")
     write_task_result(data, "done", "completed")
     write_task_result(data, "fresh", "completed")
     _age(data)
     if retention_days:
-        rows = json.loads((data / "state" / "subagent_worktrees.json").read_text())
-        for row in rows["worktrees"]:
-            if row["task_id"] == "fresh":
-                row["created_at"] = 9e12  # inside the wait
-        (data / "state" / "subagent_worktrees.json").write_text(json.dumps(rows))
+        _set(data, "fresh", created_at=9e12)  # inside the wait
 
     report = _prune(world, retention_days=retention_days, live=lambda _task: False)
     expected = 1 if retention_days else 2
@@ -113,11 +120,11 @@ def test_a_missing_checkout_keeps_its_row_and_branch_until_ownership_is_proven_o
     repo, data, root = world
     gone = _copy(world, "gone")
     shutil.rmtree(gone)
-    before = _registry_mtime(data)
+    before = _records_state(data)
     for status, answer in (("running", False), ("completed", True), ("completed", None)):
         write_task_result(data, "gone", status)
         assert _prune(world, retention_days=9999, live=lambda _task: answer) == {"removed": 0, "kept": 1}
-        assert _registry_mtime(data) == before
+        assert _records_state(data) == before
         assert _git(repo, "branch", "--list", "subagent/gone*").stdout.strip()
     assert _prune(world, retention_days=9999) == {"removed": 0, "kept": 1}
     with monkeypatch.context() as process:
@@ -127,61 +134,69 @@ def test_a_missing_checkout_keeps_its_row_and_branch_until_ownership_is_proven_o
     assert _git(repo, "branch", "--list", "subagent/gone*").stdout == ""
 
 
-def test_only_restricts_the_pass_and_an_unchanged_row_set_leaves_the_registry_untouched(world):
+def test_only_restricts_the_pass_and_an_unchanged_copy_keeps_its_record_untouched(world):
     repo, data, root = world
     first, second = _copy(world, "first"), _copy(world, "second")
     for name in ("first", "second"):
         write_task_result(data, name, "completed")
     _age(data)
-    before = _registry_mtime(data)
+    before = _records_state(data)
     assert _prune(world, retention_days=0, live=lambda _task: False, only=["nobody"]) == {"removed": 0, "kept": 2}
-    assert _registry_mtime(data) == before, "nothing changed: the registry is not rewritten"
+    assert _records_state(data) == before, "nothing changed: no record is rewritten"
     assert _prune(world, retention_days=0, live=lambda _task: False, only=["second"]) == {"removed": 1, "kept": 1}
     assert first.is_dir() and not second.exists()
-    assert _registry_mtime(data) != before
+    assert _records_state(data) == [entry for entry in before if entry[0] != sw._record_file(second, data).name]
 
 
-def _registry_cost(monkeypatch):
-    counts = {"locks": 0, "reads": 0}
-    for name, counter in (("_ops_lock", "locks"), ("_load_registry", "reads")):
-        real = getattr(sw, name)
+def _pass_cost(monkeypatch):
+    """Count the record locks a pass takes (with the copy each names) and its full listings."""
+    counts = {"locked": [], "listings": 0}
+    real_lock, real_records = sw._record_lock, sw._records
 
-        def counted(*args, _real=real, _counter=counter, **kwargs):
-            counts[_counter] += 1
-            return _real(*args, **kwargs)
+    def lock(path, *args, **kwargs):
+        counts["locked"].append(pathlib.Path(str(path)).name)
+        return real_lock(path, *args, **kwargs)
 
-        monkeypatch.setattr(sw, name, counted)
+    def records(*args, **kwargs):
+        counts["listings"] += 1
+        return real_records(*args, **kwargs)
+
+    monkeypatch.setattr(sw, "_record_lock", lock)
+    monkeypatch.setattr(sw, "_records", records)
     return counts
 
 
 @pytest.mark.parametrize("count", [100, 800])
 @pytest.mark.parametrize("only", [None, ["absent"], ["task-0"]])
-def test_irrelevant_rows_do_not_add_registry_locks_or_reads(world, monkeypatch, count, only):
+def test_a_pass_locks_only_the_records_it_selected_and_rewrites_none(world, monkeypatch, count, only):
     repo, data, root = world
     for i in range(count):
         (root / str(i)).mkdir(parents=True)
-    rows = [{"task_id": f"task-{i}", "kind": "delegated_exec" if i % 2 else "plain",
-             "path": str(root / str(i)), "created_at": 9e12} for i in range(count)]
-    sw._save_registry(rows, data)
-    before = _registry_mtime(data)
-    costs = _registry_cost(monkeypatch)
+        sw._put_record({"task_id": f"task-{i}", "kind": "delegated_exec" if i % 2 else "plain",
+                        "path": str(root / str(i)), "created_at": 9e12}, data)
+    before = _records_state(data)
+    costs = _pass_cost(monkeypatch)
     assert _prune(world, retention_days=7, only=only, live=lambda _: False) == {"removed": 0, "kept": count}
-    assert costs["locks"] <= 1 and costs["reads"] <= 2
-    assert _registry_mtime(data) == before
+    plain = {str(i) for i in range(0, count, 2)}  # the copies this pass owns; delegated ones are custody's
+    expected = plain if only is None else ({"0"} if only == ["task-0"] else set())
+    assert sorted(costs["locked"]) == sorted(expected) and costs["listings"] <= 2
+    assert _records_state(data) == before
 
 
-def test_a_selected_old_copy_still_goes_among_many_unrelated_rows(world, monkeypatch):
+def test_a_selected_old_copy_still_goes_among_many_unrelated_records(world, monkeypatch):
     repo, data, root = world
     path = _copy(world, "selected")
     write_task_result(data, "selected", "completed")
     _age(data)
     unrelated = [{"task_id": f"task-{i}", "kind": "delegated_exec", "path": str(root / str(i))}
                  for i in range(400)]
-    sw._save_registry(sw.list_worktrees(data) + unrelated, data)
-    costs = _registry_cost(monkeypatch)
+    for row in unrelated:
+        sw._put_record(row, data)
+    costs = _pass_cost(monkeypatch)
     assert _prune(world, retention_days=0, only=["selected"], live=lambda _: False) == {"removed": 1, "kept": 400}
-    assert costs["locks"] <= 2 and costs["reads"] <= 4
-    assert not path.exists() and sw.list_worktrees(data) == unrelated
+    assert set(costs["locked"]) == {path.name} and costs["listings"] <= 2  # its decision, then its removal
+    assert not path.exists()
+    assert sorted(sw.list_worktrees(data), key=lambda row: row["path"]) == sorted(unrelated, key=lambda row: row["path"])
 
 
 def test_a_checkout_surviving_its_removal_keeps_its_row_and_is_retried(world, monkeypatch):
@@ -201,7 +216,8 @@ def test_a_checkout_surviving_its_removal_keeps_its_row_and_is_retried(world, mo
     assert _git(repo, "branch", "--list", "subagent/stubborn*").stdout.strip(), "the branch is kept with the row"
 
     # Restore only deletion faults, keeping the fixture's canonical install selected.
-    (stubborn / "released").touch()
+    (stubborn / "released").touch()  # a changed identity, no unique work left behind
+    (stubborn / "released").unlink()
     assert _prune(world, retention_days=0, live=lambda _task: False) == {"removed": 1, "kept": 0}
     assert not stubborn.exists() and sw.list_worktrees(data_dir=data) == []
 
@@ -209,12 +225,12 @@ def test_a_checkout_surviving_its_removal_keeps_its_row_and_is_retried(world, mo
 def test_remove_worktree_keeps_the_row_when_the_directory_survives(world, monkeypatch):
     repo, data, root = world
     path = _copy(world, "held")
-    monkeypatch.setattr(sw, "_force_rmtree", lambda _path: None)
-    monkeypatch.setattr(sw, "_git_quiet", lambda *_args: None)
-    assert sw.remove_worktree(task_id="held", worktree_root=root, data_dir=data) is False
+    with monkeypatch.context() as failed:  # restore only the deletion faults: the fixture's install stays selected
+        failed.setattr(sw, "_force_rmtree", lambda _path: None)
+        failed.setattr(sw, "_git_quiet", lambda *_args: None)
+        assert sw.remove_worktree(task_id="held", worktree_root=root, data_dir=data) is False
     [row] = sw.list_worktrees(data_dir=data)
     assert row["removal_failed"] and path.is_dir()
-    monkeypatch.undo()
     (path / "released").touch()
     assert sw.remove_worktree(task_id="held", worktree_root=root, data_dir=data) is True
     assert sw.list_worktrees(data_dir=data) == [] and not path.exists()
@@ -240,7 +256,7 @@ def test_a_snapshot_surviving_its_removal_keeps_its_row_and_pin_and_only_selects
 
 
 @pytest.mark.parametrize("kind", ["plain", "body", "snapshot"])
-def test_pruning_deletes_outside_the_ops_lock_and_preserves_concurrent_registration(world, monkeypatch, kind):
+def test_pruning_locks_only_the_retired_copy_and_preserves_a_concurrent_registration(world, monkeypatch, kind):
     repo, data, root = world
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
     if kind == "snapshot":
@@ -250,38 +266,31 @@ def test_pruning_deletes_outside_the_ops_lock_and_preserves_concurrent_registrat
     else:
         path = _copy(world, "done")
         if kind == "body":
-            rows = sw._load_registry(data)
-            rows[0]["kind"] = "body_candidate"
-            sw._save_registry(rows, data)
+            _set(data, "done", kind="body_candidate")
     write_task_result(data, "done", "completed")
     _age(data)
-    real_remove, real_save, real_git = sw._force_rmtree, sw._save_registry, sw._git_quiet
-    saves, deletions = [], []
+    real_remove, real_drop = sw._force_rmtree, sw._drop_record
+    drops, deletions, arrivals = [], [], []
 
     def remove(checkout):
-        assert not sw._inproc_lock.locked(), "tree deletion must not hold the shared ops lock"
+        assert _lock_held(checkout, data), "a copy's tree goes under its own record lock"
         deletions.append(checkout)
-        _copy(world, "arrived")  # a real provision interleaves with this deletion
+        arrivals.append(_copy(world, "arrived"))  # a real provision interleaves with this deletion
         real_remove(checkout)
 
-    def save(rows, data_dir=None):
-        saves.append(sw._inproc_lock.locked())
-        real_save(rows, data_dir)
-
-    def git(repo_dir, *args):
-        if args[:2] == ("worktree", "remove") and path.exists():
-            assert not sw._inproc_lock.locked(), "Git tree deletion must also be outside the shared lock"
-        real_git(repo_dir, *args)
+    def drop(where, data_dir=None):
+        drops.append((pathlib.Path(str(where)), _lock_held(where, data_dir)))
+        real_drop(where, data_dir)
 
     monkeypatch.setattr(sw, "_force_rmtree", remove)
-    monkeypatch.setattr(sw, "_save_registry", save)
-    monkeypatch.setattr(sw, "_git_quiet", git)
+    monkeypatch.setattr(sw, "_drop_record", drop)
     if kind == "snapshot":
         assert sw.prune_execution_snapshots(set(), worktree_root=root, data_dir=data)["removed"] == ["closed"]
     else:
         assert _prune(world, retention_days=0, live=lambda _: False)["removed"] == 1
     assert deletions == [path] and not path.exists()
-    assert saves and all(saves), "registry mutations still require the shared lock"
+    assert drops == [(path, True)], "its record is dropped under that same lock"
+    assert not _lock_held(arrivals[0], data), "the interleaved provision never waited for it"
     [row] = sw.list_worktrees(data_dir=data)
     assert row["task_id"] == "arrived" and pathlib.Path(row["path"]).is_dir()
 
@@ -297,10 +306,10 @@ def test_snapshot_gc_requires_terminal_task_negative_liveness_and_readable_custo
     monkeypatch.setattr(body_candidate, "live_lineage_processes", lambda *_args: processes)
 
     def kept(open_ids=()):
-        before = _registry_mtime(data)
+        before = _records_state(data)
         assert sw.prune_execution_snapshots(set(open_ids), worktree_root=root, data_dir=data) == {
             "removed": [], "kept": ["proof"]}
-        assert _registry_mtime(data) == before
+        assert _records_state(data) == before
         assert _git(repo, "rev-parse", handle.baseline_ref).stdout.strip() == handle.baseline_sha
 
     kept()  # no task record yet: the provisioning window
@@ -361,9 +370,7 @@ def test_failed_removal_waits_for_changed_directory_identity_without_rewriting_f
     else:
         path = _copy(world, "done")
         if kind == "body":
-            rows = sw._load_registry(data)
-            rows[0]["kind"] = "body_candidate"
-            sw._save_registry(rows, data)
+            _set(data, "done", kind="body_candidate")
     write_task_result(data, "done", "completed")
     _age(data)
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
@@ -390,18 +397,20 @@ def test_failed_removal_waits_for_changed_directory_identity_without_rewriting_f
     assert not prune() and path.is_dir()
     [first] = sw.list_worktrees(data)
     stamp = first["removal_failed"]
-    registry = data / "state" / "subagent_worktrees.json"
-    before, mtime, judged = registry.read_bytes(), _registry_mtime(data), len(verdicts)
+    record = sw._record_file(path, data)
+    before, mtime, judged = record.read_bytes(), record.stat().st_mtime_ns, len(verdicts)
     for _ in range(2):
         assert not prune()
-        assert registry.read_bytes() == before and _registry_mtime(data) == mtime
+        assert record.read_bytes() == before and record.stat().st_mtime_ns == mtime
         assert attempts == [path] and len(verdicts) == judged and commands == []
 
-    (path / "changed").touch()  # a changed root identity authorizes another attempt, not elapsed time
+    (path / "changed").touch()
+    (path / "changed").unlink()  # a changed root identity authorizes another attempt, not elapsed time
     assert not prune() and attempts == [path, path]
     assert sw.list_worktrees(data)[0]["removal_failed"] == stamp
     monkeypatch.setattr(sw, "_force_rmtree", real_remove)
     (path / "changed_again").touch()
+    (path / "changed_again").unlink()
     assert prune() and not path.exists() and sw.list_worktrees(data) == []
 
 
@@ -420,18 +429,18 @@ def attempt(path):
         remove(path)
 wt._force_rmtree = attempt
 removed = []
-registry = data / "state" / "subagent_worktrees.json"
+records = data / "state" / "private_copies"
 for _ in range(3):
     if kind == "snapshot":
         result = len(wt.prune_execution_snapshots(set(), worktree_root=root, data_dir=data)["removed"])
     else:
         result = wt.prune_orphans(worktree_root=root, data_dir=data, retention_days=0, live=lambda _: False)["removed"]
     removed.append(result)
-    state = (registry.read_bytes(), registry.stat().st_mtime_ns)
+    state = sorted((f.name, f.read_bytes(), f.stat().st_mtime_ns) for f in records.glob("*.json"))
     if len(removed) == 1:
         first = state
     else:
-        assert state == first, "unchanged failure rewrote its registry on a later pass"
+        assert state == first, "unchanged failure rewrote its record on a later pass"
 rows = wt.list_worktrees(data)
 print(json.dumps({"attempts": len(attempts), "removed": removed,
                   "stamp": rows[0].get("removal_failed") if rows else None}))
@@ -447,9 +456,7 @@ def test_a_deep_survivor_retries_once_in_each_new_process(world, monkeypatch, ki
     else:
         path = _copy(world, "done")
         if kind == "body":
-            rows = sw._load_registry(data)
-            rows[0]["kind"] = "body_candidate"
-            sw._save_registry(rows, data)
+            _set(data, "done", kind="body_candidate")
     write_task_result(data, "done", "completed")
     _age(data)
     held = path / "nested" / "deep" / "held.txt"
@@ -457,6 +464,8 @@ def test_a_deep_survivor_retries_once_in_each_new_process(world, monkeypatch, ki
     held.write_text("held by another process")
     monkeypatch.setattr(sw, "_force_rmtree", lambda _: None)
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _: False)
+    monkeypatch.setattr("ouroboros.copy_capture_proof.plain_copy_verdict",  # this test's subject is the survivor
+                        lambda *_a, **_k: {"remove": True, "keep_branch": False, "reason": "no_unique_work"})
     if kind == "snapshot":
         assert sw.prune_execution_snapshots(set(), worktree_root=root, data_dir=data)["removed"] == []
     else:

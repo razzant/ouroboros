@@ -1,12 +1,20 @@
-"""Address accepted answers to their asker, an admitted successor, or a fresh head.
+"""Address accepted answers to their living asker, an admitted successor, or a fresh head.
 
-Mailbox write is owed delivery, never a read receipt. A final drain/terminal
-race is repaired from the durable recipient and ACK identity; no room's sole
-unrelated reader and no claimed-but-unadmitted Continue may take the answer.
+A living asker holds its answers while paused, held or queued and reads them
+when it continues. Mailbox write is owed delivery, never a read receipt. A
+final drain/terminal race is repaired from the durable recipient and ACK
+identity; no room's sole unrelated reader and no claimed-but-unadmitted
+Continue may take the answer. Once the owner's ingress accepted it, every
+retry converges on that message.
 """
 from __future__ import annotations
 
 from pathlib import Path
+
+
+def answer_message_id(asker: str, quiz_id: str) -> str:
+    """The mailbox identity ``deliver_answer`` gives a card's live answer, whichever task reads it."""
+    return f"quiz_answer:{asker}:{quiz_id}"
 
 
 def admitted_successor(root, predecessor: str) -> str:
@@ -73,11 +81,11 @@ def acknowledge_answer(root, recipient: str, entry: dict) -> None:
 
 
 def deliver_answer(root, asker: str, quiz_id: str, block: dict, live_reader, fallback) -> tuple[bool, str]:
-    """Return (forwarded_to_fresh_head, reason); a live mailbox remains owed until ACK."""
+    """Return (forwarded_to_owner_ingress, reason); a living recipient's mailbox remains owed until ACK."""
     from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, mail_read_state, mailbox_holds, write_owner_message
     from ouroboros.owner_quiz import mark_discharged, recorded_answer_frame, quiz_states
     from ouroboros.utils import utc_now_iso
-    from supervisor import queue as q
+    from supervisor import message_bus, queue as q
     from supervisor.workers import get_direct_chat_agent
 
     block = quiz_states(root, asker).get(quiz_id) or block
@@ -106,18 +114,25 @@ def deliver_answer(root, asker: str, quiz_id: str, block: dict, live_reader, fal
         current, reason = live_reader(previous)
         if current is not None or reason == "task_not_reading":
             return False, "awaiting_recipient_read"
-    recipient, task = reading_recipient(root, asker, live_reader)
+    # An answer the owner's ingress already accepted keeps that one effect: its retry converges
+    # there, never on a Continue admitted since (a press does the same, card_decision._deliver).
+    late_id, chat_id = f"quiz_late_answer:{asker}:{quiz_id}", block.get("publication_chat_id")
+    accepted = type(chat_id) is int and message_bus.accepted_chat_message(root, chat_id, late_id) is not None
+    recipient, task = ("", None) if accepted else reading_recipient(root, asker, live_reader)
     attempted = set()
     while task is not None and recipient not in attempted:
         attempted.add(recipient)
         agent = get_direct_chat_agent(recipient)
+        if agent is None:
+            from ouroboros.conversation_lease import presence_author_agent
+            agent = presence_author_agent(root, recipient)
         lock = getattr(agent, "_owner_message_admission_lock", None) or q._queue_lock
         with lock:
             # Same admission owner as room intake: no final-drain admission after closure.
             current, _reason = live_reader(recipient)
             if current is not None:
                 drive = Path(root) if agent is not None else q._task_drive_for_task(current, recipient)
-                msg_id = f"quiz_answer:{asker}:{quiz_id}"
+                msg_id = answer_message_id(asker, quiz_id)
                 if previous == recipient and delivery.get("mailbox_at"):
                     return False, "awaiting_recipient_read"
                 # Name the owed effect BEFORE append. A crash retries that same identity.
@@ -132,9 +147,10 @@ def deliver_answer(root, asker: str, quiz_id: str, block: dict, live_reader, fal
         # The selected reader ended before admission. Follow its existing
         # Continue under that recipient's own lock before using a fresh head.
         recipient, task = reading_recipient(root, admitted_successor(root, recipient), live_reader)
-    # No reader. Named ingress carries an explicit question-answer fact, which
-    # bypasses ordinary room intake and cannot release any old task's hold.
-    block = _update_delivery(root, asker, quiz_id, {"recipient_task_id": "", "msg_id": f"quiz_late_answer:{asker}:{quiz_id}",
+    # No living holder. Named ingress carries the typed question-answer fact: owner
+    # routing gives it only to the asker's live late-answer head, else a fresh head;
+    # it releases no hold.
+    block = _update_delivery(root, asker, quiz_id, {"recipient_task_id": "", "msg_id": late_id,
         "route": "fresh_head", "state": "owed", "reason_code": "asker_not_reading"}) or block
     forwarded, reason = fallback(root, asker, quiz_id, block, source=str(block.get("answer_source") or "web"))
     if forwarded:

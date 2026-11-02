@@ -256,12 +256,11 @@ def test_counts_and_content_describe_the_head_the_read_captured(managed, monkeyp
 
 
 def test_head_and_target_moving_after_the_check_never_reuse_the_cached_fact(managed, monkeypatch):
-    from ouroboros.update_letter import _request_text, official_update_projection
+    from ouroboros.update_letter import official_update_projection
 
     o2 = _commit(managed.official, "official 2", extra="2\n")
     checked = _check()
     assert checked["local_changes"] == "absent" and checked["safe_to_apply"] is True
-    assert '"local_changes": "absent"' in _request_text(checked, {"commits": []}, "")
     drive = managed.tmp / "data"
     (drive / "state").mkdir(parents=True)
     fact = official_update_projection(checked["current_sha"], drive_root=drive, state=managed.state)

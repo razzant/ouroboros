@@ -234,6 +234,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "authority_source": str(row.get("authority_source") or ""),
         # Continuation lineage and the same-tree capture identity replay too.
         **{key: str(row.get(key) or "") for key in ("continuation_of", "capture_id", "snapshot_task_id")},
+        **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion") if key in row},
         # A copy: the source rows may be the shared, read-only custody memo.
         "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
         "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
@@ -242,6 +243,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "work_order_coverage": str(row.get("work_order_coverage") or ""),
         "authority_fingerprint": str(row.get("authority_fingerprint") or ""),
         "processing": copy.deepcopy(row.get("processing")) if isinstance(row.get("processing"), dict) else {},
+        "prompt_cache_ttl": copy.deepcopy(row.get("prompt_cache_ttl")) if isinstance(row.get("prompt_cache_ttl"), dict) else {},
         # #1196: the cap and HOW it was decided replay with the body a
         # retry re-POSTs, so the replayed STARTED row keeps the same basis.
         "max_seconds": int(row.get("max_seconds") or 0) if str(row.get("max_seconds") or "").lstrip("-").isdigit() else 0,

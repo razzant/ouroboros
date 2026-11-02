@@ -1,4 +1,4 @@
-"""Swarm host admission joins the real managed provider-death delivery path.
+"""Ordinary promotion in a Swarm room joins the managed provider-death delivery path.
 
 This is the executable P5 K transfer, with no removed router actor or fabricated
 terminal notice. Admission/queue/result/annotation writers and forced provider
@@ -10,13 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-import server
 from ouroboros import agent_task_pipeline as pipeline, loop, loop_llm_call
 from ouroboros.task_finalization import send_provider_death_notice
 from ouroboros.task_results import load_task_result
 from supervisor.terminal_delivery import build_completed_result_event
 from tests.test_delivery_forced_finalization import _forced_test_context
-from tests.test_swarm_host_admission import host as host_fixture, incoming_case, rows
+from tests.test_swarm_host_admission import host as host_fixture, incoming_case, promotion_event, rows
 
 host = host_fixture
 pytestmark = pytest.mark.serial
@@ -39,11 +38,16 @@ def test_last_assistant_salvage_keeps_bytes_and_skips_empty_nonassistant_message
 def test_host_admitted_swarm_root_has_one_live_and_rebuilt_provider_disclosure(host, monkeypatch, current):
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
     case = incoming_case(host, "main")
-    server._route_owner_message(host.bridge, host.ctx, case.incoming)
+    from supervisor.events import _handle_promote_chat_to_task
+
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS_MODE", "swarm")
+    outcome = _handle_promote_chat_to_task(promotion_event(case), host.ctx)
+    assert outcome["status"] == "scheduled"
     assert len(host.pending) == 1
     task = host.pending[0]
     assert task["id"] == case.task_id and task["root_task_id"] == case.task_id
-    assert task["metadata"]["force_plan"] is True
+    assert task["metadata"]["subagents_mode"] == "swarm"
+    assert "force_plan" not in task["metadata"]
     assert not task.get("_is_direct_chat") and not task.get("_ephemeral_turn")
     assert load_task_result(host.root, case.task_id)["status"] == "scheduled"
     assert len(rows(host.root / "logs/chat_annotations.jsonl")) == 1

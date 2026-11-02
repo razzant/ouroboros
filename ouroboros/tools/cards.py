@@ -37,7 +37,9 @@ SHOW_CARD_TOOL_SCHEMA: Dict[str, Any] = {
         "audio, video, gallery, action, form; no routes); each action and form binds submit: {id, once?} "
         "and data fills the path-reading components. widget: {skill, tab_id, input?} shows an installed "
         "live skill's widget inline. app: {path} or {html} of a self-contained HTML page (at most 512 KiB) "
-        "that runs sandboxed: it cannot fetch or load resources, and loading another page closes it.\n\n"
+        "that runs sandboxed: it cannot fetch or load resources, and loading another page closes it. On most "
+        "devices it shares the owner's page thread: keep heavy computation in a blob: Worker, never a long "
+        "synchronous loop.\n\n"
         "A press on an action or form comes back to you as a [Card input] message with its values (after "
         "your task ended, as the owner's message in this chat: the pressed label and values, as a reply to "
         "the card); once: true accepts only the first press. "
@@ -160,6 +162,8 @@ def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", compo
         return argument_refusal(ctx, "SHOW_CARD_ARG_ERROR", problems, effect=_NOT_SHOWN)
 
     from ouroboros.card_store import CardStoreError, store_app_bytes, write_card
+    from ouroboros.projects_registry import project_chat_for_task_tree
+    from ouroboros.tool_access import canonical_data_root
     from ouroboros.tools.owner_delivery import deliver_owner_event
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
@@ -169,7 +173,8 @@ def _show_card(ctx: ToolContext, title: str = "", fallback_text: str = "", compo
             body = {"app": store_app_bytes(root, body["app_bytes"])}
         record = write_card(root, chat_id=int(chat_id), task_id=str(getattr(ctx, "task_id", "") or ""),
                             title=title.strip(), fallback_text=fallback_text, kind=kind, body=body,
-                            replace=str(replace or ""))
+                            replace=str(replace or ""), same_room=lambda card: project_chat_for_task_tree(
+                                canonical_data_root(ctx), card.get("task_id")) == int(chat_id))
     except CardStoreError as exc:
         return argument_refusal(ctx, exc.code, [str(exc)], effect=_NOT_SHOWN)
     except (OSError, TimeoutError) as exc:

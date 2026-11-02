@@ -119,8 +119,10 @@ def test_ledger_record_reaches_the_task_card_with_panel_facts_and_per_part_answe
     assert "Reviewer opus finding: [critical FAIL] unbounded retry loop — reason: retries forever" in lines
     assert "Reviewer opus findings omitted: 4" in lines
     assert any(line.startswith("Reviewer critic: role=commit_gate additional reviewer")
-               and "model=google/gemini-3.6-flash · transport=error · parse=none" in line
+               and "model=not reported · requested=google/gemini-3.6-flash · transport=error · parse=none" in line
                and "quorum=abstains" in line for line in lines)
+    assert panel["actors"][-1]["requested_model"] == "google/gemini-3.6-flash"
+    assert panel["actors"][-1]["observed_model"] == ""
     assert "Reviewer critic answers: change=error (findings 0, critical 0)" in lines
 
     # The task card's Reviews section shows the same record under its own group.

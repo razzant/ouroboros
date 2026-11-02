@@ -12,7 +12,9 @@ CONTENT = b"-----BEGIN PRIVATE KEY-----\nExample fixture, not a credential\n----
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-def test_peek_snapshot_and_capture_keep_the_original_pem_finding(tmp_path, monkeypatch, mode):
+def test_a_private_copy_holds_the_pem_file_and_the_capture_keeps_the_original_finding(tmp_path, monkeypatch, mode):
+    """A private copy is the source's current tree in every mode (no copy-in veto); the
+    project capture still reports the PEM observation the way its mode decides."""
     monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: mode)
     root = tmp_path / "project"
     root.mkdir()
@@ -22,12 +24,8 @@ def test_peek_snapshot_and_capture_keep_the_original_pem_finding(tmp_path, monke
     handle = provision_execution_snapshot(target_root=root, task_id="task", snapshot_id="snapshot",
                                           worktree_root=tmp_path / "copies", data_dir=tmp_path / "data")
     from pathlib import Path
-    if mode == "cyber_pro":
-        assert (Path(handle.path) / "notes.txt").read_bytes() == CONTENT
-        assert handle.capture_warnings[0]["reason"] == pem_private_key_reason(root, "notes.txt")
-    else:
-        assert not (Path(handle.path) / "notes.txt").exists()
-        assert not handle.capture_warnings
+    assert (Path(handle.path) / "notes.txt").read_bytes() == CONTENT
+    assert not hasattr(handle, "capture_warnings") and handle.excluded_untracked == ()
     _, manifest = write_workspace_patch_artifacts(root, tmp_path / "artifacts", task={})
     assert manifest["status"] == ("ready_with_changes" if mode == "cyber_pro" else "ready_no_changes")
     if mode == "cyber_pro":

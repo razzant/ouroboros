@@ -8,9 +8,9 @@ model, of what the seat cost in one wave — every attempt summed — with how m
 covers and their range. No history is "cost unknown", never a one-call estimate. A session row
 spends a seat and time, not money; callers say so before asking for a price.
 
-The table is read once per process and kept for half an hour: ``## Review`` sits in a cached prompt
-prefix, so a price that moved with every settled wave would rewrite it. A reader waits on the ledger
-lock only for the display wait and otherwise reads the last table (or none).
+The table is read once per process and kept for half an hour, so a context capture (the price rides in
+``## Review seat activity``, the changing part of every start) does not scan the ledger at every start.
+A reader waits on the ledger lock only for the display wait and otherwise reads the last table (or none).
 """
 
 from __future__ import annotations

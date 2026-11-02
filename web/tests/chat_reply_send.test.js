@@ -38,7 +38,8 @@ function fixture() {
     const messages = document.byId.get('chat-messages');
     const fire = (type, payload) => [...(handlers.get(type) || [])].forEach((fn) => fn(payload));
     const bubbleOf = (pred) => messages.children.find((node) => node.classList.contains('chat-bubble') && pred(node));
-    const notes = (node) => (node?.children || []).filter((child) => child.className === 'msg-pending');
+    // Delivery notes wherever they stand: the saved tick in the time line, or a row of words above it.
+    const notes = (node) => node?.querySelectorAll('.msg-pending') || [];
     const actions = (node) => notes(node).flatMap((note) => note.children.filter((child) => child.tagName === 'BUTTON'))
         .map((button) => button.textContent);
     return {

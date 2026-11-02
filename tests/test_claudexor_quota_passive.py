@@ -23,6 +23,8 @@ from ouroboros.gateways import claudexor as wire
 
 
 QUOTA_URL = "/api/claudexor/status?view=quota"
+# The current (unified, 3.6.0+) producer's empty roster: its legacy carrier stays present and empty.
+EMPTY_ROSTER = {"profiles": [], "harnessAccounts": [], "accountPools": []}
 QUOTA_VIEW = {"view": "resources_freshness", "requestKind": "text"}
 # The engine contract's recorded opt-in response: each constraint carries its own
 # read-time freshness beside the conservative aggregate. Without that field it is
@@ -58,7 +60,7 @@ def passive_engine(monkeypatch, tmp_path):
     clients = []
     state = {
         "responses": {
-            "/v2/credential-profiles": {"profiles": [], "harnessAccounts": []},
+            "/v2/credential-profiles": EMPTY_ROSTER,
             "/v2/quota": {"snapshots": [], "absences": []},
         },
         "errors": {},
@@ -215,8 +217,8 @@ def test_quota_view_known_empty_is_distinct_from_undiscovered(passive_engine):
         engine.provision()
         empty = _read(client)
     assert empty["reads"] == {"catalog": "not_read", "accounts": "ok", "quota": "ok"}
-    assert empty["profiles"] == {"profiles": [], "harnessAccounts": []}
-    assert empty["unified_accounts"] is False
+    assert empty["profiles"] == EMPTY_ROSTER
+    assert empty["unified_accounts"] is True
     assert empty["quota"] == [] and empty["quota_absences"] == []
     assert empty["read_errors"] == {}
     assert all(client.is_closed for client in engine.clients)
@@ -267,7 +269,7 @@ def test_quota_view_malformed_roster_does_not_claim_authoritative_empty(passive_
     assert payload["reads"] == {"catalog": "not_read", "accounts": "failed", "quota": "ok"}
     assert payload["profiles"] == {}
     assert payload["unified_accounts"] is False
-    assert set(payload["read_errors"]) == {"accounts"}
+    assert payload["read_errors"] == {"accounts": {"code": "malformed_response"}}
     assert all(client.is_closed for client in engine.clients)
 
 
@@ -283,7 +285,7 @@ def test_quota_view_malformed_quota_preserves_successful_roster(passive_engine, 
     with TestClient(_app()) as client:
         payload = _read(client)
     assert payload["reads"] == {"catalog": "not_read", "accounts": "ok", "quota": "failed"}
-    assert payload["profiles"] == {"profiles": [], "harnessAccounts": []}
+    assert payload["profiles"] == EMPTY_ROSTER
     assert payload["quota"] == [] and payload["quota_absences"] == []
     assert set(payload["read_errors"]) == {"quota"}
     assert all(client.is_closed for client in engine.clients)
@@ -322,7 +324,7 @@ def test_quota_view_errors_are_bounded_and_preserve_successful_sibling(
         payload = _read(client)
     other = "quota" if facet == "accounts" else "accounts"
     assert payload["reads"][facet] == "failed" and payload["reads"][other] == "ok"
-    assert payload["unified_accounts"] is False
+    assert payload["unified_accounts"] is (facet == "quota")
     assert set(payload["read_errors"]) == {facet}
     error = payload["read_errors"][facet]
     if failure_type == "refusal":
@@ -511,7 +513,7 @@ def test_quota_view_incomplete_constraint_freshness_fails_only_the_quota_facet(p
     assert payload["reads"] == {"catalog": "not_read", "accounts": "ok", "quota": "failed"}
     assert payload["read_errors"] == {"quota": {"code": "malformed_response"}}
     assert payload["quota"] == [] and payload["quota_absences"] == []
-    assert payload["profiles"] == {"profiles": [], "harnessAccounts": []}
+    assert payload["profiles"] == EMPTY_ROSTER
 
 
 def test_quota_view_dispatch_is_exact_and_does_not_change_default_status(monkeypatch):
@@ -550,3 +552,89 @@ def test_actor_inspection_real_wire_sends_exact_scope_not_account(passive_engine
         ("GET", "/v2/credential-profiles", {}),
         ("GET", "/v2/quota", {"view": "resources_freshness", "model": "auto", "requestKind": "image"}),
     ]
+
+
+# -- #244: ONE account-model decision for full Accounts status and the passive read ----------------
+# The roster itself carries the model: the unified producer (Claudexor 3.6.0+) always emits
+# `accountPools`; a well-formed roster without it is the retired pre-unified model. The
+# operations catalog stays a read for other capabilities and never decides this.
+
+_NAMED = {"profile": {"harness_id": "claude", "profile_id": "work-research", "enabled": True},
+          "status": {"verification": "passed", "verification_source": "vendor"}, "identity": None}
+_NATIVE = {"harness_id": "claude", "native_credentials_enabled": True, "native_login_detected": True,
+           "identity": {"email": "native@example.invalid"}, "next_up": {"kind": "native", "route": "local_session"}}
+_POOL = {"harness_id": "claude", "next_up": {"kind": "profile", "profileId": "work-research"}}
+
+
+def _full_status_engine(engine, monkeypatch, *, operations=None):
+    engine.state["full_status"] = True
+    engine.state["responses"].update({
+        "/v2/agent-capabilities": {"harnesses": [
+            {"id": "claude", "displayName": "Claude Code", "status": "ok", "enabled": True}]},
+        "/v2/harnesses": {"harnesses": []},
+        "/v2/operations": {"operations": operations if operations is not None else []},
+    })
+    monkeypatch.setattr(owned, "get_owned_daemon",
+                        lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
+
+
+@pytest.mark.parametrize("body,state,code,unified", [
+    ({"profiles": [_NAMED], "harnessAccounts": [], "accountPools": [_POOL]}, "ok", None, True),
+    ({"profiles": [_NAMED], "accountPools": [_POOL]}, "ok", None, True),
+    ({"profiles": [_NAMED], "harnessAccounts": [_NATIVE], "accountPools": [_POOL]}, "ok", None, True),
+    ({"profiles": [], "harnessAccounts": [], "accountPools": []}, "ok", None, True),
+    ({"profiles": [_NAMED], "harnessAccounts": [_NATIVE]}, "failed", "account_model_unsupported", False),
+    ({"profiles": [], "harnessAccounts": []}, "failed", "account_model_unsupported", False),
+    ({"profiles": [_NAMED]}, "failed", "malformed_response", False),
+    ({"profiles": [], "harnessAccounts": [{}]}, "failed", "malformed_response", False),
+    ({"profiles": [], "accountPools": None}, "failed", "malformed_response", False),
+], ids=["unified", "unified-without-legacy-carrier", "poisoned-hybrid", "valid-empty-unified",
+        "legacy-native-and-named", "legacy-empty", "no-model-carrier", "legacy-unidentified-row",
+        "malformed-pools"])
+def test_full_status_and_passive_read_make_one_account_model_decision(
+    passive_engine, monkeypatch, body, state, code, unified,
+):
+    engine = passive_engine
+    engine.state["responses"]["/v2/credential-profiles"] = body
+    _full_status_engine(engine, monkeypatch)
+    engine.provision()
+    with TestClient(_app()) as client:
+        passive = _read(client)
+        response = client.get("/api/claudexor/status")
+    assert response.status_code == 200
+    full = response.json()
+    assert passive["reads"]["accounts"] == state and full["reads"]["accounts"] == state
+    assert passive["unified_accounts"] is unified and full["unified_accounts"] is unified
+    assert passive.get("read_errors", {}).get("accounts", {}).get("code") == code
+    assert full["facets"]["accounts"]["error"] == code
+    if state == "ok":
+        assert passive["profiles"] == body
+        assert [w["profile"]["profile_id"] for w in full["profiles"]["profiles"]] == \
+            [w["profile"]["profile_id"] for w in body["profiles"]]
+    else:
+        # Nothing was held from an earlier answer: the refused roster is never served as an empty one.
+        assert passive["profiles"] == {} and full["profiles"] == {}
+        assert full["facets"]["accounts"]["stale"] is False
+    # The sibling facets of one fan-out keep their own verdicts.
+    assert full["reads"]["catalog"] == "ok" and full["reads"]["quota"] == "ok"
+
+
+@pytest.mark.parametrize("operations", [
+    httpx.ReadTimeout("fixture catalog unavailable"), (503, {"code": "daemon_busy"}), [{"id": "get:quota"}],
+], ids=["catalog-transport-failure", "catalog-refusal", "catalog-without-pool-route"])
+def test_a_unified_roster_is_not_downgraded_by_the_operations_catalog(passive_engine, monkeypatch, operations):
+    engine = passive_engine
+    roster = {"profiles": [_NAMED], "harnessAccounts": [], "accountPools": [_POOL]}
+    engine.state["responses"]["/v2/credential-profiles"] = roster
+    _full_status_engine(engine, monkeypatch, operations=operations if isinstance(operations, list) else [])
+    if not isinstance(operations, list):
+        engine.state["errors"]["/v2/operations"] = operations
+    engine.provision()
+    with TestClient(_app()) as client:
+        full = client.get("/api/claudexor/status").json()
+    assert full["reads"]["accounts"] == "ok" and full["unified_accounts"] is True
+    assert [w["profile"]["profile_id"] for w in full["profiles"]["profiles"]] == ["work-research"]
+    assert full["profiles"]["accountPools"] == [_POOL]
+    # The catalog keeps its own job: resource capabilities say what happened to THAT read.
+    expected_capabilities = "ok" if isinstance(operations, list) else "failed"
+    assert full["resource_capabilities_read"] == expected_capabilities

@@ -32,13 +32,14 @@ from ouroboros.skill_loader import (
     save_review_state,
 )
 from ouroboros.skill_peer_inventory import discover_skill_peers
-from tests._shared import clean_extension_runtime_state
+from tests._shared import clean_extension_runtime_state, current_python_env
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SEEDS = REPO / "skills"
 UNIX = "unix_computer_use"
 WINDOWS = "windows_computer_use"
-EVERYWHERE = ["ui_design", "design_demo", "templates", "device_voice"]  # on by default on every host
+EVERYWHERE = ["ui_design", "templates", "device_voice",  # on by default on every host
+              "live_conversation", "gemini_live", "grok_realtime", "openai_realtime"]  # inert until Calls (beta)
 UNIX_043 = "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d"  # official history: os any, permissions with net
 log = logging.getLogger(__name__)
 
@@ -192,7 +193,6 @@ def test_a_legacy_unix_remote_choice_on_windows_survives_off_reseed_and_on(data,
         assert calls[-1][1] == registry["connections"]["bench"]
         assert calls[-1][2] == (["bash", "-lc", "printf remote-ok"] if backend == "osworld_http" else "printf remote-ok")
 
-    monkeypatch.setattr(skill_lifecycle_actions, "_sync_schedules", lambda *args, **kwargs: None)
     clean_extension_runtime_state()
     try:
         exercise_remote()
@@ -329,13 +329,12 @@ def windows_installed(data, monkeypatch):
                                  installed_by="owner")["ok"]
     installs, reconciles = [], []
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     monkeypatch.setattr("ouroboros.extension_loader.reconcile_extension",
                         lambda name, *args, **kwargs: reconciles.append(name) or {"action": "extension_loaded"})
     from ouroboros import skill_lifecycle_actions
 
     monkeypatch.setattr(skill_lifecycle_actions, "_reconcile", lambda *args, **kwargs: {"action": "extension_loaded"})
-    monkeypatch.setattr(skill_lifecycle_actions, "_sync_schedules", lambda *args, **kwargs: None)
     return data, installs, reconciles
 
 
@@ -381,7 +380,7 @@ def test_a_failed_install_names_the_failure_and_the_next_boot_retries(windows_in
     assert reconciles == [WINDOWS]
 
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     assert _dependency_pass(data, [WINDOWS], log) == [WINDOWS]
     assert installs == [["comtypes==1.4.17"]] and load_enabled(data, WINDOWS) is True
 
@@ -505,8 +504,9 @@ def test_a_dirty_tree_is_reconciled_without_a_receipt(seed_repo):
 def test_a_failed_phase_writes_no_receipt_and_the_next_boot_retries(seed_repo, monkeypatch, phase):
     repo, drive = seed_repo
     ensure(repo, drive)
+    shutil.rmtree(repo / "skills" / "second")  # merged into `first`: retired only by a pass where `first` arrived
     _write(repo / "skills", "first", "1.1.0")
-    _git(repo, "commit", "-qam", "first 1.1.0")
+    _git(repo, "commit", "-qam", "first 1.1.0 takes in second")
     if phase == "reseed":
         real = skill_builtin.install_builtin_skill
         monkeypatch.setattr(skill_builtin, "install_builtin_skill",
@@ -516,6 +516,7 @@ def test_a_failed_phase_writes_no_receipt_and_the_next_boot_retries(seed_repo, m
 
     ensure(repo, drive)
     assert receipt(drive) is None  # the stale receipt went before the pass; none replaced it
+    assert (drive / "skills" / "native" / "second" / ".seed-origin").is_file(), "the retired partner waits"
 
     monkeypatch.undo()
     monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive / "settings.json")
@@ -523,7 +524,7 @@ def test_a_failed_phase_writes_no_receipt_and_the_next_boot_retries(seed_repo, m
     if phase == "reseed":
         assert skill_builtin.install_builtin_skill is real
     ensure(repo, drive)
-    assert receipt(drive) is not None
+    assert receipt(drive) is not None and not (drive / "skills" / "native" / "second").exists()
     assert skill_builtin._version(drive / "skills" / "native" / "first") == "1.1.0"
 
 
@@ -597,7 +598,6 @@ def _stub_lifecycle_effects(monkeypatch):
     monkeypatch.setattr("ouroboros.extension_loader.reconcile_extension",
                         lambda name, *args, **kwargs: reconciles.append(name) or {"action": "extension_loaded"})
     monkeypatch.setattr(skill_lifecycle_actions, "_reconcile", lambda *args, **kwargs: {"action": "extension_loaded"})
-    monkeypatch.setattr(skill_lifecycle_actions, "_sync_schedules", lambda *args, **kwargs: None)
     return reconciles
 
 
@@ -631,7 +631,7 @@ def test_a_builtin_installed_after_the_receipt_retries_its_dependencies_at_the_n
     assert _dependency_pass(drive, [WINDOWS], log) == [WINDOWS] and not load_enabled(drive, WINDOWS)
 
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     skill_builtin.ensure_builtin_skills(drive, repo_dir=repo, log_obj=log)  # the network is back
     assert installs == [["comtypes==1.4.17"]] and load_enabled(drive, WINDOWS) is True
     assert receipt(drive) is not None  # the seed receipt certifies the bundle, not package work
@@ -755,7 +755,7 @@ def _boot(drive, monkeypatch):
 def lifecycle(monkeypatch):
     installs = []
     monkeypatch.setattr("ouroboros.marketplace.isolated_deps._install_python_packages",
-                        lambda packages, *args, **kwargs: installs.append(list(packages)) or [])
+                        lambda packages, env_root, *args, **kwargs: installs.append(list(packages)) or current_python_env(env_root) or [])
     _stub_lifecycle_effects(monkeypatch)
     return installs
 
@@ -830,7 +830,7 @@ def test_an_existing_unix_copy_is_turned_on_once_unless_the_owner_chose(data, mo
 
     _boot(data, monkeypatch)
 
-    assert skill_builtin._version(native / UNIX) == "0.5.0"
+    assert skill_builtin._version(native / UNIX) == skill_builtin._version(SEEDS / UNIX)
     assert load_enabled(data, UNIX) is (choice is None)
     assert (state / "connections.json").read_bytes() == connections
     if choice is None:
@@ -896,7 +896,7 @@ def test_unticking_everything_at_onboarding_stands_after_an_update(data, monkeyp
 # Real upgrade receipts: no helper unlinks them between boots.
 @pytest.fixture
 def instruction_upgrade(seed_repo, monkeypatch):
-    from ouroboros import skill_lifecycle_actions, skill_review
+    from ouroboros import skill_review
 
     repo, drive = seed_repo
     _starter(drive, "upgrade")
@@ -909,7 +909,6 @@ def instruction_upgrade(seed_repo, monkeypatch):
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "add default instruction")
     monkeypatch.setattr(skill_builtin, "threading", SimpleNamespace(Thread=_SyncThread))
-    monkeypatch.setattr(skill_lifecycle_actions, "_sync_schedules", lambda *a, **k: None)
 
     def forbidden(*args, **kwargs):
         pytest.fail("an instruction turn-on must not review or load an extension")

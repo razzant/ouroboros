@@ -12,11 +12,14 @@ overridden collection setting drop modules BEFORE any marker comparison could
 see them, so those controls are refused and every module must be collected.
 
 `--ui-browser-shard=K/N` splits the run, never the proof of the lane: each shard
-collects and checks the complete lane exactly as above, then keeps every N-th node
-of the sorted node ids starting at the K-th and reconciles that slice. The lane
-facts (complete sorted lane, shard, assigned slice) are left on the config for the
-evidence export; `tests/ci_evidence.py reconcile-shards` proves the slices of one
-run add up to the lane an unsharded collection sees. Shards are separate processes
+collects and checks the complete lane exactly as above, then keeps its slice of the
+sorted node ids and reconciles that slice. When the run's weight table records UI
+nodes (`OUROBOROS_CI_DURATIONS`, `ui_nodes`), the slices pack the sorted lane by
+recorded time (`node_weights`; a node the table lacks weighs the table's median);
+otherwise shard K keeps every N-th node starting at the K-th. The lane facts
+(complete sorted lane, its weights, shard, assigned slice) are left on the config
+for the evidence export; `tests/ci_evidence.py reconcile-shards` proves the slices
+of one run add up to the lane an unsharded collection sees. Shards are separate processes
 that agree on node IDS: a parametrization must give each case a stable id and order
 (no iteration over a set, no unsorted glob), or one id names different cases per shard.
 """
@@ -24,8 +27,11 @@ import fnmatch
 import os
 from pathlib import Path
 import re
+import statistics
 
 import pytest
+
+from tests.ci_verdicts import durations_table
 
 
 # Reviewed platform gates: conditions a runner legitimately lacks. Registered as
@@ -41,6 +47,8 @@ PLATFORM_SKIPS = (
     ("tests/test_chat_history_recovery_browser.py",
      r"POSIX archive permissions|identity bypasses unreadable-file permissions"),
     ("tests/test_widget_stream_download_ui.py", r"native Qt probe is explicitly selected"),
+    # Headless Chromium on Linux applies no synthetic touch pinch even to a plain page (CI 40682936207); macOS does.
+    ("tests/test_shell_drawer_browser.py::test_a_pinch_magnifies_the_room", r"applies no synthetic touch pinch"),
 )
 
 # Controls that narrow collection itself. Post-collection deselection is caught by
@@ -140,6 +148,22 @@ def _reconciliation(config):
     return config.pluginmanager.get_plugin("ui_browser_lane_reconciliation")
 
 
+def node_weights(full: list[str]) -> tuple[list | None, str]:
+    """([[node, positive weight]] in lane order, weights_source) from the run's weight table.
+
+    (None, "") without a table: shards keep every N-th node. A table that records
+    no UI node, or cannot be read, keeps those positions too and says why.
+    """
+    table, why = durations_table()
+    if table is None:
+        return None, "positions: " + why if why else ""
+    recorded, run_id = table.get("ui_nodes") or {}, table["source"]["run_id"]
+    if not recorded:
+        return None, f"positions: the durations of run {run_id} record no UI node"
+    median = statistics.median_low(recorded.values())
+    return [[node, max(1, recorded.get(node, median))] for node in full], f"durations:{run_id}"
+
+
 def _module_files(config) -> set:
     """What the committed collection settings select beneath tests/ on disk."""
     root = Path(config.rootpath)
@@ -195,10 +219,23 @@ def pytest_collection_modifyitems(config, items):
     # The complete lane is recorded BEFORE slicing: every shard and the unsharded
     # manifest collection must report the same list for their slices to add up.
     lane = {"full": sorted(expected)}
+    weights, source = node_weights(lane["full"])
+    if source:
+        lane["weights_source"] = source
+    if weights is not None:
+        lane["node_weights"] = weights
     assigned, shard = lane["full"], _shard(config)
     if shard is not None:
         index, count = shard
-        assigned = lane["full"][index - 1::count]
+        if weights is None:
+            assigned = lane["full"][index - 1::count]
+        else:
+            # At collection, not at import: conftest registers this plugin before tests.ci_evidence,
+            # whose assertion rewriting an earlier import would forestall.
+            from tests.ci_evidence import node_shards
+
+            owners = node_shards([weight for _, weight in weights], count)
+            assigned = [node for node, owner in zip(lane["full"], owners) if owner == index]
         if not assigned:
             raise pytest.UsageError(f"UI_BROWSER_INCOMPLETE: shard {index}/{count} of "
                                     f"{len(expected)} nodes is empty")

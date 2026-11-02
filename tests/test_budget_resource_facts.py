@@ -80,8 +80,9 @@ def _run_task_scoped(root, monkeypatch, scoped):
     monkeypatch.setattr("ouroboros.subagent_runtime.apply_task_start_settings_or_disclose",
                         lambda *_: task_settings_snapshot({}, os.environ))
     monkeypatch.setattr("ouroboros.model_wait.task_model_wait_scope", lambda **_: nullcontext())
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=root), _emit_live_log=lambda *_: None,
-                           _event_queue=None, _handle_task_scoped=scoped)
+    from tests._agent_entry_helpers import task_entry_agent
+
+    host = task_entry_agent(root, scoped)
     return OuroborosAgent.handle_task(host, {"id": "a", "type": "task"})
 
 

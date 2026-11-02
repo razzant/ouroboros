@@ -1,8 +1,8 @@
 """The one SSOT projection of task cost for every producer surface (C2, owner 10=B).
 
-``accounted_upper_bound_usd`` is the honest NAME for what ``cost_usd`` always was:
-the settled + reserved + unresolved upper bound from the physical attempt ledger,
-not a settled receipt. The semantics do not change (owner 10=B); the name does.
+``accounted_upper_bound_usd`` retains the settled + reserved + unresolved
+subtotal from the physical attempt ledger. Unpriced work makes it a subtotal,
+not an upper bound on the whole bill; scoped coverage travels beside it.
 ABI 7.0 (ABI-3, the approved ABI break): the deprecated ``cost_usd`` /
 ``cost_usd_with_children`` aliases are no longer EMITTED anywhere — the write
 seams strip them — while the READ side keeps resolving both spellings so every
@@ -46,6 +46,7 @@ COST_OPENNESS_FIELDS = (
     # bound to the scope whose rows produced it, so a card never pairs a root-tree
     # number with own-scope openness (or a parent's zero with a child's unknown).
     "cost_presentation",
+    "cost_custody",
     "cost_accounting_status",
     "cost_accounting_error",
     "cost_final",
@@ -89,6 +90,9 @@ def honest_accounted_amount(source: Optional[Mapping[str, Any]]) -> Optional[flo
         unresolved = float(src.get("unresolved_upper_bound_usd") or 0)
     except (TypeError, ValueError):
         return amount
+    from ouroboros.delegate_custody_usage import cost_coverage_open
+    if amount == 0 and cost_coverage_open(src) and not src.get("priced_rows"):
+        return None
     if amount == 0 and unknown > 0 and reserved == 0 and unresolved == 0:
         return None
     return amount
@@ -157,11 +161,13 @@ def build_cost_presentation(
         return None
     amount = _as_amount(summary.get("accounted_usd")) if priced else None
     integrity_gap = bool(summary.get("integrity_degraded"))
-    open_accounting = open_rows > 0 or integrity_gap
+    from ouroboros.delegate_custody_usage import cost_coverage_open
+    custody_open = cost_coverage_open(summary)
+    open_accounting = open_rows > 0 or integrity_gap or custody_open
     return {
         "scope": str(scope),
         "tracked_amount": round(amount, 6) if amount is not None else None,
-        "has_unpriced": unpriced > 0,
+        "has_unpriced": unpriced > 0 or custody_open,
         "tracked_final": amount is not None and tracked_nonfinal == 0 and not integrity_gap,
         "accounting_open": open_accounting,
         "has_rows": bool(priced or unpriced),
@@ -190,7 +196,7 @@ def resolve_cost_pair(source: Optional[Mapping[str, Any]], new: str, old: str) -
 
 def with_task_cost_presentation(projection: Mapping[str, Any], task: Mapping[str, Any],
                                 drive_root: Any) -> Dict[str, Any]:
-    """Attach a root bucket without altering any existing monetary field.
+    """Attach root-scoped coverage and narrow finality without changing amounts.
 
     A root's first terminal frame can precede the supervisor's subtree refresh.
     It must already explain the tree, including roots that skip synthesis. A
@@ -205,17 +211,22 @@ def with_task_cost_presentation(projection: Mapping[str, Any], task: Mapping[str
     })
     if not lineage["is_root_task"]:
         return dict(projection)
-    carrier = None
+    from ouroboros.delegate_custody_usage import unavailable_cost_custody
+
+    carrier, bucket = None, {}
     if projection.get("cost_accounting_status") == "available":
         try:
             from ouroboros.usage_accounting import usage_breakdown
 
             bucket = usage_breakdown(pathlib.Path(task.get("budget_drive_root") or drive_root),
-                                     root_task_id=str(lineage["root_task_id"] or tid))
+                                     root_task_id=str(lineage["root_task_id"] or tid), custody_root=drive_root, include_custody=True)
             carrier = build_cost_presentation(bucket, scope=COST_SCOPE_ROOT_TREE)
         except Exception:
             log.warning("Root cost presentation unavailable for %s", tid, exc_info=True)
-    return {**projection, "cost_presentation": carrier}
+    return {**projection, "cost_presentation": carrier,
+            "cost_custody": bucket.get("cost_custody") or unavailable_cost_custody(),
+            "cost_final": bool(projection.get("cost_final") and bucket.get("cost_final")),
+            "cost_with_children_partial": bool(projection.get("cost_with_children_partial") or not bucket.get("cost_final"))}
 
 
 def honest_cost_pair_amount(
@@ -227,6 +238,13 @@ def honest_cost_pair_amount(
     if not present:
         return False, None
     probe = dict(src)
+    carrier = src.get("cost_presentation")
+    scope = COST_SCOPE_OWN if new == COST_ALIAS_PAIRS[0][0] else COST_SCOPE_ROOT_TREE
+    # Public projections omit priced_rows; their same-scope carrier retains the
+    # priced-zero evidence. A different scope or an explicit null proves none.
+    if (_as_amount(raw) == 0 and isinstance(carrier, Mapping) and carrier.get("scope") == scope
+            and carrier.get("has_rows") is True and _as_amount(carrier.get("tracked_amount")) == 0):
+        probe["priced_rows"] = 1
     probe["accounted_usd"] = raw
     return True, honest_accounted_amount(probe)
 
@@ -325,13 +343,13 @@ def live_root_cost_projection(
     if not lineage["is_root_task"]:
         return {}
     try:
-        from ouroboros.usage_accounting import usage_projection
+        from ouroboros.usage_accounting import usage_breakdown
 
         # Every root heartbeat runs this on the supervisor loop: a contended ledger lock
         # serves the last validated snapshot, it never parks the loop behind money.
-        usage = usage_projection(
+        usage = usage_breakdown(
             pathlib.Path(task.get("budget_drive_root") or drive_root),
-            root_task_id=str(lineage["root_task_id"] or task_id), allow_stale=True,
+            root_task_id=str(lineage["root_task_id"] or task_id), allow_stale=True, custody_root=drive_root, include_custody=True,
         )
         # A root-filtered summary with no attributable rows is an empty view,
         # not measured zero.  The task-detail reader applies the same rule:
@@ -345,7 +363,8 @@ def live_root_cost_projection(
                 if key != "metadata_only"
             )
             sessions = max(0, int(usage.get("subscription_sessions") or 0))
-            if attributable_rows == 0 and sessions == 0:
+            from ouroboros.delegate_custody_usage import cost_coverage_open
+            if attributable_rows == 0 and sessions == 0 and not cost_coverage_open(usage):
                 return {}
         unknown = int(usage.get("unknown_unmetered") or 0)
         reserved = float(usage.get("reserved_usd") or 0)
@@ -361,6 +380,7 @@ def live_root_cost_projection(
             "unknown_unmetered": unknown,
             "non_final_rows": int(usage.get("non_final_rows") or 0),
             "ledger_integrity_degraded": bool(usage.get("integrity_degraded")),
+            "cost_custody": usage.get("cost_custody"),
             # Built from THIS bucket, so the amount and its explanation are one fact.
             "cost_presentation": build_cost_presentation(usage, scope=COST_SCOPE_ROOT_TREE),
         }
@@ -406,13 +426,18 @@ def cost_display(source: Optional[Mapping[str, Any]], *, decimals: int = 2) -> s
 
     ``$1.23`` for a final amount, ``$1.23 (upper bound, not final)`` for an open
     one, ``unknown (accounting unavailable or not settled)`` when nothing is
-    accounted.
+    accounted. ``Tracked: $1.23 (total unknown)`` preserves a known subtotal
+    when unpriced work prevents a total or an upper bound.
     """
     projection = cost_projection(source)
     amount = projection["accounted_upper_bound_usd"]
     if amount is None:
         return "unknown (accounting unavailable or not settled)"
     text = f"${amount:.{decimals}f}"
+    from ouroboros.delegate_custody_usage import cost_coverage_open
+    carrier = projection.get("cost_presentation") or {}
+    if carrier.get("has_unpriced") or projection.get("unknown_unmetered") or cost_coverage_open(projection):
+        return f"Tracked: {text} (total unknown)"
     if projection["cost_final"]:
         return text
     return f"{text} (upper bound, not final)"

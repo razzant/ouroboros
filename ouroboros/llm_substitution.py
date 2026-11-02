@@ -44,12 +44,24 @@ the engine choose again. An account it selects twice ends the rotation without
 claiming the pool is spent, and so does every reason a redo is refused. A pin,
 an unknown outcome and a stream-level refusal (generation may have begun) are
 never asked again.
+
+## One engine-granted retry on another account
+
+A refusal before generation that the engine attributes to the account carries
+the typed grant ``retryOnOtherAccount``. Only that grant lets this call send ONE
+new operation correlated to the first (``retryOfOperationId``), every generation
+input unchanged; the engine excludes the refusing account and decides from the
+outcome whether to mark it. The call stops after that operation. When the typed
+facts say no account can serve the model, the owner gets one notice per episode.
 """
 
 from __future__ import annotations
 
 import contextvars
 import copy
+import datetime
+import hashlib
+import json
 from typing import Any
 
 from ouroboros import config
@@ -95,7 +107,15 @@ def remember_failed_profile(target: dict, parameters: dict, error: Any) -> None:
 def same_route_refusal(accumulated_usage: dict) -> bool:
     """Did this round already get a refusal that a repeat of it cannot cure?"""
     return (str(accumulated_usage.get("_last_llm_error_kind") or "") == "model_substituted"
-            or str(accumulated_usage.get("_last_llm_provider_code") or "") == "invalid_continuation")
+            or str(accumulated_usage.get("_last_llm_provider_code") or "") == "invalid_continuation"
+            or capability_refused(accumulated_usage))
+
+
+def capability_refused(accumulated_usage: dict) -> bool:
+    """The acting route's own current failure, not an earlier sticky code nor a failed configured
+    fallback's (``_acting_route_failure``, left by a walk with no answer), is an engine capability refusal."""
+    failure = accumulated_usage.get("_acting_route_failure") or accumulated_usage.get("_last_llm_failure") or {}
+    return str(failure.get("provider_code") or "") == "model_capability_refused"
 
 
 def stamp_substitutions(accumulated_usage: dict, error: Any) -> None:
@@ -129,20 +149,22 @@ def substitution_fact(result: dict) -> dict | None:
     return {"requested": requested, "observed": observed} if requested and observed else None
 
 
-def _redo_allowed(payload: dict) -> str:
+def _redo_allowed(payload: dict, *, identical: bool = False) -> str:
     """Empty when the same round may be asked again, else why it may not be.
 
     A pin names ONE account, so re-asking it is the same account and the same
     answer; the caller's configured model fallback owns that case. An admitted
     candidate is bound to exact bytes, and a redo sends no account preference,
-    so re-asking would break that admission instead of honoring it.
+    so re-asking would break that admission instead of honoring it. An
+    ``identical`` resend keeps those bytes, and every physical send re-runs the
+    bound predicate before dispatch, so the admission judges that send itself.
     """
     from ouroboros.llm_attempt import physical_attempt_headroom
     from ouroboros.usage_accounting import current_physical_attempt_predicate
 
     if (payload.get("account") or {}).get("mode") == "pin":
         return "pinned_account"
-    if current_physical_attempt_predicate() is not None:
+    if current_physical_attempt_predicate() is not None and not identical:
         return "admitted_candidate"
     from ouroboros.model_wait import dispatch_deadline_remaining_sec
 
@@ -309,4 +331,156 @@ class AccountRotation:
         message, usage = answer
         if self.refused and isinstance(usage.get("claudexor"), dict):
             usage["claudexor"]["account_rotation"] = {"refused_accounts": list(self.refused)}
+        return message, usage
+
+
+def capability_refusal_text(problem: dict) -> str:
+    """Human diagnostics from typed fields only; provider prose is never policy."""
+    context = problem.get("context") or {}
+    model = context.get("requestedModel")
+    accounts = context.get("accountsTried") or [context]
+    reasons = [f"{row['credentialProfileId']}: {row['providerReason']}"
+               for row in accounts if row.get("credentialProfileId") and row.get("providerReason")]
+    if not model or not reasons:
+        return ""
+    # A retry grant's nextStep instructs the host, not the account owner.
+    next_step = "" if context.get("retryOnOtherAccount") is True else str(context.get("nextStep") or "")
+    return "\n".join([f"Could not serve {model}.", *reasons, next_step]).strip()
+
+
+def _brief(text: Any, limit: int = 240) -> str:
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= limit else words[: limit - 1].rstrip() + "\u2026"
+
+
+def _moment(value: Any) -> str:
+    """An engine timestamp in the server's zone, named as an offset."""
+    try:
+        at = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return ""
+    minutes = int((at.utcoffset() or datetime.timedelta()).total_seconds() // 60)
+    zone = "UTC" if not minutes else f"UTC{'+' if minutes > 0 else '-'}{abs(minutes) // 60}" + (
+        f":{abs(minutes) % 60:02d}" if minutes % 60 else "")
+    return f"{at:%Y-%m-%d %H:%M} ({zone})"
+
+
+OWNER_STEP = "Check the requested model and the account plans, or choose another model."
+
+
+def capability_notice(problem: dict) -> tuple[str, str] | None:
+    """The owner's ``(delivery_id, text)`` when no account can serve the model, else None.
+
+    Typed engine facts decide, never wording: a pinned ``model_capability_refused``,
+    or an Auto refusal whose own account is among the live marks (``modelMarks``)
+    with no other unmarked account left (``alternativeRemains`` false). A refusal
+    on an unmarked account blames no account: it may belong to the request. The id
+    is the episode, each mark's start (``since``): helpers of one burst and later
+    repeats share it and the durable delivered registry sends it once while it
+    retains the id, while another account, or a failure that returns after its mark
+    cleared, is a new id. A step the engine addresses to the sender (``retryBlockedBy``)
+    is replaced by the owner's.
+    """
+    context = problem.get("context") or {}
+    model, mode = context.get("requestedModel"), context.get("accountMode")
+    marks = [mark for mark in context.get("modelMarks") or []
+             if isinstance(mark, dict) and mark.get("credentialProfileId")]
+    pinned = mode == "pin" and problem.get("code") == "model_capability_refused"
+    own = any(mark["credentialProfileId"] == context.get("credentialProfileId") for mark in marks)
+    if not model or not (pinned or (mode == "auto" and context.get("alternativeRemains") is False and own)):
+        return None
+    if pinned:
+        if not context.get("credentialProfileId"):
+            return None
+        marks = [{**context, "since": ""}]
+    named = {str(mark["credentialProfileId"]) for mark in marks}
+    others = [row for row in context.get("accountsTried") or []
+              if isinstance(row, dict) and row.get("credentialProfileId") and str(row["credentialProfileId"]) not in named]
+    episode = sorted([str(mark["credentialProfileId"]), str(mark.get("accountFingerprint") or ""),
+                      str(mark.get("since") or "") or "pin"] for mark in marks)
+    digest = hashlib.sha256(json.dumps([context.get("source"), model, episode]).encode("utf-8")).hexdigest()[:24]
+    lines = [f"The pinned account {marks[0]['credentialProfileId']} cannot serve {model}." if pinned
+             else f"No account can serve {model} right now."]
+    for mark in marks:
+        since = _moment(mark.get("since")) if mark.get("since") else ""
+        lines.append(f"{mark['credentialProfileId']}: {_brief(mark.get('providerReason'))}"
+                     + (f" Temporary mark since {since}." if since else ""))
+    lines += [f"{row['credentialProfileId']}: {_brief(row.get('providerReason'))} It refused this request too."
+              for row in others]
+    step = OWNER_STEP if context.get("retryBlockedBy") else context.get("nextStep")
+    if step:
+        lines.append(_brief(step))
+    return f"model-capability:{digest}", "\n".join(lines)
+
+
+class CapabilityRetry:
+    """One engine-granted differential operation, inside the existing send loop.
+
+    The engine grants it with ``retryOnOtherAccount=true`` for a refusal before
+    generation that it attributes to the account, whatever the code; the host adds
+    only its own custody facts. Unlike a substitution redo this preserves every
+    generation input, including the already-stamped clock. The engine owns marks,
+    bound history and the alternative; after the one correlated operation the chain
+    stops, so no rotation, processing or native repair stacks on it.
+    """
+
+    def __init__(self) -> None:
+        self.original = None
+        self.attempts: list[str] = []
+
+    def refused(self, invocation: Any, error: Any) -> dict | None:
+        """The correlated payload when the engine granted the retry, else None.
+
+        A refusal that ends the call is offered to the owner notice, which speaks
+        only when the typed facts say no account can serve the model. An invalid
+        correlation re-raises the original refusal, unannounced.
+        """
+        capture = getattr(error, "physical_attempt_capture", None)
+        attempt_id = getattr(capture, "attempt_id", "")
+        if attempt_id:
+            self.attempts.append(attempt_id)
+        if self.original is not None and error.code == "model_retry_invalid":
+            self.original.ledger_attempt_ids = list(dict.fromkeys(self.attempts))
+            raise self.original from None
+        context = (getattr(error, "problem", None) or {}).get("context") or {}
+        payload = invocation.payload
+        if (self.original is None and context.get("retryOnOtherAccount") is True
+                and context.get("generationStarted") is False and error.code != "model_outcome_unknown"
+                and getattr(capture, "state", None) in {"settled", "released"}
+                and not payload.get("retryOfOperationId")
+                and (payload.get("account") or {}).get("mode") == "auto"
+                and invocation.operation_id and context.get("operationId") == invocation.operation_id
+                and not _redo_allowed(payload, identical=True)):
+            self.original = error
+            return {**copy.deepcopy(payload), "account": {"mode": "auto"},
+                    "retryOfOperationId": invocation.operation_id}
+        self.announce(invocation, error)
+        return None
+
+    def ends_chain(self, error: Any) -> bool:
+        """After the correlated operation, or for a capability refusal, nothing re-asks."""
+        return self.original is not None or error.code == "model_capability_refused"
+
+    def unsent(self, failure: Any) -> None:
+        """A correlated send the round's bound check refused (an exact admitted candidate
+        is not this request) ends as the original refusal, like an invalid correlation.
+        Only that exact class: Stop, Pause and deadline subclasses stay their own control."""
+        from ouroboros.usage_accounting import PhysicalAttemptPreconditionFailed
+
+        if self.original is not None and type(failure) is PhysicalAttemptPreconditionFailed:
+            self.original.ledger_attempt_ids = list(dict.fromkeys(
+                [*self.attempts, *([failure.attempt_id] if failure.attempt_id else [])]))
+            raise self.original from None
+
+    @staticmethod
+    def announce(invocation: Any, error: Any) -> None:
+        from ouroboros.model_wait import announce_capability_refusal
+
+        announce_capability_refusal(error, drive_root=invocation.root)
+
+    def disclose(self, answer: tuple[dict, dict]) -> tuple[dict, dict]:
+        message, usage = answer
+        if self.original is not None:
+            usage["ledger_attempt_ids"] = list(dict.fromkeys(
+                [*self.attempts, *usage.get("ledger_attempt_ids", [])]))
         return message, usage

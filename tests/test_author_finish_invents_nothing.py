@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.outcomes import _objective_axis, normalize_outcome_axes
+from ouroboros.review_doctrine import FACT_KIND, build_fact, parse_subagent_check
 from ouroboros.review_records import (
     build_author_disposition,
     build_author_disposition_from_mapping,
@@ -85,6 +86,26 @@ def test_reviewer_tiers_keep_their_meaning():
     clean = _objective_axis({"status": "pass", "outcome_tier": "solved",
                              "acceptance_decision": {"status": "accepted", "reason": "clean_pass"}})
     assert (clean["status"], clean["source"], clean["outcome_tier"]) == ("pass", "task_acceptance_review", "solved")
+
+
+def test_a_helper_claim_is_not_a_reviewer_tier():
+    claim = {"reason": "I checked with a helper.", "selection_rationale": "It reads this repository.",
+             "report_refs": [{"task_id": "helper-1"}]}
+    built = build_author_disposition_from_mapping(
+        {"disposition": "accepted", "rationale": "r", "subagent_check": claim}, subject_hash="h")
+    assert built["subagent_check"]["report_refs"] == [{"task_id": "helper-1"}]
+    with pytest.raises(ValueError):
+        build_author_disposition_from_mapping(
+            {"disposition": "accepted", "rationale": "r", "quorum": False}, subject_hash="h")
+    fact = build_fact(parse_subagent_check(claim), subject_hash="subject-1", review_reference={"surface": "task"},
+                      drive_root=None, actors=[], observed_at="t0")
+    plain = _objective_axis(_author_finish(_record(disposition="partial")))
+    claimed_record = {**_record(disposition="partial"), FACT_KIND: fact}
+    assert validate_author_disposition(claimed_record, subject_hash="subject-1")[FACT_KIND]["kind"] == FACT_KIND
+    assert plain == _objective_axis(_author_finish(claimed_record))
+    forged = {**_record(disposition="partial"), FACT_KIND: {"kind": FACT_KIND}}
+    assert validate_author_disposition(forged) is None
+    assert _objective_axis(_author_finish(forged))["source"] != "author_acceptance"
 
 
 def test_normalized_history_keeps_both_new_and_old_author_finish_rows():

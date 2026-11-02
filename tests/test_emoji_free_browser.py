@@ -13,6 +13,7 @@ import pytest
 
 from tests.ci_evidence import output_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data as _server
+from tests.ui_console_errors import PageErrors
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent, wait_drawer_closed,
 )
@@ -51,8 +52,7 @@ def _browser(server, request, engine):
         facts["health"] = page.request.get(server["url"] + "/api/health").json()
         assert facts["health"]["runtime_version"] == server["candidate_version"]
         (evidence / "subject.json").write_text(json.dumps(facts, indent=2), encoding="utf-8")
-        errors, events = [], []
-        page.on("pageerror", lambda error: errors.append(str(error)))
+        errors, events = PageErrors(page, engine), []
         page.on("console", lambda msg: events.append({"type": msg.type, "text": msg.text}))
         page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
         page.add_init_script(f"({_OBSERVE_STATE_READS})()")
@@ -193,7 +193,7 @@ def test_host_display_copy_authorship_reload_reconnect(direct_server_with_data, 
         open_room(reload=True)
         _check_rows(page, feed, rows)
         _screenshots(page, evidence, feed)
-        assert not errors, errors
+        assert not errors.unexpected(), errors
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -219,7 +219,7 @@ def test_authored_narration_with_stale_host_type(direct_server_with_data, reques
         facts = {"row": row, "live": live, "history": replay, "inset": inset}
         (evidence / "narration.json").write_text(json.dumps(facts, ensure_ascii=False, indent=2), encoding="utf-8")
         assert live == replay == text, facts
-        assert not errors, errors
+        assert not errors.unexpected(), errors
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])

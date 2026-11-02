@@ -192,9 +192,10 @@ def test_child_cannot_acquire_owner_action_authority(skill_actor, mode):
 
 @pytest.mark.parametrize("action", ["grant", "enable"])
 def test_non_owner_presence_cannot_reuse_an_owner_chat_reference(skill_actor, action):
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceProfileResolution
-    from ouroboros.presence_runtime import ResolvedPresenceRuntime
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceProfileResolution
+    from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 
     ctx, _payload, revision = skill_actor
     source = _owner_chat(ctx)

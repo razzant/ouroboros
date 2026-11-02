@@ -230,6 +230,7 @@ def test_real_late_collector_revisits_only_pending_plan_after_legacy_history(cou
     with monkeypatch.context() as patch:
         patch.setattr(store, "commit", committed)
         assert late_review_marks.replay_owed_late_reviews(root)["settled"] == 0
+        assert late_review_marks._collect_ended_plan_asks(root, None) == 0  # child-owned collection
     assert sum(changes > 0 for changes in commits) == 3, "legacy classification commits by bounded batch, not per row"
     assert _flags(root, "old-000") == (0, 0, 1)
     assert _flags(root, late.PLAN_TASK)[1] == 1, "a running author retains its pending seat"
@@ -248,14 +249,14 @@ def test_real_late_collector_revisits_only_pending_plan_after_legacy_history(cou
 
     with monkeypatch.context() as patch:
         patch.setattr(store.Txn, "body_text", body)
-        statements = captured_statements(patch, lambda: late_review_marks.replay_owed_late_reviews(root))
+        statements = captured_statements(patch, lambda: late_review_marks._collect_ended_plan_asks(root, None))
     assert reads and set(reads) == {late.PLAN_TASK}
     assert late._participant(council.h, "s1")["status"] == "answered"
     assert len(late._plan_marks(root)) == 1 and council.transport.calls.count("m/a") == 1
     selected = [(sql, params) for sql, params in statements if "SELECT task_id FROM tasks" in sql and "plan_collection_pending" in sql]
     assert selected and all(any("tasks_plan_collection" in step for step in _plan(root, sql, params)) for sql, params in selected)
     before = _flags(root, "old-000")
-    late_review_marks.replay_owed_late_reviews(root)
+    late_review_marks._collect_ended_plan_asks(root, None)
     assert len(late._plan_marks(root)) == 1 and _flags(root, "old-000") == before
 
 
@@ -283,18 +284,160 @@ def test_lazy_selection_failure_preserves_real_settlement_and_remaining_pending_
 
     with monkeypatch.context() as fault:
         fault.setattr(task_store, "plan_collection_candidates", interrupted)
-        report = late_review_marks.replay_owed_late_reviews(root)
-    assert report["settled"] == int(after_candidate)
+        settled = late_review_marks._collect_ended_plan_asks(root, None)
+    assert settled == int(after_candidate)
     assert "plan records are unreadable; their pending seats stay pending" in caplog.text
     assert late._participant(council.h, "s1")["status"] == ("answered" if after_candidate else "pending")
     assert all(late._participant(council.h, seat)["status"] == "pending" for seat in ("s2", "s3"))
     assert _flags(root, late.PLAN_TASK)[1] == 1
-    assert late_review_marks.replay_owed_late_reviews(root)["settled"] == int(not after_candidate)
+    assert late_review_marks._collect_ended_plan_asks(root, None) == int(not after_candidate)
     [mark] = late._plan_marks(root)
     assert mark["review"]["subject"]["seat_id"] == "s1"
     assert late._participant(council.h, "s1")["status"] == "answered"
-    assert late_review_marks.replay_owed_late_reviews(root)["settled"] == 0
+    assert late_review_marks._collect_ended_plan_asks(root, None) == 0
     assert late._plan_marks(root) == [mark] and council.transport.calls.count("m/a") == 1
+
+
+@pytest.mark.parametrize("discovery", ["initial", "changed", "legacy"])
+@pytest.mark.parametrize("read", ["plan", "terminal", "collection"])
+@pytest.mark.parametrize("failure", ["busy", "invalid"])
+def test_failed_plan_examination_retries_contention_and_rests_on_invalid_input(council, monkeypatch, discovery, read, failure):
+    from ouroboros import maintenance, maintenance_jobs, plan_collection_job, task_results
+    from ouroboros.tools import plan_ask
+    from tests.test_child_duty_rest import measured_rest
+
+    root = council.h.drive
+    if discovery == "changed":
+        assert maintenance.run_job(root, "ended_plan_asks")["state"] == "done"
+        measured_rest(root, "ended_plan_asks")
+    with monkeypatch.context() as lossy:
+        lost = late._lose_settlement_callbacks(lossy)
+        council.transport.release()
+        late._until(lambda: len(lost) == 3)
+    maintenance.due(root)  # drain any contended producer wake before selecting the examination's token
+    late._end(council.h)
+    with store.open_store(root, write=True) as txn:
+        if discovery == "legacy":
+            txn.delete_row(plan_collection_job.CHANGED, late.PLAN_TASK)  # an older writer queued no token
+        wake = txn.get_row(plan_collection_job.CHANGED, late.PLAN_TASK)
+    assert bool(wake) is (discovery != "legacy")
+    faults = []
+
+    def busy(*args, **kwargs):
+        faults.append(True)
+        error = store.StoreBusy if failure == "busy" else {
+            "plan": plan_record.PlanRecordInvalid, "terminal": ValueError, "collection": OSError,
+        }[read]
+        raise error("this child pass cannot read the retained plan")
+
+    monkeypatch.setattr(plan_ask, "dispatch_ask", lambda *a, **kw: pytest.fail("collection never buys another ask"))
+    owner, attribute = {"plan": (plan_record, "read_document"),
+                        "terminal": (task_results, "load_task_result"),
+                        "collection": (plan_ask, "collect_pending")}[read]
+    with monkeypatch.context() as fault:
+        fault.setattr(owner, attribute, busy)
+        state = "pending" if failure == "busy" else "done"
+        assert maintenance.run_job(root, "ended_plan_asks") == {"state": state, "items": 0}
+        if failure == "invalid":
+            for _ in range(3):
+                measured_rest(root, "ended_plan_asks")
+    assert faults == [True]
+    assert _flags(root, late.PLAN_TASK)[1] == 1
+    assert all(late._participant(council.h, seat)["status"] == "pending" for seat in ("s1", "s2", "s3"))
+    assert late._plan_marks(root) == []
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(plan_collection_job.CHANGED, late.PLAN_TASK) == (wake if failure == "busy" else None)
+    assert maintenance_jobs.job(root, "ended_plan_asks")["state"] == state
+
+    # Contention retries at the next pass; a deterministic failure waits for the task's next write.
+    if failure == "invalid":
+        measured_rest(root, "ended_plan_asks")
+        task_store.patch_document(root, late.PLAN_TASK, lambda row: {**row, "result": "repaired input"})
+    assert maintenance.run_job(root, "ended_plan_asks") == {"state": "done", "items": 3}
+    assert _flags(root, late.PLAN_TASK)[1] == 0
+    assert all(late._participant(council.h, seat)["status"] == "answered" for seat in ("s1", "s2", "s3"))
+    marks = late._plan_marks(root)
+    assert {mark["review"]["subject"]["seat_id"] for mark in marks} == {"s1", "s2", "s3"}
+    with store.open_store(root, write=False) as txn:
+        assert txn.get_row(plan_collection_job.CHANGED, late.PLAN_TASK) is None
+    measured_rest(root, "ended_plan_asks")
+    assert late._plan_marks(root) == marks and sorted(council.transport.calls) == ["m/a", "m/b", "m/c"]
+
+
+@pytest.mark.parametrize("publication", ["free", "busy", "lost-at-exit"])
+def test_retained_plan_replies_recover_missed_wakes_without_new_task_writes(council, monkeypatch, publication):
+    import threading
+    import time
+    from contextlib import nullcontext
+
+    from ouroboros import maintenance, maintenance_jobs, maintenance_retirement, plan_collection_job
+    from ouroboros.tools import plan_ask
+    from tests.test_child_duty_rest import measured_rest
+    from tests.test_producer_wake_contention import busy_store
+
+    root = council.h.drive
+    late._end(council.h)
+    assert maintenance.run_job(root, plan_collection_job.JOB) == {"state": "done", "items": 0}
+    # The first observation may publish newly discovered in-flight custody facts once.
+    late._until(lambda: maintenance.run_job(root, plan_collection_job.JOB) is None)
+    measured_rest(root, plan_collection_job.JOB)
+    sequence = _flags(root, late.PLAN_TASK)[2]
+    publish_wake, gate, elapsed, requested = plan_collection_job.producer_published, threading.Lock(), [], []
+    publishing = threading.local()
+
+    def publish(root, token):
+        with gate, busy_store(root) if publication == "busy" else nullcontext():
+            started = time.monotonic()
+            publishing.active = True
+            try:
+                if publication != "lost-at-exit":  # death after durable reply, before a wake can survive
+                    publish_wake(root, token)
+                elapsed.append(time.monotonic() - started)
+            finally:
+                publishing.active = False
+
+    with monkeypatch.context() as lossy:
+        lost = late._lose_settlement_callbacks(lossy)
+        lossy.setattr(plan_collection_job, "producer_published", publish)
+        lossy.setattr(maintenance.child, "request",
+                      lambda: requested.append(True) if getattr(publishing, "active", False) else None)
+        council.transport.release()
+        late._until(lambda: len(lost) == 3)
+    assert len(elapsed) == 3 and max(elapsed) < 1
+    assert len(requested) == (0 if publication == "lost-at-exit" else 3)
+    assert _flags(root, late.PLAN_TASK) == (0, 1, sequence), "no task write rescued the publications"
+    assert maintenance_jobs.job(root, plan_collection_job.JOB)["state"] == "done"
+    if publication == "lost-at-exit":
+        measured_rest(root, plan_collection_job.JOB)
+        maintenance_retirement.record_startup(root, gaps=False)
+    else:
+        # The server's dispatch check must persist the wake before starting another process.
+        assert plan_collection_job.JOB in maintenance.due(root)
+        with store.open_store(root, write=False) as txn:
+            assert txn.get_row(plan_collection_job.CHANGED, late.PLAN_TASK)
+    monkeypatch.setattr(plan_ask, "dispatch_ask", lambda *a, **kw: pytest.fail("collection never buys another ask"))
+    assert maintenance.run_job(root, plan_collection_job.JOB) == {"state": "done", "items": 3}
+    assert all(late._participant(council.h, seat)["status"] == "answered" for seat in ("s1", "s2", "s3"))
+    assert {mark["review"]["subject"]["seat_id"] for mark in late._plan_marks(root)} == {"s1", "s2", "s3"}
+    measured_rest(root, plan_collection_job.JOB)
+    maintenance_retirement.record_startup(root, gaps=False)
+    measured_rest(root, plan_collection_job.JOB)  # boot does not wake settled history
+    assert sorted(council.transport.calls) == ["m/a", "m/b", "m/c"]
+
+
+def test_invalid_plan_rests_until_its_record_is_repaired(tmp_path):
+    from ouroboros import maintenance, plan_collection_job
+    from tests.test_child_duty_rest import measured_rest
+
+    publish(tmp_path, document("invalid", plan_record={"schema_version": 99, "asks": []}))
+    assert _flags(tmp_path, "invalid")[1] == 1
+    assert maintenance.run_job(tmp_path, plan_collection_job.JOB) == {"state": "done", "items": 0}
+    for _ in range(5):
+        measured_rest(tmp_path, plan_collection_job.JOB)
+    assert _flags(tmp_path, "invalid")[1] == 1, "examination does not clear plan debt"
+    task_store.patch_document(tmp_path, "invalid", lambda row: {**row, "plan_record": _record()})
+    assert _flags(tmp_path, "invalid")[1] == 0
+    measured_rest(tmp_path, plan_collection_job.JOB)
 
 
 def test_storeless_roundtrip_and_reimport_preserve_plan_and_derive_selector(tmp_path):

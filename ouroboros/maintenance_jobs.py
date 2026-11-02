@@ -11,7 +11,8 @@ maintenance child and the tests read the same rows.
 
 Row fields are the job's own; the ones every job keeps are ``state`` (one of ``STATES``),
 ``updated_at`` and, while it advances, ``cursor``/``done``/``total`` (``total`` is
-``None`` when the job cannot know its denominator), plus ``error`` for a failed run. A job
+``None`` when the job cannot know its denominator), plus ``error`` for a failed run and ``last_error``
+``{class, at}`` while its last run threw (``maintenance.run``: the state is left as it was). A job
 that cannot proceed records ``failed`` with its reason and the inputs it waits on; it is
 retried when those inputs change, never by an elapsed-time or attempt-count rule.
 """
@@ -19,7 +20,7 @@ retried when those inputs change, never by an elapsed-time or attempt-count rule
 from __future__ import annotations
 
 import pathlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from ouroboros import store
 from ouroboros.utils import utc_now_iso
@@ -42,14 +43,23 @@ def job(root: Any, name: str) -> Optional[Dict[str, Any]]:
     return dict(value) if isinstance(value, dict) else None
 
 
-def jobs(root: Any) -> Dict[str, Dict[str, Any]]:
-    """Every job row of the root, keyed by job name (one indexed range read of ``meta``)."""
+def jobs(root: Any, names: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
+    """Job rows keyed by job name: every row of the root (one indexed range read of ``meta``), or
+    only the named jobs' rows (the dispatcher's look: a row another owner keeps proportional to
+    its own inventory, the drive settlement's verdicts, is not decoded for it)."""
     import json
 
+    keys = None if names is None else [_key(name) for name in names]
+    if keys is not None and not keys:
+        return {}
     with store.open_store(pathlib.Path(root), write=False) as txn:
-        rows = txn.conn.execute(
-            "SELECT key, value FROM meta WHERE key >= ? AND key < ?", (PREFIX, PREFIX[:-1] + ";"),
-        ).fetchall()
+        if keys is None:
+            rows = txn.conn.execute(
+                "SELECT key, value FROM meta WHERE key >= ? AND key < ?", (PREFIX, PREFIX[:-1] + ";"),
+            ).fetchall()
+        else:
+            rows = txn.conn.execute(
+                f"SELECT key, value FROM meta WHERE key IN ({','.join('?' * len(keys))})", keys).fetchall()
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         value = json.loads(row["value"])
@@ -74,6 +84,15 @@ def record_in(txn: store.Txn, name: str, **facts: Any) -> Dict[str, Any]:
     row = dict(current) if isinstance(current, dict) else {}
     row.update(facts)
     row["updated_at"] = utc_now_iso()
+    txn.set_meta(key, row)
+    return row
+
+
+def forget_in(txn: store.Txn, name: str, *fields: str) -> Dict[str, Any]:
+    """Drop ``fields`` a job no longer keeps on its row, inside the caller's write transaction."""
+    key = _key(name)
+    current = txn.meta(key)
+    row = {field: value for field, value in (current.items() if isinstance(current, dict) else ()) if field not in fields}
     txn.set_meta(key, row)
     return row
 

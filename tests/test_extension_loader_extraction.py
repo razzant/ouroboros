@@ -110,7 +110,7 @@ _MOVED_OWNERS = {
 # ``snapshot`` and the route/WS/companion listings followed them there.
 _STAYED = (
     "__all__", "_finalize_extension_reconcile", "_publish_out_of_process_registration",
-    "_run_unload_callback", "_unload_extension_locked",
+    "_run_unload_callback", "_unload_extension_locked", "_load_extension_locked",
     "ensure_companions_running", "get_tool", "load_extension", "log",
     "reconcile_extension", "reload_all", "unload_extension",
 )

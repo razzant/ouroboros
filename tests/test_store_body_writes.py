@@ -109,3 +109,26 @@ def test_update_task_decodes_twice_and_encodes_once_so_the_mutator_never_holds_t
     assert seen["updated"]["nested"] == {"items": [1, 2]}
     document = load_task_result(tmp_path, "t", strict=True)
     assert document["nested"]["items"] == [1, 2] and document["launch_handoffs"]["op"]["state"] == "returned"
+
+
+def test_a_terminal_row_keeps_the_count_it_was_written_at_and_the_rows_written_since_are_one_indexed_read(tmp_path):
+    """``terminal_seq`` is the terminal-write counter's value at the row's last terminal write: a running row
+    carries none, a settled row the count, a settled row written again the new count. The rows written since a
+    count are read through ``tasks_terminal_seq`` (``task_store.terminal_writes_since``), never the others, so a
+    pass that kept the count looks at those rows alone instead of at every row it holds a verdict on."""
+    write_task_result(tmp_path, "live", "running")
+    write_task_result(tmp_path, "done", "completed", result="x")
+    with store.open_store(tmp_path, write=False) as txn:
+        count = txn.meta(store.TERMINAL_WRITES)
+        assert txn.row("live", "terminal_seq") is None and txn.row("done", "terminal_seq") == count
+    assert task_store.terminal_writes_since(tmp_path, count - 1) == ["done"]
+    assert task_store.terminal_writes_since(tmp_path, count) == []
+    write_task_result(tmp_path, "done", "completed", note="written again")
+    write_task_result(tmp_path, "later", "failed", result="y")
+    task_store.patch_handoff(tmp_path, "live", "launch_handoffs", "op", lambda _row: {"state": "claimed"})  # a live row's write
+    assert task_store.terminal_writes_since(tmp_path, count) == ["done", "later"]
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.row("done", "terminal_seq") == count + 1 and txn.row("live", "terminal_seq") is None
+        plan = " ".join(str(row[-1]) for row in txn.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT task_id FROM tasks INDEXED BY tasks_terminal_seq WHERE terminal_seq>0"))
+        assert "tasks_terminal_seq" in plan, plan

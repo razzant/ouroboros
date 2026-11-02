@@ -66,7 +66,7 @@ def test_normal_finalization_without_a_candidate_keeps_raw_answer(tmp_path, monk
     assert loop._live_delivery_candidate(ctx) is None
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_kw: False)
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_kw: NOTICE)
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_a, **_kw: NOTICE)
     text, usage, _trace = loop._no_tool_final_answer(answer, ctx, trace, tools, queue.Queue(), set(), lambda _t: None)
     assert text == answer and usage["terminal_host_notice"] == NOTICE
     assert NOTICE not in text
@@ -84,7 +84,7 @@ def test_simultaneous_plan_and_deferred_limitations_stay_one_notice_beside_a_cle
     in the notice text; a commit that also carries the plan fact in typed state
     must do so ADDITIVELY and leave this slot alone.
 
-    The disclosure is injected through ``_force_plan_disclosure`` exactly as the
+    The disclosure is injected through ``_plan_gate_disclosure`` exactly as the
     neighbouring tests do, so what is pinned here is the COMPOSITION and the
     typed outcome, never the predicate that decides whether a review is open.
     """
@@ -101,7 +101,7 @@ def test_simultaneous_plan_and_deferred_limitations_stay_one_notice_beside_a_cle
     loop_mod, registry, ctx, trace = _forced_test_context(tmp_path)
     monkeypatch.setattr(loop_mod, "_compute_subagent_handoff", lambda *_a, **_k: None)
     monkeypatch.setattr(loop_mod, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr(loop_mod, "_force_plan_disclosure", lambda *_a, **_k: plan_suffix)
+    monkeypatch.setattr(loop_mod, "_plan_gate_disclosure", lambda *_a, **_k: plan_suffix)
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_kw: False)
 
     result = loop_mod._no_tool_final_answer(

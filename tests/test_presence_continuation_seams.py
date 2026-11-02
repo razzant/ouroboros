@@ -94,7 +94,7 @@ def test_a_lent_lease_reacquires_only_without_a_stop(tmp_path):
 
 
 def test_a_queued_reacquisition_paces_its_stop_reads_and_still_ends(tmp_path, monkeypatch):
-    monkeypatch.setattr("ouroboros.presence_runner._GATE_STOP_POLL_SEC", 0.2)
+    monkeypatch.setattr("ouroboros.conversation_lease._GATE_STOP_POLL_SEC", 0.2)
     gate = PresenceTurnGate(1, state_root=tmp_path / "state")
     holder = gate.acquire(KEY)
     reads, stop_at = [], time.monotonic() + 0.7

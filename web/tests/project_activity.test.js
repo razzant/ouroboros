@@ -66,7 +66,7 @@ test('the owner\'s move is the room\'s turn alone: questions and owner actions, 
 test('the label is the room word and its first work\'s line: the episode\'s reason, then what still runs beside it', () => {
     assert.equal(summary('held_continue').label, 'Working · Continue starts when 3 helpers of the earlier attempt finish');
     assert.equal(summary('paused_by_owner').label, `Paused · You paused it · ${PRESSED}`);
-    assert.equal(summary('paused_by_mind').label, 'Paused · Ouroboros: pause before the update you asked for');
+    assert.equal(summary('paused_by_mind').label, 'Paused · Ouroboros paused it: pause before the update you asked for');
     assert.equal(summary('paused_unattributed').label, 'Paused', 'a Pause that declared nobody names nobody');
     assert.equal(summary('sleeping').label, 'Waiting · Sleeping until it is woken');
     assert.equal(summary('direct_question').label, 'Waiting for your answer', 'the word already says the question');

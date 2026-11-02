@@ -3,6 +3,7 @@
  * @property {Object=} model_activity  // exact-call transport observation; no request/account content
  * @property {Object.<string,Object>=} model_waits
  * @property {number=} task_attempt
+ * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
  * @property {string} activity_id
  * @property {number} chat_id
  * @property {string} project_id
@@ -22,6 +23,8 @@
  * @property {string=} status  // recorded lifecycle outcome; phase still owns current activity
  * @property {Object=} outcome_axes
  * @property {string=} reason_code
+ * @property {Object=} cancel_origin  // the stored stop origin the status fold reads (an owner-stopped turn's typed stop)
+ * @property {string[]=} delegated_runs_unreconciled  // the stored result's current custody debt, read by that fold
  * @property {Object=} root_phase_checkpoint  // compact post_task_synthesis fact only
  * @property {string=} timeout_retry_from  // explicit automatic-retry predecessor, never owner Continue
  * @property {string=} original_task_id
@@ -37,12 +40,13 @@
  * @property {Object.<string,{requires_owner_action?:boolean,revision:number,task_attempt:number}>=} model_waits Current owner facts; missing action evidence is unavailable.
  * @property {Object=} model_activity  // exact-call transport observation; never quota wait or task liveness
  * @property {number=} task_attempt
+ * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
  * @property {string} activity_id
  * @property {number} chat_id
  * @property {string} project_id
  * @property {string} client_message_id  // empty for managed queue rows
- * @property {string} kind  // direct_chat | managed_task — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; parked direct turns retain ID/kind
+ * @property {string} kind  // direct_chat | managed_task | presence — presentational label; membership in this census, not kind, decides liveness
+ * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; presence: preparing | working; parked direct turns retain ID/kind
  * @property {number} started_at
  */
 /**
@@ -100,6 +104,7 @@
  * @property {boolean=} unconfirmed
  * @property {'bound'|'admitted'=} state
  * @property {string=} action_nonce
+ * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
  */
 /**
  * @typedef {Object} ContinuationOffer

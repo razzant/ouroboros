@@ -338,7 +338,11 @@ def _half_visible(page, opener, feed="#chat-messages"):
         opener.evaluate("""(node, [feed, edge]) => {
             const root = document.querySelector(feed);
             const box = node.getBoundingClientRect(), view = root.getBoundingClientRect();
-            root.scrollTop += edge === 'top' ? box.top - view.top + box.height / 2 : box.bottom - view.bottom - box.height / 2;
+            const by = edge === 'top' ? box.top - view.top + box.height / 2 : box.bottom - view.bottom - box.height / 2;
+            // The owner's own gesture moves the feed: a bare scroll keeps the room following its newest row, and the
+            // phone composer folding as the owner reads back (composer_fold.js) would bring the feed back there.
+            root.dispatchEvent(new WheelEvent('wheel', {deltaY: Math.sign(by) || -1}));
+            root.scrollTop += by;
         }""", [feed, edge])
         _feed_scroll(page, feed)
         point = opener.evaluate("""(node, [feed, edge]) => {
@@ -705,9 +709,15 @@ def test_owner_files_and_photos_read_in_place_with_a_head_that_wraps(direct_serv
                 touch.goto(url, wait_until="domcontentloaded")
                 item = touch.locator(f'{feed} .chat-gallery-item:has(img[alt="{TINY}"])')
                 item.wait_for(state="visible", timeout=30_000)
-                # The room lands at its newest message once its history is read; the place is taken after that.
+                # The room lands at its newest message once its history is read, and lands there again as each of its
+                # photos loads (chat.js reflows on an image's load while the room follows its newest message): the
+                # place is taken after that, or a photo that loads late moves the ••• under its open menu, which closes.
                 touch.wait_for_selector(f'{feed}[data-history-hydrated="true"]', state="attached")
+                touch.wait_for_function("feed => [...document.querySelectorAll(feed + ' img')].every((img) => img.complete)", arg=feed)
                 _feed_scroll(touch)
+                # The owner reads back to the photo with their own gesture, as a swipe does: following ends, so a reflow
+                # while the preview opens or closes no longer lays the room out at its newest message again.
+                touch.locator(feed).evaluate("n => n.dispatchEvent(new WheelEvent('wheel', {deltaY: -1}))")
                 item.evaluate("el => el.scrollIntoView({ block: 'center' })")
                 item.locator("img").evaluate("img => img.decode()")
                 before = _feed_scroll(touch)

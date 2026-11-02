@@ -28,6 +28,7 @@ _MUTATING_SHAPES = [
     ("write_file", {"root": "user_files", "path": "no.txt", "content": "no"}),
     ("write_file", {"path": "server.py", "content": "no"}),
     ("edit_text", {"root": "active_workspace", "path": "x.py", "old": "a", "new": "b"}),
+    ("manage_schedules", {"action": "update", "schedule_id": "s1", "reason": "change time", "cron": "0 9 * * *"}),
 ]
 
 
@@ -60,6 +61,8 @@ def test_observe_keeps_its_own_research_and_notes(tmp_path, monkeypatch):
     assert authority.observe_argument_refusal(observe_meta, "schedule_subagent", {"objective": "read"}) == ""
     assert authority.observe_argument_refusal(observe_meta, "schedule_subagent",
                                               {"objective": "read", "write_surface": "read_only"}) == ""
+    for action in ("list", "get", "disable", "delete", "restore"):
+        assert authority.observe_argument_refusal(observe_meta, "manage_schedules", {"action": action}) == ""
     # An Act/Full turn is not narrowed at all by this seam.
     for level in ("act", "full"):
         assert authority.observe_argument_refusal(_wake_task(level)["metadata"], "write_file",
@@ -121,10 +124,11 @@ def test_observe_delegated_session_stays_readonly_when_access_is_omitted(tmp_pat
 
 def test_schedule_control_is_root_authority_but_reading_is_not(tmp_path):
     """A delegated task may LIST; only the root turn may change a schedule."""
-    child = _registry(tmp_path, {"delegation_role": "subagent"})
+    # The child of an owner task: the Supervisor does not hold it, so the refusal is the schedule tool's own.
+    child = _registry(tmp_path, {"delegation_role": "subagent", "work_kind": "owner"})
     listed = child.execute_result("manage_schedules", {"action": "list"})
     assert listed.status == "ok" and json.loads(listed.text)["tasks"] == []
-    for action in ("disable", "delete", "restore"):
+    for action in ("update", "disable", "delete", "restore"):
         refused = child.execute_result("manage_schedules",
                                        {"action": action, "schedule_id": "s1", "reason": "because"})
         assert refused.status == "blocked", action
@@ -137,7 +141,9 @@ def test_schedule_control_is_root_authority_but_reading_is_not(tmp_path):
     # rides the published sidecar, which is how the status above is still known.
     from ouroboros.tools.followup import _manage_schedules
 
-    for args in ({"action": "list"}, {"action": "disable", "schedule_id": "s1", "reason": "x"}):
+    for args in ({"action": "list"}, {"action": "get", "schedule_id": "s1"},
+                 {"action": "update", "schedule_id": "s1", "reason": "x", "objective": "Changed"},
+                 {"action": "disable", "schedule_id": "s1", "reason": "x"}):
         assert isinstance(_manage_schedules(child._ctx, **args), str), args
 
 
@@ -173,10 +179,13 @@ def test_schedule_mutation_fails_closed_when_profile_resolution_is_unavailable(t
     assert "RESOURCE_CONSTRAINT_BLOCKED" in blocked
 
 
-def test_presence_gets_no_schedule_authority_at_all(tmp_path):
+def test_presence_gets_no_schedule_authority_at_all(tmp_path, monkeypatch):
     """No Presence expansion: an admitted guest room neither reads nor writes it."""
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")  # the tool's own boundary, not Safety
     guest = _registry(tmp_path, {"presence": {"event": {"source_event_id": "presence-1"}}})
-    for args in ({"action": "list"}, {"action": "disable", "schedule_id": "s1", "reason": "x"}):
+    for args in ({"action": "list"}, {"action": "get", "schedule_id": "s1"},
+                 {"action": "update", "schedule_id": "s1", "reason": "x", "objective": "Changed"},
+                 {"action": "disable", "schedule_id": "s1", "reason": "x"}):
         result = guest.execute_result("manage_schedules", args)
         assert result.status == "blocked"
         assert result.code in {"ACCESS_BLOCKED", "RESOURCE_CONSTRAINT_BLOCKED"}
@@ -363,6 +372,7 @@ def test_observe_cannot_dispose_any_captured_patch_at_dispatch(tmp_path, monkeyp
     because the call never reaches the handler that would consult them.
     """
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")  # the widest install still refuses
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     assert name in ca.OBSERVE_DISABLED
     calls: list = []
     wake = _registry(tmp_path, _wake_task("observe")["metadata"], task_id="wake-1")
@@ -376,14 +386,13 @@ def test_observe_cannot_dispose_any_captured_patch_at_dispatch(tmp_path, monkeyp
     act_calls: list = []
     act = _registry(tmp_path, _wake_task("act")["metadata"], task_id="wake-2")
     _probe_handler(act, name, act_calls)
-    # (a safety-backend note may ride behind the handler's text in a bare test env)
+    # The independent Safety assessment is disabled; this checks the autonomy boundary.
     assert act.execute(name, args).startswith("PROBE_REACHED_HANDLER")
     assert act_calls == [(name, args)]
 
 
-def test_publication_of_evolution_stats_is_withheld_from_observe(tmp_path, monkeypatch):
-    """``generate_evolution_stats`` pushes docs/evolution.json through the GitHub
-    API: a publication, not a read, so Observe does not get it (Sol plan note)."""
+def test_evolution_stats_artifact_write_is_withheld_from_observe(tmp_path, monkeypatch):
+    """The local export writes a task artifact; it is not an Observe-only read."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     assert "generate_evolution_stats" in ca.OBSERVE_DISABLED
     wake = _registry(tmp_path, _wake_task("observe")["metadata"])

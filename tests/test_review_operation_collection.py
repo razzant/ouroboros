@@ -190,7 +190,7 @@ def test_proven_existing_run_is_read_attach_only_and_parsed_locally(tmp_path, fo
     if method == "strict":
         assert _verdict(actor) == "PASS" and fact == "collected"
     else:
-        assert actor["parse_status"] == "parse_unavailable" and not actor.get("semantic_verdict")
+        assert actor["parse_status"] == "malformed" and not actor.get("semantic_verdict")
     assert actor["operation_state"] not in {"pending_dispatch", "in_flight"}
 
 
@@ -413,3 +413,61 @@ def test_an_unconfirmed_or_uncaptured_send_proves_no_bytes_and_a_replay_captures
     assert replayed["state"] == "delivered"
     assert replayed["delivered"][0]["text_sha256"] == hashlib.sha256(b"answer C").hexdigest()
     assert terminal_answer_receipts(tmp_path, TASK) == captured, "receipts are per task and survive rewrites"
+
+
+@pytest.mark.parametrize("state,error_count", [("cancelled", 0), ("interrupted", 0), ("failed", 1)])
+def test_cold_terminal_loss_keeps_its_type_without_blaming_restart_on_reviewer(
+        tmp_path, forbid_effects, monkeypatch, state, error_count):
+    from ouroboros.review_execution_projection import review_actor_progress_text
+    from ouroboros.review_records import ReviewActorRecord
+    from ouroboros.observability import read_call_payload
+
+    _observe(monkeypatch, {"summary": {"state": state}})
+    _started(tmp_path, run_id="run-ended")
+    actor, fact = _collect(_session_run(), tmp_path, _ctx(tmp_path))
+    assert fact == "collected" and actor["outcome"]["operation_id"] == "op-session"
+    assert read_call_payload(tmp_path, **actor["outcome"]["source_ref"])[0]["producer_complete"]
+    events = tmp_path / "logs" / "events.jsonl"
+    errors = [json.loads(line) for line in events.read_text().splitlines()
+              if json.loads(line).get("type") == "review_model_error"] if events.exists() else []
+    assert len(errors) == error_count
+    if state in {"cancelled", "interrupted"}:
+        from ouroboros.review_substrate import compact_review_projection
+
+        assert actor["failure_code"] == "review_run_cancelled"
+        assert actor["transport_status"] == actor["outcome"]["status"] == "interrupted"
+        card = compact_review_projection([{"request": {"surface": SURFACE}, "actors": [actor]}])["panels"][0]["actors"][0]
+        assert card["transport_status"] == "interrupted" and card["parse_status"] == "unavailable"
+        assert not card["semantic_verdict"]
+        text = review_actor_progress_text(SURFACE, "finished", ReviewSlot("s", "codex"), ReviewActorRecord(**actor))
+        assert "answer may be lost" in text and "didn't answer" not in text
+    else:
+        assert actor["failure_code"] == "review_run_failed"
+        assert actor["transport_status"] == "provider_transport_error"
+
+
+def test_cold_collection_reads_saved_question_and_never_current_contract(tmp_path, forbid_effects, monkeypatch):
+    from ouroboros.observability import persist_call
+    from ouroboros import triad_review
+    from ouroboros.review_dispatch import review_operation_binding, review_reconciliation_identity
+
+    run = _session_run()
+    request = ReviewRequest(**run["request"])
+    request.policy = {"parts": ["result"], "output_shape": "array"}
+    slot = ReviewSlot(**{**run["slot_roster"][0], "route": ReviewRouteKind.AGENT_SESSION})
+    request.reconciliation_identity = review_reconciliation_identity(request, [slot], root_task_id=TASK)
+    binding = review_operation_binding(request, slot, "op-session")
+    persist_call(tmp_path, task_id=TASK, call_id="op-session_prompt", call_type="review_prompt",
+                 payload={"request": dataclasses.asdict(request), "slot": dataclasses.asdict(slot)},
+                 manifest={"review_operation_binding": binding})
+    _started(tmp_path, run_id="run-result")
+    _observe(monkeypatch, {"summary": {"state": "succeeded"}, "primaryOutput": {"text": "[]\nNO_FINDINGS"}})
+    monkeypatch.setitem(triad_review.REVIEW_OUTPUT_SHAPES,
+                        SURFACE, "two_part")
+    ctx = _ctx(tmp_path)
+    actor = review_operation.collect_recorded_review_actor(tmp_path, task_id=TASK, surface=SURFACE,
+        row=run["actors"][0], retry_key=request.retry_key, usage_ctx=ctx)
+    assert ctx._last_review_slot_executions["s"]["status"] == "ok"
+    assert actor["outcome"]["parts"] == ["result"]
+    assert actor["outcome"]["answers"]["result"]["verdict"] == "PASS"
+    assert actor["parse_status"] == "valid" and actor["usage"]["collection"] == "attach_only_observation"

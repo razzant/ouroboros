@@ -66,6 +66,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.delenv("OUROBOROS_BOOT_RUNTIME_MODE", raising=False)
     monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     # Keep the boundary's isolated HOME: treating the entire fixture as HOME
     # would also declare data's parent (and its sibling projects) the app root.
     # The worker-side queue projection is its own tested seam; here it names who is live.

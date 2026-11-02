@@ -121,8 +121,8 @@ test('state snapshots and failure authority stay monotonic across reversed compl
     const older = snapshots.begin();
     const newer = snapshots.begin();
 
-    assert.deepEqual(older, { generation: 1, requestedAt: 100 });
-    assert.deepEqual(newer, { generation: 2, requestedAt: 200 });
+    assert.deepEqual(older, { generation: 1, requestedAt: 100, path: '/api/state' });
+    assert.deepEqual(newer, { generation: 2, requestedAt: 200, path: '/api/state' });
     assert.equal(snapshots.isCurrent(older), true);
     assert.equal(snapshots.apply(newer, { activities: [] }), true);
     // An older non-OK/catch path can no longer regress the newer header.

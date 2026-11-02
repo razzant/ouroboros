@@ -19,6 +19,7 @@ import pathlib
 import re
 import subprocess
 import time
+import unicodedata
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List
@@ -131,22 +132,7 @@ class CodeInventory:
     enumeration_limits: List[str] = field(default_factory=list)
 
     def to_json(self) -> Dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "repo_root": self.repo_root,
-            "git_head": self.git_head,
-            "created_at": self.created_at,
-            "files": [
-                {
-                    **asdict(file),
-                    "symbols": [asdict(symbol) for symbol in file.symbols],
-                }
-                for file in self.files
-            ],
-            "coverage": dict(self.coverage),
-            "nested_roots": list(self.nested_roots),
-            "enumeration_limits": list(self.enumeration_limits),
-        }
+        return asdict(self)  # recursive: files, symbols and import facts become plain JSON values
 
 
 def inventory_cache_path(repo_root: pathlib.Path, drive_root: pathlib.Path) -> pathlib.Path:
@@ -171,10 +157,9 @@ def prune_stale_code_intel_roots(
     """
     import shutil
 
-    from ouroboros.retention import age_cutoff, get_gc_retention_days
+    from ouroboros.retention import age_cutoff, get_gc_retention_days, keep_until
 
-    if retention_days is None:
-        retention_days = get_gc_retention_days()
+    retention_days = get_gc_retention_days() if retention_days is None else retention_days
     cutoff = age_cutoff(retention_days, now)
     report: Dict[str, Any] = {"removed": [], "kept": 0, "errors": []}
     cache_root = pathlib.Path(drive_root) / "state" / "code_intel"
@@ -190,6 +175,7 @@ def prune_stale_code_intel_roots(
             report["kept"] += 1
             continue
         if mtime >= cutoff:
+            keep_until(report, mtime, retention_days)
             report["kept"] += 1
             continue
         try:
@@ -772,12 +758,21 @@ def _file_fact(repo_root: pathlib.Path, path: pathlib.Path) -> FileFact:
                 import_facts_complete=local_imports.complete,
                 import_facts_method=f"tree-sitter/{_TS_LANGUAGES[lang]}",
             )
-        # A known code language but no grammar/tree-sitter available: surface a
-        # VISIBLE structural-unavailable disposition instead of silently guessing.
-        return FileFact(rel, digest, len(raw), lang, token_est, disposition=f"structural_unavailable:{lang}")
-    # Unknown suffixes still participate in text evidence, but no outline parser
-    # ran. Do not report an empty outline as successfully indexed source.
+    # A known code language without grammar/tree-sitter, or an unknown suffix: no outline parser
+    # ran, so surface a VISIBLE structural-unavailable disposition, never an indexed empty
+    # outline or a silent guess. The text still participates in occurrence evidence.
     return FileFact(rel, digest, len(raw), lang, token_est, disposition=f"structural_unavailable:{lang}")
+
+
+def _name_absent(name: str, raw: bytes, language: str) -> bool:
+    """True when bytes due an outline parse cannot hold symbol ``name``: tree-sitter names are
+    their slices; Python AST names, NFKC identifiers between ASCII delimiters, stay whole in
+    the text's NFKC. Binary, undecodable and non-outline files keep their ordinary parse."""
+    if b"\0" in raw[:4096] or (language != "python" and language not in _TS_LANGUAGES):
+        return False
+    text = raw.decode("utf-8", "replace")
+    return text.encode("utf-8") == raw and name not in text and (
+        language != "python" or text.isascii() or name not in unicodedata.normalize("NFKC", text))
 
 
 def _is_sensitive_inventory_path(rel_path: str) -> bool:
@@ -816,8 +811,10 @@ def build_code_inventory(
     exclude_paths: Iterable[pathlib.Path] | None = None,
     path_allowed: Callable[[pathlib.Path], bool] | None = None,
     parse: bool = True,
+    name: str = "",
 ) -> CodeInventory:
-    """Current inventory facts; ``parse=False`` lists admitted paths only, never cached."""
+    """Current inventory facts; ``parse=False`` lists admitted paths only, never cached. ``name`` leaves
+    files whose current bytes cannot hold that outline name unparsed (``name_absent``), likewise uncached."""
     root = pathlib.Path(repo_root).resolve(strict=False)
     deadline = time.monotonic() + _MAX_ENUMERATION_SECONDS
     cached = load_cached_inventory(root, drive_root) if drive_root is not None and parse else None
@@ -849,7 +846,8 @@ def build_code_inventory(
         # The admission rule (containment, name, size) precedes cache validation:
         # an oversized cached file must never trigger an unbounded hash read.
         raw, cached_file = None, cached_by_path.get(rel)
-        if cached_file is not None and _path_fact(root, path).disposition == "not_parsed":
+        admitted = _path_fact(root, path) if cached_file is not None or (parse and name) else None
+        if admitted is not None and admitted.disposition == "not_parsed":
             try:
                 with path.open("rb") as source:
                     raw = source.read(_MAX_INDEX_FILE_BYTES + 1)
@@ -862,6 +860,8 @@ def build_code_inventory(
                      or cached_file.language == "python" or cached_file.language in _TS_LANGUAGES)
                 and cached_file.sha256 == hashlib.sha256(raw).hexdigest()):
             files.append(cached_file)
+        elif parse and name and raw is not None and len(raw) <= _MAX_INDEX_FILE_BYTES and _name_absent(name, raw, admitted.language):
+            files.append(replace(admitted, disposition="name_absent"))
         else:
             files.append(_file_fact(root, path) if parse else _path_fact(root, path))
     inventory = CodeInventory(
@@ -882,9 +882,10 @@ def build_code_inventory(
         kept = sorted([*files, *tail], key=lambda f: f.path)
         stored = replace(inventory, files=kept, coverage=dict(Counter(f.disposition for f in kept)))
     # A caller-scoped view must not replace the shared full-source cache.
-    if persist and parse and drive_root is not None and not filtered and stored != cached:
-        path = inventory_cache_path(root, pathlib.Path(drive_root))
-        atomic_write_json(path, stored.to_json(), trailing_newline=True)
+    if persist and parse and not name and drive_root is not None and not filtered and stored != cached:
+        atomic_write_json(inventory_cache_path(root, pathlib.Path(drive_root)), stored.to_json(), trailing_newline=True)
+        from ouroboros.maintenance_retirement import artifact_changed
+        artifact_changed(drive_root)
     return inventory
 
 

@@ -102,9 +102,8 @@ def test_unknown_local_probe_ignores_legacy_cache_and_cloud_metadata(
     path = ce._store_path(tmp_path)
     before = path.read_bytes() if path.exists() else None
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: pytest.fail("cloud metadata"))
-    monkeypatch.setattr(ce, "_generative_probe_window", lambda *a, **k: pytest.fail("generation probe"))
     evidence = ce.probe(tmp_path, provider="openrouter", model="remote/name", use_local=True,
-                        allow_fetch=allow_fetch, allow_generative=True)
+                        allow_fetch=allow_fetch)
     assert evidence.window_tokens == 0
     assert evidence.status == ce.STATUS_UNPROBEABLE
     assert not ce.is_known(evidence)

@@ -457,6 +457,11 @@ def test_the_refusal_is_its_own_kind_that_rotates_without_cooling_the_model():
      "refused the stored continuation"),
     ({"_last_llm_error_kind": "bad_request", "_last_llm_provider_code": "unsupported_parameter"},
      "rejected as invalid for this route"),
+    ({"_last_llm_error_kind": "bad_request", "_last_llm_failure": {"provider_code": "model_capability_refused"}},
+     "cannot serve this model, and this round asks no other account"),
+    # A capability code left over from an earlier failure does not name a later, uncoded one.
+    ({"_last_llm_error_kind": "bad_request", "_last_llm_provider_code": "model_capability_refused",
+      "_last_llm_failure": {"provider_code": None}}, "rejected as invalid for this route"),
 ])
 def test_the_owner_terminal_names_the_real_refusal(usage, expected):
     assert expected in provider_recovery_hint(usage)
@@ -464,11 +469,14 @@ def test_the_owner_terminal_names_the_real_refusal(usage, expected):
 
 def test_a_same_route_refusal_is_not_asked_a_second_time():
     for usage in ({"_last_llm_error_kind": "model_substituted"},
-                  {"_last_llm_error_kind": "bad_request", "_last_llm_provider_code": "invalid_continuation"}):
+                  {"_last_llm_error_kind": "bad_request", "_last_llm_provider_code": "invalid_continuation"},
+                  {"_last_llm_error_kind": "bad_request", "_last_llm_failure": {"provider_code": "model_capability_refused"}}):
         source, wall = provider_no_call_source(usage, deadline_exhausted=False)
         assert source == "same_route_refusal_no_resend" and wall is False
-    # An ordinary refusal keeps its one salvage call.
+    # An ordinary refusal keeps its one salvage call, also after an earlier capability refusal.
     assert provider_no_call_source({"_last_llm_error_kind": "bad_request"}, deadline_exhausted=False) == ("", False)
+    assert provider_no_call_source({"_last_llm_error_kind": "bad_request", "_last_llm_provider_code": "model_capability_refused",
+                                    "_last_llm_failure": {"provider_code": None}}, deadline_exhausted=False) == ("", False)
 
 
 def test_the_owner_row_names_what_happened_once_per_task_and_model():

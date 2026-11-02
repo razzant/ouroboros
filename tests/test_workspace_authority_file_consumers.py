@@ -427,7 +427,7 @@ def test_relative_protected_artifact_uses_explicit_system_binding_across_file_to
     assert "return 42" in (system_repo / "secret.py").read_text(encoding="utf-8")
 
 
-def test_query_and_vcs_diff_use_the_same_explicit_system_protected_binding(
+def test_query_and_vcs_read_diff_use_the_same_explicit_system_protected_binding(
     tmp_path, monkeypatch,
 ):
     registry, _ctx, system_repo, _workspace, _data = _protected_workspace_registry(
@@ -447,7 +447,7 @@ def test_query_and_vcs_diff_use_the_same_explicit_system_protected_binding(
         "query_code",
         {"root": "system_repo", "op": "definition", "query": "hidden_marker"},
     )
-    diff_result = registry.execute("vcs_diff", {"root": "system_repo"})
+    diff_result = registry.execute("vcs_read", {"action": "diff", "root": "system_repo"})
 
     assert "secret.py" not in query_result
     assert "RESOURCE_POLICY_BLOCKED" in diff_result

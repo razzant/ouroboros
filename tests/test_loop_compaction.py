@@ -72,7 +72,8 @@ def _plan(*, preferred="max"):
         projection=lambda _mode: SimpleNamespace(calibration_ratio=1.0),
         reproject_transcript=reproject, reproject_for_route=Mock(),
     )
-    plan.reproject_for_route.return_value = plan  # records the rebind; keeps this double's mode stubs
+    # The rebound plan names the selected mode, as the real projection does.
+    plan.reproject_for_route.return_value = SimpleNamespace(**vars(plan), initial_mode="low")
     return plan
 
 
@@ -198,7 +199,7 @@ def _steps_applied(monkeypatch, outcome=lambda step: True):
     return steps
 
 
-PASS_ONE, PASS_TWO = ("exec:round:1", "host_copies+bodies"), ("exec:round:1", "floor+unseen_bodies+books")
+PASS_ONE, PASS_TWO = ("exec:round:1", "host_copies+bodies"), ("exec:round:1", "floor+books+unseen_bodies")
 
 
 def test_fallback_success_preserves_complete_candidate_fit_facts(tmp_path):
@@ -291,10 +292,12 @@ SLACK = math.ceil(500_000 / RECLAIM_LOW_WATER_DIVISOR)  # the owner's return-aft
     (STATED, None, None, 520_000, 520_000 + 65_536 - 500_000 + SLACK),  # a stated limit measures even a cold E
 ])
 def test_refusal_target_is_measured_from_a_stated_limit_or_the_accepted_floor_else_unknown(
-        tmp_path, message, anchor, accepted, estimate, target):
-    from ouroboros import loop_model_call
+        tmp_path, monkeypatch, message, anchor, accepted, estimate, target):
+    from ouroboros import capability_evidence as ce, loop_model_call
     from ouroboros.context_anchor import refused_input
 
+    # A stated limit is a durable window observation: it stays in this test's store, not the session's.
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     context = _ctx(tmp_path)
     context.accumulated_usage["_last_llm_provider_message"] = message
     fit = _fit(estimated_input=estimate, anchor_input=anchor, anchor_round=3, accepted_input=accepted,
@@ -339,7 +342,7 @@ def test_each_pass_earns_one_retry_and_the_second_pass_runs_only_after_a_refused
     msg, _cost, mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and mode == "max"
     assert len(sends) == (3 if second_refused else 2)
-    expected = ["host_copies", "bodies"] + (["floor", "unseen_bodies", "books"] if second_refused else [])
+    expected = ["host_copies", "bodies"] + (["floor", "books", "unseen_bodies"] if second_refused else [])
     assert [step for step, _target in steps] == expected
     assert all(target is None for _step, target in steps)  # a cold first request measures no target
     assert context.tools._ctx._context_overflow_retries == ({PASS_ONE, PASS_TWO} if second_refused else {PASS_ONE})
@@ -365,8 +368,50 @@ def test_a_pass_that_changes_nothing_earns_no_retry_and_the_next_pass_still_runs
     monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
     msg, _cost, _mode = loop._call_round_model(context)
     assert msg["content"] == "fits" and len(sends) == 2  # no retry was bought for the unchanged candidate
-    assert [step for step, _target in steps] == ["host_copies", "bodies", "floor", "unseen_bodies", "books"]
+    assert [step for step, _target in steps] == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]
     assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
+
+
+@pytest.mark.parametrize("started_by", ["numbered_refusal", "prediction"])
+def test_the_rounds_first_failure_decides_whether_a_just_chosen_body_pays_last(tmp_path, monkeypatch, started_by):
+    """Owner 2A, both directions: pass 1 sheds part of the target and the pre-send prediction stops its retry. A round
+    a provider's numbered refusal started stays that refusal's round, so pass 2 may take the just-chosen body last,
+    for what its other steps left; a round a pre-send prediction started never takes one."""
+    from dataclasses import asdict
+    from ouroboros import capability_evidence as ce, loop, loop_model_call
+    from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)  # a stated limit is a durable observation
+    context = _ctx(tmp_path)
+    monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(estimated_input=520_000)]))
+    shed = {"host_copies": 10_000, "floor": 5_000}  # each pass sheds part of its target, never all of it
+    monkeypatch.setattr(loop_model_call, "_apply_refusal_step", lambda ctx, step, fit, target, slack=None: shed.get(step))
+    chosen = []
+    monkeypatch.setattr(loop_model_call, "_run_emergency_address_pass", lambda ctx, fit, *, rung, goal_tokens=None: (
+        chosen.append((rung, goal_tokens)) or SimpleNamespace(status="applied")))
+    sends = []
+
+    def dispatch(ctx, disposition, *, candidate_predicate=None, **_kwargs):
+        sends.append(candidate_predicate)
+        if len(sends) == 3:
+            assert candidate_predicate(_candidate_request(disposition, size=800))
+            return {"role": "assistant", "content": "fits", "tool_calls": []}, 0.0
+        ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"
+        if len(sends) == 1 and started_by == "numbered_refusal":
+            ctx.accumulated_usage["_last_llm_provider_message"] = STATED
+        else:  # the pre-send gate stopped this candidate: its facts, no provider words
+            ctx.accumulated_usage.update({"_last_llm_provider_message": "", REFUSED_CANDIDATE_KEY: {
+                **asdict(_failed_capture(size=1_000 if len(sends) == 1 else 900)),
+                "predicted_free_tokens": -30_000, "predicted_slack_tokens": 0}})
+        return None, 0.0
+
+    monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    monkeypatch.setattr(loop, "last_physical_attempt_capture", lambda: _failed_capture())
+    msg, _cost, _mode = loop._call_round_model(context)
+    assert msg["content"] == "fits" and len(sends) == 3
+    assert context.tools._ctx._context_overflow_retries == {PASS_ONE, PASS_TWO}
+    # Pass 2 measures the predicted retry (30,000 over); the floor took 5,000 of it.
+    assert chosen == ([("chosen_bodies", 25_000)] if started_by == "numbered_refusal" else [])
 
 
 def test_unchanged_candidate_after_every_pass_gets_no_retry(tmp_path, monkeypatch):
@@ -528,7 +573,7 @@ def test_equal_context_releases_retry_before_provider_send(tmp_path, monkeypatch
     assert msg is None
     assert provider_sends == 1  # both passes ran; each equal candidate was released before any send
     skipped = [event for event in events if event.get("reason") == "context_candidate_not_strictly_smaller"]
-    assert [event["rung"] for event in skipped] == ["host_copies+bodies", "floor+unseen_bodies+books"]
+    assert [event["rung"] for event in skipped] == ["host_copies+bodies", "floor+books+unseen_bodies"]
 
 
 def test_strict_shrink_predicate_uses_failed_physical_reserve():

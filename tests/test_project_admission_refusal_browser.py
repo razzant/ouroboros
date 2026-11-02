@@ -1,8 +1,8 @@
 """#1381: a never-admitted Project refusal through real producers, server and SPA.
 
 Producers run in this process against the candidate server's isolated data
-root while that server is STOPPED (the fixture's seed rule): the owner's Swarm
-row is written by the ingress writer, and the real owner router, promotion,
+root while that server is STOPPED (the fixture's seed rule): the owner's
+row is written by the ingress writer, and the real routing picker, promotion,
 queue admission and refusal emitters refuse it after a completed registry
 rebind-and-back during workspace preflight. Beside it sit an admitted root that
 started and failed (canonical result writers) and a refusal recorded by the
@@ -61,14 +61,6 @@ class _Bridge:
         self.acks.append({"chat_id": chat_id, **copy.deepcopy(payload)})
 
 
-class _ImmediateThread:
-    def __init__(self, target, args=(), kwargs=None, **_options):
-        self.target, self.args, self.kwargs = target, args, kwargs or {}
-
-    def start(self):
-        self.target(*self.args, **self.kwargs)
-
-
 def _producers(monkeypatch, data_dir: Path, repo_dir: Path) -> SimpleNamespace:
     """Point the real supervisor owners at the server's data root."""
     from ouroboros import config
@@ -112,7 +104,6 @@ def _producers(monkeypatch, data_dir: Path, repo_dir: Path) -> SimpleNamespace:
 
     bus = _Bus()
     monkeypatch.setattr(workers, "get_event_q", lambda *, create=True: bus)
-    monkeypatch.setattr("ouroboros.server_owner_routing.threading", SimpleNamespace(Thread=_ImmediateThread))
     ctx = SimpleNamespace(
         DRIVE_ROOT=data_dir, PENDING=pending, RUNNING=running, WORKERS=pool, bridge=bridge,
         enqueue_task=queue.enqueue_task, persist_queue_snapshot=queue.persist_queue_snapshot,
@@ -121,7 +112,7 @@ def _producers(monkeypatch, data_dir: Path, repo_dir: Path) -> SimpleNamespace:
         handle_chat_direct=lane.handle_chat_direct, send_with_budget=message_bus.send_with_budget,
         get_chat_agent=lambda: SimpleNamespace(_busy=False),
     )
-    return SimpleNamespace(ctx=ctx, bridge=bridge, live_sends=live_sends, pending=pending)
+    return SimpleNamespace(ctx=ctx, bridge=bridge, bus=bus, live_sends=live_sends, pending=pending)
 
 
 def _rows(path: Path) -> list:
@@ -147,9 +138,9 @@ def _legacy_refusal(host, data_dir: Path, task_id: str, chat: int, objective: st
 def _seed(host, monkeypatch, data_dir: Path, tmp_path: Path) -> dict:
     from ouroboros import projects_registry as registry
     from ouroboros import workspace_admission
-    from ouroboros.gateway.routing_decision import _derived_identity
-    from ouroboros.project_dialogue import build_owner_message_ref
-    from ouroboros.server_owner_routing import _route_owner_message
+    from ouroboros.gateway.routing_decision import _derived_identity, handle_routing_decision
+    from ouroboros.project_dialogue import append_chat_annotation
+    from ouroboros import routing_wait
     from ouroboros.task_results import load_task_result, write_task_result
     from ouroboros.utils import utc_now_iso
     from supervisor.message_bus import log_chat, send_with_budget
@@ -171,13 +162,15 @@ def _seed(host, monkeypatch, data_dir: Path, tmp_path: Path) -> dict:
     write_task_result(data_dir, ADMITTED_FAILURE, "failed", result="The comparison step failed after it started.")
     legacy = _legacy_refusal(host, data_dir, LEGACY_AT_BOOT, chat, "Earlier refused attempt (historical record)")
 
-    # The owner's Swarm press in the Project room, logged by the ingress writer.
-    client_message_id = "owner-swarm-1381"
+    # The owner's new-task picker choice in the Project room, from retained ingress.
+    client_message_id, picker_token = "owner-picker-1381", "choose-project-1381"
     ts = utc_now_iso()
     log_chat("in", chat, 1, OWNER_TEXT, ts=ts, source="web", client_message_id=client_message_id,
              require_write=True, ensure_record_boundary=True)
-    ref = build_owner_message_ref(chat_id=chat, client_message_id=client_message_id, ts=ts, text=OWNER_TEXT)
-    _token, refused = _derived_identity(client_message_id, "swarm", 0)
+    options = [{"action": "new_task_in_project", "project_id": PROJECT, "label": PROJECT_NAME}]
+    assert append_chat_annotation(data_dir, client_message_id, action="route_decision",
+        status="needs_manual_target", routing_token=picker_token, options=options)
+    dispatch_token, refused = _derived_identity(client_message_id, picker_token, 0)
     original = workspace_admission.bounded_workspace_preflight
     route_changes = []
 
@@ -188,15 +181,31 @@ def _seed(host, monkeypatch, data_dir: Path, tmp_path: Path) -> dict:
         route_changes.append(str(root))
         return original(root, *args, **kwargs)
 
-    monkeypatch.setattr(workspace_admission, "bounded_workspace_preflight", preflight_during_rebind_and_back)
-    try:
-        _route_owner_message(host.bridge, host.ctx, {
-            "chat_id": chat, "text": OWNER_TEXT, "image_caption": "", "log_text": OWNER_TEXT,
-            "client_message_id": client_message_id, "origin_message_ref": ref, "source": "web",
-            "task_metadata": {"force_plan": True, "force_plan_source": "swarm"},
-        })
-    finally:
-        monkeypatch.setattr(workspace_admission, "bounded_workspace_preflight", original)
+    wait = routing_wait.wait_for_promotion_admission
+
+    def consume_then_wait(*args, **kwargs):
+        # The absent supervisor consumes the picker's actual queued event at its
+        # wait boundary. Dispatch, admission and receipt reads remain real.
+        from supervisor.events import dispatch_event
+
+        while not host.bus.empty():
+            event = host.bus.get_nowait()
+            if event.get("type") == "promote_chat_to_task":
+                assert event["objective"] == event["source_text"] == OWNER_TEXT
+                assert event["source_ref"]["client_message_id"] == client_message_id
+                dispatch_event(event, host.ctx)
+                break
+        else:
+            pytest.fail("the picker did not dispatch a new task")
+        return wait(*args, **kwargs)
+
+    with monkeypatch.context() as dispatch:
+        dispatch.setattr(workspace_admission, "bounded_workspace_preflight", preflight_during_rebind_and_back)
+        dispatch.setattr(routing_wait, "wait_for_promotion_admission", consume_then_wait)
+        status, response = handle_routing_decision(data_dir, request_id="owner-pick-1381",
+            decision_id=f"routing:{client_message_id}:{picker_token}", option_index=0)
+    assert status == 409 and response["error"] == "dispatch_rejected", response
+    assert response["state"] == "open" and response["cause"] == REFUSAL_CAUSE
     assert route_changes, "the promotion never reached workspace preflight"
     assert not host.pending
 
@@ -210,17 +219,20 @@ def _seed(host, monkeypatch, data_dir: Path, tmp_path: Path) -> dict:
     assert not refused_result.get("started_at")
     # Bound to the room, so ordinary membership alone would make it Main-eligible.
     assert registry.project_binding_for_task(data_dir, refused)["project_id"] == PROJECT
-    assert [row["status"] for row in annotations] == ["needs_manual_target"]
-    assert annotations[0]["cause"] == REFUSAL_CAUSE
+    refusal = next(row for row in annotations if row.get("routing_token") == dispatch_token)
+    assert refusal["status"] == "needs_manual_target" and refusal["cause"] == REFUSAL_CAUSE
+    assert annotations[-1]["routing_token"] == picker_token and annotations[-1]["status"] == "needs_manual_target"
+    assert annotations[-1]["options"] == options  # the owner's picker reopens after refusal
     assert len(notices) == 1 and notices[0]["chat_id"] == chat and REFUSAL_CAUSE in notices[0]["text"]
-    return {"chat": chat, "refused": refused, "client_message_id": client_message_id,
+    return {"chat": chat, "refused": refused, "client_message_id": client_message_id, "picker_token": picker_token,
             "refusal_title": notices[0]["text"].split(" · ", 1)[0], "refused_result": refused_result,
-            "legacy_result": legacy, "annotation": annotations[0], "notice": notices[0]}
+            "legacy_result": legacy, "annotation": refusal, "notice": notices[0]}
 
 
 _MAIN_FACTS = """() => [...document.querySelectorAll('#chat-messages .chat-bubble[data-system-type='
     + '"project_completion_summary"], #chat-messages .chat-bubble.project-answer')]
     .map(n => ({task: n.dataset.taskId || '', text: n.innerText,
+                phase: n.querySelector('.project-ending-head .ui-status')?.innerText.trim() || '',
                 voice: n.classList.contains('project-answer') ? 'answer' : 'pointer'}))"""
 _PANEL_OPEN = """(pid) => {
     const host = document.getElementById('project-panel');
@@ -240,7 +252,8 @@ _PANEL_FACTS = """(pid) => {
             phase: (c.querySelector('.chat-live-phase') || {}).textContent || '', text: c.innerText})),
         bubbles: all('.chat-bubble[data-task-id]').map(n => ({task: n.dataset.taskId,
             type: n.dataset.systemType || '', text: n.innerText})),
-        annotations: all('.msg-routing-annotation').map(a => a.innerText),
+        pickers: all('.chat-routing-card').map(c => ({token: c.dataset.routingToken, state: c.dataset.state,
+            options: [...c.querySelectorAll('.chat-quiz-option')].map(b => ({text: b.innerText, disabled: b.disabled}))})),
         completions: all('.chat-bubble[data-system-type="project_completion_summary"]').length,
         text: panel.innerText,
     };
@@ -276,16 +289,21 @@ def _assert_refusal_is_origin_receipt_only(main, panel, seed):
     assert not any(seed["refusal_title"] in row["text"] for row in main), main
     assert [row["task"] for row in panel["notices"]] == [refused], panel["notices"]
     assert REFUSAL_CAUSE in panel["notices"][0]["text"]
-    assert any(REFUSAL_CAUSE in text for text in panel["annotations"]), panel["annotations"]
+    [picker] = panel["pickers"]
+    assert picker["token"] == seed["picker_token"] and picker["state"] == "open"
+    assert picker["options"] == [{"text": PROJECT_NAME, "disabled": False}]
     assert all(card["task"] != refused for card in panel["cards"]), panel["cards"]
     assert [row["type"] for row in panel["bubbles"] if row["task"] == refused] == ["task_not_started"]
     assert panel["completions"] == 0
 
 
 def _assert_failures_stay_visible(main, tasks):
-    by_task = {row["task"]: row["text"] for row in main}
+    by_task = {row["task"]: row for row in main}
     for task_id in tasks:
-        assert " · Failed" in by_task.get(task_id, ""), (task_id, main)
+        row = by_task.get(task_id, {})
+        # Typed endings give the outcome its own status, separate from the title.
+        assert row.get("phase") == "Failed" and row.get("voice") == "pointer", (task_id, main)
+        assert "Failed" in row["text"].splitlines(), (task_id, main)
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -351,7 +369,7 @@ def test_never_admitted_project_refusal_stays_an_origin_receipt(
                 # The server's startup scan owes the actual and the ambiguous failure, not the refusal.
                 main = _wait_main(page, published, timeout=60_000)
                 _open_project(page)
-                panel = _wait_panel(page, "f.notices.length > 0 && f.annotations.some(t => t.includes('Not started'))"
+                panel = _wait_panel(page, "f.notices.length > 0 && f.pickers.some(p => p.state === 'open')"
                                           f" && f.cards.some(c => c.task === '{ADMITTED_FAILURE}')")
                 record("boot_publication", {"main": main, "panel": panel,
                                             "refused_after_boot": load_task_result(data_dir, seed["refused"], strict=True)})
@@ -405,7 +423,7 @@ def test_never_admitted_project_refusal_stays_an_origin_receipt(
                 late_legacy = _legacy_refusal(host, data_dir, LEGACY_AT_DUTY, seed["chat"],
                                               "Refused attempt discovered by the custody duty")
                 settled = reconcile_terminal_projections(data_dir)
-                live = [row.get("delivery_id") for row in host.live_sends]
+                live = [row.get("delivery_id") for row in host.live_sends if row.get("type") == "send_message"]
                 refused_after = load_task_result(data_dir, seed["refused"], strict=True)
                 record("custody_duty", {"settled": settled, "live_sends": live, "late_legacy": late_legacy,
                                         "refused_after": refused_after})

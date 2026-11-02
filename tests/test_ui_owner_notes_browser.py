@@ -14,6 +14,7 @@ from tests import _dialogue as dialogue_test
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -21,6 +22,7 @@ import pytest
 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
+from tests.test_reconnect_feed_browser import HISTORY_LANDED
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
@@ -135,9 +137,12 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
                 window.__reminderBannerObserver.observe(document.querySelector('#toast-stack'), { childList: true });
             }""", LIVE)
             assert page.evaluate("getSelection().toString()") == LIVE
+            # Live delivery may precede its durable append; this scenario tests adoption of a saved row.
+            _wait_for_row(page.request, url, LIVE)
             for attempt in (1, 2):
-                reconnected = page.locator('#chat-messages .chat-bubble[data-system-type="reconnect"]')
-                before = reconnected.count()
+                page.wait_for_function("() => window.__ouroWs.ws?.readyState === WebSocket.OPEN"
+                                       " && Boolean(window.__ouroWs._lastSha)", timeout=30_000)
+                page.evaluate(HISTORY_LANDED)
                 with page.expect_response(lambda response: "/api/chat/history" in response.url
                                           and response.request.method == "GET", timeout=30_000) as history:
                     page.evaluate("window.__ouroWs.ws.close()")
@@ -145,11 +150,8 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
                 rows = history.value.json()["messages"]
                 row = next(row for row in rows if row.get("system_type") == "reminder"
                            and row.get("text", "").endswith(LIVE))
-                # The reconnect row is appended only after syncHistory has painted.
-                # Wait for that independent marker, so a duplicate still gets a RED capture.
-                page.wait_for_function("""before => document.querySelectorAll(
-                    '#chat-messages .chat-bubble[data-system-type="reconnect"]').length > before""",
-                    arg=before, timeout=30_000)
+                page.wait_for_function("() => window.historyLanded > 0", timeout=30_000)
+                assert page.locator('[data-system-type="reconnect"]').count() == 0
                 page.evaluate(SETTLED)
                 page.screenshot(path=str(evidence / f"main-live-reconnect-{attempt}.png"))
                 assert live.count() == 1, "reconnect history must adopt the live reminder"
@@ -172,13 +174,17 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
             waiting = schedules.locator(".activity-row").filter(has_text=LATER)
             waiting.wait_for(state="visible", timeout=30_000)
             assert waiting.locator(".activity-name").inner_text() == LATER
-            assert waiting.locator(".activity-sub").inner_text().startswith("reminder · one-shot · at/after ")
+            assert waiting.locator(".activity-sub[data-i18n-authored]").inner_text() == LATER
+            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^reminder · one-shot · at/after "))
+            assert timing.count() == 1
+            assert timing.locator("time").get_attribute("datetime") == "2999-01-01T09:00:00Z"
             schedules.scroll_into_view_if_needed()
             page.screenshot(path=str(evidence / "activity-desktop.png"), full_page=True)
             page.set_viewport_size({"width": 390, "height": 844})
             wait_drawer_closed(page)
             page.evaluate(SETTLED)
-            assert waiting.locator(".activity-sub").evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+            assert waiting.locator(".activity-sub").evaluate_all(
+                "nodes => nodes.every(node => node.scrollWidth <= node.clientWidth + 1)")
             page.screenshot(path=str(evidence / "activity-narrow.png"), full_page=True)
         finally:
             browser.close()

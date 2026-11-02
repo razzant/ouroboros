@@ -27,9 +27,10 @@ ROW = """sel => { const row = document.querySelector(sel); const r = row.getBoun
     const mark = document.querySelector('.chat-row-reply-mark');
     return { x: r.x, y: r.y, w: r.width, h: r.height, swipe: row.dataset.rowSwipe || '', press: row.dataset.rowPress || '',
         transform: getComputedStyle(row).transform, shadow: getComputedStyle(row).boxShadow,
+        select: getComputedStyle(row).userSelect || getComputedStyle(row).webkitUserSelect,
         mark: mark ? { armed: mark.dataset.armed || '', k: Number(mark.style.getPropertyValue('--reply-k')), shown: mark.isConnected } : null,
         staged: document.getElementById('chat-input-reply')?.textContent || '', scrollTop: document.getElementById('chat-messages').scrollTop,
-        menu: [...document.querySelectorAll('.chat-row-menu [data-row-action]')].map((item) => item.dataset.rowAction) }; }"""
+        menu: [...document.querySelectorAll('.chat-row-menu:not([data-leaving]) [data-row-action]')].map((item) => item.dataset.rowAction) }; }"""
 # Playwright leaves the order of init scripts undefined: the recorder patches the stub's Telegram whether the stub is
 # already there or assigns it later.
 RECORD_HAPTICS = """(() => { const played = window.__haptics = [];
@@ -174,6 +175,11 @@ def test_a_long_press_lifts_the_row_over_the_dimmed_feed_until_its_menu_closes(c
         finger.send('touchEnd')
         page.wait_for_timeout(200)
         facts['after_up'] = page.evaluate(ROW, ASSISTANT)
+        # The feed scrolls under the lifted row (its own reflow, as a growing live card makes): the row has not moved,
+        # so its menu stays (the lift's scale moved its corners, never its middle).
+        page.evaluate("() => document.getElementById('chat-messages').dispatchEvent(new Event('scroll'))")
+        page.wait_for_timeout(50)
+        facts['reflowed'] = page.evaluate(ROW, ASSISTANT)
         finger.send('touchStart', *header)
         finger.send('touchEnd')
         page.wait_for_timeout(80)
@@ -193,12 +199,16 @@ def test_a_long_press_lifts_the_row_over_the_dimmed_feed_until_its_menu_closes(c
     assert facts['beside'][1] < facts['beside'][0] * 0.85, ('the feed around it dims', facts)
     assert abs(facts['header'][1] - facts['header'][0]) < 3, ('the header stays bright', facts)
     assert facts['after_up']['press'] == 'lift' and facts['after_up']['menu'], ('lifted while the menu is open', facts)
+    assert facts['reflowed']['menu'] == facts['after_up']['menu'], ('the feed scrolling under the lifted row keeps its menu', facts)
+    # The press is the row's: the browser selects no word under it (iOS would also open its own edit menu over ours).
+    assert hold['select'] == 'none' and lift['select'] == 'none', facts
     assert facts['closing']['menu'] == [] and facts['closing']['press'] == 'release', facts
     assert facts['rest']['press'] == '' and facts['rest']['transform'] == 'none', facts
+    assert facts['rest']['select'] != 'none', ('at rest its words are selectable again', facts)
 
 
 def test_inside_telegram_each_moment_plays_its_one_haptic(chromium_ui, tmp_path):
-    """Swarm flipped: a tick each way. A swipe past the reply point: one medium tap (none for pulling further). A long
+    """A Subagents value chosen: a tick each. A swipe past the reply point: one medium tap (none for pulling further). A long
     press that opens the menu: one medium tap. The drawer latched open by a finger: one light tap; ☰ is silent."""
     page, client = booted(chromium_ui, tmp_path, telegram=True)
     finger = Finger(page)
@@ -208,9 +218,13 @@ def test_inside_telegram_each_moment_plays_its_one_haptic(chromium_ui, tmp_path)
     try:
         facts['host'] = page.evaluate('document.documentElement.dataset.ouroborosHost')
         facts['idle'] = played()
-        page.locator('#chat-swarm').click()
-        page.locator('#chat-swarm').click()
-        facts['swarm'] = played()
+        page.route('**/api/owner/subagents-mode', lambda route: route.fulfill(json={
+            'ok': True, 'project_id': '', 'subagents_mode': route.request.post_data_json['mode']}))
+        page.locator('#page-chat .chat-subagents-head').click()
+        page.locator('#page-chat .chat-subagents-strip .chat-seg[data-mode="swarm"]').click()
+        page.locator('#page-chat .chat-subagents-strip .chat-seg[data-mode="off"]').click()
+        facts['mode'] = played()
+        page.keyboard.press('Escape')
         clear()
         row = page.evaluate(ROW, ASSISTANT)
         start = (row['x'] + row['w'] - 24, row['y'] + row['h'] / 2)
@@ -252,7 +266,7 @@ def test_inside_telegram_each_moment_plays_its_one_haptic(chromium_ui, tmp_path)
         page.close()
         client.close()
     assert facts['host'] == 'telegram' and facts['idle'] == [], facts
-    assert facts['swarm'] == ['tick', 'tick'], ('armed, then disarmed', facts)
+    assert facts['mode'] == ['tick', 'tick'], ('Swarm, then Off: a tick each', facts)
     assert facts['swipe'] == ['medium'], ('one tap as the reply point is crossed', facts)
     assert facts['press'] == ['medium'], ('one tap as the long press opens the menu', facts)
     assert facts['drawer']['open'] is True and facts['latch'] == ['light'], ('the finger latched the drawer open', facts)

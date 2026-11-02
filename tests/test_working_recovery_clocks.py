@@ -11,8 +11,9 @@ import pytest
 
 from ouroboros import agent as agent_module, config, model_wait, working_checkpoint as wc
 from ouroboros.tools.registry import ToolRegistry
-from supervisor import queue, queue_timeouts, task_reaper, worker_assignment, workers
+from supervisor import queue, queue_timeouts, worker_assignment, workers
 from tests._budget_pause_exact_helpers import _loop_ctx
+from tests._silence_reaper_support import historical_successor
 from tests.test_project_hold_recovery import worker
 from tests.test_restart_saved_work import _stop_and_boot
 from tests.test_swarm_host_admission import host  # noqa: F401
@@ -48,11 +49,9 @@ def _recover(host, tmp_path, monkeypatch, *, new_id=False, legacy=False):  # noq
         path.write_text(json.dumps(saved))
     else:
         assert saved["started_at"] == now - 1000.0
-    if new_id:
+    if new_id:  # only a stored pre-upgrade timeout successor has a new id
         workers.RUNNING.clear()
-        answer = task_reaper._enqueue_retry(queue, original, task_id="held", retry_task_id="held-retry",
-                                           attempt=1, terminal_reason="idle_timeout", recon_fields={})
-        assert answer[:2] == (True, 2), answer
+        historical_successor(original, 1, "held-retry")
     else:
         assert _stop_and_boot(queue, workers) == 1
         assert queue.resume_budget_paused_task("held")["ok"]

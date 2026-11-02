@@ -169,7 +169,7 @@ def test_post_round_finalize_control_binds_its_grace_deadline(tmp_path, monkeypa
     )
     grace_deadline = time.time() + 42.0
     monkeypatch.setattr(loop, "_resolve_delivery_control", lambda content, *_args: ("fresh", content))
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", lambda *_args: False)
+    monkeypatch.setattr(loop, "_enforce_plan_gate", lambda *_args: False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_args: None)
     monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_args: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
@@ -248,16 +248,10 @@ def test_budget_exhaustion_projects_deferred_child_before_forced_return(
 
 
 def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monkeypatch):
-    from ouroboros.task_results import (
-        STATUS_RUNNING,
-        write_task_result,
-    )
-    from tests import _legacy_plan_shared as legacy
+    from tests.test_plan_gate import _plan, _participant, OBJECTION, SEAT
 
     loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
-    registry._ctx.task_metadata["force_plan"] = True
-    write_task_result(tmp_path, "parent1", STATUS_RUNNING, result="running")
-    legacy.seed_plan_review_state(tmp_path, "parent1", legacy.v2_state(current="a" * 64))
+    _plan(tmp_path, "parent1", participants=[_participant(SEAT, reply=OBJECTION)])
     loop._replace_delivery_candidate(
         registry,
         limit_ctx,
@@ -275,8 +269,8 @@ def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monk
     text, usage, _returned_trace = loop._handle_round_limit(limit_ctx)
 
     assert text.startswith("Useful verified work completed before the rail.")
-    # The wave is still open at finalization, so the disclosure says so in the
-    # present tense: "remained" claimed a panel had ended that nobody closed.
+    # A real counted objection stays open even when the task-wide rail forces
+    # best-effort delivery. It is disclosed without erasing the useful candidate.
     assert "Blocking plan review is open" in usage["terminal_host_notice"]
     assert "`round_limit`" in usage["terminal_host_notice"]
     assert usage["reason_code"] == "round_limit"
@@ -284,7 +278,7 @@ def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monk
 
 def test_forced_managed_swarm_runs_the_ordinary_final_model_call(tmp_path, monkeypatch):
     loop, registry, limit_ctx, _trace = _forced_test_context(tmp_path)
-    registry._ctx.task_metadata.update({"force_plan": True, "force_plan_source": "swarm"})
+    registry._ctx.task_metadata.update({"subagents_mode": "swarm", "force_plan": True, "force_plan_source": "swarm"})
     calls = []
     monkeypatch.setattr(
         loop, "call_llm_with_retry",
@@ -295,7 +289,8 @@ def test_forced_managed_swarm_runs_the_ordinary_final_model_call(tmp_path, monke
     assert calls == ["forced"]
     assert text == "Verified work before the limit."
     assert usage["reason_code"] == "round_limit"
-    assert "Plan review is open" in usage["terminal_host_notice"]
+    assert not usage.get("terminal_plan_review_open")
+    assert "Plan review is open" not in usage.get("terminal_host_notice", "")
 
 
 def test_presence_handoff_does_not_replace_ordinary_forced_finalization(tmp_path, monkeypatch):
@@ -604,7 +599,7 @@ def test_provider_unavailable_keeps_current_model_candidate_byte_exact(
     answer = "Complete current model answer."
     loop._replace_delivery_candidate(registry, limit_ctx, trace, answer, control="replace")
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (None, 0.0))
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_k: "\nHOST FACT")
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_a, **_k: "\nHOST FACT")
 
     text, usage, returned_trace = loop._handle_provider_unavailable(limit_ctx)
 
@@ -644,7 +639,7 @@ def test_provider_unavailable_forced_model_answer_excludes_host_suffix(
         "call_llm_with_retry",
         lambda *_a, **_k: ({"content": "Fresh forced model answer."}, 0.0),
     )
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_k: "\nHOST FACT")
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_a, **_k: "\nHOST FACT")
 
     text, usage, returned_trace = loop._handle_provider_unavailable(limit_ctx)
 

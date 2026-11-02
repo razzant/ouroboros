@@ -24,6 +24,7 @@ declared (the owner's press, Ouroboros's own sentence), the app stopping, the
 spending limit, a technical problem; a Pause that declared nobody names nobody.
 ``waiting`` continues when what it waits for happens: helpers of an earlier
 attempt finishing, a model becoming available, the owner's sign-in or answer.
+A sleep whose chosen helper a stop holds does not: a ``held`` tail says so.
 ``turn`` names what waits for the owner; ``release`` says who can move it.
 
 No I/O, no clocks, no thresholds: the server adapter (``work_projection``) and
@@ -37,19 +38,17 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 ACTIVITY_ORDER = ("working", "queued", "waiting", "paused", "unknown")
 TRANSITIONS = ("none", "finalizing", "pausing")
 
-# Hold reasons (supervisor/events_budget.py HOLD_*), read as data so this module imports nothing from the queue.
-_WRITER_HOLD = "continuation_writer_unsettled"
-_RESTART_HOLDS = {"owner_restart_hold": "after_restart", "saved_work_hold": "saved_on_stop"}
-_SELECTION_HOLDS = {"root_fence_lifted_pending_selection", "root_fence_member_pending_selection"}
+from ouroboros.work_stop import STOP_TEXT, activity_stop_view, door_holders
 
 # One owner sentence per reason code (the TASK_CAUSE_PHRASES discipline): keyed on the code
 # only, a code with no sentence stays raw, and the raw code stays typed beside it.
 REASON_TEXT = {
+    **STOP_TEXT,
+    "model_handoff": "a model request has no recorded result",
     "earlier_attempt_finishing": ("Continue starts when the helper of the earlier attempt finishes",
                                   "Continue starts when {count} helpers of the earlier attempt finish"),
     "earlier_runs_finishing": ("Continue starts when the external run of the earlier attempt finishes",
                                "Continue starts when {count} external runs of the earlier attempt finish"),
-    "earlier_work_unconfirmed": "Continue starts when the earlier attempt's work is confirmed finished",
     "helpers_running": ("1 helper still working", "{count} helpers still working"),
     "delegated_running": ("1 external run still working", "{count} external runs still working"),
     "owner_answer": "Waiting for your answer",
@@ -57,26 +56,24 @@ REASON_TEXT = {
     "model_wait": "Waiting for the model to become available",
     "project_admission": "Waiting for Project verification",
     "queued": "Waiting for a free worker",
-    "sleeping": "Sleeping until it is woken",
-    # A decided Pause says its declared author; the Resume button already says how it continues.
-    "paused_by_owner": "You paused it",
-    "paused_by_mind": "Ouroboros paused it",
-    "paused_unattributed": "",
-    "saved_on_stop": "Saved when the app stopped",
-    "after_restart": "Held after a restart",
-    "after_panic": "Stopped by Panic",
-    "spending_limit": "Spending limit reached",
-    "technical_pause": "After a technical problem",
-    "awaiting_selection": "Waiting for Ouroboros or you to resume it",
-    "restore_failed": "Its saved state could not be restored",
     "review_work_finishing": "Review work finishing",
     "external_runs_unconfirmed": ("1 external run may still be running", "{count} external runs may still be running"),
-    "held": "Held",
+    # A sleeping episode's chosen helpers a stop holds, by who releases them (classify_member's release).
+    "awaited_helpers_mind": ("1 helper it waits for is paused until Ouroboros resumes it",
+                             "{count} helpers it waits for are paused until Ouroboros resumes them"),
+    "awaited_helpers_owner": ("1 helper it waits for is paused until you resume it",
+                              "{count} helpers it waits for are paused until you resume them"),
+    "awaited_helpers_paused": ("1 helper it waits for is paused", "{count} helpers it waits for are paused"),
+    # A preparing direct turn's start step (census ``turn_phase``, supervisor.active_activity.TURN_PHASES).
+    "turn_admitted": "Setting up the turn",
+    "turn_started": "Starting the turn",
+    "turn_context_building": "Building context",
+    "turn_context_built": "Context ready",
+    # A live inline turn's recorded Stop, until its next stop check (the census work fact ``cancel_pending``).
+    "stop_requested": "Stop requested: it ends at its next step",
 }
-
-# Reasons that only the owner's explicit action continues when the census says so (can_resume).
-_OWNER_ACTION_CODES = {"saved_on_stop", "after_restart", "after_panic", "spending_limit", "technical_pause",
-                       "restore_failed", "held"}
+_TURN_STEPS = ("admitted", "started", "context_building", "context_built")
+_CALL_STEPS = ("requested", "dispatched")  # its Main call started (supervisor.active_activity.CALL_PHASES)
 
 
 def reason(code: str, *, count: Optional[int] = None, ids: Iterable[str] = (), since: Any = None,
@@ -125,11 +122,19 @@ def _current_waits(row: Mapping[str, Any]) -> List[tuple]:
             if isinstance(wait, dict) and wait.get("state") == "waiting" and wait.get("task_attempt") == attempt]
 
 
+def _waits_on(sleep: Any) -> List[str]:
+    """What a saved sleep selected (a warm one on its owner wait, a cold one on its exact pause): the work says
+    when a chosen helper cannot finish by itself."""
+    sleep = sleep if isinstance(sleep, Mapping) else {}
+    return [str(task) for task in dict.fromkeys([*(sleep.get("tasks") or ()), *(sleep.get("senders") or ())]) if task]
+
+
 def _call(row: Mapping[str, Any]) -> str:
-    """The exact-call word a working member is in (the cards' modelActivityPresentation)."""
+    """The exact-call word a working member is in (the cards' modelActivityPresentation); a direct turn
+    whose own call start precedes its census phase's move says the word that move gives, never more."""
     phase = row.get("phase")
     if phase == "preparing":
-        return "preparing"
+        return "working" if row.get("turn_phase") in _CALL_STEPS else "preparing"
     activity = row.get("model_activity") if isinstance(row.get("model_activity"), dict) else {}
     operation = activity.get("phase")
     if operation in {"dispatching", "awaiting_response"}:
@@ -141,28 +146,14 @@ def _call(row: Mapping[str, Any]) -> str:
     return "working"
 
 
-_PAUSE_CODES = {"owner": "paused_by_owner", "ouroboros": "paused_by_mind"}
-
-
-def _decided_pause(author: Mapping[str, Any], since: Any) -> Dict[str, Any]:
-    """The reason of a Pause someone decided: its declared author and, for Ouroboros, its own sentence."""
-    actor = str(author.get("actor") or "")
-    entry = reason(_PAUSE_CODES.get(actor, "paused_unattributed"), since=author.get("at") or since)
-    text = str(author.get("text") or "").strip()
-    if actor == "ouroboros" and text:
-        entry["text"] = f"Ouroboros: {text}"
-    if actor:
-        entry["by"] = {"actor": actor, "text": text, "at": author.get("at") or ""}
-    return entry
-
-
 def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Classify one census row (``decision_owners`` shape) with the raw facts the census drops.
 
     ``raw`` carries the queue row's hold and pause records, the declared author of the tree's Pause
     (``pause_by``, ``control_actor.pause_author``), the members that Pause already parked and the task's
-    own identity facts (see ``work_projection``), ``running`` when the queue runs it, and ``sent_review`` while a
-    review it sent from a warm park still runs. Returns the member's
+    own identity facts (see ``work_projection``), ``running`` when the queue runs it, its current worker ``owner_wait``,
+    ``sent_review`` while a review it sent from a warm park still runs, and ``cancel_pending`` while a live inline
+    turn's recorded Stop waits for its next stop check. Returns the member's
     own state only; ``live`` says whether the member itself executes now: under a settling Pause only a running
     member the Pause has not parked does, never a queued one or one that already saved its place."""
     raw = raw or {}
@@ -173,54 +164,28 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     if phase == "unknown":
         state["confirmed"] = False
         return state
-    hold = raw.get("hold") if isinstance(raw.get("hold"), dict) else {}
-    hold = {} if hold.get("selected") else hold
-    since = raw.get("paused_at") or row.get("started_at") or None
     if phase in {"budget_paused", "budget_pausing"}:
-        cause = str(row.get("pause_cause") or "unknown")
-        hold_reason = str(hold.get("reason") or "")
-        code, activity, release = "", "paused", "owner"
-        if hold_reason == _WRITER_HOLD:
-            code, activity, release = "earlier_work_unconfirmed", "waiting", "self"
-        elif hold_reason == "panic_hold":
-            code = "after_panic"
-        elif hold_reason in _RESTART_HOLDS:
-            code = _RESTART_HOLDS[hold_reason]
-        elif cause == "owner":
-            author = raw.get("pause_by") if isinstance(raw.get("pause_by"), dict) else {}
-            code = _PAUSE_CODES.get(str(author.get("actor") or ""), "paused_unattributed")
-            release = "mind" if code == "paused_by_mind" else "owner"
-        elif cause == "budget":
-            code = "spending_limit"
-        elif cause == "authority":
-            code = "technical_pause"
-        elif hold_reason in _SELECTION_HOLDS:
-            code, release = "awaiting_selection", "mind"
-        elif hold_reason.startswith("restore_refused:"):
-            code, release = "restore_failed", "none"
-        elif cause == "sleep":
-            code, activity, release = "sleeping", "waiting", "self"
-        elif cause == "restart":
-            code = "after_restart"
-        else:
-            code, release = "held", "none"
-        if code in _PAUSE_CODES.values() or code == "paused_unattributed":
-            state["reasons"].append(_decided_pause(raw.get("pause_by") or {}, since))
-        else:
-            state["reasons"].append(reason(code, since=since, raw=hold_reason or cause))
-        if phase == "budget_pausing" and activity == "paused":
-            # Still finishing its step unless the settling Pause already parked it.
-            state.update(activity="working", transition="pausing", call="",
-                         live=bool(raw.get("running")) and task_id not in set(raw.get("parked") or ()))
-        else:
-            state["activity"] = activity
-        state["release"] = release
-        # Reviews the Pause lets finish are the work's tail, never the episode's reason.
+        view = activity_stop_view(dict(row), dict(raw))
+        state["stop"], state["refusal"] = view["stop"], view["refusal"]
+        state["reasons"].append(view["reason"])
+        state["resumable"] = view["resumable"]
+        state["activity"] = "waiting" if view["waiting"] else "paused"
+        if view["waiting"] and isinstance(raw.get("_budget_pause"), Mapping):
+            state["waits_on"] = _waits_on(raw["_budget_pause"].get("sleep"))
+        # Which episodes may ask for its release (internal: ``awaited_tails`` names no releaser for another).
+        state["door_holders"] = sorted(door_holders({"id": task_id, **{key: row.get(key) or raw.get(key)
+                                                                      for key in ("root_task_id", "parent_task_id")}}))
+        state["release"] = ("owner" if view["release"] == "owner" else "mind" if view["resumable"]
+                            else "self" if view["waiting"] else "none")
+        if phase == "budget_pausing" and not view["waiting"] and raw.get("running", row.get("live")) \
+                and task_id not in set(raw.get("parked") or ()):
+            state.update(activity="working", transition="pausing", live=True)
         state["reviews_finishing"] = bool(row.get("finishing_reviews") or raw.get("sent_review"))
-        # Main's attention rule (main_decisions.owner_actions) is the turn: the census's explicit-Resume rule.
-        if _owner_actions(row)[1]:
-            state["turn"].append({"kind": "action", "task_id": task_id, "code": code})
-            state["release"] = "owner"
+        state["model_handoffs"] = list(raw.get("model_handoffs") or ())
+        if _owner_actions({**row, "stop": view["stop"], "refusal": view["refusal"]})[1]:
+            state["turn"].append({"kind": "action", "task_id": task_id, "code": view["reason"]["code"]})
+        if raw.get("execution_transport") is not None:  # a stopped call has ended; it never resumes
+            state.update(release="none", turn=[], resumable=False)
         return state
     wait = _owner_wait(row)
     if wait == "owner_wait":
@@ -232,6 +197,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if wait == "unknown":
         state["confirmed"] = False
+        return state
+    # A warm sleeper keeps its worker and frozen census phase, but executes nothing.
+    # A current Pause above wins; an ended or older attempt's wait proves no sleep.
+    waiting = raw.get("owner_wait")
+    if isinstance(waiting, dict) and waiting.get("state") == "waiting" and waiting.get("reason") == "sleep" \
+            and waiting.get("task_attempt") == int(row.get("task_attempt") or 1) \
+            and isinstance(waiting.get("sleep"), dict) and waiting["sleep"].get("mode") == "warm":
+        state["activity"] = "waiting"
+        state["reasons"].append(reason("sleeping"))
+        state["waits_on"] = _waits_on(waiting["sleep"])
         return state
     waits = _current_waits(row)
     if waits:
@@ -265,16 +240,16 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         return state
     if phase in {"working", "thinking", "preparing"}:
         state.update(activity="working", call=_call(row), live=True)
+        step = str(row.get("turn_phase") or "")
+        if phase == "preparing" and step in _TURN_STEPS:
+            state["reasons"].append(reason(f"turn_{step}"))
+        if raw.get("cancel_pending"):
+            state["reasons"].append(reason("stop_requested"))
         return state
     state["confirmed"] = False
     return state
 
 
-# Pauses the owner's Resume door releases: an owner/mind/host Pause over the tree, an explicit-Resume hold,
-# a budget checkpoint, or a member waiting for selection. A writer hold releases itself; an unrestorable or
-# unread hold has no Resume the door would accept (it answers cancel_or_new_run).
-_RESUMABLE_CODES = {"paused_by_owner", "paused_by_mind", "paused_unattributed", "saved_on_stop", "after_restart",
-                    "after_panic", "spending_limit", "technical_pause", "awaiting_selection"}
 _RUNNING_PHASES = {"working", "thinking", "preparing", "finalizing"}
 
 
@@ -288,23 +263,27 @@ def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Map
     earlier = [str(task_id) for task_id in earlier_live if task_id]
     roots = [str(task_id) for task_id in live_roots if task_id]
     controls: List[Dict[str, Any]] = []
-    if current is not None and current_row is not None:
+    # A live inline Presence turn's only door is Stop (#2012): Pause, Hurry and Wrap up have none for it yet, and
+    # before its first durable write (``cancelable`` False) Stop has no row to reach: that door refuses the id.
+    presence = current_row is not None and current_row.get("kind") == "presence"
+    if current is not None and current_row is not None and not presence:
         target = str(current.get("task_id") or "")
         phase = str(current_row.get("phase") or "")
         codes = {entry.get("code") for entry in current.get("reasons") or ()}
         # A live root, managed or a direct turn, and an answered root's upkeep: the hurry, stop and Pause doors
-        # take them all; the Pause ends that upkeep at once.
-        if current["activity"] == "working" and current.get("transition") in {"none", "finalizing"} \
-                and phase in _RUNNING_PHASES:
+        # take them all; the Pause ends that upkeep at once. A warm sleep keeps both: either control wakes it.
+        if ((current["activity"] == "working" and current.get("transition") in {"none", "finalizing"})
+                or (current["activity"] == "waiting" and "sleeping" in codes)) and phase in _RUNNING_PHASES:
             controls += [{"action": "wrap_up", "target": target}, {"action": "hurry", "target": target}]
         # A Pause still settling keeps its Pause: the door coalesces a repeat, which retries an uncertain reply.
         if current.get("transition") in {"none", "finalizing", "pausing"} \
                 and current["activity"] in {"working", "queued", "waiting"} \
                 and "earlier_work_unconfirmed" not in codes and phase != "budget_paused":
             controls.append({"action": "pause", "target": target})
-        if current["activity"] == "paused" and phase == "budget_paused" and codes & _RESUMABLE_CODES:
+        if current["activity"] == "paused" and current.get("resumable"):
             controls.append({"action": "resume", "target": target})
-    for task_id in [*([str(current.get("task_id"))] if current is not None else []), *roots]:
+    stoppable = current is not None and not (presence and current_row.get("cancelable") is False)
+    for task_id in [*([str(current.get("task_id"))] if stoppable else []), *roots]:
         if task_id and task_id not in {entry["target"] for entry in controls if entry["action"] == "stop"}:
             controls.append({"action": "stop", "target": task_id, "scope": "cascade"})
     for task_id in earlier:
@@ -326,6 +305,18 @@ def _outcome(row: Mapping[str, Any]) -> str:
     axes = row.get("outcome_axes") if isinstance(row.get("outcome_axes"), dict) else {}
     lifecycle = axes.get("lifecycle") if isinstance(axes.get("lifecycle"), dict) else {}
     return str(lifecycle.get("status") or row.get("status") or "")
+
+
+def shown_outcome(row: Mapping[str, Any]) -> str:
+    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except a turn the owner
+    stopped, which reads ``cancelled`` wherever its card's status fold says Stopped (``outcome_phase``)."""
+    status = _outcome(row)
+    if status in {"completed", "failed"} and isinstance(row.get("cancel_origin"), dict):
+        from ouroboros.project_dialogue import outcome_phase
+
+        if outcome_phase({**row, "root_phase_checkpoint": {}}, {}) == "cancelled":
+            return "cancelled"
+    return status
 
 
 def mark_of(activity: str, confirmed: bool, *, live: bool = False, unknown: bool = False) -> str:
@@ -394,6 +385,35 @@ def work_tails(helper_ids: List[str], runs: Iterable[Mapping[str, Any]], *, revi
     return tails
 
 
+def awaited_tails(current: Optional[Mapping[str, Any]], helpers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The helpers a sleeping episode chose to wait for (its saved selection, never every paused member) that a
+    stop holds: they finish only after their own Resume, so the sleep does not end by itself. One ``held`` tail
+    per classified release, named only when it is true here: Ouroboros for a mind release only when this
+    episode holds the helper's request door (its root or parent), else no releaser at all (a Continue's
+    predecessor's helper). The episode keeps its word, its controls and its turn."""
+    chosen, episode = set((current or {}).get("waits_on") or ()), str((current or {}).get("task_id") or "")
+    paused = [member for member in helpers if member["task_id"] in chosen and member["activity"] == "paused"]
+
+    def release(member: Mapping[str, Any]) -> str:
+        if member["release"] == "mind":
+            return "mind" if episode in (member.get("door_holders") or ()) else "none"
+        return "owner" if member["release"] == "owner" else "none"
+
+    tails = []
+    for named, code in (("mind", "awaited_helpers_mind"), ("owner", "awaited_helpers_owner"),
+                        ("none", "awaited_helpers_paused")):
+        ids = [member["task_id"] for member in paused if release(member) == named]
+        if ids:
+            tails.append(_tail("helper", code, ids, state="held"))
+    return tails
+
+
+def model_tails(blockers: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    attempts = sorted({str(b["attempt_id"]) for b in blockers if b.get("kind") == "model_handoff"
+                       and not b.get("review_owned") and b.get("attempt_id")})
+    return [_tail("model", "model_handoff", attempts, state="unknown")] if attempts else []
+
+
 def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mapping[str, Any],
                  name: str = "", room: Any = None, focus: Any = None, runs: Iterable[Mapping[str, Any]] = (),
                  outcome: str = "", gaps: Iterable[Dict[str, Any]] = ()) -> Dict[str, Any]:
@@ -445,7 +465,8 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     else:
         # Only runs nobody can confirm remain: the work stays listed (its Stop reaches them), its word unconfirmed.
         reasons, activity, transition, call, release = [], "unknown", "none", "", "none"
-    tails = work_tails(helper_ids, runs, reviewing=reviewing, named=named)
+    tails = work_tails(helper_ids, runs, reviewing=reviewing, named=named) + awaited_tails(current, helpers)
+    tails += model_tails(b for member in members for b in member.get("model_handoffs") or ())
     episode_live = bool(current is not None and current.get("live"))
     live = episode_live or bool(working_helpers or live_runs or reviewing)
     if turn:
@@ -455,7 +476,12 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
         "episode": {"task_id": str(episode.get("task_id") or work_id), "live": bool(current is not None)},
         "activity": activity, "transition": transition, "call": call,
         "because": reasons, "tails": tails, "live": live, "turn": turn, "release": release,
-        "members": {"ids": [member["task_id"] for member in members]},
+        **({"stop": current.get("stop", {}), "refusal": current.get("refusal", {})} if current else {}),
+        "members": {"ids": [member["task_id"] for member in members], "states": {
+            member["task_id"]: {**{key: member[key] for key in (
+                "activity", "transition", "call", "live", "release", "confirmed", "turn")},
+                "because": member["reasons"], "tails": model_tails(member.get("model_handoffs") or ())}
+            for member in members}},
         "confirmed": all(member["confirmed"] for member in members) and not gaps,
     }
     # The work's own mark follows its episode (the Paused mark lights when the tasks are parked; what they let

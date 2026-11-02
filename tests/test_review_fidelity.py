@@ -201,33 +201,6 @@ class TestFormatStatusSection:
             assert f"{prefix}{i}" in output, f"Missing {prefix}{i} in output"
         assert "... and" not in output, f"Truncation marker found. Snippet: {output[:800]}"
 
-    def test_more_than_three_advisory_runs_all_shown(self):
-        """Old cap was advisory_runs[-3:] — 5 runs must all appear."""
-        from ouroboros.review_state import (
-            AdvisoryReviewState, AdvisoryRunRecord, format_status_section,
-        )
-
-        state = AdvisoryReviewState.__new__(AdvisoryReviewState)
-        state.advisory_runs = [
-            AdvisoryRunRecord(
-                snapshot_hash=f"hash{i:012d}",
-                commit_message=f"commit run {i}",
-                status="fresh",
-                ts="2026-04-08T00:00:00",
-                items=[],
-            )
-            for i in range(5)
-        ]
-        state.attempts = []
-        state.open_obligations = []
-        state.last_stale_from_edit_ts = ""
-        state.last_stale_reason = ""
-        state.last_stale_repo_key = ""
-
-        output = format_status_section(state, repo_dir=None)
-        for i in range(5):
-            assert f"commit run {i}" in output, f"Advisory run {i} missing from output"
-
     def test_more_than_three_attempts_all_shown(self):
         """Old cap was attempts[-3:] — 5 attempts must all appear."""
         from ouroboros.review_state import (
@@ -351,35 +324,6 @@ class TestCommitGateJsonHelperNotTruncated:
 class TestFormatStatusSectionNoFieldSlicing:
     """format_status_section must not slice ts or commit_message fields."""
 
-    def test_full_timestamp_and_commit_message_in_advisory_run(self):
-        """run.ts and run.commit_message must appear untruncated in advisory run rows."""
-        from ouroboros.review_state import (
-            AdvisoryReviewState, AdvisoryRunRecord, format_status_section,
-        )
-
-        full_ts = "2026-04-08T12:34:56.789000+00:00"
-        long_msg = "fix: a very long commit message that was previously truncated at 60 chars"
-
-        state = AdvisoryReviewState.__new__(AdvisoryReviewState)
-        state.advisory_runs = [
-            AdvisoryRunRecord(
-                snapshot_hash="abc123def456",
-                commit_message=long_msg,
-                status="fresh",
-                ts=full_ts,
-                items=[],
-            )
-        ]
-        state.attempts = []
-        state.open_obligations = []
-        state.last_stale_from_edit_ts = ""
-        state.last_stale_reason = ""
-        state.last_stale_repo_key = ""
-
-        output = format_status_section(state, repo_dir=None)
-        assert full_ts in output, f"Full timestamp not found in output. Got: {output[:400]}"
-        assert long_msg in output, f"Full commit message not found in output. Got: {output[:400]}"
-
     def test_full_timestamp_and_commit_message_in_blocked_attempt(self):
         """ca.ts and ca.commit_message must appear untruncated in last blocked attempt block."""
         from ouroboros.review_state import (
@@ -463,44 +407,6 @@ class TestHandleReviewStatusNotTruncated:
             f"got {len(loaded.attempts[0].commit_message)}"
         )
 
-    def test_runs_data_all_runs_present_no_list_cap(self):
-        """_handle_review_status must return all advisory runs — no [-5:] list cap."""
-        import json, tempfile, pathlib
-        from unittest.mock import MagicMock
-        from ouroboros.review_state import (
-            AdvisoryReviewState, AdvisoryRunRecord, save_state,
-        )
-        from ouroboros.tools.preflight_review import _handle_review_status
-
-        # Create 7 runs — previously only last 5 were returned
-        runs = []
-        for i in range(7):
-            run = AdvisoryRunRecord(
-                snapshot_hash=f"hash{i}",
-                commit_message=f"fix: commit {i}",
-                status="fresh",
-                ts=f"2026-04-08T00:{i:02d}:00",
-            )
-            runs.append(run)
-
-        state = AdvisoryReviewState()
-        state.advisory_runs = runs
-
-        tmp = pathlib.Path(tempfile.mkdtemp())
-        (tmp / "state").mkdir()
-        save_state(tmp, state)
-
-        ctx = MagicMock()
-        ctx.drive_root = str(tmp)
-        ctx.repo_dir = ""
-
-        result_json = _handle_review_status(ctx)
-        data = json.loads(result_json)
-        returned_runs = data.get("advisory_runs", [])
-        assert len(returned_runs) == 7, (
-            f"Expected 7 runs (no [-5:] cap), got {len(returned_runs)}"
-        )
-
     def test_attempts_data_all_attempts_present_no_list_cap(self):
         """_handle_review_status must return all commit attempts — no [-8:] list cap."""
         import json, tempfile, pathlib
@@ -533,40 +439,6 @@ class TestHandleReviewStatusNotTruncated:
         returned_attempts = data.get("attempts", [])
         assert len(returned_attempts) == 10, (
             f"Expected 10 attempts (no [-8:] cap), got {len(returned_attempts)}"
-        )
-
-    def test_runs_data_commit_message_and_ts_not_truncated(self):
-        """runs_data in _handle_review_status must not truncate commit_message[:80] or ts[:16]."""
-        import tempfile, pathlib
-        from ouroboros.review_state import (
-            AdvisoryReviewState, AdvisoryRunRecord, save_state, load_state,
-        )
-
-        full_ts = "2026-04-08T23:59:59.654321+00:00"   # 32 chars — was clipped to 16
-        long_msg = "fix: " + "Z" * 200                  # 205 chars — was clipped to 80
-
-        run = AdvisoryRunRecord(
-            snapshot_hash="abc123",
-            commit_message=long_msg,
-            status="fresh",
-            ts=full_ts,
-        )
-
-        state = AdvisoryReviewState()
-        state.advisory_runs = [run]
-
-        tmp = pathlib.Path(tempfile.mkdtemp())
-        (tmp / "state").mkdir()
-        save_state(tmp, state)
-        loaded = load_state(tmp)
-
-        saved_run = loaded.advisory_runs[0]
-        assert saved_run.ts == full_ts, (
-            f"AdvisoryRunRecord.ts truncated in state. Expected '{full_ts}', got '{saved_run.ts}'"
-        )
-        assert saved_run.commit_message == long_msg, (
-            f"AdvisoryRunRecord.commit_message truncated. Expected {len(long_msg)} chars, "
-            f"got {len(saved_run.commit_message)}"
         )
 
 
@@ -665,7 +537,7 @@ class TestPersistencePathNotTruncated:
 # ---------------------------------------------------------------------------
 
 class TestReviewEvidenceOmissionBudget:
-    """Tests for max_attempts=0/max_runs=0 and has_evidence omission-counter semantics."""
+    """Tests for max_attempts=0 and has_evidence omission-counter semantics."""
 
     def setup_method(self, _method=None):
         import importlib
@@ -702,39 +574,16 @@ class TestReviewEvidenceOmissionBudget:
             save_state(drive_root, state)
 
             ev = self.mod.collect_review_evidence(
-                drive_root=drive_root, task_id="t0", max_attempts=0, max_runs=3
+                drive_root=drive_root, task_id="t0", max_attempts=0
             )
         assert ev["recent_attempts"] == [], (
             "max_attempts=0 must return [] (not the full list via [-0:] bug)"
         )
         assert ev["omitted_attempts"] >= 0  # all seeded attempts counted as omitted
 
-    def test_max_runs_zero_returns_empty_list_not_full(self):
-        """max_runs=0 must return [] not the full list. Seeds actual runs to prevent vacuous pass."""
-        import pathlib, tempfile
-        from ouroboros.review_state import AdvisoryReviewState, AdvisoryRunRecord, save_state
-
-        with tempfile.TemporaryDirectory() as tmp:
-            drive_root = pathlib.Path(tmp)
-            (drive_root / "state").mkdir(parents=True)
-            state = AdvisoryReviewState()
-            for i in range(2):
-                state.advisory_runs.append(AdvisoryRunRecord(
-                    snapshot_hash=f"hash{i}", commit_message=f"msg{i}",
-                    status="fresh", ts="2026-01-01T00:00:00",
-                ))
-            save_state(drive_root, state)
-
-            ev = self.mod.collect_review_evidence(
-                drive_root=drive_root, task_id="t0", max_attempts=3, max_runs=0
-            )
-        assert ev["recent_advisory_runs"] == [], (
-            "max_runs=0 must return [] (not the full list)"
-        )
-
     def test_omitted_attempts_correct_when_max_zero_empty_state(self):
         """omitted_attempts == 0 when state has no attempts and max_attempts=0."""
-        ev = self._collect(max_attempts=0, max_runs=3)
+        ev = self._collect(max_attempts=0)
         assert ev["omitted_attempts"] == 0  # nothing to omit in empty state
 
     def test_attempt_to_dict_includes_duration_sec(self):
@@ -767,7 +616,6 @@ class TestReviewEvidenceOmissionBudget:
                 drive_root=pathlib.Path(tmp),
                 task_id="t1",
                 max_attempts=0,
-                max_runs=0,
                 max_continuations=0,
                 max_obligations=0,
             )

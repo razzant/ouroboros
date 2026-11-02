@@ -21,6 +21,32 @@ fi
 
 echo "=== Building Ouroboros for Linux (v${VERSION}) ==="
 
+# Preserve the pre-#688 host-backend build on other Linux builders/architectures.
+# Release CI explicitly requires 1; auto never silently skips a broken Jammy build.
+GTK_MODE=${OUROBOROS_BUNDLE_LINUX_GTK:-auto}
+if [ "$GTK_MODE" = auto ]; then
+    GTK_MODE=0
+    if [ "$(uname -m)" = x86_64 ] && [ -r /etc/os-release ]; then
+        if ( . /etc/os-release; [ "$ID" = ubuntu ] && [ "$VERSION_ID" = 22.04 ] ); then
+            GTK_MODE=1
+        fi
+    fi
+fi
+case "$GTK_MODE" in 0|1) ;; *) echo "Invalid OUROBOROS_BUNDLE_LINUX_GTK: $GTK_MODE" >&2; exit 1 ;; esac
+export OUROBOROS_BUNDLE_LINUX_GTK=$GTK_MODE
+GTK_EXTRAS=()
+if [ "$GTK_MODE" = 1 ]; then
+    GTK_EXTRAS=(--extra linux-desktop)
+    # Compile GI/Cairo with this builder, not the portable Python's build machine.
+    export CC="${CC:-gcc}" CXX="${CXX:-g++}" LDSHARED="${LDSHARED:-gcc -shared}"
+    if ! pkg-config --exists gtk+-3.0 webkit2gtk-4.1 gobject-introspection-1.0 cairo; then
+        echo "ERROR: GTK/WebKit build inputs are missing. See packaging/appimage/README.md." >&2
+        exit 1
+    fi
+else
+    echo "Host-backend Linux build: no bundled native-window claim (see packaging/appimage/README.md)."
+fi
+
 if [ ! -f "python-standalone/bin/python3" ]; then
     echo "ERROR: python-standalone/ not found."
     echo "Run first: bash scripts/download_python_standalone.sh"
@@ -56,6 +82,7 @@ BUILD_VENV="build/linux-pyinstaller-venv"
 BUILD_PYTHON="$BUILD_VENV/bin/python"
 BUILD_REQUIREMENTS="$BUILD_VENV/build-requirements.txt"
 uv export --locked --no-dev --extra browser --extra desktop --extra build \
+    "${GTK_EXTRAS[@]}" \
     --no-emit-project --no-hashes --no-annotate --output-file "$BUILD_REQUIREMENTS"
 uv pip install --python "$BUILD_PYTHON" -q -r "$BUILD_REQUIREMENTS"
 
@@ -63,7 +90,7 @@ echo "--- Installing agent dependencies into python-standalone ---"
 uv pip install --python "$PORTABLE_PYTHON" -q -r requirements-runtime.lock
 # The source-launcher handoff cannot import the frozen launcher's private PYZ.
 DESKTOP_REQUIREMENTS="build/linux-desktop-requirements.txt"
-uv export --locked --no-dev --extra desktop \
+uv export --locked --no-dev --extra desktop "${GTK_EXTRAS[@]}" \
     --no-emit-project --no-hashes --no-annotate --output-file "$DESKTOP_REQUIREMENTS"
 uv pip install --python "$PORTABLE_PYTHON" -q -r "$DESKTOP_REQUIREMENTS"
 
@@ -86,6 +113,13 @@ echo "--- Building embedded managed repo bundle ---"
 
 echo "--- Running PyInstaller ---"
 "$BUILD_PYTHON" -m PyInstaller Ouroboros.spec --clean --noconfirm
+
+# The native shell is independent of Playwright's WebKit browser-tool runtime.
+if [ "$GTK_MODE" = 1 ]; then
+    "$BUILD_PYTHON" scripts/bundle_linux_gtk.py dist/Ouroboros/_internal
+    "$BUILD_PYTHON" scripts/capture_linux_sources.py dist/Ouroboros/_internal/linux-gtk \
+        "dist/native-sources-linux-${VERSION}.tar.gz"
+fi
 
 echo "--- Installing packaged CLI wrappers ---"
 mkdir -p dist/Ouroboros/bin

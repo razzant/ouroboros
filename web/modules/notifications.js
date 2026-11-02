@@ -20,7 +20,7 @@
    — one finished task has several wire shapes, and a quiz frame can be
    delivered more than once.
 
-   Preferences are client-local like the appearance choice (web/theme.js): the
+   Preferences stay with this client's origin: the
    desktop window and each browser keep their own, nothing is sent to the
    server, and the controls carry no `s-` id, so the Settings collector never
    posts them.
@@ -231,6 +231,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
         // Log frames carry runtime diagnostics, not owner-facing prose, so this
         // one stays title-only even when message text is switched on.
         if (text(frame.type || frame.event) !== 'task_done') return null;
+        if (frame.quiet_effective === true) return null;
         if (!rootEligible(taskId)) return null;
         // A task_done frame is not always an ending: an update or restart
         // teardown pushes a NON-settled `interrupted` terminal and requeues the
@@ -297,6 +298,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
     // every stopped or failed conversation "a task finished" — it falls through
     // to the ordinary-reply category below instead.
     if (systemType === 'task_summary') {
+        if (frame.quiet_effective === true) return null;
         if (!rootEligible(taskId)) return null;
         return {
             category: 'task_done',
@@ -396,9 +398,10 @@ export function nativeStatusText({ enabled = true, shell = null, native = false,
     const app = `this desktop app${shell.version ? ` (${shell.version})` : ''}`;
     const fallback = banner ? 'a browser banner or the app' : 'the app';
     if (!native) {
-        // Owner decision 3A: an app without the native method falls back, and says why.
-        return `System notifications need the current Ouroboros desktop app; ${app} predates them, so alerts `
-            + `fall back to ${fallback}. Updates inside Ouroboros do not replace the app itself.`;
+        // Owner decision 3A: an app without the native method falls back, and says why. Only the observed fact:
+        // a missing method proves neither an old app nor a remedy; Dashboard > Updates owns update actions.
+        return `${app.charAt(0).toUpperCase()}${app.slice(1)} has no system-notification method here, so alerts `
+            + `fall back to ${fallback}.`;
     }
     const status = text(capability?.status);
     const why = (fact) => (text(fact?.reason) ? ` (${text(fact.reason)})` : '');

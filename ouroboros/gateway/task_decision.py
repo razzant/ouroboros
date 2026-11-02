@@ -60,15 +60,17 @@ def _parse_quiz_decision_id(decision_id: str) -> Tuple[str, str, str]:
     return family, parts[1], parts[2]
 
 
-def _live_root_task(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Queue-lock read: the live task row, or a refusal reason.
+def _live_root_task(task_id: str, *, holds_mail: bool = False) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Snapshot queue memory under its lock, then read live-author storage outside it.
 
     ``task_not_live`` is NOT a hard refusal for a quiz answer — the caller
     consults the durable projection for the honest late-answer state; nor is
     ``task_settled``, a RUNNING worker whose result already settled (its
     mailbox is no longer drained, TZ-2 D15). ``task_not_reading`` is alive
     (queued, held, owner- or money-paused) but reads no question mail now; an
-    unheld cold sleep still reads it here, never in room intake (D6)."""
+    unheld cold sleep still reads it here, never in room intake (D6). With
+    ``holds_mail`` that living row comes back too: addressed question mail
+    waits in its mailbox until it reads, and no hold is released."""
     from supervisor import queue as q
 
     with q._queue_lock:
@@ -88,21 +90,29 @@ def _live_root_task(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
             from supervisor.workers import direct_chat_turn
 
             task = direct_chat_turn(task_id)
+    if task is None:
+        from ouroboros.conversation_lease import presence_author_agent
+        from ouroboros.task_results import load_task_result
+        agent = presence_author_agent(q.DRIVE_ROOT, task_id)
+        if agent is not None and getattr(agent, "_busy", False) and getattr(agent, "_current_task_id", "") == task_id:
+            if not getattr(agent, "_accepting_owner_messages", False):
+                return None, "task_settled"
+            task = load_task_result(q.DRIVE_ROOT, task_id, strict=True)
         if task is None:
             return None, "task_not_live"
-        lineage = resolve_task_lineage(
-            task_id,
-            metadata=task.get("metadata"),
-            root_task_id=task.get("root_task_id"),
-            parent_task_id=task.get("parent_task_id"),
-            delegation_role=task.get("delegation_role"),
-            original_task_id=task.get("original_task_id"),
-            timeout_retry_from=task.get("timeout_retry_from"),
-        )
-        if not bool(lineage["is_root_task"]):
-            # Decision-31 hierarchy: owner quiz cards come only from ROOT
-            # tasks (a subagent escalates to its parent, never to a card).
-            return None, "not_a_root_task"
+    lineage = resolve_task_lineage(
+        task_id,
+        metadata=task.get("metadata"),
+        root_task_id=task.get("root_task_id"),
+        parent_task_id=task.get("parent_task_id"),
+        delegation_role=task.get("delegation_role"),
+        original_task_id=task.get("original_task_id"),
+        timeout_retry_from=task.get("timeout_retry_from"),
+    )
+    if not bool(lineage["is_root_task"]):
+        # Decision-31 hierarchy: owner quiz cards come only from ROOT
+        # tasks (a subagent escalates to its parent, never to a card).
+        return None, "not_a_root_task"
     from supervisor.queue import _task_drive_for_task
 
     from ouroboros.owner_mailbox import mailbox_drain_ended
@@ -115,10 +125,17 @@ def _live_root_task(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
     from ouroboros.room_reader import is_reading, unheld_cold_sleep
     from supervisor.workers import direct_chat_turn
     drive = _task_drive_for_task(task, task_id)
-    running = task_id in q.RUNNING or direct_chat_turn(task_id) is not None
+    from ouroboros.conversation_lease import presence_author_agent
+    running = (task_id in q.RUNNING or direct_chat_turn(task_id) is not None
+               or presence_author_agent(q.DRIVE_ROOT, task_id) is not None)
     if not (is_reading(drive, task_id, task, running=running) or unheld_cold_sleep(drive, task_id, task)):
-        return None, "task_not_reading"
+        return (task if holds_mail else None), "task_not_reading"
     return task, ""
+
+
+def _mail_holder(task_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The living work an addressed answer waits for: reading now, or paused, held or queued."""
+    return _live_root_task(task_id, holds_mail=True)
 
 
 def _quiz_answer_frame(
@@ -157,6 +174,10 @@ def _answer_pending(root: pathlib.Path, task_id: str, quiz_id: str, reason: str,
     from ouroboros.owner_quiz import question_delivery_projection, quiz_states
 
     block = quiz_states(root, task_id).get(quiz_id) or {}
+    if block.get("state") != "answered":
+        return _refused("The answer could not be confirmed. Retry the same answer when storage is available.",
+                        503, task_id=task_id, reason_code="quiz_answer_unconfirmed",
+                        **({"state": block["state"]} if block.get("state") else {}))
     delivery = question_delivery_projection(block)
     fields = {"question_delivery": delivery,
               **({"answered_index": block["answered_index"]} if "answered_index" in block else {}),
@@ -248,8 +269,9 @@ def _forward_late_quiz_answer(
     rebuilds the FULL frame from the stored block for the model
     (``owner_quiz.late_answer_model_text``), so the model still reads the card.
 
-    The typed late_answer metadata bypasses the room's ordinary-reader route.
-    A fresh head receives the complete frame and the asker keeps its holds.
+    The typed late_answer metadata routes only to a live head that an earlier
+    late answer to this asker started, never to another reader; otherwise a
+    fresh head receives the complete frame.
     """
     chat_id, reason = _late_answer_destination(drive_root, task_id, block)
     if chat_id is None:
@@ -261,16 +283,24 @@ def _forward_late_quiz_answer(
         # An answered block always has a comment or a valid index; a block
         # that has neither cannot be spoken as the owner's words.
         return False, "answer_unreadable"
+    # Snapshot current related work at delivery, not at ask time: a child may
+    # have been promoted after the question. The owner's Main turn stays unrestricted.
+    from ouroboros.presence_owner_contact import private_main_contact
+    from ouroboros.task_results import load_task_result
+    snapshot = dict(block)
+    metadata = {"late_answer": {"task_id": task_id, "quiz_id": quiz_id,
+                                "answer_snapshot": {"task_id": task_id, "quiz": snapshot}}}
+    if private_main_contact(block, task_id):
+        current = load_task_result(drive_root, task_id, strict=True) or {}
+        child = ((current.get("metadata") or {}).get("presence_work_ref")
+                 or (current.get("presence_continuation") or {}).get("child_work_ref"))
+        contact = dict(block["presence_contact"])
+        if child:
+            contact["child_work_ref"] = str(child)
+        snapshot["presence_contact"] = contact
     return deliver_as_owner_message(
         drive_root, chat_id, text, f"quiz_late_answer:{task_id}:{quiz_id}", source=source,
-        # Provenance rides its OWN field; the real transport (the web card, or
-        # the skill that relayed the owner's tap) is the message's source.
-        task_metadata={"late_answer": {
-            "task_id": task_id, "quiz_id": quiz_id,
-            # Host-authored exact frame authority in the existing accepted
-            # message. Discharged quiz GC cannot orphan a queued answer.
-            "answer_snapshot": {"task_id": task_id, "quiz": dict(block)},
-        }},
+        task_metadata=metadata,
     )
 
 
@@ -607,7 +637,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
                                            "The answer was recorded. Its history and delivery remain pending.")
             from ouroboros.question_answers import deliver_answer
             forwarded, forward_reason = await run_sync_to_completion(
-                deliver_answer, drive_root, task_id, quiz_id, block, _live_root_task, _forward_late_quiz_answer)
+                deliver_answer, drive_root, task_id, quiz_id, block, _mail_holder, _forward_late_quiz_answer)
             late_delivery = late_delivery or bool(forwarded)
             forward_reason = pending_reason or forward_reason
             if forward_reason:

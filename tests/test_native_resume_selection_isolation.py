@@ -17,10 +17,9 @@ def test_native_read_gap_resume_leaves_sibling_selections_untouched(restart_case
     env = _held(case, monkeypatch)
     assert not queue.BUDGET_ROOT_FENCES
     carriers = [
-        {"_budget_pause_hold": {"reason": events_budget.HOLD_SAVED_WORK,
-                                 "selected": True, "selected_by": "owner"}},
+        {"_resume_selection": {"selected_by": "owner"}},
         {"_budget_pause_hold": {"reason": events_budget.HOLD_ROOT_FENCE_LIFTED,
-                                 "selected": False, "root_grant_id": "older-root"}},
+                                 "root_grant_id": "older-root"}},
         {"_budget_pause_resume": {"authority": "explicit_resume", "selected_by": "owner",
                                    "grant_id": "kept-child-grant"}},
     ]

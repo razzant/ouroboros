@@ -24,8 +24,10 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-
+from tests import test_declared_output_early_answer as output_fixtures
 from tests._workspace_executor_shared import _init_repo, fake_docker_cli
+
+project = output_fixtures.project
 
 
 @pytest.mark.parametrize("executor_kind", [None, "local"])
@@ -523,6 +525,45 @@ def test_executor_services_participate_in_task_and_global_cleanup(tmp_path, monk
     killed = kill_all_services(data)
     assert any(item.get("name") == "globalsvc" for item in killed)
     assert workspace_executor.service_status(ctx, "globalsvc") is None
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_automatic_local_executor_stop_finalizes_declared_outputs(project, missing):
+    from ouroboros import artifacts, loop_budget, workspace_executor
+    from ouroboros.tools import services
+    registry, workspace, _ = project
+    ctx = registry._ctx
+    ctx.executor_ref = {"type": "local", "workspace_host_path": str(workspace),
+                        "workspace_backend_path": "/workspace"}
+    started = registry.execute_result("start_service", {
+        "name": "automatic-output", "outputs": ["answer.txt"],
+        "cmd": [sys.executable, "-c", "from pathlib import Path; import time; "
+                "Path('answer.txt').write_text('service-bytes'); print('READY', flush=True); time.sleep(60)"],
+        "readiness": {"log_contains": "READY", "timeout_sec": 10},
+    })
+    assert started.status == "ok", started.text
+    try:
+        if missing:
+            (workspace / "answer.txt").unlink()
+        completion = SimpleNamespace(drive_root=ctx.drive_root, task_id=ctx.task_id, tools=registry,
+                                     drive_logs=ctx.drive_logs(), event_queue=None, llm_trace={})
+        assert loop_budget._finalize_task_services(completion)
+        [event] = completion.llm_trace["verification_events"]
+        assert event["kind"] == "services_stopped"
+        stopped = event["services"]
+        print(json.dumps(stopped))
+        assert len(stopped) == 1 and stopped[0]["lifecycle"] == "stopped"
+        assert stopped[0]["artifact_output_failed"] is missing
+        assert not any(key.startswith("_") for key in stopped[0])
+        assert workspace_executor.service_status(ctx, "automatic-output") is None
+        assert not loop_budget._finalize_task_services(completion)
+        records = artifacts.collect_task_artifact_records(ctx.drive_root, ctx.task_id, require_registered=True)
+        if missing:
+            assert "missing output" in stopped[0]["artifact_outputs"] and not records
+        else:
+            assert len(records) == 1 and Path(records[0]["path"]).read_text() == "service-bytes"
+    finally:
+        services._stop_service(ctx, "automatic-output")
 
 
 def test_executor_keep_alive_service_survives_task_teardown(tmp_path, monkeypatch):

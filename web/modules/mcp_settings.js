@@ -15,7 +15,8 @@ const TRANSPORTS = [
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
-    'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings']);
+    'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
+    'schemas_at_start']);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -116,6 +117,25 @@ function toolCountLabel(count) {
     return `${count} tool${count === 1 ? '' : 's'}`;
 }
 
+function tokensLabel(count) {
+    const n = Number(count || 0);
+    return n < 1000 ? `≈${n} tokens` : `≈${(n / 1000).toFixed(1)}k tokens`;
+}
+
+function isPinned(server) {
+    return [true, 'true', 'True'].includes(server.schemas_at_start);
+}
+
+/** What this server costs the request: its part of the connections map, and its call schemas. */
+function weightLabel(server) {
+    const status = mcpStatusByServer[String(server.id ?? '')] || null;
+    if (!status || status.schema_tokens == null) return '';
+    const schemas = isPinned(server)
+        ? `call schemas ${tokensLabel(status.schema_tokens)} in every Low/Max request from task start`
+        : `call schemas ${tokensLabel(status.schema_tokens)}, loaded when Ouroboros takes up this server`;
+    return `Connections map ${tokensLabel(status.map_tokens)} in every Low/Max request; ${schemas}.`;
+}
+
 function unsupportedFields(server) {
     const unused = server.transport === 'stdio' ? ['url', 'auth_token', 'headers']
         : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
@@ -135,11 +155,17 @@ function statusParts(server) {
     const status = mcpStatusByServer[String(server.id ?? '')] || null;
     const toolCount = status ? Number(status.tool_count || 0) : 0;
     const lastError = status ? String(status.last_error || '') : '';
-    const lastRefreshed = status ? String(status.last_refreshed || '') : '';
+    const listedAt = status ? String(status.listed_at || '') : '';
+    const attempt = status?.latest_attempt;
     const tools = status && Array.isArray(status.tools) ? status.tools : [];
-    const badge = lastError ? [`Error: ${lastError}`, 'mcp-server-status-danger']
-        : toolCount > 0 ? [`${toolCountLabel(toolCount)} discovered`, 'mcp-server-status-ok']
-            : lastRefreshed ? ['0 tools discovered', 'mcp-server-status-warn'] : ['Not refreshed yet', 'mcp-server-status-muted'];
+    let label = listedAt ? `${toolCountLabel(toolCount)} (listed ${listedAt})`
+        : attempt ? 'Never listed under the current configuration' : 'Not listed yet';
+    if (attempt?.ok === false) label += `; last attempt ${attempt.at} failed: ${attempt.error}`;
+    else if (attempt?.partial) label += `; last attempt ${attempt.at} was partial`;
+    else if (lastError) label += `; ${lastError}`;
+    if (status?.publication_error) label += `; catalog publication failed: ${status.publication_error}`;
+    const badge = [label, lastError || status?.publication_error ? 'mcp-server-status-danger'
+        : toolCount > 0 ? 'mcp-server-status-ok' : listedAt ? 'mcp-server-status-warn' : 'mcp-server-status-muted'];
     const toolItems = tools.map((t) => `
                 <li>
                     <strong>${escapeHtml(t.name || t.prefixed_name || '')}</strong>
@@ -166,6 +192,8 @@ function paintStatus() {
         const card = isServer(server) ? cardFor(server) : null;
         if (!card) continue;
         const { badgeText, badgeClass, toolItems } = statusParts(server);
+        const weight = card.querySelector('[data-mcp-weight]');
+        if (weight) { weight.textContent = weightLabel(server); weight.hidden = !weight.textContent; }
         const badge = card.querySelector('.mcp-server-status');
         badge.className = badgeClass;
         if (badge.textContent !== badgeText) badge.textContent = badgeText;
@@ -196,6 +224,7 @@ function renderServerCard(server, index) {
         ? server.env_from_settings : JSON.stringify(server.env_from_settings ?? {}, null, 2);
     const literalEnv = typeof server.env === 'string' ? server.env : JSON.stringify(server.env ?? {}, null, 2);
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
+    const weight = weightLabel(server);
     const allowedTools = Array.isArray(server.allowed_tools) ? server.allowed_tools.join(', ') : '';
     const transportOptions = TRANSPORTS.map((opt) => {
         const selected = opt.value === transport ? ' selected' : '';
@@ -213,11 +242,16 @@ function renderServerCard(server, index) {
                 <div class="mcp-server-card-title">
                     <strong>${escapeHtml(name || id || `MCP Server ${index + 1}`)}</strong>
                     <span class="${badgeClass}">${escapeHtml(badgeText)}</span>
+                    <span class="ui-field-help" data-mcp-weight ${weight ? '' : 'hidden'}>${escapeHtml(weight)}</span>
                 </div>
                 <div class="mcp-server-card-actions">
                     <label class="mcp-server-enabled">
                         <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Enabled" data-mcp-field="enabled" ${enabled ? 'checked' : ''}>
                         <span>Enabled</span>
+                    </label>
+                    <label class="mcp-server-enabled" title="Off: Ouroboros sees this server's tools in its connections map and loads their call schemas when it needs them. On: in Low and Max the call schemas are in every request from the start of each task.">
+                        <input class="ui-checkbox" type="checkbox" aria-label="MCP server ${index + 1}: Call schemas from task start" data-mcp-field="schemas_at_start" ${isPinned(server) ? 'checked' : ''}>
+                        <span>Schemas from task start</span>
                     </label>
                     <button type="button" class="btn btn-default" data-mcp-test ${pending.has('test') ? 'disabled' : ''}>Test draft catalog</button>
                     <button type="button" class="btn btn-default" data-mcp-refresh ${pending.has('refresh') ? 'disabled' : ''}>Refresh saved catalog</button>
@@ -299,8 +333,8 @@ function bindCardEvents(card) {
         input.addEventListener('input', () => {
             const field = input.dataset.mcpField;
             const server = rowServer;
-            if (field === 'enabled') {
-                server.enabled = Boolean(input.checked);
+            if (field === 'enabled' || field === 'schemas_at_start') {
+                server[field] = Boolean(input.checked);
             } else if (field === 'allowed_tools') {
                 server.allowed_tools = String(input.value || '')
                     .split(',')
@@ -325,8 +359,10 @@ function bindCardEvents(card) {
             serverEdited(server);
         });
         input.addEventListener('change', () => {
-            if (input.dataset.mcpField === 'enabled') {
-                rowServer.enabled = Boolean(input.checked);
+            const field = input.dataset.mcpField;
+            if (field === 'enabled' || field === 'schemas_at_start') {
+                rowServer[field] = Boolean(input.checked);
+                if (field === 'schemas_at_start') paintStatus();
                 serverEdited(rowServer);
             }
         });
@@ -400,9 +436,11 @@ function bindCardEvents(card) {
         setCardMessage(server, 'Refreshing tools...', 'muted', 'refresh');
         try {
             const data = await jsonPost('/api/mcp/refresh', { server_id: sid }, { rejectOkFalse: true });
+            if (data.published === false) throw new Error(data.publication_error || 'Catalog was not published');
             await refreshStatus();
             if (mcpServers.includes(server)) setCardMessage(server, `Saved catalog refreshed — ${toolCountLabel(Number(data.tool_count || 0))} discovered. No tool was called.`, 'ok', 'refresh');
         } catch (err) {
+            await refreshStatus();
             if (mcpServers.includes(server)) setCardMessage(server, `Refresh failed: ${err && err.message ? err.message : err}`, 'danger', 'refresh');
         } finally {
             setPending(server, 'refresh', false);
@@ -468,7 +506,9 @@ function renderEnvelopeStatus() {
     const totalTools = Array.isArray(mcpStatusEnvelope.servers)
         ? mcpStatusEnvelope.servers.reduce((sum, s) => sum + Number(s.tool_count || 0), 0)
         : 0;
-    el.textContent = `${total} server${total === 1 ? '' : 's'} configured, ${totalTools} tool${totalTools === 1 ? '' : 's'} discovered.`;
+    const weights = mcpStatusEnvelope.weights;
+    const cost = weights ? ` Connections map ${tokensLabel(weights.map_tokens)} in every Low/Max request; call schemas from task start ${tokensLabel(weights.schema_tokens_from_task_start)}.` : '';
+    el.textContent = `${total} server${total === 1 ? '' : 's'} configured, ${totalTools} tool${totalTools === 1 ? '' : 's'} discovered.${cost}`;
     el.dataset.tone = 'ok';
 }
 
@@ -592,6 +632,7 @@ export function applyMcpSettings(settings) {
             auth_header: String(s.auth_header ?? 'Authorization'),
             auth_token: String(s.auth_token ?? ''),
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+            schemas_at_start: isPinned(s),
         };
         savedMcpSecrets.set(server, { identity: serverIdentity(s), url: server.url });
         return server;
@@ -641,6 +682,7 @@ function collectServer(s) {
         auth_header: String(s.auth_header || 'Authorization').trim() || 'Authorization',
         auth_token: String(s.auth_token || ''),
         allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [],
+        schemas_at_start: isPinned(s),
         ...credentialPayload(s),
     };
 }
@@ -654,7 +696,7 @@ export function mcpDraftSnapshot() {
 function draftFreshness() {
     return JSON.stringify(mcpServers.map((server) => {
         if (!isServer(server)) return server;
-        const { enabled: _enabled, allowed_tools: _allowedTools, ...fields } = server;
+        const { enabled: _enabled, allowed_tools: _allowedTools, schemas_at_start: _pin, ...fields } = server;
         return [fields, headerDraftRows(server)];
     }));
 }

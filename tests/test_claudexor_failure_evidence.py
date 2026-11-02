@@ -130,8 +130,15 @@ def test_catalog_read_failure_does_not_guess_unsupported_or_dispatch(setup, monk
         raise ClaudexorUnavailable("daemon_unreachable", "Metadata connection lost")
 
     monkeypatch.setattr(gateway, "operations", failed_catalog)
+    # The refusal is retried until the call's deadline and then reported as itself. The deadline runs on a
+    # transport clock that advances only while the transport waits between reads: on the wall clock a loaded
+    # runner can spend any deadline on gateway setup before the first read, which truthfully ends as
+    # daemon_not_answering, a different case (#2101).
+    clock = [0.0]
+    monkeypatch.setattr(transport, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
     with pytest.raises(transport.ClaudexorModelError) as caught:
-        call(client, asynchronous, timeout=0.01)
+        call(client, asynchronous, timeout=0.05)
     assert caught.value.code == "daemon_unreachable"
     assert caught.value.physical_attempt_capture.state == "released"
     assert not gateway.uploads and not gateway.creates and gateway.closed >= 1

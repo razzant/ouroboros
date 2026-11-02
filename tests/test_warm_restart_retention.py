@@ -275,6 +275,7 @@ def test_historical_orphan_continue_uses_known_cause_and_keeps_vetoes(tmp_path, 
 @pytest.mark.parametrize("reason", ["owner_pause", "sleep"])
 @pytest.mark.parametrize("ack", [False, True])
 def test_real_stop_door_selection_and_boot(tmp_path, monkeypatch, door, reason, ack):
+    import threading
     import server
     from ouroboros import server_restart
     from ouroboros.gateway import control
@@ -286,6 +287,8 @@ def test_real_stop_door_selection_and_boot(tmp_path, monkeypatch, door, reason, 
     monkeypatch.setattr(workers, "direct_chat_turns", lambda: [])
     monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server_restart, "_LAST_RETURN_TX", {"id": ""})
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    monkeypatch.setattr(server_restart, "_owner_restart_requested", threading.Event())
     monkeypatch.setattr(server_restart, "_LAST_RETURNING", set())
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                           kill_workers=workers.kill_workers, load_state=lambda: {},
@@ -306,6 +309,8 @@ def test_real_stop_door_selection_and_boot(tmp_path, monkeypatch, door, reason, 
         monkeypatch.setattr("ouroboros.process_custody.quiesce_custodied_services", lambda *_a: (True, []))
         assert control._quiesce_repo_writers("managed_update") == []
     else:
+        transaction = delegate_recovery.prepare_owner_restart(tmp_path)
+        server_restart._LAST_RETURN_TX["id"] = transaction["transaction_id"]
         monkeypatch.setattr(server_restart, "_stop_owned_daemon", lambda *_a: None)
         monkeypatch.setattr("ouroboros.delegate_custody.reconcile_orphaned_runs", lambda *_a, **_k: None)
         monkeypatch.setattr("ouroboros.owned_shutdown.stop_owned_work", lambda *_a: None)
@@ -316,6 +321,8 @@ def test_real_stop_door_selection_and_boot(tmp_path, monkeypatch, door, reason, 
         delegate_recovery._write_restart_transaction(tmp_path, {**tx, "status": "normal_exit_acknowledged"})
     workers.PENDING.clear()
     workers.RUNNING.clear()
+    monkeypatch.setattr(server_restart, "_OWNER_STOP_BEGAN", threading.Event())
+    monkeypatch.setattr(delegate_recovery, "_PROCESS_GENERATION", "next-boot")
     queue.restore_pending_from_snapshot()
     [task] = workers.PENDING
     assert task["id"] == "saved-warm"
@@ -502,7 +509,8 @@ def test_unreadable_unrelated_row_does_not_remove_manual_restart_returns(tmp_pat
 
     monkeypatch.setattr(owner_wait, "load_task_result", fault)
     monkeypatch.setattr(server_restart, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(server_restart, "_LAST_RETURN_TX", {"id": ""})
+    transaction = delegate_recovery.prepare_owner_restart(tmp_path)
+    monkeypatch.setattr(server_restart, "_LAST_RETURN_TX", {"id": transaction["transaction_id"]})
     monkeypatch.setattr(server_restart, "_LAST_RETURNING", set())
     monkeypatch.setattr(workers, "direct_chat_turns", lambda: [])
     selected, _ = server_restart._prepare_owner_restart_returns(SimpleNamespace(
@@ -561,6 +569,7 @@ def test_a_closed_wait_with_a_retention_hold_still_reaches_shutdown_custody(tmp_
 @pytest.mark.parametrize("reason", ["owner", "owner_pause"])
 def test_unreadable_wait_does_not_abort_other_pending_restore(tmp_path, monkeypatch, ack, project_hold, reason):
     from ouroboros import task_results
+    from ouroboros.work_stop import continuation_refusal
     from ouroboros.cancel_intents import has_active_intent
 
     queue, _, workers = _install_queue(tmp_path, monkeypatch)
@@ -592,7 +601,7 @@ def test_unreadable_wait_does_not_abort_other_pending_restore(tmp_path, monkeypa
     restored = {t["id"]: t for t in workers.PENDING}
     assert {"saved-warm", "bystander"} <= restored.keys()
     assert restored["saved-warm"]["_owner_wait_resume"]["wait_id"] == wait["wait_id"]
-    assert budget_hold_fact(restored["saved-warm"])["dispatchable"] is False
+    assert continuation_refusal(restored["saved-warm"]) and not restored["saved-warm"].get("_resume_selection")
     assert not restored["saved-warm"].get("_terminalization_retry")
     assert not has_active_intent(tmp_path, "saved-warm", strict=True)
     if reason == "owner_pause":

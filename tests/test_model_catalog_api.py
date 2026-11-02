@@ -1,6 +1,5 @@
 import asyncio
 from copy import deepcopy
-import inspect
 import json
 
 import httpx
@@ -38,12 +37,12 @@ def test_model_catalog_tags_provider_values(monkeypatch):
             source="OpenRouter",
         )]
 
-    async def fake_anthropic(_client, _api_key):
+    async def fake_anthropic(_client, _api_key, **_kwargs):
         return [model_catalog_api._build_model_catalog_entry(
             "anthropic", "Anthropic", "claude-sonnet-4-6", "Claude Sonnet 4.6"
         )]
 
-    async def fake_compatible(_client, provider_id, provider_label, _api_key, _base_url):
+    async def fake_compatible(_client, provider_id, provider_label, _api_key, _base_url, **_kwargs):
         model_id = {
             "openai": "gpt-4.1",
             "openai-compatible": "compatible-pro",
@@ -105,10 +104,10 @@ def test_model_catalog_returns_errors_nonfatally(monkeypatch):
             "openrouter", "Anthropic", "anthropic/claude-opus", "Claude Opus", source="OpenRouter"
         )]
 
-    async def fake_anthropic(_client, _api_key):
+    async def fake_anthropic(_client, _api_key, **_kwargs):
         raise RuntimeError("anthropic failed")
 
-    async def fake_compatible(_client, _provider_id, _provider_label, _api_key, _base_url):
+    async def fake_compatible(_client, _provider_id, _provider_label, _api_key, _base_url, **_kwargs):
         raise RuntimeError("catalog failed")
 
     monkeypatch.setattr(model_catalog_api, "_fetch_openrouter_model_catalog", fake_openrouter)
@@ -132,7 +131,7 @@ def test_model_catalog_registers_openai_compatible_base_url_without_key(monkeypa
     })
     captured = {}
 
-    async def fake_compatible(_client, provider_id, provider_label, api_key, base_url):
+    async def fake_compatible(_client, provider_id, provider_label, api_key, base_url, **_kwargs):
         captured.update({
             "provider_id": provider_id,
             "provider_label": provider_label,
@@ -186,7 +185,7 @@ def test_model_catalog_runs_provider_loaders_as_native_async(monkeypatch):
         calls.append("provider")
         return [{"value": "provider::model", "label": "Provider Model"}]
 
-    monkeypatch.setattr(model_catalog_api, "_provider_specs", lambda settings: [("provider", _loader)])
+    monkeypatch.setattr(model_catalog_api, "_provider_specs", lambda settings, **kwargs: [("provider", _loader)])
 
     response = asyncio.run(model_catalog_api.api_model_catalog(None))
     payload = json.loads(response.body.decode("utf-8"))
@@ -202,7 +201,7 @@ def test_model_catalog_classifies_httpx_error_stage(monkeypatch):
     async def _loader(_client):
         raise httpx.ConnectError("network down")
 
-    monkeypatch.setattr(model_catalog_api, "_provider_specs", lambda settings: [("provider", _loader)])
+    monkeypatch.setattr(model_catalog_api, "_provider_specs", lambda settings, **kwargs: [("provider", _loader)])
 
     response = asyncio.run(model_catalog_api.api_model_catalog(None))
     payload = json.loads(response.body.decode("utf-8"))
@@ -213,19 +212,27 @@ def test_model_catalog_classifies_httpx_error_stage(monkeypatch):
 
 
 def test_direct_api_catalog_loaders_keep_the_native_async_transport():
-    # The owned Claudexor gateway is synchronous and is explicitly offloaded
-    # at the endpoint boundary. Direct API fetchers must remain natively async.
-    source = "\n".join(
-        inspect.getsource(obj)
-        for obj in (
-            model_catalog_api._provider_specs,
-            model_catalog_api._load_provider,
-            model_catalog_api._fetch_openai_compatible_model_catalog,
-            model_catalog_api._fetch_openrouter_model_catalog,
-        )
-    )
-    assert "import requests" not in source
-    assert "asyncio.to_thread" not in source
+    # HTTP stays on the calling loop. Saved evidence persistence has its own
+    # off-loop witness in test_saved_catalog_image_input.py.
+    async def run():
+        loop, calls = asyncio.get_running_loop(), []
+
+        class Client:
+            async def get(self, url, **kwargs):
+                assert asyncio.get_running_loop() is loop
+                calls.append(url)
+                await asyncio.sleep(0)
+                return _Response({"data": [{"id": "vendor/model"}]})
+
+        for provider, loader in model_catalog_api._provider_specs({
+            "OPENROUTER_API_KEY": "fixture", "ANTHROPIC_API_KEY": "fixture", "DEEPSEEK_API_KEY": "fixture",
+            "OPENAI_COMPATIBLE_BASE_URL": "https://compat.invalid/v1",
+        }):
+            _, items, error, _, _ = await model_catalog_api._load_provider(Client(), provider, loader)
+            assert items and not error
+        assert len(calls) == 4
+
+    asyncio.run(run())
 
 
 def _account_operation(path):
@@ -303,6 +310,24 @@ def test_account_catalog_matches_the_published_response_shape(account_engine):
     assert any(row['default_reasoning_effort'] is None for row in payload['items'])
     assert any(row['observed_at'] is None for row in payload['items'])
     assert not validate_ingress(payload, ModelCatalogResponse)
+
+
+def test_agent_inventory_does_not_supply_an_absent_main_chat_transport(account_engine):
+    gateway, _ = account_engine
+    # Cursor login and agent inventory may succeed independently. Neither is a
+    # raw-model source; borrowing them here would reproduce the false-ready bug.
+    gateway.harness_model_catalog = lambda **_: {"models": [{"id": "cursor-test"}]}
+    gateway.credential_profiles = lambda: {"profiles": [{
+        "profile": {"harness_id": "cursor", "profile_id": "cursor-default"},
+        "status": {"verification": "passed", "verification_source": "vendor"},
+    }]}
+    assert gateway.credential_profiles()["profiles"][0]["status"]["verification"] == "passed"
+    assert gateway.harness_model_catalog()["models"]
+    result = model_catalog_api._subscription_model_catalog("cursor", "cursor-default")
+    assert result["items"] == []
+    assert result["errors"][0]["code"] == "model_source_unavailable"
+    assert gateway.calls == []  # no unrelated/default model request
+    assert model_catalog_api._subscription_model_catalog("codex")["items"]
 
 
 def test_auto_catalog_keeps_every_account_and_independent_capabilities(account_engine):

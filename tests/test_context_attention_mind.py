@@ -183,8 +183,9 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
     monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
 
     def plan(system):
-        p = SimpleNamespace(model="same-model", route_fp="route-a", preferred_mode="max", core_sha256="a" * 64,
-                            core=object(), provider="openai", output_reserve_tokens=65_536, window_tokens=500_000)
+        p = SimpleNamespace(model="same-model", route_fp="route-a", preferred_mode="max", initial_mode="max",
+                            core_sha256="a" * 64, core=object(), provider="openai", output_reserve_tokens=65_536,
+                            window_tokens=500_000)
         p.projection = lambda mode: SimpleNamespace(system_content_json=system, calibration_ratio=1.0)
         p.reproject_transcript = lambda messages, mode: [{"role": "system", "content": system}, *messages[1:]]
 
@@ -257,11 +258,11 @@ def test_facts_line_names_room_money_and_tariff_as_known_or_unknown(tmp_path, mo
     assert "model same-model" in line and "mode low" in line
     usage = context.accumulated_usage
     # Free room is the window's (#1727); the target is its own fact, measured with the reply floor.
-    free = 500_000 - usage["_context_prompt_estimate"] - usage["_context_reply_allowance_tokens"]
+    free = 500_000 - usage["_context_prompt_estimate"] - usage["_context_response_reserve_tokens"]
     room = 250_000 - usage["_context_prompt_estimate"] - 65_536
     for part in ("window 500,000", "target 250,000",
                  "input ~120,000 before this line (round 3 accepted 110,000, +10,000 since)",
-                 f"free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
+                 f"predicted free ~{free:,}", f"target room {room:,} (reply floor 65,536)",
                  "largest unit:2:3:", "own cost unknown",
                  "shared wallet $12.50 known headroom (unreserved; shared with other tasks)",
                  "quota 3 of 10 this hour", "tariff unknown", "elapsed unknown (no recorded start)",
@@ -323,7 +324,7 @@ def test_after_a_refusal_free_room_is_stated_as_the_measured_lower_bound_or_unkn
         reply_allowance=65_536)]))
     loop._measure_round_main_fit(context, automatic_pass_used=False)
     line = context_facts_line(context, measured=True)
-    assert f"free at least ~{921_840 - 500_000 - 65_536:,} (below an input this model accepted)" in line
+    assert "free unknown (acceptance established no reply room)" in line
     assert "free ~" not in line and "refused at ~933,000" in line
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit(
         estimated_input=900_000, anchor_input=890_000, anchor_round=9, accepted_input=921_840,
@@ -372,4 +373,4 @@ def test_facts_largest_components_include_core_and_schemas(tmp_path, monkeypatch
     monkeypatch.setattr(loop, "_measure_round_main_fit", _measure_cycle([_fit()]))
     assert append_context_facts(context, money={})
     line = context.messages[-1]["content"]
-    assert "system[0:0]" in line and "tool schemas" in line and "unit:2:3:" in line
+    assert "core and books" in line and "tool schemas" in line and "unit:2:3:" in line

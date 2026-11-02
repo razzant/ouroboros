@@ -64,6 +64,9 @@ class Node extends Events {
     append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
     getClientRects() { return this.isConnected && !this.closest('[hidden]') ? [this.rect] : []; }
     getBoundingClientRect() { return this.rect; }
+    // The laid-out size, as a browser reports it without the element's own transform.
+    get offsetWidth() { return this.rect.width ?? 0; }
+    get offsetHeight() { return this.rect.height ?? 0; }
     focus() { if (this.isConnected) this.ownerDocument.activeElement = this; }
 }
 function environment() {
@@ -126,12 +129,42 @@ test('native activation has one owner; external select is silent and never steal
     assert.equal(controller.select('three'), true);
     assert.equal(doc.activeElement, tabs[0]);
     assert.deepEqual(changed, ['two']);
+    strip.setAttribute('inert', '');
+    assert.equal(controller.select('one'), true, 'programmatic route selection succeeds while drawer closes over inert page');
+    strip.emit('click', { target: tabs[2] });
+    assert.equal(tabs[0].getAttribute('aria-selected'), 'true', 'user clicks on an inert strip are ignored');
+    strip.removeAttribute('inert');
     assert.equal(controller.select('unknown'), false);
     controller.destroy();
     assert.equal(controller.select('one', { focus: true }), false);
     strip.emit('click', { target: tabs[0] });
     assert.equal(strip.listenerCount(), 0);
     assert.deepEqual(changed, ['two']);
+});
+
+test('external tab selection works under a hidden or inert page without activating or focusing it', () => {
+    for (const attribute of ['hidden', 'inert']) {
+        const { doc, node, strip, tabs, changed, controller } = tabFixture();
+        const page = node('main', { [attribute]: '' });
+        page.append(strip);
+        const before = doc.activeElement;
+        assert.equal(controller.select('two'), true);
+        assert.equal(tabs[1].getAttribute('aria-selected'), 'true');
+        assert.equal(doc.activeElement, before);
+        assert.equal(controller.select('three', { focus: true }), false);
+        strip.emit('click', { target: tabs[2] });
+        strip.emit('keydown', { target: tabs[1], key: 'ArrowRight' });
+        assert.deepEqual(changed, []);
+        assert.equal(tabs[1].getAttribute('aria-selected'), 'true');
+        for (const attr of ['hidden', 'inert', 'aria-disabled']) {
+            tabs[2].setAttribute(attr, attr === 'aria-disabled' ? 'true' : '');
+            assert.equal(controller.select('three'), false);
+            tabs[2].removeAttribute(attr);
+        }
+        tabs[2].disabled = true;
+        assert.equal(controller.select('three'), false);
+        controller.destroy();
+    }
 });
 
 test('tab keys skip disabled/hidden choices, ignore nested strips and modifiers', () => {
@@ -297,6 +330,7 @@ test('menu fits a short/narrow viewport and keyboard wraps over enabled actions'
     assert.equal(menu.css.get('--ui-popup-left'), '142px');
     assert.equal(menu.css.get('--ui-popup-top'), '104px');
     assert.equal(menu.css.get('--ui-popup-max-height'), '196px');
+    assert.equal(menu.css.get('--ui-popup-origin'), '153px 100px', 'opening above its anchor, it grows from the anchor\'s middle at its foot');
     assert.equal(doc.activeElement, options[0]);
     menu.emit('keydown', { target: options[0], key: 'ArrowUp' });
     assert.equal(doc.activeElement, options[2]);
@@ -338,6 +372,10 @@ test('scroll inside the menu stays open; scrolling the page closes without a foc
     doc.defaultView.emit('scroll', { target: menu });
     doc.defaultView.emit('scroll');
     assert.deepEqual(closed, [], 'a queued event without movement does not close a just-opened menu');
+    // A row lifting under its long-press menu grows about its middle: the feed reflowing under it keeps the menu.
+    anchor.rect = { left: 274.5, right: 315.5, top: 207.8, bottom: 238.2, width: 41, height: 30.4 };
+    doc.defaultView.emit('scroll');
+    assert.deepEqual(closed, [], 'a lifted anchor has not moved');
     anchor.rect = { ...anchor.rect, top: anchor.rect.top - 10 };
     doc.defaultView.emit('scroll');
     assert.deepEqual(closed, ['scroll']);
@@ -409,6 +447,7 @@ test('popup uses visual viewport bounds and point coordinates without an input o
     const binding = bindPopoverPosition(popup, { point: { x: 300, y: 230 } });
     assert.equal(popup.css.get('--ui-popup-left'), '152px');
     assert.equal(popup.css.get('--ui-popup-top'), '122px');
+    assert.equal(popup.css.get('--ui-popup-origin'), '120px 80px', 'it grows from the press, clamped to its own box');
     binding.destroy();
     assert.equal(doc.defaultView.listenerCount() + doc.defaultView.visualViewport.listenerCount(), 0);
 });

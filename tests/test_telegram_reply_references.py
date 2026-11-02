@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from tests.test_telegram_format_parity import _load_skill
+from tests.test_telegram_routing_notices import phone  # noqa: F401 -- the owner's chat behind the real bus
 
 # The shared native-skill loader replaces its package entries in sys.modules.
 pytestmark = pytest.mark.serial
@@ -281,17 +282,27 @@ def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(bridge, 
     assert posts[1][1]["decision_id"] == "quiz:task:quiz" and posts[1][1]["comment"] == "B"
 
 
-def test_silent_mode_edits_same_episode_but_never_continue_or_reply_origin(bridge):
+def _quiet(b, **settings):
+    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_SILENT_MODE": "on", **settings})
+    return b.plugin._make_outbound(b.api)
+
+
+def _note(text, task_id="episode-1", **fields):
+    """A progress note as the agent publishes its narration (``ouroboros/agent.py``)."""
+    return {"text": text, "task_id": task_id, "is_progress": True, "role": "assistant",
+            "system_type": "model_narration", **fields}
+
+
+def test_silent_mode_replaces_progress_only_within_its_episode_and_reply_origin(bridge):
     b = bridge
-    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_SILENT_MODE": "on"})
-    handle = b.plugin._make_outbound(b.api)
+    handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
 
     async def run():
-        await handle({"text": "First", "task_id": "episode-1", "row_address": "row-first"})
-        await handle({"text": "Update", "task_id": "episode-1", "row_address": "row-update"})
-        await handle({"text": "Continue", "task_id": "episode-2", "row_address": "row-continue"})
-        await handle({"text": "Other origin", "task_id": "episode-2", "row_address": "row-origin",
-                      "reply_to": {"address": "other-owner"}})
+        await handle(_note("First", row_address="row-first"))
+        await handle(_note("Update", row_address="row-update"))
+        await handle(_note("Continue", "episode-2", row_address="row-continue"))
+        await handle(_note("Other origin", "episode-2", row_address="row-origin",
+                           reply_to={"address": "other-owner"}))
 
     asyncio.run(run())
     assert [method for method, _ in b.calls] == ["sendMessage", "editMessageText", "sendMessage", "sendMessage"]
@@ -302,15 +313,195 @@ def test_silent_mode_edits_same_episode_but_never_continue_or_reply_origin(bridg
 
 def test_silent_mode_starts_new_message_when_native_reply_anchor_changes(bridge):
     b = bridge
-    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_SILENT_MODE": "on"})
+    handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
     ref = _accept_owner(b, 10)
-    event = {"text": "First answer", "task_id": "same-episode", "reply_to": ref}
-    handle = b.plugin._make_outbound(b.api)
+    event = _note("First note", "same-episode", reply_to=ref)
     asyncio.run(handle(event))
     _state(b.plugin)._owner_message_seen(b.api, 42, 11)
     asyncio.run(handle({**event, "text": "More about the earlier request"}))
     assert [method for method, _ in b.calls] == ["sendMessage", "sendMessage"]
     assert "reply_to_message_id" not in b.calls[0][1] and b.calls[1][1]["reply_to_message_id"] == 10
+
+
+_REPLIES = ["Starting: the page template first, then the three longest notes.",
+            "Found it: long tables break at the page edge; wrapping rows, not shrinking the font.",
+            "Done: the PDF export works and long tables wrap."]
+
+
+@pytest.mark.parametrize("silent", ["on", "off"])
+def test_every_authored_message_and_the_final_answer_stay_their_own_messages(bridge, silent):
+    b = bridge
+    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_SILENT_MODE": silent})
+    handle = b.plugin._make_outbound(b.api)
+
+    async def run():
+        await handle({"text": _REPLIES[0], "task_id": "t1", "system_type": "proactive_message"})
+        await handle({"text": _REPLIES[1], "task_id": "t1", "system_type": "proactive_message"})
+        await handle({"text": _REPLIES[2], "task_id": "t1"})
+
+    asyncio.run(run())
+    assert [method for method, _ in b.calls] == ["sendMessage"] * 3
+    assert [data["text"] for _, data in b.calls] == _REPLIES
+    # Silent mode means no sound; it never means fewer messages.
+    assert [data.get("disable_notification") for _, data in b.calls] == [True if silent == "on" else None] * 3
+    assert b.plugin._get_silent_msg(b.api, 42) == 0
+
+
+def test_progress_replaces_progress_but_never_a_reply_or_the_final_answer(bridge):
+    b = bridge
+    handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
+    events = [{"text": _REPLIES[0], "task_id": "t1", "system_type": "proactive_message"},
+              _note("Reading the page template.", "t1"), _note("Building a trial PDF.", "t1"),
+              {"text": _REPLIES[1], "task_id": "t1", "system_type": "proactive_message"},
+              _note("Checking table wrapping.", "t1"), {"text": _REPLIES[2], "task_id": "t1"}]
+
+    async def run():
+        for event in events:
+            await handle(event)
+
+    asyncio.run(run())
+    assert [method for method, _ in b.calls] == [
+        "sendMessage", "sendMessage", "editMessageText", "sendMessage", "sendMessage", "sendMessage"]
+    edit = b.calls[2][1]
+    assert edit["message_id"] == "102" and edit["text"] == "Building a trial PDF."
+    visible = {}
+    for index, (method, data) in enumerate(b.calls, 101):
+        visible[int(data["message_id"]) if method == "editMessageText" else index] = data["text"]
+    assert list(visible.values()) == [_REPLIES[0], "Building a trial PDF.", _REPLIES[1],
+                                      "Checking table wrapping.", _REPLIES[2]]
+    assert all(data.get("disable_notification") is True for method, data in b.calls if method == "sendMessage")
+    assert b.plugin._get_silent_msg(b.api, 42) == 0, "the final answer ends the progress run"
+
+
+def test_a_split_progress_note_is_never_replaced(bridge):
+    """Editing the last part of a long note would erase that part: only a one-message note is replaceable."""
+    b = bridge
+    handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
+    long_note = "Reading every chapter. " * 400
+    asyncio.run(handle(_note(long_note, "t1")))
+    parts = len(b.calls)
+    assert parts > 1
+    asyncio.run(handle(_note("Next step.", "t1")))
+    assert [method for method, _ in b.calls] == ["sendMessage"] * (parts + 1)
+    assert b.calls[-1][1]["text"] == "Next step."
+    asyncio.run(handle(_note(long_note, "t1")))  # nor does a split note replace a short one
+    assert "editMessageText" not in [method for method, _ in b.calls]
+
+
+def test_a_message_tracked_before_this_version_is_never_replaced(bridge):
+    """An older bridge tracked authored replies; with no progress fact on it that reply stays."""
+    b = bridge
+    handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
+    _state(b.plugin)._remember_message(b.api, 42, 77, {
+        "row_address": "old-reply", "chat_id": 1, "task_id": "t1", "kind": "message",
+        "reply_to": "", "native_reply_id": 0})
+    b.plugin._set_silent_msg(b.api, 42, 77)
+    asyncio.run(handle(_note("Checking the result.", "t1")))
+    assert [method for method, _ in b.calls] == ["sendMessage"]
+    asyncio.run(handle({"text": "Same task, same origin: still its own message.", "task_id": "t1"}))
+    assert [method for method, _ in b.calls] == ["sendMessage", "sendMessage"]
+
+
+def test_questions_files_and_host_rows_keep_their_sound_in_silent_mode(bridge):
+    b = bridge
+    b.plugin.merge_settings(b.api.state_dir, {"TELEGRAM_SILENT_MODE": "on"})
+    asyncio.run(b.plugin._make_outbound(b.api)({
+        "text": "The task stopped: the working folder can't be used.", "role": "system",
+        "system_type": "terminal_incident", "task_id": "t1"}))
+    asyncio.run(b.plugin._make_quiz(b.api)({
+        "chat_id": 1, "quiz_id": "q", "task_id": "t1", "question": "Which name?",
+        "options": [{"label": "A"}, {"label": "B"}]}))
+    asyncio.run(b.plugin._make_document(b.api)({"chat_id": 1, "file_base64": "eA==", "filename": "notes.pdf"}))
+    assert [method for method, _ in b.calls] == ["sendMessage", "sendMessage", "sendDocument"]
+    assert all("disable_notification" not in data for _, data in b.calls)
+
+
+def _host_note(text, task_id="episode-1", **fields):
+    """A technical progress note in the host's voice, as the agent publishes it (``ouroboros/agent.py``)."""
+    return {**_note(text, task_id, **fields), "role": "system", "system_type": "host_progress"}
+
+
+def test_silent_mode_mutes_and_replaces_the_hosts_technical_progress_but_not_its_problems(bridge):
+    """Owner's choice, 27 Oct: A, every message muted. The host's typed technical notes are progress like the
+    model's own: muted, and the next note of the episode replaces the last. A typed incident is a problem: it
+    keeps its sound, is never replaced and leaves the progress run as it was."""
+    b = bridge
+    handle = _quiet(b, TELEGRAM_MIRROR_PROGRESS="on")
+
+    async def run():
+        await handle(_host_note("Checkpoint 3 at round 12"))
+        await handle(_host_note("Running the tests"))
+        await handle(_host_note("Fallback: trying other/model", task_incident="model_lane_attempt"))
+        await handle(_host_note("Fallback: other/model is now the active route; it answered."))
+        await handle(_note("Reading the failing test first."))
+
+    asyncio.run(run())
+    assert [(method, data.get("disable_notification")) for method, data in b.calls] == [
+        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None), ("editMessageText", None)]
+    assert b.calls[1][1]["message_id"] == b.calls[3][1]["message_id"] == b.calls[4][1]["message_id"] == "101"  # the first note, form-encoded
+
+
+def test_the_agents_host_progress_reaches_the_phone_muted_and_replaced(phone, monkeypatch):  # noqa: F811
+    """The real chain: ``OuroborosAgent._emit_progress`` → the supervisor's send_message delivery → the bus →
+    this bridge. In Silent mode the host's technical note rings no sound and the next one replaces it; the
+    incident note the same producer types keeps its sound."""
+    from supervisor import events_chat_delivery
+    from tests.test_progress_narration_voice import _agent, _emit
+
+    phone.plugin.merge_settings(phone.api.state_dir, {"TELEGRAM_SILENT_MODE": "on", "TELEGRAM_MIRROR_PROGRESS": "on"})
+    monkeypatch.setattr(events_chat_delivery, "_bound_project_chat_id", lambda *_: 0)
+    phone.ctx.RUNNING["task-1"] = {"task": {"id": "task-1", "_attempt": 0}}
+    agent, events = _agent()
+    _emit(agent, "Checkpoint 3 at round 12")
+    _emit(agent, "Running the tests")
+    _emit(agent, "Fallback: trying other/model", incident={"task_incident": "model_lane_attempt", "toast_once": "lane"})
+    _emit(agent, "Fallback: other/model is now the active route; it answered.")  # ordinary progress: Silent mutes it
+    for _ in range(4):
+        assert events_chat_delivery._handle_send_message(events.get_nowait(), phone.ctx) is True
+    assert [(method, data.get("disable_notification")) for method, data in phone.calls] == [
+        ("sendMessage", True), ("editMessageText", None), ("sendMessage", None), ("editMessageText", None)]
+
+
+def test_with_silent_mode_off_mirrored_route_rows_keep_the_phones_own_sound(phone, monkeypatch):  # noqa: F811
+    """The same real chain with Silent mode off and progress mirrored, the owner's other existing choice: every
+    note, the walk's ordinary outcome row included, is its own message with the phone's own notification. The
+    outcome row adds no incident or toast; it is not promised silence."""
+    from supervisor import events_chat_delivery
+    from tests.test_progress_narration_voice import _agent, _emit
+
+    phone.plugin.merge_settings(phone.api.state_dir, {"TELEGRAM_SILENT_MODE": "off", "TELEGRAM_MIRROR_PROGRESS": "on"})
+    monkeypatch.setattr(events_chat_delivery, "_bound_project_chat_id", lambda *_: 0)
+    phone.ctx.RUNNING["task-1"] = {"task": {"id": "task-1", "_attempt": 0}}
+    agent, events = _agent()
+    _emit(agent, "Running the tests")
+    _emit(agent, "Fallback: trying other/model", incident={"task_incident": "model_lane_attempt", "toast_once": "lane"})
+    _emit(agent, "Fallback: other/model is now the active route; it answered.")
+    for _ in range(3):
+        assert events_chat_delivery._handle_send_message(events.get_nowait(), phone.ctx) is True
+    assert [(method, data.get("disable_notification")) for method, data in phone.calls] == [("sendMessage", None)] * 3
+    assert phone.calls[-1][1]["text"].endswith("other/model is now the active route; it answered.")
+
+
+def test_silent_mode_setting_explains_sound_not_replacement(tmp_path):
+    from tests.test_telegram_format_parity import _load_skill as load
+
+    plugin, _transport = load()
+    sections = []
+    api = SimpleNamespace(
+        get_state_dir=lambda: str(tmp_path), get_runtime_info=lambda: {"data_dir": str(tmp_path / "data")},
+        register_supervised_task=lambda *a, **k: None, subscribe_event=lambda *a, **k: None,
+        register_route=lambda *a, **k: None, log=lambda *a, **k: None,
+        register_settings_section=lambda name, **kwargs: sections.append(kwargs))
+    plugin.register_miniapp = lambda _api: None
+    plugin.register(api)
+    fields = [field for component in sections[0]["schema"]["components"] if component.get("type") == "form"
+              for field in component["fields"]]
+    (silent,) = [field for field in fields if field["name"] == "TELEGRAM_SILENT_MODE"]
+    assert silent["label"] == "Silent mode"
+    assert [option["label"] for option in silent["options"]] == ["Off", "On (without sound)"]
+    assert silent["help"] == (
+        "On sends replies, the final answer and progress without sound; a progress update replaces "
+        "the one just before it. Questions, files and problems keep their sound.")
 
 
 def test_completion_notifier_maps_persisted_summary_and_keeps_episodes_separate(bridge, monkeypatch):
@@ -334,7 +525,7 @@ def test_completion_notifier_maps_persisted_summary_and_keeps_episodes_separate(
     assert mapping._reply_reference(b.api, 42, 102) == "task:episode-2"
 
 
-def test_relay_success_silent_named_failure_one_line_synthetic_uses_host_row(bridge):
+def test_relay_success_silent_failure_one_line_and_its_paired_system_row_only_when_no_ack_carried_it(bridge):
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, routing_refusal_cause
 
     b = bridge
@@ -344,13 +535,19 @@ def test_relay_success_silent_named_failure_one_line_synthetic_uses_host_row(bri
     asyncio.run(handle(ack))
     assert not b.calls
     cause = routing_refusal_cause("steer_task", "rejected", "cancel_pending")
-    asyncio.run(handle({**ack, "status": "rejected", "cause": cause}))
+    refused = {**ack, "status": "rejected", "cause": cause, "routing_notice_carrier": "routing_ack"}
+    asyncio.run(handle(refused))
     assert len(b.calls) == 1 and b.calls[0][1]["text"] == f"Parser · {cause}"
     assert "\n" not in b.calls[0][1]["text"]
-    asyncio.run(handle({**ack, "client_message_id": AGENT_RECEIPT_ID_PREFIX + "1", "status": "rejected", "cause": cause}))
-    assert len(b.calls) == 1
-    asyncio.run(handle({"role": "system", "system_type": "steer_not_delivered", "text": f"Parser · {cause}"}))
-    assert len(b.calls) == 2 and all(method == "sendMessage" for method, _ in b.calls)
+    # The ACK is the carrier for an act that wears no owner message too; its paired System row is skipped
+    # only when it says so, and a row that carries the notice itself (or any standalone one) still arrives.
+    asyncio.run(handle({**refused, "client_message_id": AGENT_RECEIPT_ID_PREFIX + "1"}))
+    row = {"role": "system", "system_type": "steer_not_delivered", "text": f"Parser · {cause}"}
+    asyncio.run(handle({**row, "routing_notice_carrier": "routing_ack"}))
+    assert [data["text"] for _, data in b.calls] == [f"Parser · {cause}"] * 2
+    asyncio.run(handle({**row, "routing_notice_carrier": "system"}))
+    asyncio.run(handle(row))
+    assert len(b.calls) == 4 and all(method == "sendMessage" for method, _ in b.calls)
 
 
 def test_relay_quotes_the_owners_words_and_files_above_the_note_verbatim(bridge):
@@ -367,8 +564,7 @@ def test_relay_quotes_the_owners_words_and_files_above_the_note_verbatim(bridge)
     assert not data.get("parse_mode"), "his words are sent verbatim, never re-read as markup"
     bridge.calls.clear()
     asyncio.run(bridge.plugin._make_outbound(bridge.api)({**event, "relay": {"relay_id": "r2", "text": "", "quotes": []}}))
-    [(_method, plain)] = bridge.calls
-    assert plain["text"] == "Apply this constraint.", "a relay without quoted words is just its note"
+    assert not bridge.calls, "a note between works without his words stays in its room, off the phone"
 
 
 _MAP_FAULTS = [("write_text", 28), ("write_text", 13), ("replace", 28), ("replace", 13)]  # ENOSPC, EACCES

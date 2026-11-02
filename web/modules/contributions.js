@@ -2,7 +2,8 @@
 // `GET /api/ui/contributions`, read at boot, on every socket (re)open, on `extension_lifecycle`, on the end of any skill
 // lifecycle job (its `skill_lifecycle` progress row: an install from Browse, an update, a turn-on once ready, whoever
 // started it) and on the page's own `ouro:skill-lifecycle`; overlapping triggers share one read and a failed read
-// keeps the last good snapshot. Its
+// keeps the last good snapshot. `onChange` hears a changed projection; `onLifecycle` hears every such lifecycle end,
+// for what the projection leaves out (an off skill's files). Its
 // selectors answer per placement and per provider kind; placements follow the owner's arrangement
 // (`preferences.contributions.hidden` and `order`, contributed items only: the host's own controls are not in this
 // store) and leave out a contribution that is off for this page. The fault book is that "off": a contribution whose
@@ -42,10 +43,11 @@ export function createContributionsStore({ client = apiClient } = {}) {
     let destroyed = false;
     const faults = new Map();  // key -> { revision, reason, skill, skill_label, label }
     const listeners = new Set();
+    const lifecycleListeners = new Set();
     const detachers = new Set();
 
-    function notify() {
-        for (const listener of [...listeners]) {
+    function notify(set = listeners) {
+        for (const listener of [...set]) {
             try { listener(store); } catch (error) { console.error('contributions listener failed', error); }
         }
     }
@@ -133,16 +135,22 @@ export function createContributionsStore({ client = apiClient } = {}) {
             listeners.add(listener);
             return () => listeners.delete(listener);
         },
+        /** Called at each lifecycle trigger below, changed projection or not; never at boot or a socket open. */
+        onLifecycle(listener) {
+            lifecycleListeners.add(listener);
+            return () => lifecycleListeners.delete(listener);
+        },
         /** Read at boot and on every trigger that may change what is live. Returns the disposer. */
         attach({ ws = null, target = globalThis.window } = {}) {
             const read = () => { void store.refresh(); };
+            const lifecycle = () => { read(); notify(lifecycleListeners); };
             const ended = (msg) => {
                 const phase = (msg?.lifecycle || msg?.progress_meta?.lifecycle)?.phase;
-                if (msg?.system_type === 'skill_lifecycle' && LIFECYCLE_ENDS.has(phase)) read();
+                if (msg?.system_type === 'skill_lifecycle' && LIFECYCLE_ENDS.has(phase)) lifecycle();
             };
-            const offs = [ws?.on?.('open', read), ws?.on?.('extension_lifecycle', read), ws?.on?.('chat', ended)];
-            target?.addEventListener?.('ouro:skill-lifecycle', read);
-            offs.push(() => target?.removeEventListener?.('ouro:skill-lifecycle', read));
+            const offs = [ws?.on?.('open', read), ws?.on?.('extension_lifecycle', lifecycle), ws?.on?.('chat', ended)];
+            target?.addEventListener?.('ouro:skill-lifecycle', lifecycle);
+            offs.push(() => target?.removeEventListener?.('ouro:skill-lifecycle', lifecycle));
             const detach = () => {
                 for (const off of offs) if (typeof off === 'function') off();
                 detachers.delete(detach);
@@ -155,6 +163,7 @@ export function createContributionsStore({ client = apiClient } = {}) {
             destroyed = true;
             for (const detach of [...detachers]) detach();
             listeners.clear();
+            lifecycleListeners.clear();
         },
     };
     return store;

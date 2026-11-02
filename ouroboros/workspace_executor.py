@@ -14,7 +14,6 @@ import json
 import hashlib
 import os
 import pathlib
-import posixpath
 import shlex
 import subprocess
 import threading
@@ -34,31 +33,12 @@ from ouroboros.platform_layer import (
     request_process_tree_kill,
     scrub_repo_from_pythonpath, subprocess_new_group_kwargs,
 )
-from ouroboros.tool_access import path_is_relative_to
 from ouroboros.tool_custody import invocation_binding
 from ouroboros.utils import atomic_write_json, utc_now_iso
-
-@dataclass(frozen=True)
-class PathMapping:
-    host_path: pathlib.Path
-    backend_path: str
-
-
-class BackendPathNoMatch(ValueError):
-    """The backend spelling does not select any configured mapping.
-
-    Mapping callers use this narrow distinction to preserve their existing
-    host-path fallback.  A matched mapping with an invalid descendant remains
-    a plain ``ValueError`` and must be refused.
-    """
-
-@dataclass(frozen=True)
-class ExecutorRef:
-    kind: str
-    executor_id: str
-    network: str
-    mappings: tuple[PathMapping, ...]
-    container_name: str = ""
+from ouroboros.workspace_executor_paths import (  # noqa: F401 — public compatibility surface
+    BackendPathNoMatch, ExecutorRef, PathMapping, normalize_executor_ref,
+    map_host_path, map_backend_path, map_backend_path_lexical,
+)
 
 @dataclass
 class ExecutorResult:
@@ -99,6 +79,7 @@ class _ExecutorService:
     env: dict[str, str] = field(default_factory=dict, repr=False)
     secret_values: tuple[str, ...] = field(default=(), repr=False)
     drive_root: pathlib.Path | None = None
+    output_context: Any = None
 
 
 _SERVICES: dict[str, _ExecutorService] = {}
@@ -128,116 +109,6 @@ def executor_ref_from_ctx(ctx: Any) -> ExecutorRef | None:
     return normalize_executor_ref(raw)
 
 
-def normalize_executor_ref(raw: dict[str, Any]) -> ExecutorRef | None:
-    if not raw:
-        return None
-    kind = str(raw.get("type") or raw.get("kind") or "").strip().lower()
-    if not kind:
-        raise ValueError("executor_ref.type is required")
-    if kind not in {"local", "docker_exec"}:
-        raise ValueError(f"unsupported executor_ref.type: {kind}")
-    network = str(raw.get("network") or "host").strip().lower()
-    if network not in {"host", "none"}:
-        raise ValueError("executor_ref.network must be 'host' or 'none'")
-    if kind == "local" and network == "none":
-        raise ValueError("local executor_ref cannot enforce network=none; use docker_exec")
-
-    mappings: list[PathMapping] = []
-    workspace_host = str(raw.get("workspace_host_path") or "").strip()
-    workspace_backend = str(raw.get("workspace_backend_path") or "").strip()
-    if workspace_host and workspace_backend:
-        mappings.append(PathMapping(pathlib.Path(workspace_host).expanduser().resolve(strict=False), _normalize_backend_path(workspace_backend)))
-    raw_mappings = raw.get("path_mappings") if "path_mappings" in raw else raw.get("mappings")
-    if raw_mappings is None:
-        raw_mappings = []
-    if not isinstance(raw_mappings, list):
-        raise ValueError("executor_ref.path_mappings must be a list")
-    for item in raw_mappings:
-        if not isinstance(item, dict):
-            raise ValueError("executor_ref.path_mappings entries must be objects")
-        host = str(item.get("host_path") or "").strip()
-        backend = str(item.get("backend_path") or "").strip()
-        if not host or not backend:
-            raise ValueError("executor_ref.path_mappings entries require host_path and backend_path")
-        mappings.append(PathMapping(pathlib.Path(host).expanduser().resolve(strict=False), _normalize_backend_path(backend)))
-    if not mappings:
-        raise ValueError("executor_ref requires at least one host/backend path mapping")
-    if kind == "docker_exec" and not str(raw.get("container_name") or raw.get("container") or "").strip():
-        raise ValueError("docker_exec executor_ref requires container_name")
-    return ExecutorRef(
-        kind=kind,
-        executor_id=str(raw.get("id") or raw.get("container_name") or uuid.uuid4().hex[:12]),
-        network=network,
-        mappings=tuple(_dedupe_mappings(mappings)),
-        container_name=str(raw.get("container_name") or raw.get("container") or "").strip(),
-    )
-
-
-def _normalize_backend_path(path_text: str) -> str:
-    normalized = str(path_text or "").replace("\\", "/").strip()
-    if not normalized.startswith("/"):
-        raise ValueError("executor_ref backend_path must be an absolute backend path")
-    raw_parts = [part for part in normalized.split("/") if part]
-    if any(part in {".", ".."} for part in raw_parts):
-        raise ValueError("executor_ref backend_path must not contain traversal segments")
-    normalized = posixpath.normpath(normalized)
-    if normalized in {"", ".", "/"}:
-        raise ValueError("executor_ref backend_path must not be empty or backend root")
-    return normalized
-
-
-def _dedupe_mappings(mappings: list[PathMapping]) -> list[PathMapping]:
-    seen: set[tuple[str, str]] = set()
-    result: list[PathMapping] = []
-    for mapping in mappings:
-        key = (str(mapping.host_path), mapping.backend_path.rstrip("/"))
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(mapping)
-    result.sort(key=lambda item: len(str(item.host_path)), reverse=True)
-    return result
-
-
-def map_host_path(executor: ExecutorRef, path: pathlib.Path) -> str:
-    host = pathlib.Path(path).expanduser().resolve(strict=False)
-    for mapping in executor.mappings:
-        if not path_is_relative_to(host, mapping.host_path):
-            continue
-        rel = host.relative_to(mapping.host_path).as_posix()
-        base = mapping.backend_path.rstrip("/")
-        return base if not rel or rel == "." else f"{base}/{rel}"
-    raise ValueError(f"path is outside executor mappings: {host}")
-
-
-def map_backend_path(executor: ExecutorRef, path_text: str) -> pathlib.Path:
-    return map_backend_path_lexical(executor, path_text).resolve(strict=False)
-
-
-def map_backend_path_lexical(executor: ExecutorRef, path_text: str) -> pathlib.Path:
-    """Map a backend path without resolving descendant symlinks.
-
-    Policy callers need the lexical spelling to detect a path that originated
-    under a configured output root before canonicalization can move it into a
-    different allowed root.  Execution and ordinary path consumers continue to
-    use ``map_backend_path`` and receive the resolved host path.
-    """
-    normalized = str(path_text or "").replace("\\", "/").rstrip("/")
-    if not normalized.startswith("/"):
-        raise BackendPathNoMatch(f"backend path is not absolute: {path_text}")
-    for mapping in sorted(executor.mappings, key=lambda item: len(item.backend_path.rstrip("/")), reverse=True):
-        base = str(mapping.backend_path or "").replace("\\", "/").rstrip("/")
-        if not base:
-            continue
-        if normalized != base and not normalized.startswith(base + "/"):
-            continue
-        rel_text = normalized[len(base):].lstrip("/")
-        rel_parts = [part for part in rel_text.split("/") if part and part != "."]
-        if any(part == ".." for part in rel_parts):
-            raise ValueError(f"backend path escapes executor mapping: {path_text}")
-        return mapping.host_path.joinpath(*rel_parts)
-    raise BackendPathNoMatch(f"path is outside executor backend mappings: {path_text}")
-
 
 def execute(
     ctx: Any,
@@ -247,12 +118,16 @@ def execute(
     *,
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
+    executor: ExecutorRef | None = None,
+    stop: Any = None,
 ) -> ExecutorResult:
     """Run in the configured backend. Host/interpreter ``env_overlay`` applies
     only locally: host paths/PATH must not leak into Docker. Explicit target_env
     is separate and reaches either backend, through inert aliases in Docker.
-    In a body candidate or system copy, Docker must map the source copy and its sibling ``.env`` directory (else refused)."""
-    executor = executor_ref_from_ctx(ctx)
+    In a body candidate or system copy, Docker must map the source copy and its sibling ``.env`` directory (else refused).
+    ``stop`` is an in-process turn's Stop-now reader (``shell_process.communicate_or_stop``): each backend ends
+    through its own timeout kill, the container command through its owned pidfile, never the container."""
+    executor = executor or executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
     drive_root = _custody_drive_root(getattr(ctx, "drive_root", None))
@@ -264,10 +139,10 @@ def execute(
     if executor.kind == "local":
         return _execute_local(
             executor, cmd, cwd_path, timeout_sec,
-            drive_root=drive_root, local_env=candidate_env,
+            drive_root=drive_root, local_env=candidate_env, stop=stop,
             env_overlay=env_overlay, **({"target_env": target_env} if target_env else {}),
         )
-    return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=drive_root,
+    return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=drive_root, stop=stop,
                            **({"target_env": overlay_env(candidate_env or {}, target_env), "replace_env": True}
                               if candidate_env is not None else {"target_env": target_env} if target_env else {}))
 
@@ -335,7 +210,10 @@ def _execute_local(
     env_overlay: "dict[str, str] | None" = None,
     target_env: "dict[str, str] | None" = None,
     local_env: "dict[str, str] | None" = None,
+    stop: Any = None,
 ) -> ExecutorResult:
+    from ouroboros.tools.shell_process import communicate_or_stop
+
     drive_root = _custody_drive_root(drive_root)
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
@@ -381,7 +259,7 @@ def _execute_local(
         confirmed()
     _FOREGROUND[proc] = (record_path, executor.kind)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        stdout, stderr = communicate_or_stop(proc, timeout_sec, stop, lambda: kill_process_tree(proc))
         return ExecutorResult(
             proc.returncode,
             stdout or "",
@@ -409,7 +287,10 @@ def _execute_docker(
     drive_root: pathlib.Path | None,
     target_env: "dict[str, str] | None" = None,
     replace_env: bool = False,
+    stop: Any = None,
 ) -> ExecutorResult:
+    from ouroboros.tools.shell_process import communicate_or_stop
+
     drive_root = _custody_drive_root(drive_root)
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
@@ -478,8 +359,15 @@ def _execute_docker(
         confirmed()
     _FOREGROUND[proc] = (record_path, executor.kind)
     cleanup_confirmed = False
+
+    def stop_backend() -> bool:  # Stop now: the timeout's own pidfile stop, then the host CLI
+        nonlocal cleanup_confirmed
+        cleanup_confirmed = _cleanup_docker_exec_timeout(executor.container_name, pidfile)
+        kill_process_tree(proc)
+        return cleanup_confirmed
+
     try:
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
+        stdout, stderr = communicate_or_stop(proc, timeout_sec, stop, stop_backend)
         cleanup_confirmed = _docker_exec_completed(executor.container_name, pidfile)
     except subprocess.TimeoutExpired:
         cleanup_confirmed = _cleanup_docker_exec_timeout(executor.container_name, pidfile)
@@ -894,6 +782,7 @@ def _trace(executor: ExecutorRef, cwd: str, cmd: list[str], returncode: int | No
         "executor_id": executor.executor_id,
         "executor_type": executor.kind,
         "network": executor.network,
+        **({"container_name": executor.container_name} if executor.kind == "docker_exec" else {}),
         "cwd": cwd,
         "cmd": _redacted_cmd(cmd),
         "returncode": returncode,
@@ -939,12 +828,13 @@ def start_service(
     env_overlay: "dict[str, str] | None" = None,
     env: dict[str, str] | None = None,
     secret_values: tuple[str, ...] = (),
+    output_context: Any = None,
 ) -> dict[str, Any]:
     if _panic_requested:
         raise RuntimeError("Emergency Stop has retired executor admission")
     drive_root = _custody_drive_root(getattr(ctx, "drive_root", None))
     env = validate_process_env(env)
-    executor = executor_ref_from_ctx(ctx)
+    executor = output_context.executor if output_context else executor_ref_from_ctx(ctx)
     if executor is None:
         raise ValueError("no executor_ref configured")
     bootstrap_process_path()
@@ -965,6 +855,7 @@ def start_service(
         task_id=str(getattr(ctx, "task_id", "") or "manual"),
         name=name,
         executor=executor,
+        output_context=output_context,
         cmd=[str(part) for part in cmd],
         host_cwd=host_cwd,
         backend_cwd=backend_cwd,
@@ -981,13 +872,14 @@ def start_service(
         drive_root=drive_root,
     )
     if executor.kind == "local":
+        from ouroboros.maintenance_retirement import artifact_changed
         from ouroboros.process_custody import spawn_supervised
-
         # A service inside the bound body candidate runs isolated; a refusal precedes any log.
         base_env = candidate_env if candidate_env is not None else _executor_service_env()
         log_path = drive_root / "services" / record.task_id / f"{name}.executor.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fh = log_path.open("ab")
+        artifact_changed(drive_root)
 
         from ouroboros.owner_pause import _member_coordinates
         from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
@@ -1181,6 +1073,7 @@ def stop_service(ctx: Any, name: str) -> dict[str, Any] | None:
     payload = _stop_service_record(record)
     if not payload.get("stop_failed"):
         payload["_before_outputs"] = record.before_outputs
+        payload["_output_context"] = record.output_context
     return payload
 
 
@@ -1196,6 +1089,9 @@ def stop_task_services(ctx: Any) -> list[dict[str, Any]]:
         try:
             payload = stop_service(ctx, record.name)
             if payload is not None:
+                from ouroboros.tools.services import _finalize_executor_service_outputs
+
+                _finalize_executor_service_outputs(ctx, payload)
                 payload["lifecycle"] = (
                     "cleanup_pending"
                     if payload.get("stop_failed") or payload.get("cleanup_dispatched") is False
@@ -1405,6 +1301,7 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
             "id": record.executor.executor_id,
             "type": record.executor.kind,
             "network": record.executor.network,
+            **({"container_name": record.executor.container_name} if record.executor.kind == "docker_exec" else {}),
         },
         "backend_pid": record.backend_pid,
         "backend_cwd": record.backend_cwd,

@@ -485,25 +485,15 @@ def test_separate_work_keeps_the_callers_unmet_swarm_obligation(_projects_root, 
 
 
 
-def test_ensure_keeps_the_obligation_and_a_met_one_transfers_nothing(_projects_root, monkeypatch):
-    import ouroboros.task_results as task_results
-    from ouroboros.owner_hurry import unmet_force_plan_obligation
+def test_move_to_project_ignores_legacy_planning_obligation(_projects_root, monkeypatch):
+    from ouroboros.owner_hurry import plan_gate_decision
     from ouroboros.tools.control import _move_to_project
 
-    tmp_path = _projects_root
-    supervisor = _supervisor(tmp_path, running={"swarm-root": {"task": {"id": "swarm-root", "project_id": ""}}})
-    ctx = _ensure_live(tmp_path, supervisor, task_id="swarm-root",
+    supervisor = _supervisor(_projects_root, running={"swarm-root": {"task": {"id": "swarm-root", "project_id": ""}}})
+    ctx = _ensure_live(_projects_root, supervisor, task_id="swarm-root",
                        task_metadata={"force_plan": True, "force_plan_source": "swarm"})
-
-    out = _move_to_project(ctx, project_name="Cyber Racing")
-
-    assert out.startswith("OK: this work")
-    assert ctx.task_metadata["force_plan"] is True  # same task: the obligation stays
-    assert unmet_force_plan_obligation(ctx) == {"unmet": True, "source": "swarm"}
-    monkeypatch.setattr(task_results, "load_plan_review_state",
-                        lambda _root, _tid: {"schema_version": 2, "waves": [{"request_fingerprint": "f1"}]})
-    assert unmet_force_plan_obligation(ctx) == {"unmet": False, "reason": "plan_asked"}
-    assert unmet_force_plan_obligation(_owner_turn_ctx(tmp_path)) == {"unmet": False, "reason": "not_required"}
+    assert _move_to_project(ctx, project_name="Cyber Racing").startswith("OK: this work")
+    assert plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "not_required"
 
 
 def test_separate_work_reports_its_own_destination(_projects_root, monkeypatch):
@@ -529,21 +519,15 @@ def test_separate_work_reports_its_own_destination(_projects_root, monkeypatch):
     assert "first-room" not in out and "second project" not in out
 
 
-def test_a_transfer_admitted_after_the_wait_returned_still_releases_the_worker(tmp_path):
-    """Late admission: the supervisor recorded the transfer on the promoter's task
-    result while the tool had already returned unconfirmed; the worker's own
-    obligation readers reconcile from that durable record instead of holding
-    finalization for a plan the new root owes."""
-    from ouroboros.owner_hurry import force_plan_decision, unmet_force_plan_obligation
-    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+def test_old_transfer_receipts_remain_readable_without_creating_an_obligation(tmp_path):
+    from ouroboros.owner_hurry import plan_gate_decision
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result, load_task_result
 
-    write_task_result(tmp_path, "swarm-root", STATUS_RUNNING, result="running",
-                      force_plan_transfer={"from": "swarm-root", "to": "new-root", "released": True})
+    receipt = {"from": "swarm-root", "to": "new-root", "released": True}
+    write_task_result(tmp_path, "swarm-root", STATUS_RUNNING, result="running", force_plan_transfer=receipt)
     ctx = _pooled_root_ctx(tmp_path)
-    assert unmet_force_plan_obligation(ctx) == {"unmet": False, "reason": "transferred"}
-    assert ctx.task_metadata["force_plan"] is False
-    assert ctx.task_metadata["force_plan_transferred_to"] == "new-root"
-    assert force_plan_decision(ctx, {}, enforcement="blocking")["status"] == "not_required"
+    assert plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "not_required"
+    assert load_task_result(tmp_path, "swarm-root")["force_plan_transfer"] == receipt
 
 
 def test_a_returning_roster_is_re_announced_after_an_intervening_change(tmp_path):

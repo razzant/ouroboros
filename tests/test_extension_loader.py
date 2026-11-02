@@ -49,6 +49,9 @@ def test_load_extension_registers_tool(tmp_path):
         "    )\n"
     )
     loaded, _, drive_root = _prepare_extension(tmp_path, "ext1", plugin, permissions=["tool"])
+    # Python entries are imported, not launched through the script interpreter.
+    assert loaded.manifest.runtime == ""
+    assert loaded.manifest.validate() == []
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("ext1", "echo")

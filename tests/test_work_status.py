@@ -18,11 +18,52 @@ def row(task_id, phase="working", **extra):
 
 # ---- one member ---------------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("is_call", [False, True])
+def test_stopped_call_has_no_resume_release_but_text_still_does(is_call, tmp_path):
+    parked = row("call", "budget_paused", pause_cause="restart", can_resume=True)
+    metadata = {"execution_transport": {"type": "live_conversation"}} if is_call else {}
+    raw = {"metadata": metadata, "_budget_pause_hold": {"reason": "owner_restart_hold"}}
+    facts = wp._member_raw(parked, raw, wp._Observations(tmp_path), "call")
+    state = ws.classify_member(parked, facts)
+    # A stopped call has ended: nobody resumes it. A text task keeps the release the stop view gives it.
+    assert (state["release"] == "none") is is_call
+    if is_call:
+        assert state["turn"] == [] and state.get("resumable") is False
+    actions = {control["action"] for control in ws.controls_for(state, parked)}
+    assert ("resume" in actions) is (not is_call)
+    assert "stop" in actions
+
+
 def test_working_member_names_its_exact_call():
     state = ws.classify_member(row("t", model_activity={"phase": "awaiting_response"}))
     assert (state["activity"], state["call"], state["release"]) == ("working", "sending", "self")
     assert ws.classify_member(row("t", "thinking"))["call"] == "thinking"
     assert ws.classify_member(row("t", "preparing", kind="direct_chat"))["call"] == "preparing"
+
+
+@pytest.mark.parametrize("turn_phase, text", [
+    ("admitted", "Setting up the turn"), ("started", "Starting the turn"),
+    ("context_building", "Building context"), ("context_built", "Context ready"),
+])
+def test_a_preparing_direct_turn_says_the_start_step_it_stands_at(turn_phase, text):
+    state = ws.classify_member(row("d", "preparing", kind="direct_chat", turn_phase=turn_phase))
+    assert (state["activity"], state["call"], state["live"]) == ("working", "preparing", True)
+    assert state["reasons"] == [{"code": f"turn_{turn_phase}", "text": text}]
+
+
+def test_a_start_step_speaks_only_while_preparing_and_a_started_call_reads_the_census_move():
+    # Its own Main call started before its census phase moved: the word that move gives, never Sending ahead of it.
+    for step in ("requested", "dispatched"):
+        lagging = ws.classify_member(row("d", "preparing", kind="direct_chat", turn_phase=step))
+        assert (lagging["call"], lagging["reasons"]) == ("working", []), step
+    # Without a start fact, or once its census phase moved on, a turn's word and reasons stay what they were.
+    assert ws.classify_member(row("d", "preparing", kind="direct_chat"))["reasons"] == []
+    moved = ws.classify_member(row("d", "working", kind="direct_chat", turn_phase="context_built"))
+    assert (moved["call"], moved["reasons"]) == ("working", [])
+    assert ws.classify_member(row("d", "working", kind="direct_chat", turn_phase="dispatched"))["call"] == "working"
+    # Sending is the census's own observation of the request going out.
+    sending = row("d", "working", kind="direct_chat", turn_phase="requested", model_activity={"phase": "dispatching"})
+    assert ws.classify_member(sending)["call"] == "sending"
 
 
 def test_writer_held_continue_waits_and_is_never_the_owners_turn():
@@ -34,16 +75,16 @@ def test_writer_held_continue_waits_and_is_never_the_owners_turn():
     # The same parked row without the writer hold is a pause, not a wait.
     assert ws.classify_member(held, {"hold": {}})["activity"] == "paused"
     # A hold the owner's selection already released explains nothing.
-    assert ws.classify_member(held, {"hold": {"reason": "continuation_writer_unsettled", "selected": True}})[
+    assert ws.classify_member(held, {"hold": {}, "_resume_selection": {"selected_by": "owner"}})[
         "activity"] == "paused"
 
 
 @pytest.mark.parametrize("author, code, release, text", [
-    ({"actor": "owner", "text": "", "at": "T0"}, "paused_by_owner", "owner", "You paused it"),
+    ({"actor": "owner", "text": "", "at": "T0"}, "paused_by_owner", "mind", "You paused it"),
     ({"actor": "ouroboros", "text": "pause before the update you asked for", "at": "T0"}, "paused_by_mind", "mind",
-     "Ouroboros: pause before the update you asked for"),
+     "Ouroboros paused it"),
     ({"actor": "ouroboros", "text": "", "at": "T0"}, "paused_by_mind", "mind", "Ouroboros paused it"),
-    ({"actor": "", "text": "", "at": "T0"}, "paused_unattributed", "owner", ""),
+    ({"actor": "", "text": "", "at": "T0"}, "paused_unattributed", "mind", ""),
 ])
 def test_a_decided_pause_says_its_declared_author_never_the_door(author, code, release, text):
     state = ws.classify_member(row("t", "budget_paused", pause_cause="owner"), {"pause_by": author, "paused_at": "T9"})
@@ -60,6 +101,8 @@ def test_pause_author_reads_the_declared_record_and_never_defaults_to_the_owner(
     # Legacy fences: the mind's own record, at the top or as its first press on the same fence.
     legacy = {"fence_id": "f1", "actor": "mind", "reason": " for the update ", "requested_at": "R", "paused_at": "P"}
     assert pause_author(legacy) == {"actor": "ouroboros", "text": "for the update", "at": "R"}
+    assert pause_author({**legacy, "text": "new wording"}) == {
+        "actor": "ouroboros", "text": "new wording", "at": "R"}
     pressed_later = {"fence_id": "f1", "requested_by": "owner", "requested_at": "R",
                      "requests": {"a": {"fence_id": "f1"}, "b": {"fence_id": "f1", "actor": "mind", "reason": "x"},
                                   "c": {"fence_id": "f0", "actor": "mind", "reason": "older fence"}}}
@@ -80,7 +123,7 @@ def test_owner_required_resume_is_the_owners_turn_only_when_the_census_says_so(c
     parked = row("t", "budget_paused", pause_cause=cause, can_resume=True)
     state = ws.classify_member(parked, {"hold": hold})
     assert state["activity"] == "paused" and state["reasons"][0]["code"] == code
-    assert state["turn"] == [{"kind": "action", "task_id": "t", "code": code}] and state["release"] == "owner"
+    assert state["turn"] == [{"kind": "action", "task_id": "t", "code": code}] and state["release"] == ("owner" if code == "after_panic" else "mind")
     quiet = ws.classify_member(dict(parked, can_resume=False), {"hold": hold})
     assert quiet["turn"] == []
 
@@ -92,11 +135,50 @@ def test_cold_sleep_waits_and_pausing_is_still_work():
     pausing = ws.classify_member(row("t", "budget_pausing", pause_cause="owner"), {**owner, "running": True})
     assert (pausing["activity"], pausing["transition"], pausing["live"]) == ("working", "pausing", True)
     # Under a Pause still settling, a member the queue holds (never started, or already saved and parked) is
-    # Pausing… too but executes nothing; nor does a running one the settled census already parked.
+    # Paused with Resume because it executes nothing; nor does a running one the settled census already parked.
     queued = ws.classify_member(row("t", "budget_pausing", pause_cause="owner"), owner)
-    assert (queued["transition"], queued["live"]) == ("pausing", False)
+    assert (queued["transition"], queued["live"]) == ("none", False)
     parked = ws.classify_member(row("t", "budget_pausing", pause_cause="owner"), {"parked": ["t"], "running": True})
-    assert (parked["transition"], parked["live"]) == ("pausing", False)
+    assert (parked["transition"], parked["live"]) == ("none", False)
+
+
+def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_resumes_them():
+    def sleeper(*chosen):
+        return ws.classify_member(row("root"), {"running": True, "owner_wait": {
+            "state": "waiting", "reason": "sleep", "task_attempt": 1,
+            "sleep": {"mode": "warm", "tasks": list(chosen), "senders": list(chosen)}}})
+
+    def helper(task_id, raw):
+        return ws.classify_member(row(task_id, "budget_paused", pause_cause="unknown", can_resume=False,
+                                      parent_task_id="root", root_task_id="root"), raw)
+
+    selected = helper("chosen", {"_budget_pause": {"reason": "owner", "exact_continuation": True}})
+    other = helper("other", {"_budget_pause": {"reason": "owner", "exact_continuation": True}})
+    panic = helper("panic", {"hold": {"reason": "panic_hold", "release": "owner"}})
+    root = sleeper("chosen", "panic")
+    work = ws.roll_up_work("root", [root, selected, other, panic], episode={"task_id": "root", "state": root})
+    # The sleep keeps its word, reason, controls and turn; its line names what its saved sleep chose, by release.
+    assert (work["activity"], work["because"][0]["code"], work["turn"], work["mark"]) == (
+        "waiting", "sleeping", [], "still")
+    assert [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"]] == [
+        ("awaited_helpers_mind", ["chosen"], "held", "1 helper it waits for is paused until Ouroboros resumes it"),
+        ("awaited_helpers_owner", ["panic"], "held", "1 helper it waits for is paused until you resume it")]
+    assert "other" not in str(work["tails"]), "a paused helper the sleep did not choose is not why it waits"
+    controls = ws.controls_for(root, row("root"))
+    assert "resume" not in [entry["action"] for entry in controls], "no Resume door is invented for a helper"
+    # A Continue episode is neither the helper's root nor its parent: it holds no request door, so the line
+    # names no releaser for a helper only a mind could ask to resume (the owner's own release keeps its words).
+    later = ws.classify_member(row("later"), {"running": True, "owner_wait": {
+        "state": "waiting", "reason": "sleep", "task_attempt": 1,
+        "sleep": {"mode": "warm", "tasks": ["chosen", "panic"]}}})
+    work = ws.roll_up_work("root", [later, selected, panic], episode={"task_id": "later", "state": later})
+    assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"]] == [
+        ("awaited_helpers_owner", ["panic"], "1 helper it waits for is paused until you resume it"),
+        ("awaited_helpers_paused", ["chosen"], "1 helper it waits for is paused")]
+    # Without the saved selection (or once the episode ended) the line says no such thing.
+    awake = ws.roll_up_work("root", [sleeper(), selected], episode={"task_id": "root", "state": sleeper()})
+    assert awake["tails"] == []
+    assert ws.roll_up_work("root", [selected], episode={"task_id": "root"})["tails"] == []
 
 
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
@@ -114,11 +196,11 @@ def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
     assert (work["activity"], work["transition"], work["tails"]) == ("working", "pausing", [])
 
 
-def test_unread_pause_cause_stays_raw_and_releases_nothing():
+def test_refused_source_keeps_resume_for_rechecking_and_unknown_without_a_stop_stays_held():
     state = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "restore_refused:x"}})
-    assert state["reasons"][0]["code"] == "restore_failed" and state["release"] == "none"
+    assert state["reasons"][0]["code"] == "restore_failed" and state["release"] == "mind"
     raw = ws.classify_member(row("t", "budget_paused", pause_cause="mystery"), {"hold": {}})
-    assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held: mystery"
+    assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held"
 
 
 def test_owner_question_is_a_wait_on_the_owner_and_a_gap_is_unconfirmed():
@@ -200,7 +282,7 @@ def test_finalizing_answer_and_paused_work():
     assert (work["activity"], work["transition"], work["outcome"]) == ("working", "finalizing", "done")
     paused = ws.classify_member(row("t", "budget_paused", pause_cause="owner"), {"pause_by": {"actor": "owner"}})
     work = ws.roll_up_work("t", [paused], episode={"task_id": "t", "state": paused})
-    assert (work["activity"], work["release"], work["because"][0]["code"]) == ("paused", "owner", "paused_by_owner")
+    assert (work["activity"], work["release"], work["because"][0]["code"]) == ("paused", "mind", "paused_by_owner")
     assert (work["tails"], work["live"], work["mark"]) == ([], False, "pause") and "paused_by" not in work
 
 
@@ -557,7 +639,7 @@ def test_post_answer_upkeep_keeps_its_controls_and_a_settling_pause_keeps_its_pa
     assert [entry["action"] for entry in ws.controls_for(ws.classify_member(finishing), finishing)] == [
         "wrap_up", "hurry", "pause", "stop"]
     pausing = row("f", "budget_pausing", kind=kind, pause_cause="owner")
-    assert [entry["action"] for entry in ws.controls_for(ws.classify_member(pausing), pausing)] == ["pause", "stop"]
+    assert [entry["action"] for entry in ws.controls_for(ws.classify_member(pausing, {"running": True}), pausing)] == ["pause", "stop"]
     paused = row("f", "budget_paused", kind=kind, pause_cause="owner", can_resume=True)
     assert "pause" not in [entry["action"] for entry in ws.controls_for(ws.classify_member(paused), paused)]
 
@@ -610,8 +692,8 @@ def test_a_held_continue_offers_stop_earlier_only_where_the_stop_door_reaches(st
     ("owner", {"fence": {"requested_by": "owner", "actor": "mind"}}, True),
     ("restart", {"hold": {"reason": "saved_work_hold"}}, True),
     ("budget", {}, True),
-    ("unknown", {"hold": {"reason": "restore_refused:x"}}, False),
-    ("mystery", {}, False),
+    ("unknown", {"hold": {"reason": "restore_refused:x"}}, True),
+    ("mystery", {}, True),  # an existing census Resume survives an absent stop / older cause vocabulary
 ])
 def test_resume_is_offered_only_where_the_resume_door_releases_the_pause(cause, raw, resumable):
     parked = row("t", "budget_paused", pause_cause=cause, can_resume=True)

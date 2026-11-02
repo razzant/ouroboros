@@ -1,5 +1,6 @@
 """The browser smokes set aside exactly the engine read's own network line, nothing else."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -26,27 +27,31 @@ def test_nothing_is_set_aside_without_a_recorded_refusal_and_only_once_per_refus
 
 
 class _Page:
-    """Events PageErrors reads, including Playwright's split WebKit error name."""
+    """Events PageErrors reads, including Playwright's split WebKit error name. Every listener
+    registered for an event runs, as in Playwright: a second registration records twice."""
 
     def __init__(self):
         self.handlers, self.main_frame = {}, SimpleNamespace(url="")
 
     def on(self, event, handler):
-        self.handlers[event] = handler
+        self.handlers.setdefault(event, []).append(handler)
 
     def error(self, text, name=""):
         error = Exception(text)
         error.name = name
-        self.handlers["pageerror"](error)
+        for handler in self.handlers.get("pageerror", []):
+            handler(error)
 
     def commit(self, url, frame=None):
         frame = frame or self.main_frame
         frame.url = url
-        self.handlers["framenavigated"](frame)
+        for handler in self.handlers.get("framenavigated", []):
+            handler(frame)
 
 
 OWN = "/127.0.0.1:65140/api/state due to access control checks."
 CORS = "/localhost:65140/api/state due to access control checks."
+FETCH = "Fetch API cannot load http"  # the error name Playwright splits off WebKit's report
 
 
 def test_only_webkits_report_of_the_pages_own_fetch_is_set_aside():
@@ -148,3 +153,105 @@ def test_full_urls_default_ports_and_an_already_committed_page():
     foreign_port = "https://example.test:444/api/state due to access control checks."
     page.error(foreign_port)
     assert errors.unexpected() == [foreign_port]
+
+
+# One list for several pages (the shared browser fixture): each page's own origin, at arrival.
+
+def test_each_watched_page_is_judged_by_its_own_committed_origin():
+    first, second = _Page(), _Page()
+    errors = PageErrors(first, "webkit")
+    assert errors.watch(second) is second
+    first.commit("http://127.0.0.1:65140/")
+    second.commit("http://localhost:65140/")
+    for page in (first, second):
+        for text in (OWN, CORS):
+            page.error(text, name=FETCH)
+    assert errors == [OWN, CORS, OWN, CORS]
+    # The other page's origin is no exemption.
+    assert errors.unexpected() == [CORS, OWN]
+    assert [(entry.page, entry.own_fetch) for entry in errors] == [(1, True), (1, False), (2, False), (2, True)]
+
+
+def test_another_pages_navigation_never_changes_this_pages_verdicts_or_address():
+    first, second = _Page(), _Page()
+    errors = PageErrors(None, "webkit")
+    errors.watch(first)
+    errors.watch(second)
+    first.commit("http://127.0.0.1:65140/a")
+    second.commit("http://127.0.0.1:65140/b")
+    second.error(OWN, name=FETCH)  # before the second page's next document commits: still its own origin
+    second.commit("http://localhost:65140/c")
+    second.error(OWN, name=FETCH)  # after that commit the origin it left is no exemption
+    first.error(OWN, name=FETCH)  # the first page never left its origin
+    first.error(CORS, name=FETCH)  # and the second page's new origin is none of its own
+    assert errors.unexpected() == [OWN, CORS]
+    assert [(entry.page, entry.url, entry.own_fetch) for entry in errors] == [
+        (2, "http://127.0.0.1:65140/b", True), (2, "http://localhost:65140/c", False),
+        (1, "http://127.0.0.1:65140/a", True), (1, "http://127.0.0.1:65140/a", False)]
+
+
+def test_an_undeclared_page_keeps_every_error_and_a_later_declaration_judges_only_later_ones():
+    page = _Page()
+    errors = PageErrors(None, "webkit")
+    errors.watch(page, navigates=False)
+    page.commit("http://127.0.0.1:65140/")
+    page.error(OWN, name=FETCH)  # no navigation declared: it counts
+    errors.watch(page)  # the test is about to reload it
+    page.error(OWN, name=FETCH)
+    errors.watch(page, navigates=False)  # watching again adds no listener and narrows nothing back
+    page.error(OWN, name=FETCH)
+    assert [len(page.handlers[event]) for event in ("pageerror", "framenavigated")] == [1, 1]
+    assert errors == [OWN, OWN, OWN]
+    assert [entry.own_fetch for entry in errors] == [False, True, True]
+    assert errors.unexpected() == [OWN]
+
+
+def test_a_declared_page_still_fails_on_its_script_and_native_dialog_errors():
+    page = _Page()
+    errors = PageErrors(page, "webkit")
+    page.commit("http://127.0.0.1:65140/")
+    page.error("undefined is not an object", name="TypeError")
+    page.error("native dialog used", name="Error")  # the Skills tests' dialog guard
+    assert errors.unexpected() == ["undefined is not an object", "native dialog used"]
+
+
+def test_outside_webkit_no_declared_page_sets_anything_aside():
+    first, second = _Page(), _Page()
+    errors = PageErrors(first, "chromium")
+    errors.watch(second)
+    for page in (first, second):
+        page.commit("http://127.0.0.1:65140/")
+        page.error(OWN, name=FETCH)
+    assert errors.unexpected() == [OWN, OWN]
+
+
+def test_equal_text_from_two_pages_keeps_each_entrys_own_verdict_through_list_edits():
+    strict, navigating = _Page(), _Page()
+    errors = PageErrors(None, "webkit")
+    errors.watch(strict, navigates=False)
+    errors.watch(navigating)
+    for page in (strict, navigating):
+        page.commit("http://127.0.0.1:65140/")
+        page.error(OWN, name=FETCH)
+    assert errors == [OWN, OWN] and errors.unexpected() == [OWN]
+    errors.reverse()
+    assert [(entry.page, entry.own_fetch) for entry in errors] == [(2, True), (1, False)]
+    errors.remove(OWN)  # by text, as for any list: the first equal entry goes, whichever page it came from
+    assert [(entry.page, entry.own_fetch) for entry in errors] == [(1, False)] and errors.unexpected() == [OWN]
+    errors.append(str(OWN))  # an adopter's own copy counts, though it equals a set-aside entry's text
+    navigating.error(OWN, name=FETCH)
+    assert errors.unexpected() == [OWN, OWN]
+    assert json.loads(json.dumps(errors)) == [OWN, OWN, OWN]
+
+
+def test_the_report_gives_each_entrys_verdict_page_and_address():
+    page = _Page()
+    errors = PageErrors(None, "webkit")
+    errors.watch(page)
+    page.commit("http://127.0.0.1:65140/")
+    page.error(OWN, name=FETCH)
+    page.error("x is not defined", name="ReferenceError")
+    errors.append("added by hand")
+    assert errors.report() == [f"set aside on page 1 at http://127.0.0.1:65140/: {OWN}",
+                               "unexpected on page 1 at http://127.0.0.1:65140/: x is not defined",
+                               "unexpected: added by hand"]

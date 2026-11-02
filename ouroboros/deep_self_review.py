@@ -44,8 +44,8 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
     load_governance_doc,
 )
 from ouroboros.shell_parse import is_absolute_path_text  # noqa: E402
-from ouroboros.utils import utc_now_iso  # noqa: E402
-from ouroboros.provider_models import provider_for_model, provider_has_credentials  # noqa: E402
+from ouroboros.utils import emit_cognitive_operation_event, utc_now_iso  # noqa: E402
+from ouroboros.provider_models import legacy_openai_base, provider_for_model, provider_has_credentials  # noqa: E402
 from ouroboros.reviewer_slot_config import (  # noqa: E402
     ROUTE_KIND_API,
     ROUTE_KIND_SESSION,
@@ -55,7 +55,6 @@ from ouroboros.reviewer_slot_config import (  # noqa: E402
 )
 from ouroboros.usage_accounting import BudgetExceeded  # noqa: E402
 from ouroboros.triad_review import REVIEW_REPORT_CONTRACT  # noqa: E402
-from ouroboros.config import runtime_setting
 
 # The report's own output reserve: what the row's model may spend answering,
 # on the request and on the slot (one number for both deliveries).
@@ -66,9 +65,8 @@ _MEMORY_WHITELIST = [
     "memory/scratchpad.md",
     "memory/registry.md",
     "memory/WORLD.md",
+    "memory/knowledge/overview.md",
     "memory/knowledge/index-full.md",
-    "memory/knowledge/patterns.md",
-    "memory/knowledge/improvement-backlog.md",
 ]
 
 # The role half of the reviewer prompt, shared by both deliveries; the "how to
@@ -80,9 +78,9 @@ Primary directive: The Constitution (BIBLE.md) is your absolute reference.
 Every finding must be checked against it.
 
 What to look for: bugs, crashes, race conditions,
-BIBLE.md violations (P0–P12), contradictions between code and docs,
+violations of the principles in BIBLE.md, contradictions between code and docs,
 security gaps, dead code, missing error handling, architectural issues,
-known error patterns from patterns.md that remain unfixed, and ideas how to improve Ouroboros to work better and better comply with the Bible."""
+failure classes the inlined knowledge describes whose causes remain unrepaired, and ideas how to improve Ouroboros to work better and better comply with the Bible."""
 
 # The repository is inspected with tools; tier-1 governance and memory arrive
 # inline. No second tool read is needed for those exact delivered documents.
@@ -182,7 +180,7 @@ def _api_route_model(row: ConfiguredReviewerSlot) -> Tuple[str, Optional[str]]:
     if row.use_local is True or model_has_credentials(configured):
         return "", configured
     if configured.startswith("openai/"):
-        if provider_has_credentials("openai") and not runtime_setting("OPENAI_BASE_URL"):
+        if provider_has_credentials("openai") and not legacy_openai_base():
             from ouroboros.provider_models import OPENAI_DIRECT_DEFAULTS
 
             slug = configured.split("/", 1)[1]
@@ -519,7 +517,7 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
     if not bible.strip():
         raise RuntimeError("BIBLE.md is missing at the repository root — a deep self-review has no constitution to check against")
     # The memory whitelist, inlined byte-exact, and the typed memory fact every
-    # delivery carries: ``{"inlined": n, "total": 7, "dispositions": {rel:
+    # delivery carries: ``{"inlined": n, "total": 6, "dispositions": {rel:
     # inlined | missing | empty | oversized | read_error}}`` — one disposition
     # per whitelisted path (task text, usage fact, provenance header), never a
     # silent skip.
@@ -567,6 +565,7 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
         # fact the reviewer (and the header) can rely on, never a gap.
         f"Memory dispositions ({memory['total']} whitelisted): "
         + "; ".join(f"{rel} {d}" for rel, d in memory["dispositions"].items()),
+        _body_line(drive_root),
     ]
     if required_sources_ref:
         parts.append("Read the complete required source manifest through its exact source handle and inspect its sources across your working views. Documents already delivered in full above need no second tool read: "
@@ -577,6 +576,16 @@ def _retrieving_task(repo_dir: pathlib.Path, drive_root: pathlib.Path, *,
     return "\n\n".join(part for part in parts if str(part or "").strip()), {
         "memory": memory, "bible_chars": len(bible), "required_sources": sources,
         "governance_manifest": governance.manifest}
+
+
+def _body_line(drive_root: pathlib.Path) -> str:
+    """The body's dated facts in one line, the same ``vitals`` every turn's Runtime section carries
+    (``context_runtime_facts``): the reviewer judges the trend with the numbers, without a tool call."""
+    from ouroboros.context_runtime_facts import vitals_fact, vitals_line
+    from ouroboros.utils import utc_now_iso
+
+    line = vitals_line(vitals_fact(drive_root, observed_at=utc_now_iso()))
+    return f"Body (the Runtime section's vitals, as every turn reads them): {line}" if line else ""
 
 
 def _review_usage_scope(current: Any, request: Any) -> Any:
@@ -619,7 +628,7 @@ def _run_retrieving_review(
     the caller's goal and questions, in the request's goal and the task text."""
     from dataclasses import asdict
 
-    from ouroboros.config import get_finalization_grace_sec, get_task_abs_ceiling_sec, operation_window_sec
+    from ouroboros.config import get_finalization_grace_sec
     from ouroboros.deadline_utils import review_operation_timeout_sec
     from ouroboros.observability import persist_call
     from ouroboros.review_execution import ReviewAssignment, _review_route_executor
@@ -657,15 +666,11 @@ def _run_retrieving_review(
         policy=policy,
         deadline_at=deadline_at,
     )
-    # The logical window: the task's operation window (its finite absolute lifetime,
-    # else the operation fallback) narrowed by the owner deadline — the same clock the
-    # coordinator gives a slot; without it the native episode would run with no window
-    # at all and a session would fall to the transport's own defaults.
-    window = review_operation_timeout_sec(
-        operation_window_sec(get_task_abs_ceiling_sec()),
-        route="agent_session" if row.is_session else "api_chat",
-        deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec(),
-    )
+    # The logical window: what truly bounds either retrieving delivery — an explicit review
+    # window, the owner deadline less the grace, the task's finite execution window — the
+    # clock the coordinator gives a slot; ``None`` when none exists, never a socket timeout.
+    window = review_operation_timeout_sec(retrieves=True, deadline_at=deadline_at,
+                                          reserve_sec=get_finalization_grace_sec())
     from ouroboros.config import review_model_uses_local
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_substrate import ReviewSlot
@@ -697,11 +702,12 @@ def _run_retrieving_review(
         from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 
         executor = NativeToolRoundReviewExecutor(assignment, llm=llm)
-    executor._logical_deadline_monotonic = time.monotonic() + window
+    executor._logical_deadline_monotonic = None if window is None else time.monotonic() + window
     delivery = "agent_session" if row.is_session else "native_tool_rounds"
     emit_progress(
         f"Deep self-review via {delivery} on {sendable}: {_memory_line(task_facts['memory'])}, "
-        f"BIBLE.md ({task_facts['bible_chars']:,} chars) delivered inline; window {window:.0f}s..."
+        f"BIBLE.md ({task_facts['bible_chars']:,} chars) delivered inline; "
+        + ("no logical window..." if window is None else f"window {window:.0f}s...")
     )
     prompt_ref: Dict[str, Any] = {}
     try:
@@ -715,9 +721,19 @@ def _run_retrieving_review(
         log.debug("deep self-review prompt custody write failed", exc_info=True)
     scope = _review_usage_scope(current_usage_scope() or UsageScope(), request)
     memory = task_facts["memory"]
+    # Outside the loop and review custody no round, usage or tool fact reaches the supervisor before
+    # the delivery ends: the review holds a seat's typed lease, which spares only silence attention
+    # while it is in flight (on the supervisor's own bounds), and every exit, an error, budget or
+    # cancel included, closes it into a fresh progress stamp (``supervisor/cognitive_operations``).
+    lease = {"task_id": task_id, "operation_id": assignment.call_id, "kind": "review",
+             "task_attempt": getattr(usage_ctx, "task_attempt", None), "slot_id": slot.slot_id}
+    events = getattr(usage_ctx, "event_queue", None)
+    emit_cognitive_operation_event(events, phase="started", **lease)
+    settled = "failed"
     try:
         with usage_scope(scope):
             attempt = executor.execute()
+        settled = "finished"
     except Exception as exc:
         # The memory fact precedes EVERY «Выполняется как» record — this
         # failure-custody row included — and rides the typed failure the caller
@@ -736,6 +752,8 @@ def _run_retrieving_review(
         log.error("Deep self-review failed: %s", exc, exc_info=True)
         return _failed(f"❌ Deep self-review failed: {type(exc).__name__}: {exc}",
                        reason_code="deep_self_review_error", usage=custody)
+    finally:
+        emit_cognitive_operation_event(events, phase=settled, **lease)
     usage = dict(attempt.usage or {})
     # Attached FIRST: the usage handed to every «Выполняется как» record below
     # and the returned usage carry the memory fact. The durable D22 projection

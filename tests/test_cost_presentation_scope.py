@@ -303,7 +303,7 @@ def test_producer_to_wire_consumers_keep_tree_scope_and_late_unknown_price(data_
     assert browser['late'] == ['$0.35'] and browser['lateWhy'] == ""
 
 
-def test_first_terminal_root_frame_preserves_money_on_tree_failure(monkeypatch):
+def test_first_terminal_root_frame_preserves_amount_but_not_finality_on_tree_failure(monkeypatch):
     from ouroboros.cost_projection import with_task_cost_presentation
 
     original = {'cost_accounting_status': 'available', 'accounted_upper_bound_usd': 0,
@@ -311,7 +311,10 @@ def test_first_terminal_root_frame_preserves_money_on_tree_failure(monkeypatch):
     monkeypatch.setattr('ouroboros.usage_accounting.usage_breakdown',
                         lambda *_a, **_kw: (_ for _ in ()).throw(OSError('unreadable tree')))
     output = with_task_cost_presentation(original, {'id': 'root', '_skip_post_task_synthesis': True}, '.')
-    assert output == {**original, 'cost_presentation': None}
+    assert output == {**original, 'cost_presentation': None, 'cost_final': False,
+                      'cost_with_children_partial': True, 'cost_custody': {
+                          'status': 'unavailable', 'open_run_ids': [], 'unrecorded_run_ids': [],
+                          'pending_invocation_ids': []}}
 
 
 @pytest.mark.parametrize('rollup, swarm, keeps_own', [

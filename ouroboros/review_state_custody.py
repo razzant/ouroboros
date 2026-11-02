@@ -125,7 +125,6 @@ def checkpoint_pending_review_invocation(
         raise ReservedReviewSlotRefused("pending review invocation checkpoint is incomplete")
     if expected["surface"] not in {"multi_model_review", "scope_review"}:
         raise ReservedReviewSlotRefused(f"unsupported commit-review surface {surface!r}")
-    still_sends = _left_before_launch_still_sends(expected["operation_id"])
 
     def _mutate(state: AdvisoryReviewState) -> None:
         current = state.latest_attempt_for(
@@ -158,9 +157,10 @@ def checkpoint_pending_review_invocation(
         if str(row.get("operation_id") or "") != expected["operation_id"]:
             raise ReservedReviewSlotRefused("reserved commit-review operation identity changed")
         row_state = str(row.get("operation_state") or "")
-        if row_state == "pending_dispatch" and still_sends:
-            # The author left this seat on an addressed message before its first launch (G1's receptive
-            # yield records it pending_dispatch); it still sends, and this start makes it in flight.
+        if row_state == "pending_dispatch" and _left_before_launch_still_sends(expected["operation_id"]):
+            # The author left only its own wait before this seat's first launch (its drain recorded it
+            # pending_dispatch); it still sends, and this start makes it in flight. Read with the row,
+            # under its lock: the drain may record the row while this start waits for that lock.
             row["operation_state"] = "in_flight"
         elif row_state != "in_flight":  # a Pause preparation never sends; a settled or lost row stays closed
             raise ReservedReviewSlotRefused("reserved commit-review operation is not in flight")
@@ -176,15 +176,16 @@ def checkpoint_pending_review_invocation(
 
 
 def _left_before_launch_still_sends(operation_id: str) -> bool:
-    """This process's live seat for ``operation_id`` was detached by an addressed message or a departed
-    author, not by Pause: its preparation goes on and sends. The caller is that seat itself, about to start."""
+    """This process's live seat for ``operation_id`` was left when only its author's wait ended, not by
+    Pause (``review_pause.left_wait_only``, the rule its drain's pending row read): its preparation goes
+    on and sends. The caller is that seat's own start checkpoint, under the review-state lock; custody's
+    ``_ACTIVE_LOCK`` nests inside it, and no holder of that lock writes review state."""
     from ouroboros.review_custody import _ACTIVE, _ACTIVE_LOCK
-    from ouroboros.review_pause import ADDRESSED_EVENT, DEPARTED_EVENT
+    from ouroboros.review_pause import left_wait_only
 
     with _ACTIVE_LOCK:
         entry = next((item for item in _ACTIVE.values() if item.operation_id == operation_id), None)
-        return bool(entry is not None and getattr(entry, "author_left_for", "") in {ADDRESSED_EVENT, DEPARTED_EVENT}
-                    and not getattr(entry, "pause_before_launch", False))
+        return bool(entry is not None and left_wait_only(entry))
 
 
 def _attempt_history_evictable(item: "CommitAttemptRecord") -> bool:

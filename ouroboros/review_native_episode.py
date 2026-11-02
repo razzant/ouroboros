@@ -45,8 +45,9 @@ from typing import Any, Dict, List, Optional
 from ouroboros.config import get_finalization_grace_sec
 from ouroboros.deadline_utils import caller_deadline_arguments, owner_deadline_exhausted, review_transport_timeout
 from ouroboros.event_usage import event_token_counts
-from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_review_paid_stamp
+from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp
 from ouroboros.review_verdict_extraction import canonicalize_session_verdict
+from ouroboros.review_native_images import NativeReviewImages, staged_image_registry
 from ouroboros.triad_review import request_output_shape
 from ouroboros.delegate_custody_usage import observe_failed_review_send
 from ouroboros.usage_accounting import (
@@ -105,7 +106,7 @@ def review_native_transcript_bound(
         model_id=model_id, binding=dict(use_local=use_local, model_role=model_role,
                                        credential_profile_id=credential_profile_id, model_route=model_route))
     capacity = _CHARS_PER_ESTIMATED_TOKEN * max(0, int(calibrated_input_token_limit(
-        str(model_id or ""), context_window=window, output_reserve=reserve,
+        str(model_id or ""), context_window=sized, output_reserve=reserve,
         tokenizer_margin=margin, budget_cap=window)))
     return max(0, capacity)
 
@@ -178,14 +179,13 @@ def native_or_packet_attempt_rail(slot: Any, two_send_surface: bool) -> Any:
 
 _INSPECTION_TOOL_NAMES = (
     "read_file", "list_files", "search_code", "query_code", "query_data",
-    "vcs_status", "vcs_diff", "compact_context",
+    "vcs_read", "compact_context", "view_image",
 )
 
 _NATIVE_REVIEW_INSTRUCTIONS = (
     "You are an independent Ouroboros reviewer running a bounded read-only "
     "inspection episode. Retrieve the evidence yourself with the tools you are "
-    "given inside the repository root — read_file, list_files, search_code, "
-    "query_code, query_data, vcs_status, vcs_diff and compact_context. You cannot "
+    "given over the bound repository and admitted retained evidence. You cannot "
     "modify anything and have no shell. Read LARGE files in bounded chunks "
     "(read_file supports start_line/max_lines and start_char for long lines) instead of requesting a whole large "
     "document at once. The full required review surface may need several working views. "
@@ -201,6 +201,11 @@ _NATIVE_REVIEW_INSTRUCTIONS = (
     "must follow the output contract in the task EXACTLY; your host parses it "
     "structurally, and prose around the verdict is a non-response."
 )
+# A tool reply's own guidance on handling evidence (its errors, results and unsupported options are facts).
+_FOCUS_GUIDANCE = ("Native review focus uses your own working_note; inspect is optional. Select complete units or use "
+                   "keep_last_n with your note.")
+_CONTINUE_READING = (". Continue reading the remainder in bounded chunks (read_file supports start_line/max_lines and "
+                     "start_char for long lines).")
 
 # Bounded retrieval pages keep exact full sources and continuation cursors.
 # This is a per-result projection, never a cumulative reading or send limit.
@@ -246,22 +251,40 @@ def native_episode_prompt(surface: str, role_hint: str, task: str, output_contra
     ])
 
 
-def native_first_send_messages(prompt: str, required_sources_ref: Any = None) -> List[Dict[str, Any]]:
-    """Cache the completed assignment, stable throughout this review episode: the
-    task plus the required-manifest reference when the surface declared one
-    (``None``: no manifest). ``_open_episode`` and every pre-dispatch measure
-    build the opening here."""
-    from ouroboros.tools.review_helpers import cached_prompt_blocks
-
-    task = prompt if required_sources_ref is None else prompt + (
+def native_first_send_task(prompt: str, required_sources_ref: Any = None) -> str:
+    """The opening's user text: the work order, plus the required-manifest reference the surface declared."""
+    return prompt if required_sources_ref is None else prompt + (
         "\nRequired source manifest: " + json.dumps(required_sources_ref, ensure_ascii=False)
         + "\nSources marked delivered_inline are already included in full. Read the other required "
         "sources through their exact physical addresses, using multiple working views as needed. "
         "Observed read coverage remains diagnostic evidence beside your findings.")
-    return [
-        {"role": "system", "content": _NATIVE_REVIEW_INSTRUCTIONS},
-        {"role": "user", "content": cached_prompt_blocks(task)},
-    ]
+
+
+def native_first_send_messages(prompt: str, required_sources_ref: Any = None) -> List[Dict[str, Any]]:
+    """Cache the completed assignment, stable throughout this review episode (``native_first_send_task``;
+    ``None``: no manifest). ``_open_episode`` and every pre-dispatch measure build the opening here."""
+    from ouroboros.tools.review_helpers import cached_prompt_blocks
+
+    return [{"role": "system", "content": _NATIVE_REVIEW_INSTRUCTIONS},
+            {"role": "user", "content": cached_prompt_blocks(native_first_send_task(prompt, required_sources_ref))}]
+
+
+def native_paged_prompt(pointer: str, output_contract: str) -> str:
+    """The opening of an episode whose work order is paged: the pointer, then the contract again."""
+    return pointer + "\nOUTPUT CONTRACT:\n" + output_contract
+
+
+def native_material(surface: str, output_contract: str) -> list:
+    """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a native episode's opening over
+    a placeholder task, inline and paged, with and without a required-source manifest, its tool replies' evidence
+    guidance and its inspection tool set."""
+    from ouroboros.tools.review_brief_coupling import paged_review_text
+    from ouroboros.tools.review_multi_model import TRIAD_ROLE_HINT
+
+    pointer = paged_review_text("⟨text⟩", {"path": "⟨path⟩", "sha256": "⟨sha⟩"}, label="review brief", delegated=False)
+    return [_NATIVE_REVIEW_INSTRUCTIONS, *(native_first_send_task(prompt, ref) for ref in (None, {"⟨ref⟩": 1}) for prompt in (
+        native_episode_prompt(surface, TRIAD_ROLE_HINT, "⟨task⟩", output_contract, "⟨slot⟩"),
+        native_paged_prompt(pointer, output_contract))), _FOCUS_GUIDANCE, _CONTINUE_READING, *_INSPECTION_TOOL_NAMES]
 
 
 def inspection_registry(root: str, drive_root: Any, task_id: str = "") -> tuple[Any, Any, List[Dict[str, Any]]]:
@@ -386,6 +409,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._round_messages: list[dict] = []
         self._last_persisted_round = 0
         self._tool_abandoned = False  # a loose worker retires this episode's read attribution
+        self._images = NativeReviewImages()
 
     def _source_root(self) -> Optional[pathlib.Path]:
         root = (self.assignment.request.policy or {}).get("native_data_root") or self.assignment.custody_root
@@ -412,24 +436,34 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
     def _record_round_source(self) -> None:
         if not self._round_messages or self._rounds_used <= self._last_persisted_round:
             return
-        ref = self._store_source(f"round-{self._rounds_used}", {
+        ref = self._store_source(f"round-{self._rounds_used}", self._images.source_projection({
             "round": self._rounds_used, "messages": self._round_messages,
             "read_receipts": self._tool_receipts, "view_receipt": self._view_receipt,
             "sent_view": getattr(self._inspection_ctx, "_last_context_observation", {}),
-        })
+        }))
         if ref:
             self._round_source_refs.append(ref)
         self._last_persisted_round = self._rounds_used
 
-    def _observe_sent_view(self, messages: list, schemas: list) -> None:
+    def _observe_sent_view(self, messages: list, schemas: list, *, confirmed: bool = True) -> None:
         from ouroboros.tools.compact_context import record_context_view
+        from ouroboros.transcript_prefix import count_accepted_send
+        count_accepted_send(self._inspection_ctx, messages, schemas, round_idx=self._rounds_used, usage=self._episode_usage)
         record_context_view(self._inspection_ctx, messages, schemas)
+        self._images.observe(self._rounds_used, confirmed=confirmed)
         for receipt in self._tool_receipts:
             receipt["delivered"] = True
         from ouroboros.delegate_output import acknowledge_staged_output_delivery
         for execution, projected, shown in self._pending_staged_reads:
             acknowledge_staged_output_delivery(self._inspection_ctx, execution, projected, shown_ranges=shown)
         self._pending_staged_reads.clear()
+
+    def _retire_reasoning(self, messages: list, schemas: list, round_idx: int) -> None:
+        from ouroboros.transcript_prefix import append_reasoning_retirement_fact, prepare_reasoning_for_send
+
+        if prepare_reasoning_for_send(self._inspection_ctx, messages, schemas,
+                                      round_idx=round_idx, usage=self._episode_usage):
+            append_reasoning_retirement_fact(self._episode_usage, round_idx, messages)
 
     def _refresh_window(self, model_route: Optional[dict] = None) -> None:
         """Window evidence for the current route, never an assumed send limit."""
@@ -457,6 +491,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             "window": copy.deepcopy(self._window),
             "previous_request": copy.deepcopy(self._previous_request),
             "output_allowance_tokens": int(self.assignment.request.max_tokens or self.assignment.slot.max_tokens),
+            "images": copy.deepcopy(list(self._images.facts.values())),
         }
 
     def _apply_working_view(self, messages: list, schemas: list, round_idx: int) -> bool:
@@ -492,7 +527,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._view_receipt = asdict(receipt)
         ref = self._store_source(f"view-{round_idx}", self._view_receipt)
         if receipt.status == "applied":
+            from ouroboros.transcript_prefix import sanction_rewrite
             messages[:] = candidate
+            sanction_rewrite(self._inspection_ctx, "compaction")  # the reviewer's own fold names its change
             self._view_changes += 1
         if receipt.status != "no_op":
             notice = {"role": "user", "content": json.dumps({"context_view_status": receipt.status,
@@ -500,8 +537,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             messages.append(notice)
         return receipt.status == "applied"
 
-    def _read_coverage(self) -> dict:
-        """Fold exact delivered intervals over the caller's complete required manifest.
+    def _read_coverage(self, manifest_key: str = "") -> dict:
+        """Fold exact delivered intervals over one complete declared manifest: ``manifest_key``, else the one
+        ``session_read_facts`` chooses, the required manifest when its key exists (an empty one included),
+        else the ``observed_sources`` the host only observes.
 
         Four states: ``unobserved`` when the surface declared no manifest at all,
         ``declared_empty`` (a complete coverage of nothing) when it declared an
@@ -509,16 +548,16 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         """
         from ouroboros.tool_access import resource_root_path
         policy = self.assignment.request.policy or {}
-        required = policy.get("native_required_sources")
-        if not isinstance(required, list):
+        manifest = policy.get(manifest_key or ("native_required_sources" if "native_required_sources" in policy else "observed_sources"))
+        if not isinstance(manifest, list):
             return {"status": "unobserved", "reason": "required_source_manifest_missing", "sources": []}
-        if not required:
+        if not manifest:
             return {"status": "complete", "reason": "declared_empty", "sources": [],
                     "required_source_count": 0}
         if self._inspection_ctx is None:
-            return {"status": "unobserved", "reason": "native_inspection_unavailable", "sources": required}
+            return {"status": "unobserved", "reason": "native_inspection_unavailable", "sources": manifest}
         rows = []
-        for source in required:
+        for source in manifest:
             row = dict(source) if isinstance(source, dict) else {"source": source}
             try:
                 total = row["complete_chars"]
@@ -561,21 +600,24 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._record_round_source()
         policy = self.assignment.request.policy or {}
         coverage = self._read_coverage()
+        required = "native_required_sources" in policy
+        # A required manifest (a paged brief creates its own) never hides what the host observed.
+        observed = {"observed_read_coverage": self._read_coverage("observed_sources")} if required and "observed_sources" in policy else {}
         if self._source_gap and coverage["status"] == "complete":
             coverage = {**coverage, "status": "incomplete", "reason": self._source_gap}
         history_ref = self._store_source("history", {
             "required_sources": policy.get("native_required_sources"),
-            "required_sources_ref": policy.get("native_required_sources_ref"),
+            "required_sources_ref": policy.get("native_required_sources_ref"), "observed_sources": policy.get("observed_sources"),
             "round_sources": self._round_source_refs, "read_receipts": self._tool_receipts,
-            "coverage": coverage, "view_changes": self._view_changes,
+            "coverage": coverage, **observed, "view_changes": self._view_changes,
         })
         if self._source_gap and coverage["status"] == "complete":
             coverage = {**coverage, "status": "incomplete", "reason": self._source_gap}
-        facts = {"native_read_coverage": coverage, "native_history_source": history_ref,
+        facts = {"native_read_coverage": coverage, **observed, "native_history_source": history_ref,
                  "native_view_changes": self._view_changes, "native_source_gap": self._source_gap}
         if self._initial_source:
             facts["native_initial_source"] = self._initial_source
-        if coverage["status"] == "incomplete":
+        if required and coverage["status"] == "incomplete":  # an observed source is no capability delta
             facts["native_incomplete"] = "required_source_coverage_incomplete"
         return facts
 
@@ -588,6 +630,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 registry, tc, validation_by_id, round_idx=round_idx)
             self._round_messages.append(copy.deepcopy(tool_message))
             messages.append(tool_message)
+        self._round_messages.extend(copy.deepcopy(self._images.append_after_tools(messages, self._inspection_ctx)))
         self._apply_working_view(messages, schemas, round_idx)
         transcript_chars = _wire_size(messages, schemas)
         self._record_round_source()
@@ -674,11 +717,11 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         updated = apply_review_model_override(slot, {f"reviewer:{slot.slot_id}": {
             "model": values["model"], "use_local": values.get("use_local", False),
             "model_account_override": values.get("model_account_override", slot.session_profile)}})
-        values["messages"] = LLMClient.sanitize_reasoning_on_model_switch(values["messages"], slot.model, updated.model)
-        messages[:] = values["messages"]
-        values["messages"] = messages
+        messages[:] = LLMClient.sanitize_reasoning_on_model_switch(messages, slot.model, updated.model)
         self.assignment = replace(self.assignment, slot=updated)
         self._refresh_window(values.pop("_model_observed_route", None))
+        self._retire_reasoning(messages, values.get("tools"), self._rounds_used + 1)
+        values["messages"] = self._images.prepare(messages, updated)
         return values
 
     def _run_episode(self) -> None:
@@ -703,6 +746,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         scratch = tempfile.mkdtemp(prefix="ouro-native-review-")
         registry = None
         total_usage: Dict[str, Any] = {}
+        self._episode_usage = total_usage
         final_answer: Optional[str] = None
         last_content = ""  # the reviewer's latest prose — the product of an exhausted report episode
         end_reason = "not_started"  # the true reason is set by whichever end the episode takes
@@ -720,14 +764,15 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             while True:
                 # Time, money and provider outcomes have their own owners.
                 # Approximate context sizing never decides whether to continue.
-                if owner_deadline_exhausted(
-                    deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec(),
-                ) or (logical_deadline is not None and monotonic_now() >= float(logical_deadline)):
+                owner_spent = owner_deadline_exhausted(deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec())
+                if owner_spent or (logical_deadline is not None and monotonic_now() >= float(logical_deadline)):
                     end_reason = "deadline_exhausted"
                     if shape == "report" and last_content:
                         break  # a report keeps its draft (marked incomplete below)
-                    raise _deadline_exhausted_error("owner deadline exhausted mid native review episode")
+                    raise _deadline_exhausted_error("owner deadline exhausted mid native review episode" if owner_spent
+                                                    else "slot logical window exhausted mid native review episode")
                 round_idx += 1
+                self._retire_reasoning(messages, schemas, round_idx)
                 chat_kwargs = self._chat_kwargs(messages, schemas, max_tokens)
                 transport = review_transport_timeout(
                     slot.model, getattr(slot, "transport_timeout_sec", None), deadline_at,
@@ -760,18 +805,25 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                                       if isinstance(exc, BillingAuthorityUnavailable) else "control_authority_unavailable"
                                       if isinstance(exc, ControlAuthorityUnavailable) else "transport_error")
                         capture = getattr(exc, "physical_attempt_capture", None)
+                        sent = self._images.sent_messages
+                        transcript_chars = _wire_size(sent, schemas)
+                        stamp_failed = False  # a strict stamp that failed after this send ends the episode here
                         if str(getattr(capture, "state", "") or "") in POSITIVE_PHYSICAL_ATTEMPT_STATES:
                             # A send that was physically dispatched IS a round
                             # of this episode, even when its response never
                             # came back: its receipt keys and custody must not
                             # read as a zero-send refusal.
                             self._rounds_used, last_send_chars = round_idx, transcript_chars  # a dispatched send IS the last one
-                            self._observe_sent_view(messages, schemas)
-                            invoke_review_paid_stamp(self.assignment.dispatch_stamp)
+                            self._observe_sent_view(messages, schemas, confirmed=False)
+                            stamp_failed = invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
                         observe_failed_review_send(self.usage_observer, exc)
+                        if not stamp_failed and self._images.refuse_send(exc, self.assignment.slot, round_idx, transcript_chars):
+                            end_reason = "running"
+                            continue  # Same episode, explicit gap; no estimate suppresses an image send.
                         if isinstance(exc, (BudgetExceeded, BillingAuthorityUnavailable, ControlAuthorityUnavailable)) and shape == "report" and last_content:
                             break  # nothing was sent; a report keeps its draft
                         raise
+                transcript_chars = _wire_size(self._images.sent_messages, schemas)
                 self._rounds_used, last_send_chars = round_idx, transcript_chars  # a returned send is the last physical send
                 self._observe_sent_view(messages, schemas)
                 slot = self.assignment.slot
@@ -960,19 +1012,18 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 required.append({"root": "artifact_store", "path": source["path"],
                                  **source_text_identity(self.episode_prompt.encode("utf-8")),
                                  "coverage_basis": "candidate_blob"})
-                policy["native_required_sources"] = required
                 ref = self._store_source("required-sources", required)
-                policy["native_required_sources_ref"] = ref
-                prompt = paged_review_text(self.episode_prompt, source, label="review brief", delegated=False)
-                prompt += "\nOUTPUT CONTRACT:\n" + self._output_contract()
-                messages = native_first_send_messages(prompt, ref)
+                self.assignment = replace(self.assignment, request=replace(self.assignment.request, policy={  # this seat's own: a wave shares one request
+                    **policy, "native_required_sources": required, "native_required_sources_ref": ref}))
+                messages = native_first_send_messages(native_paged_prompt(paged_review_text(
+                    self.episode_prompt, source, label="review brief", delegated=False), self._output_contract()), ref)
         return registry, schemas, messages, _wire_size(messages, schemas)
 
     def _chat_kwargs(self, messages: List[Dict[str, Any]], schemas: List[Dict[str, Any]], max_tokens: int) -> Dict[str, Any]:
         """One round's provider call, shaped from the request and the slot."""
         request, slot = self.assignment.request, self.assignment.slot
         kwargs: Dict[str, Any] = {
-            "messages": messages,
+            "messages": self._images.prepare(messages, slot),
             "model": slot.model,
             "model_role": f"reviewer:{slot.slot_id}",
             "model_account_override": slot.session_profile,
@@ -1066,6 +1117,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         outcome = "executed"
         extent: Dict[str, Any] = {}
         typed_result = None
+        image_registry = None
         source_gap = ""
         source_ref = {}
         room = _EPISODE_TOOL_RESULT_CHAR_CAP
@@ -1099,7 +1151,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                         # call that can wedge on anything outside it.
                         from ouroboros.tools.compact_context import _compact_context
                         if not args.get("inspect") and args.get("working_note") is None:
-                            result = "Native review focus uses your own working_note; inspect is optional. Select complete units or use keep_last_n with your note."
+                            result = _FOCUS_GUIDANCE
                         else:
                             unsupported = [key for key in ("schema_names", "review_notes", "review_transfers")
                                            if key in args and args[key] is not None]
@@ -1114,7 +1166,8 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                                 result += "\nNot applied by native review: " + ", ".join(unsupported) + ". The supported authored request is unchanged."
                     else:
                         from ouroboros.tools.tool_result import ToolResult
-                        returned = self._execute_bounded(registry, name, args)
+                        image_registry = staged_image_registry(registry) if name == "view_image" else None
+                        returned = self._execute_bounded(image_registry or registry, name, args)
                         typed_result = returned if isinstance(returned, ToolResult) else None
                         result = typed_result.text if typed_result is not None else str(returned)
                 except _ToolAbandoned as exc:
@@ -1136,10 +1189,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 # cap, and the cut is measured on the SERIALIZED message (JSON
                 # escaping inflates real text) until it fits the room — a raw
                 # result under the cap can still overshoot the room on the wire.
-                marker = (
-                    ". Continue reading the remainder in bounded"
-                    " chunks (read_file supports start_line/max_lines and start_char for long lines)."
-                )
+                marker = _CONTINUE_READING
                 full = result
                 source_ref = {}
                 oversized = (len(full) > result_cap or len(json.dumps({"role": "tool", "tool_call_id": call_id,
@@ -1182,8 +1232,14 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         if source_ref:
             receipt['result_source_ref'] = source_ref
         receipt.update(extent)
+        if name == "view_image":
+            result, receipt["image_attachment"] = self._images.accept(
+                call_id, (args or {}).get("path", ""), result,
+                image_registry if outcome == "executed" else None, round_idx=round_idx)
+            receipt["result_chars"] = len(result)
         self._tool_receipts.append(receipt)
-        return {"role": "tool", "tool_call_id": call_id, "content": result}
+        return {"role": "tool", "tool_call_id": call_id, "content": result,
+                **({"_review_image_id": receipt["image_attachment"]["image_id"]} if name == "view_image" else {})}
 
     def _read_extent(self, full: str, shown: int) -> Dict[str, Any]:
         """The extent an executed ``read_file`` actually DELIVERED, as bounded
@@ -1391,6 +1447,8 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
 
     def _verdict_result(self, force_extraction: bool = False) -> ReviewAttemptResult:
         text = self._raw_transcript or ""
+        if text.strip() and self.answer_observer:
+            self.answer_observer()
         canonical, method, extraction_usage = canonicalize_session_verdict(
             text,
             conformance_passed=False,  # no structured-output channel on this route

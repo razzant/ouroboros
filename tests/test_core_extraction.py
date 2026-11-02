@@ -156,8 +156,16 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled for the infrastructure-under-load PR: forward_to_worker also writes into a requested
     # child's mailbox (read when it starts, or kept as unread mail), so its description and `task_id`
     # description say "running, queued or requested"; nothing else in the catalog changed.
+    # Rolled for the start ledger: show_card's description adds one sentence (on most devices an app
+    # shares the owner's page thread, so heavy computation belongs in a blob: Worker); nothing else changed.
+    # D3 adds the recorded reply_to address to forward_to_worker and escalate.
+    # Target merge retains the contributor tool affordances and target review/mail contracts.
+    # 2026-10-23: escalate gains request_id for private Main questions; its retry
+    # description also explains that a new wait after timeout needs a new key.
+    # Rolled for the decision-quality review fixes: escalate's description names a helper's
+    # proposal as a fork source and makes a set-aside position one of the options; nothing else changed.
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "70baf8519aedbee949abab80b3c1e9f4ea78e29ad81387c65fcc8bfb8b56a996"
+        "c624c58e06228b4f0079bcbaafac846c6eb2a59ade38300a2d7fd528895a39fb"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

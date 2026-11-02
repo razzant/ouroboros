@@ -96,6 +96,14 @@ def _revision(data):
         return txn.revision()
 
 
+def _statistics(data):
+    """The planner tables as stored: the ``sqlite_stat1`` rows and the number of ``sqlite_stat4`` samples."""
+    with store.open_store(data, write=False) as txn:
+        stat1 = sorted(tuple(row) for row in txn.conn.execute("SELECT tbl, idx, stat FROM sqlite_stat1"))
+        stat4 = txn.conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat4'").fetchone()
+        return stat1, txn.conn.execute("SELECT COUNT(*) FROM sqlite_stat4").fetchone()[0] if stat4 else 0
+
+
 @pytest.fixture
 def data(tmp_path, monkeypatch):
     root = tmp_path / "data"
@@ -185,16 +193,102 @@ def test_planner_statistics_once_per_store_and_again_after_tenfold_growth(data):
     assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 3}
     with store.open_store(data, write=False) as txn:
         assert txn.conn.execute("SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl='tasks'").fetchone()[0] > 0
+    assert _statistics(data)[1] == 0, "row counts only, whatever the SQLite build"
     before = _revision(data)
     assert maintenance.run_job(data, "sqlite_analyze") is None and _revision(data) == before
     for index in range(3, 30):
         write_task_result(data, f"task-{index}", "completed", result="answer")
     assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 30}
+    assert _statistics(data)[1] == 0
+
+
+def test_a_store_analyzed_before_keeps_row_counts_only_from_the_childs_next_run(data):
+    """The job's plain ``ANALYZE`` of before, on a build with ENABLE_STAT4, left index samples that every new
+    connection loads with the schema. The child's next pass, whatever job it runs for, drops them and keeps the
+    ``sqlite_stat1`` rows and the tenfold base as they were; the pass after it rests. The server's look never
+    spawns the child for it."""
+    import contextlib
+    import sqlite3
+
+    from ouroboros.task_results import write_task_result
+
+    for index in range(3):
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    with store.open_store(data, write=True) as txn:  # what the job wrote before its row named its statistics
+        txn.conn.execute("ANALYZE")
+        maintenance_jobs.record_in(txn, "sqlite_analyze", state="done", tasks=3)
+    for index in range(3, 9):  # grown, short of tenfold
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    stat1, samples = _statistics(data)
+    with contextlib.closing(sqlite3.connect(":memory:")) as probe:
+        sampling = "ENABLE_STAT4" in {row[0] for row in probe.execute("PRAGMA compile_options")}
+    assert (samples > 0) == sampling, (sqlite3.sqlite_version, samples)
+    assert "sqlite_analyze" not in maintenance.due(data), "never by itself a reason to spawn the child"
+    report = maintenance.run(data)
+    assert report["jobs"]["sqlite_analyze"] == {"state": "done", "items": 0}, report
+    assert _statistics(data) == (stat1, 0)
+    assert maintenance_jobs.job(data, "sqlite_analyze")["tasks"] == 3
+    before = _revision(data)
+    assert maintenance.run_job(data, "sqlite_analyze") is None and _revision(data) == before
+    for index in range(9, 30):
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 30}
+    assert _statistics(data)[1] == 0
+
+
+def test_samples_an_older_body_analyzed_back_under_this_bodys_row_go_at_the_childs_next_run(data):
+    """A Restore to a body whose job was a plain ``ANALYZE`` and a merge into its row: the store this body analyzed
+    grows tenfold there and is analyzed again, so a build with ENABLE_STAT4 has its samples back while the row still
+    names ``stat1``, beside that body's tenfold base. Back on this body neither its boot nor the server's look moves
+    them; the child's next pass, whatever job it runs for, drops them and keeps the ``sqlite_stat1`` rows and the base,
+    and the pass after it rests. Without samples the row's word holds and that pass leaves the job alone."""
+    import contextlib
+    import sqlite3
+
+    from ouroboros import store_import
+    from ouroboros.task_results import write_task_result
+
+    def older_run():  # the job's run before its row named its statistics, verbatim
+        with store.open_store(data, write=True) as txn:
+            tasks = int(txn.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+            txn.conn.execute("ANALYZE")
+        maintenance_jobs.record(data, "sqlite_analyze", state="done", tasks=tasks)
+        return {"state": "done", "items": tasks}
+
+    this_body, older_body = "this-body", "older-body"
+    for index in range(3):
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    store_import.ensure_current_store(data, with_children=False, body_sha=this_body)
+    assert maintenance.run_job(data, "sqlite_analyze") == {"state": "done", "items": 3}
+    store.close_connections()
+    store_import.ensure_current_store(data, with_children=False, body_sha=older_body)  # Restore: the older body boots
+    for index in range(3, 30):  # tenfold: due by the older body's own rule
+        write_task_result(data, f"task-{index}", "completed", result="answer")
+    assert older_run() == {"state": "done", "items": 30}
+    stat1, samples = _statistics(data)
+    with contextlib.closing(sqlite3.connect(":memory:")) as probe:
+        sampling = "ENABLE_STAT4" in {row[0] for row in probe.execute("PRAGMA compile_options")}
+    assert (samples > 0) == sampling, (sqlite3.sqlite_version, samples)
+    row = maintenance_jobs.job(data, "sqlite_analyze")
+    assert (row["statistics"], row["tasks"]) == ("stat1", 30), "the merge kept this body's word"
+    store.close_connections()
+    store_import.ensure_current_store(data, with_children=False, body_sha=this_body)  # the update back
+    assert _statistics(data) == (stat1, samples), "the boot leaves the statistics as they are"
+    assert "sqlite_analyze" not in maintenance.due(data), "never by itself a reason to spawn the child"
+    report = maintenance.run(data)
+    assert report["jobs"].get("sqlite_analyze") == ({"state": "done", "items": 0} if sampling else None), report
+    assert _statistics(data) == (stat1, 0)
+    row = maintenance_jobs.job(data, "sqlite_analyze")
+    assert (row["statistics"], row["tasks"]) == ("stat1", 30)
+    before = _revision(data)
+    assert maintenance.run_job(data, "sqlite_analyze") is None and _revision(data) == before
 
 
 def test_legacy_reconcile_runs_only_when_scheduled_and_tolerates_a_body_without_it(data, monkeypatch):
     from ouroboros import store_import
 
+    for name in ("pending_invocations", "ended_plan_asks", "runtime_retirement", "record_compression"):
+        maintenance.run_job(data, name)
     calls = []
     monkeypatch.setattr(store_import, "run_legacy_reconcile",
                         lambda root, **kw: calls.append(kw) or maintenance_jobs.record(root, "legacy_reconcile",
@@ -227,20 +321,23 @@ def test_a_retained_drive_rests_until_its_inputs_change(data, monkeypatch):
     write_task_result(data, "held", "completed", result="answer", child_drive_root=str(drive),
                       root_phase_checkpoint={"post_task_synthesis": "running"})
     sm._run_drive_custody_pass()
-    row = maintenance_jobs.job(data, "drive_settlement")
-    assert row["retained"]["held"]["reason"] == "post_work_open" and drive.is_dir()
+    assert sm.settlement_verdicts(data)["held"]["reason"] == "post_work_open" and drive.is_dir()
+    assert "retained" not in maintenance_jobs.job(data, "drive_settlement"), "the verdicts have their own row"
 
     settle, attempts = task_custody.settle_child_drive, []
     with monkeypatch.context() as patch:
         patch.setattr(task_custody, "settle_child_drive",
                       lambda *a, **k: attempts.append(a[1]) or settle(*a, **k))
-        before, decodes = _revision(data), _decodes(patch)
-        sm._run_drive_custody_pass()
-        assert attempts == [] and decodes == [] and _revision(data) == before, "a resting verdict was re-attempted"
+        decodes = _decodes(patch)
+        sm._run_drive_custody_pass()  # compares the verdict, attempts nothing: records that the layout rests
+        assert attempts == [] and decodes == [], "a resting verdict was re-attempted"
+        before = _revision(data)
+        sm._run_drive_custody_pass()  # the layout's inputs stand: nothing read, nothing written
+        assert attempts == [] and decodes == [] and _revision(data) == before, "a resting layout was walked"
     # Only the probes go; this install stays bound while the post-work closes.
     write_task_result(data, "held", "completed", root_phase_checkpoint={"post_task_synthesis": "completed"})
     sm._run_drive_custody_pass()
-    assert not drive.exists() and "held" not in maintenance_jobs.job(data, "drive_settlement")["retained"]
+    assert not drive.exists() and "held" not in sm.settlement_verdicts(data)
     assert load_task_result(data, "held")["status"] == "completed"
 
 
@@ -251,7 +348,16 @@ def _setup_job(name, data, monkeypatch):
     from ouroboros import store_import
     from ouroboros.task_results import write_task_result
 
-    if name == "legacy_reconcile":
+    if name == "delegate_capture":
+        from tests.test_delegate_capture_child import _queued
+
+        assert _queued(data.parent, monkeypatch)[0] == data
+    elif name == "subagent_metrics":
+        from ouroboros.subagent_metrics import EVENT
+        from ouroboros.utils import append_jsonl
+        from tests.test_subagent_metrics import event
+        append_jsonl(data / "logs/events.jsonl", event(type=EVENT))
+    elif name == "legacy_reconcile":
         monkeypatch.setattr(store_import, "run_legacy_reconcile", lambda root, **kw: maintenance_jobs.record(
             root, "legacy_reconcile", state="done", done=1), raising=False)
         maintenance_jobs.record(data, "legacy_reconcile", state="pending")
@@ -272,6 +378,11 @@ def _setup_job(name, data, monkeypatch):
         from tests.test_evidence_packs import _task
 
         _task(data, "settled", blobs=1)
+    elif name == "record_compression":
+        write_task_result(data, "settled", "completed", result="answer")
+        evidence = data / "task_results" / "artifacts" / "settled" / "delegated_runs" / "run" / "evidence" / "out.log"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_bytes(b"a finished record compresses where the filesystem can\n" * 4096)
     elif name == "dialogue_import":
         from ouroboros import dialogue_import
         from tests._dialogue import seed
@@ -279,6 +390,18 @@ def _setup_job(name, data, monkeypatch):
         seed(data, archives={"chat_20261001T000000.jsonl": [{"ts": "2026-10-01T00:00:00Z", "direction": "in",
                                                              "chat_id": 1, "text": "archived"}]})
         dialogue_import.cutover(data)  # plans the archive segment; the job imports it
+    elif name == "memory_tail":
+        from ouroboros import dialogue_store
+        from ouroboros.chronicle_store import ChronicleStore
+
+        assert ChronicleStore(data).ensure_activated()["kind"] == "activation"  # its frontier at the stream's start
+        dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "in", "text": "after the frontier"})
+    elif name == "room_appearances":
+        from ouroboros import dialogue_store
+
+        # An older body's notice: no appearance keys, the derivation mark left behind it.
+        dialogue_store.append(data, "chat", {"chat_id": 1, "direction": "out", "type": "main_notice", "task_id": "t",
+                                             "text": "an older body's notice"}, feed=True, appearances=None)
     elif name == "hot_facts":
         from ouroboros import store
 
@@ -373,7 +496,8 @@ def test_the_real_child_process_runs_the_due_jobs_and_reports(data):
     from ouroboros import dialogue_import
 
     dialogue_import.cutover(data)  # as the boot does before the dialogue opens: the archive is planned
-    assert maintenance.due(data) == ["dialogue_import", "custody_trash"]
+    assert maintenance.due(data) == ["subagent_metrics", "pending_invocations", "dialogue_import",
+                                     "ended_plan_asks", "custody_trash", "runtime_retirement", "record_compression"]
     unit = maintenance.MaintenanceChild()
     assert unit.tick(data, REPO)
     unit._thread.join(240)
@@ -387,3 +511,265 @@ def test_the_real_child_process_runs_the_due_jobs_and_reports(data):
     assert finished[0]["jobs"]["dialogue_import"]["state"] == "done"
     assert pr.projects_summary(data)[0]["has_thread_activity"] is False
     assert maintenance.due(data) == [], "the child left every job at rest"
+
+
+def test_the_dispatchers_look_costs_the_same_whatever_the_server_and_the_ledger_hold(data, monkeypatch):
+    """``maintenance.due`` decodes only its own jobs' rows and probes the import ledger by index: the
+    verdict map the server keeps for its retained drives and a ledger of imported segments, both sized
+    by history, add nothing to the look (JSON decoded, statements, VM steps equal at 1 and 30 units)."""
+    from ouroboros import dialogue_store as ds, server_maintenance as sm
+    from ouroboros.startup_migrations import prepare_startup_state
+    from tests._cost_meter import BOUNDARY, CostMeter
+
+    looks = []
+    for scale in (1, 30):
+        root = data.parent / f"root{scale:02}"
+        prepare_startup_state(root)
+        with store.open_store(root, write=True) as txn:
+            txn.set_meta(sm.SETTLEMENT_VERDICTS, {f"drive-{index}": {
+                "layout": "headless_tasks", "reason": "canonical_not_settled",
+                "basis": [[index, "2025-01-01T00:00:00+00:00"], [index, 96, 1], None, "FileNotFoundError", "7.8.0"]}
+                for index in range(20 * scale)})
+            maintenance_jobs.record_in(txn, "drive_settlement", cursor={"headless": "", "direct": ""}, rest={})
+        ds.create(root)
+        with ds.transaction(root, write=True) as conn:
+            conn.executemany("INSERT INTO import_ledger (stream, name, base, size, state) VALUES ('chat', ?, ?, 1, 'done')",
+                             [(f"chat_{index:06d}.jsonl", index) for index in range(20 * scale)])
+        store.close_connections()
+        with CostMeter(root) as meter:
+            token = BOUNDARY.set("look")
+            try:
+                due = maintenance.due(root)
+            finally:
+                BOUNDARY.reset(token)
+        counts = meter.snapshot("look")["counts"]
+        looks.append((due, {key: counts.get(key, 0) for key in ("json_chars", "json_loads", "statements", "vm_steps", "open", "scandir")}))
+    assert looks[0] == looks[1], looks
+
+
+def test_a_layout_whose_inputs_stand_is_not_listed_and_each_input_wakes_it(data, monkeypatch):
+    """After a whole pass finds nothing to settle, the next passes read the layout's basis and stop: the
+    drives are not listed, no verdict is compared, no body decoded, nothing written. A task completing
+    elsewhere costs one indexed read of the rows written since and leaves the rest standing; a drive's
+    own closed task written again, and a drive its creator published, are looked at alone, without a
+    listing. A drive added without a publication, a changed retention setting, a new server generation
+    and a young drive reaching its retention instant each make the next pass walk again; a pass stopped
+    by the generation token records no rest."""
+    from ouroboros import headless, maintenance_retirement, server_maintenance as sm, task_custody
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+
+    now, day = 1_800_000_000.0, 86_400.0
+    clock = [now]
+    prepare_startup_state(data)
+    monkeypatch.setattr(sm, "DATA_DIR", data)
+    monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "1")
+    monkeypatch.setattr("ouroboros.retention.time.time", lambda: clock[0])
+    monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
+    listings, compared = [], []
+    names = headless._drive_names
+    monkeypatch.setattr(headless, "_drive_names", lambda base: listings.append(base.name) or names(base))
+    verdict = task_custody.rested_verdict
+    monkeypatch.setattr(task_custody, "rested_verdict", lambda rested, parent, task_id, *a: compared.append(task_id) or verdict(rested, parent, task_id, *a))
+    old = "2026-01-01T00:00:00+00:00"  # ten days before the clock: past retention
+    drive = headless.prepare_task_drive(data, "held", "empty")
+    write_task_result(data, "held", "completed", result="answer", child_drive_root=str(drive), ts=old,
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+
+    def rest():
+        return (maintenance_jobs.job(data, "drive_settlement") or {}).get("rest", {}).get("headless") or {}
+
+    def walks_then_rests(why):
+        listings.clear()
+        sm._run_drive_custody_pass()
+        assert "headless_tasks" in listings, why  # the changed input made the pass walk (no direct layout here)
+        for _pass in range(3):
+            if rest():
+                return
+            sm._run_drive_custody_pass()
+        raise AssertionError(f"{why}: the lap never came to rest")
+
+    sm._run_drive_custody_pass()  # attempts the drive: retained post_work_open, its verdict recorded
+    assert sm.settlement_verdicts(data)["held"]["reason"] == "post_work_open" and not rest()
+    sm._run_drive_custody_pass()  # walks, compares the verdict, attempts nothing: the layout rests
+    assert rest()["basis"]["directory"] and rest()["youngest"] is None
+    listings.clear(), compared.clear()
+    before, decodes = _revision(data), _decodes(monkeypatch)
+    for _pass in range(2):
+        sm._run_drive_custody_pass()
+    assert listings == [] and compared == [] and decodes == [] and _revision(data) == before, "a resting layout was walked"
+    assert drive.is_dir()
+
+    fresh = headless.prepare_task_drive(data, "fresh", "empty")  # the creator publishes the arrival
+    write_task_result(data, "fresh", "completed", result="answer", child_drive_root=str(fresh), ts=old,
+                      root_phase_checkpoint={"post_task_synthesis": "running"})
+    listings.clear(), compared.clear()
+    sm._run_drive_custody_pass()
+    assert listings == [] and compared == ["fresh"], "a drive its creator published is looked at alone, without a listing"
+    assert sm.settlement_verdicts(data)["fresh"]["reason"] == "post_work_open" and not rest()
+    walks_then_rests("the whole pass after the published drive was attempted")
+    (data / "state" / "headless_tasks" / "copied" / "data").mkdir(parents=True)  # a drive nobody published
+    walks_then_rests("a drive added without a publication")
+    write_task_result(data, "elsewhere", "completed", result="an ordinary finished turn")  # no drive of this layout
+    listings.clear(), compared.clear(), decodes.clear()
+    counter = rest()["basis"]["terminal"]
+    sm._run_drive_custody_pass()
+    assert listings == [] and compared == [] and decodes == [], "a completion elsewhere walked the layout"
+    assert rest()["basis"]["terminal"] > counter, "the rest stands under the moved counter"
+    write_task_result(data, "held", "completed", note="written again")  # a closed task written again: its drive alone
+    listings.clear(), compared.clear()
+    sm._run_drive_custody_pass()
+    assert listings == [] and compared == ["held"], "a drive's own row written is looked at alone, without a listing"
+    walks_then_rests("the whole pass after a drive's own row changed")
+    monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "2")
+    walks_then_rests("the retention setting changed")
+    maintenance_retirement.record_startup(data, gaps=False)
+    walks_then_rests("a new server generation")
+    young = headless.prepare_task_drive(data, "young", "empty")  # published: looked at alone, its instant kept
+    write_task_result(data, "young", "completed", result="answer", child_drive_root=str(young),
+                      ts="2027-01-14T16:00:00+00:00")  # a day before the clock: inside the two-day retention
+    listings.clear(), compared.clear(), decodes.clear()
+    sm._run_drive_custody_pass()
+    assert listings == [] and compared == [] and decodes == [], "a published young drive is skipped alone: no verdict decoded"
+    assert rest()["youngest"] is not None, "the rest stands and keeps the young drive's instant"
+    sm._run_drive_custody_pass()
+    assert listings == [], "a young drive is not a reason to walk before its instant"
+    clock[0] = now + 2 * day
+    walks_then_rests("the young drive reached its retention instant")
+    assert not young.is_dir(), "it settled when its instant came"
+    kept: dict = {}
+    report = headless.prune_headless_task_drives(data, live=lambda _task: False, stop=lambda: True, rested={}, rest=kept)
+    assert report["deferred"] and kept == {}, "a stopped pass records no rest"
+
+
+def test_a_published_drive_arrival_is_looked_at_alone_consumed_once_and_best_effort(data, monkeypatch):
+    """The drive creator publishes the new drive (``task_custody.record_drive_arrival`` at the end of
+    ``headless.prepare_task_drive``): the next pass looks at that drive alone, with no listing and no
+    other verdict compared, leaves the rest standing under the moved inputs, and forgets the publication
+    in the transaction that records the pass; a publication landing during a walking pass survives it
+    and is looked at by the next. The publication is best-effort: a root nothing imported gets no store
+    built for it, and a store that cannot take the write loses nothing (the creator still returns the
+    drive; the layout directory's moved mtime makes the next pass walk whole, as every pass did before)."""
+    from ouroboros import headless, server_maintenance as sm, task_custody
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+
+    prepare_startup_state(data)
+    monkeypatch.setattr(sm, "DATA_DIR", data)
+    monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
+    listings, compared = [], []
+    names = headless._drive_names
+    monkeypatch.setattr(headless, "_drive_names", lambda base: listings.append(base.name) or names(base))
+    verdict = task_custody.rested_verdict
+    monkeypatch.setattr(task_custody, "rested_verdict",
+                        lambda rested, parent, task_id, *a: compared.append(task_id) or verdict(rested, parent, task_id, *a))
+    layout = data / "state" / "headless_tasks"
+
+    def rest():
+        return (maintenance_jobs.job(data, "drive_settlement") or {}).get("rest", {}).get("headless") or {}
+
+    def arrivals():
+        with store.open_store(data, write=False) as txn:
+            return sorted(txn.set_rows(task_custody.DRIVE_ARRIVALS))
+
+    def at_work(task_id):
+        drive = headless.prepare_task_drive(data, task_id, "empty")
+        write_task_result(data, task_id, "running", child_drive_root=str(drive))
+        return drive
+
+    layout.mkdir(parents=True)
+    sm._run_drive_custody_pass()  # an empty layout: listed once, the lap rests
+    assert rest() and "headless_tasks" in listings and rest()["basis"]["arrivals"] is None
+    at_work("atwork")
+    assert arrivals() == ["headless_tasks/atwork"]
+    listings.clear()
+    sm._run_drive_custody_pass()
+    assert listings == [] and set(compared) <= {"atwork"} and arrivals() == [], "the published drive is looked at alone and forgotten"
+    assert rest()["basis"]["arrivals"] == 1, "the rest stands under the moved inputs"
+    revision = _revision(data)
+    sm._run_drive_custody_pass()
+    assert listings == [] and _revision(data) == revision, "and the layout rests again"
+
+    (layout / "copied" / "data").mkdir(parents=True)  # a drive nobody published: the next pass walks whole ...
+    published = []
+
+    def listing_with_an_arrival(base):  # ... and while it walks, a creator publishes another drive
+        if not published:
+            published.append(at_work("late"))
+        return names(base)
+    monkeypatch.setattr(headless, "_drive_names", listing_with_an_arrival)
+    sm._run_drive_custody_pass()
+    assert published and arrivals() == ["headless_tasks/late"] and rest(), "a publication during the walk survives it"
+    monkeypatch.setattr(headless, "_drive_names", lambda base: listings.append(base.name) or names(base))
+    listings.clear(), compared.clear()
+    sm._run_drive_custody_pass()
+    assert listings == [] and set(compared) <= {"late"} and arrivals() == [] and rest(), "the next pass looks at it alone"
+
+    bare = data.parent / "bare"  # a root nothing imported: the creator builds no store to publish into
+    drive = headless.prepare_task_drive(bare, "orphan", "empty")
+    assert drive.is_dir() and not (bare / "state" / "current.sqlite").exists()
+    opening = store.open_store
+
+    def refusing(root, *, write, **kwargs):  # a store that cannot take the publication's write
+        if write:
+            raise store.StoreBusy("held elsewhere", reason="contention")
+        return opening(root, write=write, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "open_store", refusing)
+        assert task_custody.record_drive_arrival(data, layout, "unpublished") is False
+        drive = headless.prepare_task_drive(data, "unpublished", "empty")
+    assert drive.is_dir() and arrivals() == []
+    write_task_result(data, "unpublished", "running", child_drive_root=str(drive))
+    listings.clear()
+    sm._run_drive_custody_pass()
+    assert "headless_tasks" in listings and rest(), "an unpublished drive moved the directory: the pass walked whole and rests"
+
+
+def test_the_arrival_publication_never_waits_for_a_busy_store_and_lands_on_a_free_one(data, monkeypatch):
+    """Task creation publishes the new drive's arrival under a zero acquisition budget: a store another
+    writer holds costs the creator no wait (the drive exists, no row lands, and the next pass walks the
+    layout whole and rests, as every pass did before the publication existed); a free store still takes
+    the row, and the next pass looks at the drive alone. With the budget removed the creation spends the
+    store's whole wait (``store.STORE_WAIT_SEC``) on every task admitted while the store is held."""
+    import contextlib
+    import sqlite3
+    import time
+
+    from ouroboros import headless, server_maintenance as sm, task_custody
+    from ouroboros.startup_migrations import prepare_startup_state
+    from ouroboros.task_results import write_task_result
+
+    prepare_startup_state(data)
+    monkeypatch.setattr(sm, "DATA_DIR", data)
+    monkeypatch.setattr("supervisor.queue.task_settlement_liveness", lambda _task: False)
+    listings = []
+    names = headless._drive_names
+    monkeypatch.setattr(headless, "_drive_names", lambda base: listings.append(base.name) or names(base))
+    (data / "state" / "headless_tasks").mkdir(parents=True)
+
+    def arrivals():
+        with store.open_store(data, write=False) as txn:
+            return sorted(txn.set_rows(task_custody.DRIVE_ARRIVALS))
+
+    sm._run_drive_custody_pass()  # the lap rests on the empty layout
+    with contextlib.closing(sqlite3.connect(store.store_path(data), isolation_level=None)) as holder:
+        holder.execute("BEGIN IMMEDIATE")  # another writer holds the store throughout the creation
+        try:
+            started = time.monotonic()
+            held = headless.prepare_task_drive(data, "held", "empty")
+            elapsed = time.monotonic() - started
+        finally:
+            holder.execute("ROLLBACK")
+    assert held.is_dir() and arrivals() == [], "the creator keeps its drive; no row landed"
+    assert elapsed < 1, f"a busy store cost the creator {elapsed:.1f} s: the publication waited for it"
+    write_task_result(data, "held", "running", child_drive_root=str(held))
+    listings.clear()
+    sm._run_drive_custody_pass()
+    assert "headless_tasks" in listings, "the unpublished drive moved the directory: the pass walked whole"
+
+    free = headless.prepare_task_drive(data, "free", "empty")
+    assert free.is_dir() and arrivals() == ["headless_tasks/free"], "a free store still takes the publication"
+    write_task_result(data, "free", "running", child_drive_root=str(free))
+    listings.clear()
+    sm._run_drive_custody_pass()
+    assert listings == [] and arrivals() == [], "the next pass looks at the published drive alone"

@@ -237,8 +237,8 @@ def _at_sign_in(next_path: str | None = None):
 
 def _chat_frame(text: str) -> str:
     # The composer's own frame shape (chat.js), sent through the page's real socket manager.
-    return ("() => window.__ouroWs.send({type: 'chat', content: %s, sender_session_id: 'session-recovery-test', "
-            "force_plan: false}).status" % json.dumps(text))
+    return ("() => window.__ouroWs.send({type: 'chat', content: %s, sender_session_id: 'session-recovery-test'})"
+            ".status" % json.dumps(text))
 
 
 def _history_text(page) -> str:

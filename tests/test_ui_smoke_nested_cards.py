@@ -1,9 +1,11 @@
 """Rendered contracts of NESTED subagent cards and of card text selection.
 
 A nested child is subordinate to its root: collapsed, it is an identity row
-(status chip · role identity · notes and chevron, no `Show details` label) in
-quieter ink over its metadata row (agent model, the quiet harness chip, cost,
-last update, docked `Reviews N`). One useful narration line stays visible;
+(status chip · role identity · `Details` and chevron, its notes count kept in the
+button's name) in quieter ink over its compact metadata row (the quiet harness
+chip and the executor's own model, or the agent model of a child that runs no
+executor; duration, cost, docked `Reviews N`). The coordinator and the last
+update are labelled rows of the card's details. One useful narration line stays visible;
 the complete narration waits for expansion. The card's
 summary outranks its details: a body-size activity line over meta-size timeline
 rows, an expanded row back at body size. Twins (same parent and displayed role)
@@ -15,6 +17,8 @@ Kept apart from ``test_ui_smoke_playwright.py`` so that module stays under the
 size-ratchet byte gate. Reuses its server fixture.
 """
 from __future__ import annotations
+
+import re
 
 import pytest
 
@@ -56,10 +60,15 @@ FACTS = """sel => {
         reviewsTop: q('[data-live-review-summary]') ? rect(q('[data-live-review-summary]')).top : -1,
         toggleShown: rect(q('[data-live-toggle]')).width > 1,
         disclosureTag: disclosure.tagName, disclosureName: disclosure.textContent.replace(/\\s+/g, ' ').trim(),
+        countText: q('[data-live-count]').textContent, countHidden: q('[data-live-count]').hidden,
         ariaExpanded: disclosure.getAttribute('aria-expanded'),
         cardRight: rect(card).right, cardHScroll: card.scrollWidth > card.clientWidth + 1,
         sideRight: rect(q('.chat-live-summary-side')).right,
         titleClipped: title.scrollWidth > title.clientWidth + 1,
+        titleCut: title.scrollHeight > title.clientHeight + 1,
+        // The labelled facts of the card's own details, as `Label: value` parts.
+        factsText: [...(card.querySelector(':scope > .chat-live-details > [data-live-facts]')?.children || [])]
+            .map((row) => `${row.querySelector('dt').textContent}: ${row.querySelector('dd').textContent}`).join(' · '),
     };
 }"""
 
@@ -96,7 +105,7 @@ def _seed(data_dir):
 def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_server_with_data, browser_engine):  # noqa: F811
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     _seed(direct_server_with_data["data_dir"])
     url = direct_server_with_data["url"]
@@ -124,8 +133,11 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 assert twin_b["text"] == "scout (f6e5d4c3)", twin_b
                 assert lone["text"] == "reviewer", lone
                 for facts in (twin_a, twin_b):
-                    assert "Coordinator: gemini-3.6-flash" in facts["metaText"], facts
-                assert "Agent model: gemini-3.6-flash" in lone["metaText"], lone
+                    # The coordinator is a row of the details, never the executor's compact fact.
+                    assert "Coordinator: gemini-3.6-flash" in facts["factsText"], facts
+                    assert "gemini" not in facts["metaText"], facts
+                assert "Agent model: gemini-3.6-flash" in lone["factsText"], lone
+                assert "gemini-3.6-flash" in lone["metaText"], lone
                 for facts in (twin_a, twin_b, lone):
                     assert "Done" not in facts["text"] and "—" not in facts["text"], facts
                     # Identity row: the title shares the chip row and takes one line; the
@@ -134,10 +146,16 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                     assert facts["titleLines"] <= 1.2, facts
                     assert facts["activityDisplay"] != "none" and facts["activityLines"] <= 1.2, facts
                     assert facts["metaDisplay"] != "none", facts
-                    assert "updated" in facts["metaText"], facts
-                    # The `Show details` words are the root's; a child keeps notes + chevron, and the
-                    # words stay its button's name.
-                    assert not facts["toggleShown"] and "Show details" in facts["disclosureName"], facts
+                    # A finished child's last update is a row of its details, not a fact of its compact line.
+                    assert "updated" not in facts["metaText"] and "Updated: " in facts["factsText"], facts
+                    # Every card shows the one word `Details` beside its chevron; its notes count stays its name.
+                    assert facts["toggleShown"] and facts["disclosureName"].endswith("Details"), facts
+                    # The shared count projection starts at two notes; a lone timeline
+                    # row does not add a count to the compact disclosure's name.
+                    if facts["countHidden"]:
+                        assert facts["disclosureName"] == "Details", facts
+                    else:
+                        assert facts["countText"] and facts["countText"] in facts["disclosureName"], facts
                     # Quieter than the root: weight 400 and the secondary ink.
                     assert facts["titleWeight"] in ("400", "normal"), facts
                     assert facts["titleColor"] != root["titleColor"], (facts, root)
@@ -154,12 +172,14 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 assert root["toggleShown"] and root["disclosureTag"] == "BUTTON", root
                 # The summary outranks the details: body-size activity line.
                 assert root["activityFont"] == "14px", root
-                # A long identity ellipsizes inside a phone's row (below the 720px switch the room has no sidebar
-                # beside it since #1998, so a narrow window alone no longer squeezes it); the side controls stay
-                # inside the card.
+                # A long identity takes a second line inside a phone's row before it is cut, and ends that line
+                # with an ellipsis (owner 29.10: the name is not lost before a secondary control; below the 720px
+                # switch the room has no sidebar beside it since #1998, so a narrow window alone no longer squeezes
+                # it); the row never wraps and the side controls stay inside the card.
                 set_viewport(page, 390, 800)
                 long = page.evaluate(FACTS, CHILD % "nest-long")
-                assert long["titleClipped"] and long["titleLines"] <= 1.2, long
+                assert long["titleCut"] and 1.8 <= long["titleLines"] <= 2.2, long
+                assert abs(long["titleTop"] - long["chipTop"]) <= 4 and long["toggleShown"], long
                 assert long["sideRight"] <= long["cardRight"] + 1 and not long["cardHScroll"], long
                 set_viewport(page, 1100, 800)
                 # Live path: a twin's narration frame keeps its id, and a NEW sibling of the
@@ -232,10 +252,11 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 second_planner = page.evaluate(FACTS, CHILD % "33334444bbbb-pln")
                 assert first_planner["text"] == "planner (11112222)"
                 assert second_planner["text"] == "planner (33334444)"
-                assert "Agent model: gpt-5.6-sol" in first_planner["metaText"]
-                assert "Agent model: gemini-3.6-flash" in second_planner["metaText"]
-                # A child's review count stays in its own foot while collapsed, like the root's (the action row under
-                # its metadata line), never a band of the summary.
+                assert "Agent model: gpt-5.6-sol" in first_planner["factsText"]
+                assert "Agent model: gemini-3.6-flash" in second_planner["factsText"]
+                assert "gpt-5.6-sol" in first_planner["metaText"] and "gemini-3.6-flash" in second_planner["metaText"]
+                # A child's review count stays docked in its own foot while collapsed (the action row under its
+                # metadata line; a root's is Details' twin in its head), never a band of the summary.
                 _emit_ws_frame(page, {**child_frame, "task_id": "nest-review", "subagent_task_id": "nest-review",
                                       "subagent_role": "reviewer", "subagent_event": "completed",
                                       "content": "reviewer re-read the candidate and filed a long note " + "word " * 40,
@@ -263,6 +284,11 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                     CHILD % "nest-review",
                 )
                 assert rows and all(r["size"] == "12px" for r in rows), rows
+                # The shared projection names two or more notes, not a lone timeline row.
+                # Check the computed accessible name as well as the raw text above.
+                disclosure = page.locator(CHILD % "nest-review").locator('[data-live-disclosure]')
+                expect(disclosure).to_have_accessible_name(
+                    re.compile(r"\d+ notes.*Details") if len(rows) >= 2 else "Details")
                 line_toggle = page.locator(f'{CHILD % "nest-review"} > [data-live-timeline] .chat-live-line-toggle').first
                 assert line_toggle.count() >= 1, rows
                 line_toggle.click()
@@ -294,7 +320,7 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 title.click()
                 page.wait_for_timeout(200)
                 assert page.evaluate(FACTS, ROOT)["ariaExpanded"] == root["ariaExpanded"]
-                # The one disclosure, "Show details", toggles by pointer...
+                # The one disclosure, "Details", toggles by pointer...
                 page.locator(f"{ROOT} > .chat-live-summary-button [data-live-toggle]").click()
                 page.wait_for_timeout(200)
                 toggled = page.evaluate(FACTS, ROOT)["ariaExpanded"]

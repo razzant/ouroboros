@@ -170,8 +170,8 @@ def test_kept_shared_blob_rests_until_the_last_live_sharer_settles(root):
     _task(root, "live", status="running", blobs=1, payloads=[raw])
     first = packer.run_pass(root)
     assert (first["kept"], first["packed"], first["swept"]) == (1, 1, 2) and _loose(refs[0])
-    second = packer.run_pass(root)  # once more: the directory revision after its own unlinks (as before)
-    assert (second["examined"], second["kept"], second["swept"]) == (1, 1, 1)
+    second = packer.run_pass(root)  # the pass recorded the directories as its own unlinks left them
+    assert (second["examined"], second["kept"], second["swept"]) == (0, 0, 0)
     for _ in range(2):  # then no treadmill: the settled task is not re-examined, re-verified or re-kept
         assert packer.changed_tasks(root) == []
         rest = packer.run_pass(root)

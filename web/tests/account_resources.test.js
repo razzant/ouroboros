@@ -194,7 +194,7 @@ for (const operation of ['refresh', 'reset']) {
         payload.profiles = { profiles: [{ profile: { harness_id: target.harness, profile_id: target.profile_id,
             enabled: true }, status: { verification: 'passed' } }], harnessAccounts: [] };
         payload.availability_scope = { model: null, requestKind: 'text', basis: 'quota_block' };
-        payload.quota[0].availability = { state: 'exhausted' };
+        payload.quota[0].availability = { state: 'exhausted', resets_at: '2099-01-01T05:00:00Z' };
         const incoming = atTime('2099-01-01T00:00:00Z', 0.2, 1);
         incoming.snapshots[0].availability = { state: 'available' };
         const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async url =>
@@ -592,4 +592,28 @@ test('a full refresh preceding a queued reset cannot freshen its failed readback
     assert.equal(resourceReadGap(store.resourceAction(target)), true);
     assert.match(accountResourcesMarkup(row, store.snapshot, { action: store.resourceAction(target) }), /Last known · 100% used/);
     store.dispose();
+});
+
+test('a temporary model mark is one escaped line per model, only beside a successful account read', async () => {
+    const { capabilityMarkup } = await import('../modules/account_resources.js');
+    const { capabilityMarksReadFailedAt } = await import('../modules/claudexor_status_store.js');
+    const now = Date.now();
+    const mark = (model, state, expiresIn) => ({ harness_id: row.harness, profile_id: row.profile_id,
+        requested_model: model, provider_reason: `<b>${model}</b> is not supported`, state,
+        observed_at: new Date(now - 25 * 60000).toISOString(), expires_at: new Date(now + expiresIn).toISOString() });
+    const payload = { ...snapshot(), profiles: { routing_evidence: { refusals: [], lastService: [], capabilities: [
+        mark('gpt-6.1-sol', 'provisional', 4 * 3600000), mark('gpt-6-astra', 'probe_due', -60000),
+        { ...mark('other', 'confirmed', 3600000), profile_id: 'someone-else' }] } } };
+    const html = capabilityMarkup(row, payload);
+    assert.equal(html.match(/data-model-capability/g).length, 2);
+    assert.match(html, /Cannot serve gpt-6\.1-sol: &lt;b&gt;gpt-6\.1-sol&lt;\/b&gt; is not supported · temporary mark set 25m ago; may be retried in 4h/);
+    assert.match(html, /Cannot serve gpt-6-astra: .* the next request may recheck it/);
+    assert.doesNotMatch(html, /<b>/);
+    // A stale roster cannot assert a current mark; a failed read is one section fact, never "no marks".
+    assert.equal(capabilityMarkup(row, { ...payload, reads: { ...payload.reads, accounts: 'failed' } }), '');
+    assert.equal(capabilityMarksReadFailedAt(payload), '');
+    const failed = { ...snapshot(), profiles: { routing_evidence_read: { state: 'failed', observed_at: '2026-10-21T02:00:00Z' } } };
+    assert.equal(capabilityMarksReadFailedAt(failed), '2026-10-21T02:00:00Z');
+    assert.equal(capabilityMarkup(row, failed), '');
+    assert.equal(capabilityMarksReadFailedAt({ ...failed, reads: { ...failed.reads, accounts: 'failed' } }), '');
 });

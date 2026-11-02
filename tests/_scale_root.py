@@ -26,8 +26,31 @@ facts under ``quiz_needs_retention`` and must not scale with history. ``NEVER_AC
 stays constant: a registered project is a current fact (every ``/api/state`` lists it), and one
 project that never had a row already sends a boot through the whole growing archive.
 
+The duties' own shapes (the 22.10 class, counted from the owner's snapshot, never census-sized):
+CURRENT and constant, three held candidates whose captures await their owner's apply or reject,
+each a private copy (a linked worktree under ``<home>/worktrees/exec``, outside the data root, of a
+fixture source under ``<home>/sources``) whose named evidence — a read-only Git object, a log and a
+symlinked entry (the recorded gap) — was retained: two copies whose records date from before the
+one-primitive update keep their checkouts until disposition (the rest law guards real checkouts),
+one current copy's checkout went once its capture was saved (its result lives as the patch and
+the pinned commits). An evidence-only investigation no longer stays held: it is disposed at its
+capture, so its shape is the closed history below. Plus one copy with no custody yet
+(``COMPANION_RUN``, whose owner task has no record, so no GC may take it: the driver's positive
+companion starts it) and ``PENDING_INVOCATIONS`` start requests whose bodies live in observability
+blobs; history per unit
+of ``k``: ``CLOSED_RUNS_PER_K`` closed runs that once held such evidence, ``ABSENT_OWNERS_PER_K``
+usage owners whose task row is gone (``result_absent``), ``PACKED_PER_K`` settled tasks whose
+evidence the real packer packed (sidecars, pack index), ``PLAN_ASKS_PER_K`` ended tasks with a
+plan ask still pending a seat, one more day of consciousness money (``CONSCIOUSNESS_PER_K`` own
+wakes and the step of a started root still at work today, through the retired usage journal the
+store imports once) while the allowance's own last-24-hours window stays CURRENT and constant;
+and the subagent metrics cursor is ABSENT while the event chain holds every unit's suffix.
+
 Run in its own interpreter with ``OUROBOROS_DATA_DIR`` set to the root (the writers that use
-the process data root then write there): ``python -m tests._scale_root ROOT K OUT.json``.
+the process data root then write there): ``python -m tests._scale_root ROOT K OUT.json``. The
+build names ``<home>/worktrees`` the process's worktree root, as the measured boot must too; the
+meter's execution root is the copies' own folder inside it, so resolving the configured root on a
+pass is no walk of a checkout.
 """
 
 from __future__ import annotations
@@ -36,9 +59,11 @@ import datetime
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 LEGACY_PER_K = 10
 SETTLED_PER_K = 10
@@ -49,6 +74,15 @@ ROWS_PER_SEGMENT = 150
 # A registered project is a current fact (the sidebar lists it on every /api/state), so their
 # number stays constant; one never-active project already sends a boot through the archive.
 NEVER_ACTIVE_PROJECTS = 1
+HELD_RUNS = (("cur-legacy-a", "legacy"), ("cur-legacy-b", "legacy"), ("cur-cand-a", "candidate"))
+COMPANION_RUN = "cur-inv-late"  # its copy exists; no custody row until the driver's companion starts it
+PENDING_INVOCATIONS = 2
+CLOSED_RUNS_PER_K = 2
+ABSENT_OWNERS_PER_K = 5
+PACKED_PER_K = 2
+PLAN_ASKS_PER_K = 2
+CONSCIOUSNESS_PER_K = 2  # own wakes per day of history
+LONG_ROOT = "cur-long-root"  # a started root at work today whose steps reach back k days
 BODY_SIZES = (20_000, 40_000, 80_000, 200_000)
 MAIN = 1
 FOREIGN_CHATS = (MAIN, 424242, 515151)  # Main and two transport mirrors: never a project room
@@ -350,6 +384,270 @@ def _main_rows(root: pathlib.Path) -> None:
                              drive_root=root, require_write=True)
 
 
+# ---- the duties' own shapes --------------------------------------------------------------------
+
+def _git(area: pathlib.Path, *args: str) -> str:
+    done = subprocess.run(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", *args],
+                          cwd=area, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def worktree_root(root: pathlib.Path) -> pathlib.Path:
+    """The configured worktree root: beside the data root, as an install's is."""
+    return pathlib.Path(root).resolve().parent / "worktrees"
+
+
+def execution_root(root: pathlib.Path) -> pathlib.Path:
+    """Where the delegated copies live, inside the configured worktree root."""
+    return worktree_root(root) / "exec"
+
+
+def checkout(exec_root: pathlib.Path, name: str, *, legacy: bool = False) -> Tuple[pathlib.Path, str]:
+    """A private copy of a fixture source (``snap-<name>``, owned by ``<name>-task``) whose declared
+    evidence folder holds a read-only Git object (copied as Git writes them, 0444), a log, and a
+    symlinked entry (a recorded gap). ``legacy``: its record carries ``file_baseline``, as a copy made
+    before the one-primitive update does, so its checkout stays until disposition."""
+    from ouroboros import subagent_worktrees as worktrees
+    from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
+
+    source = exec_root.parent.parent / "sources" / name  # beside the worktree root, never inside it
+    source.mkdir(parents=True)
+    _git(source, "init", "-q")
+    (source / "README.md").write_text("fixture checkout\n", encoding="utf-8")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "-q", "-m", "baseline")
+    handle = worktrees.provision_execution_snapshot(target_root=source, task_id=f"{name}-task",
+                                                    snapshot_id="snap-" + name, worktree_root=exec_root)
+    if legacy:
+        worktrees._update_record(handle.path, lambda row: {**row, "file_baseline": {}}, op="scale_root")
+    area = pathlib.Path(handle.path)
+    evidence = area / EVIDENCE_DIRNAME
+    loose = next(path for path in (source / ".git" / "objects").glob("??/*") if path.is_file())
+    kept = evidence / "objects" / loose.parent.name / loose.name
+    kept.parent.mkdir(parents=True)
+    shutil.copy2(loose, kept)
+    os.chmod(kept, 0o444)
+    (evidence / "check.log").write_text("ran the checks\n" * 50, encoding="utf-8")
+    os.symlink(os.path.join("..", "README.md"), evidence / "linked-readme")
+    return area, handle.baseline_sha
+
+
+def terminal_detail(run_id: str) -> dict:
+    text = f"complete answer of {run_id}"
+    return {"summary": {"runId": run_id, "state": "succeeded", "spendUsd": 0.25, "spendEstimated": False,
+                        "effectiveAccess": "readonly"}, "lastSeq": 4,
+            "primaryOutput": {"text": text, "bytes": len(text.encode()), "truncated": False}}
+
+
+def held_run(root: pathlib.Path, run_id: str, kind: str, area: pathlib.Path, sha: str) -> Dict[str, Any]:
+    """One terminal candidate the previous generation collected: output retained, money settled, patch
+    captured, named evidence retained (the symlink a recorded gap), undisposed, so it stays HELD until its
+    owner applies or rejects it. A legacy copy keeps its checkout; a current one is released."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros import delegate_custody_current as current
+    from ouroboros.delegate_collection import collect_terminal
+    from ouroboros.subagent_worktrees import find_execution_snapshot
+
+    entry = custody.RunCustody(
+        run_id=run_id, task_id=f"{run_id}-task", root_task_id=f"{run_id}-task", invocation_id="inv-" + run_id,
+        route_id="test", model="test", access="readonly", mode="ask", ledger_root=str(root),
+        snapshot_id="snap-" + run_id, execution_root=str(area), baseline_sha=sha,
+        target_root=str(find_execution_snapshot("snap-" + run_id)["target_root"]), authority_source="preflight_head")
+    if not custody.record_started(root, entry):
+        raise RuntimeError(f"custody of {run_id} did not land")
+    collected = collect_terminal(root, run_id, detail=terminal_detail(run_id))
+    row = current.run(root, run_id)
+    capture = collected.get("workspace_capture") or {}
+    named = capture.get("named_evidence") or {}
+    released = kind != "legacy"
+    if not (row.terminal_source and row.settled and row.output_complete and row.patch_captured
+            and not row.patch_disposed and named.get("status") == "retained" and named.get("gaps")
+            and bool(capture.get("checkout_released")) is released and area.exists() is not released):
+        raise RuntimeError(f"{run_id} is not a held {kind} candidate: {collected}")
+    return {"run_id": run_id, "task_id": entry.task_id, "kind": kind, "area": str(area), "baseline_sha": sha}
+
+
+def _settled_task(root: pathlib.Path, task_id: str, **fields: Any) -> None:
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(root, task_id, "completed", chat_id=MAIN, result=_body(20_000, task_id), **fields)
+    _discharged(root, task_id)
+
+
+GLOBAL_LIMIT_USD = 100.0  # the k=1 and k=30 roots reserve under this limit (measured so; unchanged)
+LIMIT_REFERENCE_K = 30
+
+
+def spend_limit_usd(k: int) -> float:
+    """The global limit the synthetic money is reserved under: the k=30 root's $100, or proportionally more
+    for a larger root (every unit settles ``ABSENT_OWNERS_PER_K`` attempts: the known spend grows with the
+    shape, and a fixed limit refused the k=100 root's reservations once it reached $100)."""
+    return GLOBAL_LIMIT_USD * max(1.0, k / LIMIT_REFERENCE_K)
+
+
+def money(root: pathlib.Path, task_id: str, *, category: str = "", cost: float = 0.4,
+          limit: float = GLOBAL_LIMIT_USD) -> None:
+    """One settled attempt of ``task_id`` through the real ledger: the task becomes a dirty usage owner
+    and the ledger's publication marker moves (also the driver's ``money`` activity, tests/_cost_driver.py)."""
+    from ouroboros import usage_accounting as usage
+
+    reservation = usage.reserve_attempt(usage.AttemptRequest(
+        model="test", provider="openai", drive_root=root, task_id=task_id, root_task_id=task_id,
+        reservation_usd=1.0, global_limit_usd=limit, category=category))
+    usage.mark_dispatched(reservation)
+    usage.settle_attempt(reservation, {"prompt_tokens": 7}, cost_usd=cost, cost_final=True)
+
+
+def _delegated(root: pathlib.Path, k: int) -> Dict[str, Any]:
+    """The held runs (current), their closed predecessors (history) and the pending start requests."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros import store
+
+    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+
+    exec_root = execution_root(root)
+    os.environ["OUROBOROS_SUBAGENT_WORKTREE_ROOT"] = str(worktree_root(root))  # copies release only inside it
+    held = []
+    for run_id, kind in HELD_RUNS:
+        _settled_task(root, f"{run_id}-task")
+        held.append(held_run(root, run_id, kind, *checkout(exec_root, run_id, legacy=kind == "legacy")))
+    # No task record for the companion's owner: an owner not proven over keeps its copy from every GC.
+    area, sha = checkout(exec_root, COMPANION_RUN)
+    companion = {"run_id": COMPANION_RUN, "task_id": f"{COMPANION_RUN}-task", "area": str(area), "baseline_sha": sha}
+    pending = []
+    for index in range(PENDING_INVOCATIONS):
+        task_id = f"cur-pending-inv-{index}-task"
+        _settled_task(root, task_id)
+        invocation_id = f"inv-pending-{index}"
+        if not custody.record_start_requested(
+                root, invocation_id=invocation_id, task_id=task_id, root_task_id=task_id, surface="delegate",
+                route="test", category="subagent", source="delegated_subagent", idempotency_key=f"idem-{index}",
+                request={"prompt": f"pending start {index} " + "p" * 4000, "route": "test"}):
+            raise RuntimeError("the pending start request did not land")
+        pending.append(invocation_id)
+    with store.open_store(root, write=True) as txn:
+        template = txn.custody_row(HELD_RUNS[0][0])
+        count = 0
+        for unit in range(k):
+            for index in range(CLOSED_RUNS_PER_K):
+                run_id = f"run-closed-{unit}-{index}"
+                txn.put_custody(run_id, {**template, "run_id": run_id, "task_id": f"hist-settled-{unit}-{index}",
+                                         "root_task_id": f"hist-settled-{unit}-{index}",
+                                         "authority_source": INVESTIGATION_AUTHORITY,
+                                         "patch_disposed": custody.EVIDENCE_RETAINED}, state="closed")
+                count += 1
+    return {"execution_root": str(exec_root), "held_runs": held, "companion": companion,
+            "pending_invocations": pending, "closed_evidence_runs": count}
+
+
+def _usage_owners(root: pathlib.Path, k: int) -> Dict[str, int]:
+    """Per unit: owners whose task row is gone (``result_absent``), and the settled rows of the day's wakes."""
+    from tests._store_shared import delete_result
+
+    absent = 0
+    for unit in range(k):
+        for index in range(ABSENT_OWNERS_PER_K):
+            task_id = f"hist-absent-{unit}-{index}"
+            _settled_task(root, task_id)
+            money(root, task_id, limit=spend_limit_usd(k))
+            delete_result(root, task_id)
+            absent += 1
+        for index in range(CONSCIOUSNESS_PER_K):
+            _settled_task(root, f"hist-wake-{unit}-{index}", ts=_iso(OLD))  # history: older than current work
+    return {"absent_owners": absent}
+
+
+def _journal_rows(attempt_id: str, ts: float, root_task_id: str, task_id: str, category: str, cost: float = 0.01) -> List[dict]:
+    """One settled attempt in the retired journal format the store's one-time import reads."""
+    base = {"attempt_id": attempt_id, "kind": "attempt", "model": "test", "provider": "openai", "category": category,
+            "source": "test", "task_id": task_id, "root_task_id": root_task_id, "parent_task_id": "",
+            "ts": datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).isoformat()}
+    return [{**base, "state": "reserved", "reservation_upper_bound_usd": "1"}, {**base, "state": "dispatched"},
+            {**base, "state": "settled", "cost_usd": str(cost), "cost_final": True, "pricing_known": True}]
+
+
+def _consciousness_journal(root: pathlib.Path, k: int) -> int:
+    """Consciousness money through the retired journal the usage store imports once, when it is first
+    opened (before any money is settled on this root). CURRENT and constant: the last 24 hours — two own
+    wakes, one started root, the long-lived root's row of today. Per unit of ``k``, one day further back
+    (outside the allowance's window): ``CONSCIOUSNESS_PER_K`` own wakes and the long-lived root's step of
+    that day. The allowance read sums the window; the older days are history it must not visit."""
+    from tests._usage_store_testing import write_journal
+
+    now, day, rows, roots = time.time(), 86_400.0, [], 0
+    for wake in range(2):
+        rows += _journal_rows(f"cur-wake-{wake}", now - 3600 * (wake + 1), f"cur-wake-{wake}", f"cur-wake-{wake}", "consciousness")
+    rows += _journal_rows("cur-started", now - 7200, "cur-started", "cur-started", "consciousness_task")
+    rows += _journal_rows("cur-long-today", now - 1800, LONG_ROOT, LONG_ROOT, "consciousness_task")
+    for unit in range(k):
+        at = now - (unit + 1) * day - 3 * 3600
+        for index in range(CONSCIOUSNESS_PER_K):
+            wake = f"hist-wake-{unit}-{index}"
+            rows += _journal_rows(wake, at - 60 * index, wake, wake, "consciousness")
+            roots += 1
+        rows += _journal_rows(f"hist-long-{unit}-0", at - 10, LONG_ROOT, f"hist-long-step-{unit}", "consciousness_task")
+        rows += _journal_rows(f"hist-long-{unit}-1", at - 20, LONG_ROOT, f"hist-long-step-{unit}", "task")
+    write_journal(root, rows)
+    return roots
+
+
+def _packed(root: pathlib.Path, k: int) -> Dict[str, Any]:
+    """Per unit: settled tasks with call evidence and a checkpoint handle, packed by the real packer."""
+    from ouroboros import evidence_packer
+    from ouroboros.artifacts import store_actor_source_bytes
+    from ouroboros.observability import write_blob
+
+    for unit in range(k):
+        for index in range(PACKED_PER_K):
+            task_id = f"hist-packed-{unit}-{index}"
+            calls = root / "observability" / "calls" / task_id
+            calls.mkdir(parents=True, exist_ok=True)
+            for call in range(2):
+                ref = write_blob(root, {"message": {"content": f"answer {task_id} {call} " + "x" * 4000}}, kind="json")
+                (calls / f"llm_{call}_response.json").write_text(json.dumps(
+                    {"call_id": f"llm_{call}", "task_id": task_id, "full_payload_ref": ref}), encoding="utf-8")
+            store_actor_source_bytes(root, task_id, category="context_checkpoints", source_id=f"focus_{task_id}",
+                                     data=b"# focus\n" + b"y" * 3000, extension="md")
+            _settled_task(root, task_id, ts=_iso(OLD))  # history: older than current work
+    report = evidence_packer.run_pass(root)
+    return {"packed": report["packed"], "faults": report["faults"]}
+
+
+def _plan_asks(root: pathlib.Path, k: int) -> int:
+    """Per unit: ended tasks whose plan record still holds a pending seat (the reconcile pass's collector)."""
+    from ouroboros import store
+    from ouroboros.plan_record import PLAN_RECORD_KEY, PLAN_RECORD_VERSION
+    from ouroboros.task_store import read_document
+
+    template = read_document(root, "hist-template")
+    count = 0
+    with store.open_store(root, write=True) as txn:
+        for unit in range(k):
+            for index in range(PLAN_ASKS_PER_K):
+                task_id = f"hist-plan-{unit}-{index}"
+                at = _iso(NEW + datetime.timedelta(days=unit, hours=12, minutes=index))
+                record = {"schema_version": PLAN_RECORD_VERSION, "attempts": [],
+                          "revisions": [{"n": 1, "goal": "finish", "plan": "do it", "done_when": [], "affected_paths": [],
+                                         "ts": at}],
+                          "asks": [{"ask_id": f"ask-{unit}-{index}", "revision": 1, "ts": at, "participants": [
+                              {"seat_id": "seat-1", "status": "pending", "operation_id": f"op-{unit}-{index}",
+                               "owner_marked": True, "dispatched": True, "model": "test", "route": "api_chat"}]}]}
+                txn.store_task({**template, "task_id": task_id, "chat_id": MAIN, "ts": at, "updated_at": at,
+                                "canonical_terminal_projection": {"published_at": at}, PLAN_RECORD_KEY: record},
+                               pending_drive=False)
+                count += 1
+    return count
+
+
+def _forget_metrics_cursor(root: pathlib.Path) -> None:
+    """The producer boundary's replay shape: no cursor while the chain holds every unit's suffix."""
+    from ouroboros import store
+    from ouroboros.subagent_metrics import CURSOR
+
+    with store.open_store(root, write=True) as txn:
+        txn.conn.execute("DELETE FROM meta WHERE key=?", (CURSOR,))
+
+
 def build(root: Any, k: int) -> Dict[str, Any]:
     """Build the published root (see the module docstring); returns its facts."""
     from ouroboros.startup_migrations import prepare_startup_state
@@ -361,10 +659,12 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     (root / "state").mkdir(parents=True, exist_ok=True)
     state.init(root, 100.0)
     state.init_state()  # a first boot's state, before any history exists
-    (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": 100, "OUROBOROS_MAX_WORKERS": 2}),
-                                        encoding="utf-8")
+    # No fallback model: the turn law (B10) ends a turn at its first model request, which the driver refuses.
+    (root / "settings.json").write_text(json.dumps({"TOTAL_BUDGET": 100, "OUROBOROS_MAX_WORKERS": 2,
+                                                    "OUROBOROS_MODEL_FALLBACKS": []}), encoding="utf-8")
     facts: Dict[str, Any] = {"k": k}
     steps: Dict[str, float] = {}
+    facts["consciousness_roots"] = _consciousness_journal(root, k)  # before the first money write opens the store
 
     def step(name: str, call):
         begun = time.monotonic()
@@ -382,6 +682,11 @@ def build(root: Any, k: int) -> Dict[str, Any]:
     facts.update(step("projects", lambda: _projects(root, k)))
     facts.update(step("current", lambda: _current(root, k)))
     step("main_rows", lambda: _main_rows(root))
+    facts.update(step("delegated", lambda: _delegated(root, k)))
+    facts.update(step("usage_owners", lambda: _usage_owners(root, k)))
+    facts["packs"] = step("packed", lambda: _packed(root, k))
+    facts["plan_asks"] = step("plan_asks", lambda: _plan_asks(root, k))
+    step("metrics_cursor", lambda: _forget_metrics_cursor(root))
     facts["build_seconds"] = round(time.monotonic() - started, 2)
     facts["build_steps"] = steps
     return facts

@@ -19,7 +19,9 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 # (path, qualified function, shape): (number of sites, reason)
 EXCEPTIONS = {
-    ("ouroboros/upgrade_notices.py", "startup_upgrade_notices", "call"): (1, "Host notice uses literal system role and a type from its finite owed-notice tuples; test_reviewer_delivery_defaults and test_legacy_memory_notice pin all three emitted types."),
+    ("ouroboros/live_conversation.py", "ConversationHost.caption.write", "envelope"): (1, "Projects the durable owner/model/participant caption row with its recorded role and system_type; test_live_host_captions pins both spoken voices."),
+    ("supervisor/message_ingress.py", "handle_web_message", "envelope"): (1, "Echoes the accepted canonical row: owner words remain user, host call openings retain system/call_open; test_call_open_ingress pins both paths."),
+    ("ouroboros/upgrade_notices.py", "startup_upgrade_notices", "call"): (1, "Host notice uses literal system role and a type from its finite owed-notice tuples; test_reviewer_delivery_defaults and test_legacy_memory_notice pin every emitted type."),
     ("supervisor/message_bus.py", "_send_markdown", "call"): (1, "Forwards the caller's role/type to the bridge."),
     ("supervisor/message_bus.py", "send_with_budget", "call"): (1, "Forwards caller authorship, not a producer of new text."),
     ("supervisor/message_bus.py", "send_with_budget", "envelope"): (1, "Persists the caller's role/type for progress history."),
@@ -32,7 +34,8 @@ EXCEPTIONS = {
     ("ouroboros/agent_task_pipeline.py", "emit_task_results", "envelope"): (1, "Final model output; prepare_terminal_send_event applies host terminal provenance separately."),
     ("ouroboros/agent.py", "OuroborosAgent._emit_progress", "envelope"): (1, "Explicit narration fact selects model versus host; end-to-end voice test pins both branches."),
     ("ouroboros/tools/control_runtime.py", "_send_user_message", "envelope"): (1, "The model authors this nonterminal reply; proactive_message is not a System voice."),
-    ("ouroboros/owner_relay.py", "publish_relay", "call"): (1, "One Ouroboros bubble (relay shape F): the teller's own note under the owner's host-held quoted words; no host-authored text."),
+    ("ouroboros/presence_owner_contact.py", "send_main_message", "envelope"): (1, "The model authors the private Main report; the host source signature attributes it without changing its voice."),
+    ("ouroboros/owner_relay.py", "publish_relay", "call"): (1, "One relay row, drawn as a note card: the teller's own note and summary under the owner's host-held quoted words; no host-authored text."),
 }
 
 
@@ -161,6 +164,7 @@ def test_exceptions_are_counted_and_stale_rows_fail():
 # `skill_repair` also the host's automatic repair after a marketplace install. Nothing produces an
 # `acceptance_late_settlement` row since the review fold; the old rows still render as card rows.
 HOST_ROW_CLASSES = {
+    "body_adoption": ("card_row", 1),  # the authorizing task's settled adoption; a task-unbound one stays restart_notice
     "budget_notice": ("runtime_state", 1),
     "cancel_receipt": ("owner_act_receipt", 2),
     "command_reply": ("owner_act_receipt", 2),
@@ -172,14 +176,17 @@ HOST_ROW_CLASSES = {
     "finalization_notice": ("card_row", 2),
     "host_progress": ("card_row", 1),
     "initialization_notice": ("not_started", 1),
+    "low_start_notice": ("runtime_state", 1),  # a fresh start memory lowered to Low (owner 1B, 29.10)
     "managed_update_notice": ("runtime_state", 2),
+    "model_capability_notice": ("runtime_state", 1),
     "owner_pause_notice": ("card_row", 1),
     "project_completion_summary": ("main_lifecycle", 1),
+    "project_closure": ("runtime_state", 1),  # the mind's reversible project decision, in its room
     "project_handoff": ("main_lifecycle", 1),
     "project_started": ("main_lifecycle", 1),
     "promotion_notice": ("runtime_state", 4),
     "reminder": ("signed_words", 1),
-    "restart_notice": ("runtime_state", 7),
+    "restart_notice": ("runtime_state", 8),  # includes the saved-for-Restart input acknowledgement
     "rollback_notice": ("runtime_state", 1),
     "retired_settings_notice": ("runtime_state", 2),
     "review_pool_migration_notice": ("runtime_state", 1),
@@ -195,14 +202,15 @@ HOST_ROW_CLASSES = {
     "subagent_started": ("card_row", 1),
     "subagent_terminal_notice": ("card_row", 1),
     "supervisor_failure": ("no_mind", 1),
-    "task_admission_notice": ("not_started", 5),
+    "task_admission_notice": ("not_started", 1),  # the one-shot Swarm admission's two sites are gone
     "task_error": ("no_mind", 1),
-    "task_not_started": ("not_started", 2),
+    "task_not_started": ("not_started", 5),  # also the two worker_chat_lane Restart-intake refusals
     "task_pause_notice": ("card_row", 1),
-    "task_reaper_notice": ("card_row", 4),
+    "task_reaper_notice": ("card_row", 2),  # wedged hold and stop; the two idle-retry notices are gone
     "task_scheduled": ("card_row", 1),
     "task_start_unconfirmed": ("not_started", 1),
     "terminal_incident": ("no_mind", 2),
+    "ui_hold": ("runtime_state", 1),
     "worker_failure": ("no_mind", 2),
     "worker_readiness_notice": ("runtime_state", 2),
 }

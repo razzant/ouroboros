@@ -1,8 +1,8 @@
 """#1554: an addressed action retires a positively ENDED local owner's capability.
 
-Two kinds of positive evidence reach the existing retirement writers: a retained
-witness (the producer knew the owner ended but its write failed) and a
-platform-qualified absence of the recorded owner. Passive readers write
+Positive evidence reaches the existing retirement writers: a platform-qualified
+absence of the recorded owner, or a legacy witness an older release kept (a
+failed retirement write is now owed by the process that knows it). Passive readers write
 nothing; access denial, EPERM, unreadable or differently formatted identity,
 generation, terminality and age prove nothing; independent effects and money
 stay exactly as they were.
@@ -18,6 +18,7 @@ import pytest
 from ouroboros import local_custody_repair as repair
 from ouroboros import platform_layer
 from ouroboros.task_results import load_task_result, write_task_result
+from ouroboros.tool_custody import owner_proof
 from tests._budget_pause_exact_helpers import _install_queue
 from tests._store_shared import result_signature
 
@@ -33,13 +34,14 @@ def _dead_process_identity():
     return child.pid, birth
 
 
-def _claim(tmp_path, task_id, pid, birth, *, holder=None, attempt=1):
+def _claim(tmp_path, task_id, pid, birth, *, holder=None, attempt=1, proof=None):
     holder = holder or task_id
     row = load_task_result(tmp_path, holder) or {}
     claims = dict(row.get("launch_handoffs") or {})
     claims[f"op-{task_id}"] = {"tool": "delegate_wait", "task_id": task_id, "root_task_id": "root",
                                "state": "claimed", "claimed_at": "2026-10-06T11:32:45+00:00",
-                               "local_owner": {"pid": pid, "process_birth": birth, "task_attempt": attempt}}
+                               "local_owner": {"pid": pid, "process_birth": birth, "task_attempt": attempt},
+                               **({"owner_proof": proof} if proof else {})}
     write_task_result(tmp_path, holder, row.get("status") or "cancelled", root_task_id="root", launch_handoffs=claims)
 
 
@@ -82,8 +84,9 @@ def test_a_live_unknown_or_unattributable_owner_stays_held(tmp_path, monkeypatch
     pid, birth = {"live_self": (os.getpid(), own), "unreadable_birth": (os.getpid(), ""),
                   "other_format_birth": (os.getpid(), foreign_birth),
                   "no_identity": (0, own)}[case]
-    _claim(tmp_path, "helper", pid, birth)
-    assert repair.owner_ended(pid, birth) is False
+    proof = owner_proof() if pid else None  # every row this live image writes carries its session
+    _claim(tmp_path, "helper", pid, birth, proof=proof)
+    assert repair.owner_ended(pid, birth, proof) is False
     assert [b["kind"] for b in action_writers(queue, "root")] == ["tool_handoff"]
 
 
@@ -103,8 +106,12 @@ _BOOT = "0123456789abcdef0123456789abcdef"
 def test_only_a_validated_birth_identity_can_prove_a_different_process(monkeypatch, live, recorded, ended):
     monkeypatch.setattr(platform_layer, "process_start_time", lambda _pid: live)
     monkeypatch.setattr(platform_layer, "pid_provably_gone", lambda _pid: False)
-    assert repair.owner_ended(os.getpid(), recorded) is ended
+    monkeypatch.setattr("ouroboros.process_identity.process_zombie", lambda _pid: False)
     assert repair.owner_ended(4242, recorded) is ended
+    assert repair.owner_ended(os.getpid(), recorded) is ended, "a stamp with no proof keeps the birth comparison"
+    # A custody row on this very pid is decided by the custody session alone: this image's rows carry it.
+    assert repair.owner_ended(os.getpid(), recorded, owner_proof()) is False
+    assert repair.owner_ended(os.getpid(), recorded, {}) is True, "a sessionless custody row is an earlier image's"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="ps lstart is the POSIX wall-clock fallback")
@@ -120,7 +127,9 @@ def test_two_timezone_readings_of_this_living_process_are_not_its_death(monkeypa
     if not utc or utc == moscow:
         pytest.skip("this ps does not render a timezone-dependent lstart")
     monkeypatch.setattr(platform_layer, "process_start_time", lambda _pid: moscow)
+    assert repair.owner_ended(os.getppid(), utc) is False, "another living pid: two readings prove nothing"
     assert repair.owner_ended(os.getpid(), utc) is False
+    assert repair.owner_ended(os.getpid(), utc, owner_proof()) is False
 
 
 @pytest.mark.parametrize("state,gone", [("no_such_pid", True), ("exited", True), ("denied", False),
@@ -142,10 +151,10 @@ def test_posix_eperm_is_not_absence(monkeypatch):
     assert platform_layer.pid_is_alive(4242) is True
 
 
-def test_a_closed_receiver_whose_retirement_write_failed_keeps_a_witness_the_next_action_discharges(
+def test_a_closed_receiver_whose_retirement_write_failed_is_owed_until_the_store_accepts_it(
         tmp_path, monkeypatch):
-    from ouroboros import model_wait, usage_accounting as ua
-    from supervisor.continuation_admission import action_writers, conflicting_writers
+    from ouroboros import custody_owed, model_wait, usage_accounting as ua
+    from supervisor.continuation_admission import conflicting_writers
 
     queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
     monkeypatch.setenv("TOTAL_BUDGET", "1000")
@@ -162,26 +171,16 @@ def test_a_closed_receiver_whose_retirement_write_failed_keeps_a_witness_the_nex
     monkeypatch.setattr(model_wait, "put_handoffs",
                         lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk")))
     owner.close()  # a closed receiver on a live host; its retirement write fails
-    witness = next(iter(_witnesses(tmp_path).values()))
-    assert witness["model_consumers"] == {owner.answer_consumer_id: 1}
-    assert witness["producer"] == "model_wait" and witness["task_id"] == "root"
+    assert custody_owed.labels() == ["consumers:root"] and _witnesses(tmp_path) == {}, "owed, not a witness row"
     write_task_result(tmp_path, "root", "failed", root_task_id="root")
     assert any(b["kind"] == "model_handoff" for b in conflicting_writers(queue, "root"))
-    assert _witnesses(tmp_path), "a passive census discharges nothing"
+    assert custody_owed.drain() == 1, "a store that still refuses keeps the duty"
 
     monkeypatch.setattr(model_wait, "put_handoffs", real_update)
-    assert not any(b["kind"] == "model_handoff" for b in action_writers(queue, "root"))
-    assert _witnesses(tmp_path) == {}, "discharged only by the writer that landed"
+    assert custody_owed.drain() == 0, "the process's driver lands the same write"
+    assert not any(b["kind"] == "model_handoff" for b in conflicting_writers(queue, "root"))
     assert owner.answer_consumer_id in load_task_result(tmp_path, "root")["retired_model_consumers"]
     assert ua.read_usage_records(tmp_path, final_only=True) == money, "unknown money stays unknown"
-
-
-def test_a_witness_that_cannot_be_written_either_leaves_an_honest_hold(tmp_path, monkeypatch):
-    from ouroboros import obligations
-
-    monkeypatch.setattr(obligations, "add", lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("lock")))
-    assert repair.retain_witness(tmp_path, "t", reason="x", model_consumers={"c": 1}) is False
-
 
 def test_a_member_claim_parked_on_its_roots_row_is_retired_where_it_lives(tmp_path, monkeypatch):
     from supervisor.continuation_admission import action_writers
@@ -208,22 +207,21 @@ def test_independent_effects_survive_the_repair(tmp_path, monkeypatch):
     assert "tool_handoff" not in kinds and "merge_operation" in kinds, "a merge receipt keeps its own custody"
 
 
-def test_confirmed_worker_death_whose_write_failed_retains_its_death_witness(tmp_path, monkeypatch):
+def test_confirmed_worker_death_whose_write_failed_is_owed_by_the_process(tmp_path, monkeypatch):
+    from ouroboros import custody_owed, task_store
+
     write_task_result(tmp_path, "root", "running", root_task_id="root")
-    from ouroboros import task_store
-
-    real = task_store.patch_document  # the retirement's store write; the witness row's own write stays real
+    _claim(tmp_path, "root", 99999, "b")
+    real = task_store.patch_document  # the retirement's store write
     monkeypatch.setattr(task_store, "patch_document", lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk")))
-    assert repair.retire_ended_owner(tmp_path, "root", "root", pid=99999, birth="b", attempt=1,
-                                     producer="worker_death") is False
+    assert repair.retire_ended_process(tmp_path, pid=99999, process_birth="b")["owed"] is True
+    assert custody_owed.pending() == 1 and _witnesses(tmp_path) == {}
     monkeypatch.setattr(task_store, "patch_document", real)
-    witness = next(iter(_witnesses(tmp_path).values()))
-    assert witness["local_owner"] == {"pid": 99999, "process_birth": "b", "task_attempt": 1}
-    assert witness["producer"] == "worker_death"
+    assert custody_owed.drain() == 0
+    assert load_task_result(tmp_path, "root")["retired_tool_invocations"]["op-root"]["state"] == "owner_dead"
 
-
-def test_addressed_retry_discharges_a_root_held_child_witness_after_retirement_write_failure(tmp_path, monkeypatch):
-    from ouroboros import tool_custody, usage_accounting as ua
+def test_an_owed_root_held_child_retirement_lands_after_a_write_failure(tmp_path, monkeypatch):
+    from ouroboros import custody_owed, tool_custody, usage_accounting as ua
     from supervisor.continuation_admission import action_writers, conflicting_writers
 
     queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
@@ -237,35 +235,34 @@ def test_addressed_retry_discharges_a_root_held_child_witness_after_retirement_w
             ua.execute_physical_attempt(ua.AttemptRequest(model="m", provider="test", reservation_usd=.2),
                                         lambda: (_ for _ in ()).throw(RuntimeError("unknown cost")))
     money = ua.read_usage_records(tmp_path, final_only=True)
-    retire = tool_custody.retire_tool_invocations
-    monkeypatch.setattr(tool_custody, "retire_tool_invocations",
+    retire = tool_custody.retire_process_invocations
+    monkeypatch.setattr(tool_custody, "retire_process_invocations",
                         lambda *_a, **_kw: (_ for _ in ()).throw(OSError("retirement disk failure")))
-    assert repair.retire_ended_owner(tmp_path, "child", "root", pid=pid, birth=birth, attempt=1,
-                                     producer="confirmed_worker_death", holder="root") is False
-    assert _witnesses(tmp_path)
-    monkeypatch.setattr(tool_custody, "retire_tool_invocations", retire)
-    # The next action has only the positive retained witness; a new process
-    # probe is unavailable. The unpublished child is absent from tree members.
+    assert repair.retire_ended_process(tmp_path, pid=pid, process_birth=birth)["owed"] is True
+    assert custody_owed.pending() == 1 and _witnesses(tmp_path) == {}
+    monkeypatch.setattr(tool_custody, "retire_process_invocations", retire)
+    # No new process probe is available; the process that knew the death owes the write.
     monkeypatch.setattr(repair, "owner_ended", lambda *_a: False)
-    assert "tool_handoff" in [b["kind"] for b in conflicting_writers(queue, "root")]
-    assert _witnesses(tmp_path), "passive census never discharges the witness"
+    assert "tool_handoff" in [b["kind"] for b in conflicting_writers(queue, "root")], "a passive census writes nothing"
+    assert custody_owed.drain() == 0
     kinds = [b["kind"] for b in action_writers(queue, "root")]
     assert "tool_handoff" not in kinds and "merge_operation" in kinds
-    assert _witnesses(tmp_path) == {}
     retired = load_task_result(tmp_path, "root")["retired_tool_invocations"]["op-child"]
     assert retired["effect_outcome"] == "unknown" and retired["replay_authorized"] is False
     assert load_task_result(tmp_path, "child") is None, "repair does not invent the unpublished child's row"
     assert ua.read_usage_records(tmp_path, final_only=True) == money
-
 
 def test_holder_witness_from_a_different_tree_is_not_discharged(tmp_path, monkeypatch):
     from supervisor.continuation_admission import action_writers
 
     queue, _state, _workers = _install_queue(tmp_path, monkeypatch)
     write_task_result(tmp_path, "root", "failed", root_task_id="root")
-    repair.retain_witness(tmp_path, "root", reason="write_failed", producer="confirmed_worker_death",
-                          local_owner={"pid": 4242, "process_birth": "old-birth", "task_attempt": 1},
-                          root_task_id="foreign-tree", holder="root")
+    from ouroboros import obligations
+
+    obligations.add(tmp_path, repair.WITNESS_SET, "legacy-witness",  # a row an older release kept
+                    {"task_id": "root", "root_task_id": "foreign-tree", "holder": "root", "reason": "write_failed",
+                     "producer": "confirmed_worker_death",
+                     "local_owner": {"pid": 4242, "process_birth": "old-birth", "task_attempt": 1}})
     before = _witnesses(tmp_path)
     action_writers(queue, "root")
     assert _witnesses(tmp_path) == before, "matching the holder name is insufficient without its tree"

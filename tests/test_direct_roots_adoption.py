@@ -281,7 +281,7 @@ def test_saved_working_state_is_held_for_resume_without_roster_or_snapshot(tmp_p
     assert fenced == [] and not ci.has_active_intent(tmp_path, TID, strict=True)
     task = next(row for row in workers.PENDING if row["id"] == TID)
     hold = budget_hold_fact(task)
-    assert hold and hold["reason"] == HOLD_SAVED_WORK and hold["stop_cause"] == "app_stop"
+    assert hold and hold["reason"] == HOLD_SAVED_WORK and hold["door"] == "app_stop"
     assert task["_working_recovery"]["from_attempt"] == 1 and task["_attempt"] == 2
     assert load_task_result(tmp_path, TID)["status"] != STATUS_CANCELLED
     assert not task.get("_project_admission_restore_hold")

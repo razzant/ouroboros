@@ -16,6 +16,7 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 ANTHROPIC = "sk-ant-api03-SYNTHETIC-" + "0123456789abcdef" * 7 + "-END"
 CUSTOM = "synthetic-custom-" + "ABCDEF0123456789" * 6 + "-END"
 MCP = "synthetic-mcp-" + "fedcba9876543210" * 6 + "-END"
+ADDED = "sk-or-v1-SYNTHETIC-added-" + "13579bdf" * 8 + "-END"
 
 
 @pytest.mark.serial
@@ -30,6 +31,8 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     settings.update(ANTHROPIC_API_KEY=ANTHROPIC, TEST_REVEAL_KEY=CUSTOM,
                     GITHUB_TOKEN="synthetic-github-token", MCP_ENABLED=False,
+                    OUROBOROS_CONNECTIONS=[{"kind": "openrouter", "name": "claude-credits",
+                                            "label": "Claude credits", "api_key": ADDED}],
                     MCP_SERVERS=[{"id": "saved-mcp", "name": "Reveal fixture",
                                   "transport": "streamable_http", "enabled": False,
                                   "url": "https://example.invalid/mcp", "auth_token": MCP}])
@@ -77,8 +80,9 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             # Save is available before the initial page-shown document finishes applying.
             expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=30_000)
             anthropic_card = page.locator('[data-provider-card="anthropic"]')
-            if anthropic_card.get_attribute("open") is None:
-                anthropic_card.locator("summary").click()
+            card_toggle = anthropic_card.locator("[data-provider-toggle]")
+            if card_toggle.get_attribute("aria-expanded") != "true":
+                card_toggle.click()
             field = page.locator("#s-anthropic")
             toggle = page.locator('.secret-toggle[data-target="s-anthropic"]')
             preview = page.locator("#s-anthropic-reveal")
@@ -123,10 +127,19 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             expect(preview).to_have_text("")
             expect(field).to_be_visible()
 
-            # Every top-level consumer uses the same complete view, including dynamic rows.
+            # A key added in a card is read by its connection and field, never by a top-level setting.
+            added = page.locator('[data-connection-row][data-kind="openrouter"][data-name="claude-credits"]')
+            added.locator(".secret-toggle").click()
+            expect(added.locator(".settings-secret-value")).to_have_text(ADDED)
+            assert reveals[-1] == {"connection": "openrouter@claude-credits", "field": "api_key"}
+            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            added.locator(".secret-toggle").click()
+            expect(added.locator(".settings-secret-value")).to_be_hidden()
+
+            # Every top-level consumer uses the same complete view, including dynamic rows. A provider
+            # key has its one input in Accounts; Secrets draws no second one.
             page.click('[data-settings-tab="secrets"]')
-            page.locator('.secret-toggle[data-target="s-secret-anthropic-api-key"]').click()
-            expect(page.locator("#s-secret-anthropic-api-key-reveal")).to_have_text(ANTHROPIC)
+            expect(page.locator('#page-settings [data-secret-setting="ANTHROPIC_API_KEY"]')).to_have_count(1)
             custom = page.locator('[data-custom-secret-row][data-original-key="TEST_REVEAL_KEY"]')
             custom.locator("[data-row-secret-toggle]").click()
             expect(custom.locator(".settings-secret-value")).to_have_text(CUSTOM)
@@ -158,9 +171,10 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             assert len(saves) == 1
             assert "ANTHROPIC_API_KEY" not in saves[0] and "TEST_REVEAL_KEY" not in saves[0]
             assert saves[0]["MCP_SERVERS"][0]["auth_token"] == MCP[:8] + "..."
-            assert all(value not in json.dumps(saves[0]) for value in (ANTHROPIC, CUSTOM, MCP))
+            assert all(value not in json.dumps(saves[0]) for value in (ANTHROPIC, CUSTOM, MCP, ADDED))
+            assert "OUROBOROS_CONNECTIONS" not in saves[0], "an untouched added key travels in no save"
 
-            # A real edit in Accounts survives Show on its later Secrets duplicate.
+            # A real edit in Accounts survives Show: a draft is shown as typed, never as the saved key.
             page.click('[data-settings-tab="providers"]')
             replacement = "synthetic-replacement-" + "1234567890" * 10
             field.fill(replacement)
@@ -170,15 +184,13 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             assert len(reveals) == before, "draft Show must not retrieve the old saved key"
             toggle.click()
             expect(field).to_have_value(replacement)
-            page.click('[data-settings-tab="secrets"]')
-            page.locator('.secret-toggle[data-target="s-secret-anthropic-api-key"]').click()
-            expect(page.locator("#s-secret-anthropic-api-key-reveal")).to_have_text(ANTHROPIC)
             page.click("#btn-save-settings")
             expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=20_000)
             assert saves[-1]["ANTHROPIC_API_KEY"] == replacement
             assert json.loads(settings_path.read_text(encoding="utf-8"))["ANTHROPIC_API_KEY"] == replacement
 
             # Clear during a pending read remains an edit; the late old value never reappears.
+            page.click('[data-settings-tab="secrets"]')
             behavior["reveal"] = "hold"
             with page.expect_request(lambda r: r.url.endswith("/api/settings/secret")):
                 custom.locator("[data-row-secret-toggle]").click()

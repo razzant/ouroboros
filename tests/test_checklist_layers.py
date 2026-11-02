@@ -74,7 +74,7 @@ def test_item_numbering_is_continuous_across_the_layers():
     body_keys = {key for _, key in body_items}
     assert "bible_compliance" not in core_keys
     assert {"bible_compliance", "development_compliance", "version_bump", "self_consistency",
-            "size_cap_paydown", "capability_placement"} <= body_keys
+            "size_cap_paydown", "capability_placement", "copy_mechanism"} <= body_keys
     assert {"secrets_check", "code_quality", "security_issues", "tests_affected"} <= core_keys
 
 

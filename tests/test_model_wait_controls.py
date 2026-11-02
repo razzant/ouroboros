@@ -18,6 +18,7 @@ from tests.test_llm_claudexor import MODEL, result, setup as gateway_fixture
 from tests.test_model_wait import live_wait as wait_fixture
 from tests.test_subscription_main_wait import main_call as main_fixture
 from tests._usage_store_testing import ledger_rows
+from tests._shared import saved_settings
 
 setup = gateway_fixture
 live_wait = wait_fixture
@@ -293,6 +294,7 @@ def test_pre_call_wrap_keeps_the_existing_transport_episode_no_call(main_call, m
 
     ctx, gateway, owner, events, _decide, _observations = main_call
     tools = _loop_tools(ctx, owner)
+    saved_settings(monkeypatch, ctx.drive_root, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_args: False)
@@ -347,6 +349,7 @@ def test_outage_wrap_keeps_older_wire_death_custody_without_summary(tmp_path, mo
             return llm.chat(**kwargs)
 
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL_FALLBACKS="")  # a saved blank: no chain
     monkeypatch.setattr(loop, "_run_cross_model_fallback_chain", _no_chain)
     posted = []
 
@@ -552,6 +555,9 @@ def test_web_and_host_wait_decisions_share_saved_replay_and_attempt_fences(live_
 
     root, _gateway, _client, owner, _events, _decide = live_wait
     monkeypatch.setattr(config, "SETTINGS_PATH", root / "settings.json")
+    if persist_role:
+        config.SETTINGS_PATH.write_text(json.dumps({"OUROBOROS_MODEL_SAFETY": "fixed/checker",
+            "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}), encoding="utf-8")
     row = {"wait_id": "wait-one", "revision": 1, "task_attempt": 1, "state": "waiting", "role": "light"}
     model_wait.mutate_wait(root, "task-one", "wait-one", lambda _: row)
     owner.waits["wait-one"] = dict(row)

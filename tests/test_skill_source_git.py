@@ -212,3 +212,333 @@ def test_fetch_errors_redact_credentials_from_messages_logs_and_cache(
     assert ("Retrying with the configured GitHub token failed too" in meta["error"]) == (phase == "authenticated")
     rendered = json.dumps(meta) + caplog.text + (transport.repo_cache_dir(tmp_path / "data", row) / "meta.json").read_text(encoding="utf-8")
     assert TOKEN not in rendered and ENCODED not in rendered
+
+
+@pytest.fixture
+def newline_source(tmp_path, monkeypatch):
+    """Real Git objects with isolated Windows-style defaults on every platform."""
+    import subprocess
+
+    config = tmp_path / "newline.gitconfig"
+    config.write_bytes(b"[core]\n\tautocrlf = true\n\teol = crlf\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(root, *args):
+        return subprocess.check_output(["git", "-C", str(root), *args], stderr=subprocess.STDOUT, timeout=30)
+
+    git(source, "init", "--quiet")
+    git(source, "config", "core.autocrlf", "false")
+    (source / "SKILL.md").write_bytes(b"---\nname: newline-skill\ntype: instruction\n---\nExact bytes.\n")
+    (source / "empty").write_bytes(b"")
+    (source / "binary.dat").write_bytes(b"\x00binary\r\n\xff\n")
+    git(source, "add", ".")
+    git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "source")
+    return source, git, config
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_source_checkout_preserves_release_bytes_with_host_autocrlf(newline_source, tmp_path, monkeypatch, existing):
+    import os
+    import time
+
+    from ouroboros.skill_loader import compute_content_hash
+
+    source, git, config = newline_source
+    before = config.read_bytes()
+    target = tmp_path / "cache"
+    commit = git(source, "rev-parse", "HEAD").decode().strip()
+    if existing:
+        git(tmp_path, "clone", "--quiet", str(source), str(target))
+        assert b"\r\n" in (target / "SKILL.md").read_bytes()
+        # Age the files before refreshing the index so Git's racy-stat rehash
+        # cannot accidentally repair this same-commit legacy checkout for us.
+        old = time.time() - 10
+        for name in ("SKILL.md", "empty", "binary.dat"):
+            os.utime(target / name, (old, old))
+        git(target, "update-index", "--refresh")
+        assert not git(target, "status", "--porcelain").strip()
+    assert transport.fetch_tree(target, str(source), commit) == commit
+    for name in ("SKILL.md", "empty", "binary.dat"):
+        assert (target / name).read_bytes() == (source / name).read_bytes()
+    assert compute_content_hash(target) == compute_content_hash(source)
+    assert config.read_bytes() == before
+    # A consumer may still be reading when a same-commit source refresh runs.
+    # Only legacy materialization needs index invalidation, not every refresh.
+    real_git = transport._git
+
+    def refresh_without_removal(args, **kwargs):
+        assert args[0] not in {"rm", "read-tree"}, "prepared source refresh must not invalidate its index"
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(transport, "_git", refresh_without_removal)
+    with (target / "SKILL.md").open("rb") as manifest:
+        assert transport.fetch_tree(target, str(source), commit) == commit
+        assert manifest.read() == (source / "SKILL.md").read_bytes()
+        assert (target / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+
+
+def test_cached_pointer_repairs_crlf_without_network(newline_source, tmp_path, monkeypatch):
+    source, git, _config = newline_source
+    commit = git(source, "rev-parse", "HEAD").decode().strip()
+    url = "https://github.com/example/newline-skills"
+    target = transport.sources_state_root(tmp_path) / "pointers" / transport._key(url, commit) / "repo"
+    target.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "--quiet", str(source), str(target))
+    assert b"\r\n" in (target / "SKILL.md").read_bytes()
+    real_git = transport._git
+
+    def local_only(args, **kwargs):
+        assert args[0] != "fetch", "same-commit pointers must remain offline"
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(transport, "_git", local_only)
+    for _ in range(2):
+        assert transport.checkout_at_commit(tmp_path, url, commit) == target
+        assert (target / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+
+
+def test_source_checkout_keeps_repository_authored_attributes(newline_source, tmp_path):
+    source, git, _config = newline_source
+    (source / ".gitattributes").write_bytes(b"*.cmd text eol=crlf\n")
+    (source / "run.cmd").write_bytes(b"echo explicit\n")
+    git(source, "add", ".")
+    git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "attributes")
+    target = tmp_path / "cache"
+    transport.fetch_tree(target, str(source), "HEAD")
+    assert (target / "run.cmd").read_bytes() == b"echo explicit\r\n"
+    assert (target / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+
+
+def _interrupt_source_refresh(drive, row, *, checkout_number, interruption):
+    """Leave real cache state behind, including an unreleased lock on child exit."""
+    import subprocess
+    import sys
+
+    child = subprocess.run([sys.executable, "-c", """
+import json
+import os
+import pathlib
+import sys
+from ouroboros import skill_source_catalog as catalog
+from ouroboros import skill_source_git as transport
+
+drive, row, checkout_number, interruption = json.loads(sys.argv[1])
+real_git = transport._git
+checkouts = 0
+def interrupt(args, **kwargs):
+    global checkouts
+    if args[0] == "checkout":
+        checkouts += 1
+        if checkouts == checkout_number:
+            if interruption == "child_exit":
+                os._exit(73)
+            raise transport.SkillSourceFetchError("synthetic interrupted checkout")
+    return real_git(args, **kwargs)
+transport._git = interrupt
+meta = catalog.refresh_source(pathlib.Path(drive), row)
+assert meta.get("error") == "synthetic interrupted checkout", meta
+""", json.dumps([str(drive), row, checkout_number, interruption])],
+        capture_output=True, text=True, timeout=60)
+    assert child.returncode == (73 if interruption == "child_exit" else 0), (child.stdout, child.stderr)
+
+
+@pytest.mark.parametrize("interruption", [None, "checkout_failure", "child_exit"])
+@pytest.mark.parametrize("attributes_dir", [".", "skills"])
+def test_removed_attributes_migration_installs_release(newline_source, tmp_path, attributes_dir, interruption):
+    from ouroboros import skill_source_catalog as catalog
+    from ouroboros import skill_source_install as installer
+    from ouroboros.skill_install_record import read_install_record
+    from tests._skill_source_fixtures import entry
+
+    source, git, config = newline_source
+    before = config.read_bytes()
+    payload = source / "skills" / "newline-skill"
+    payload.mkdir(parents=True)
+    for name in ("SKILL.md", "empty", "binary.dat"):
+        (source / name).rename(payload / name)
+    (source / "hub.json").write_bytes(b'{"schema_version": 2, "name": "Newlines"}\n')
+    entries = source / "entries"
+    entries.mkdir()
+    attributes = source / attributes_dir / ".gitattributes"
+    attributes.write_bytes(b"*.md text eol=crlf\n")
+    git(source, "add", "-A")
+    git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "old attributes")
+    drive = tmp_path / "data"
+    row = {"id": "newlines", "name": "Newlines", "kind": "hub", "part": "community",
+           "url": source.as_uri(), "trust": "review", "confirmed": True}
+    target = transport.clone_dir(drive, row)
+    target.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "--quiet", str(source), str(target))
+    assert b"\r\n" in (target / "skills/newline-skill/SKILL.md").read_bytes()
+
+    if interruption:
+        old_commit = git(source, "rev-parse", "HEAD").strip()
+        _interrupt_source_refresh(drive, row, checkout_number=2, interruption=interruption)
+        assert git(target, "config", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"pending"
+        assert git(target, "rev-parse", "HEAD").strip() == old_commit
+        assert not git(target, "ls-files").strip()
+        assert (target / attributes_dir / ".gitattributes").is_file()
+
+    # Advance upstream only AFTER the interrupted migration emptied the index.
+    # Retrying the same revision would not exercise the lost tracked deletion.
+    attributes.unlink()
+    with (payload / "SKILL.md").open("ab") as manifest:
+        manifest.write(b"New release without attributes.\n")
+    digest = catalog.tree_release_digest(payload)
+    (entries / "newline-skill.json").write_bytes(json.dumps(entry("newline-skill", digest)).encode())
+    git(source, "add", "-A")
+    git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "remove attributes")
+    commit = git(source, "rev-parse", "HEAD").decode().strip()
+
+    meta = catalog.refresh_source(drive, row)
+    assert not meta.get("error"), meta
+    assert meta["commit"] == commit
+    assert not (target / attributes_dir / ".gitattributes").exists()
+    assert git(target, "config", "--local", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"1"
+    # A successful refresh must produce installable bytes, not merely delete the
+    # old attributes after they have already converted the published payload.
+    result = installer.install_item(drive, "newlines/newline-skill", rows=[row], turn_on_when_ready=False)
+    assert result["digest"] == digest and result["needs_review"]
+    record = read_install_record(drive, "newline-skill")
+    assert record["release"]["commit"] == commit and record["release"]["digest"] == digest
+    installed = drive / "skills/ouroboroshub/newline-skill"
+    for name in ("SKILL.md", "empty", "binary.dat"):
+        assert (installed / name).read_bytes() == (payload / name).read_bytes()
+    assert catalog.tree_release_digest(installed) == digest
+    assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("interruption", ["checkout_failure", "child_exit"])
+def test_pending_unborn_source_retries(newline_source, tmp_path, interruption):
+    import subprocess
+
+    from ouroboros import skill_source_catalog as catalog
+
+    source, git, config = newline_source
+    before = config.read_bytes()
+    drive = tmp_path / "data"
+    row = {"id": "newlines", "kind": "git", "url": source.as_uri(), "trust": "review"}
+    target = transport.clone_dir(drive, row)
+    _interrupt_source_refresh(drive, row, checkout_number=1, interruption=interruption)
+    assert git(target, "config", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"pending"
+    with pytest.raises(subprocess.CalledProcessError):
+        git(target, "rev-parse", "--verify", "HEAD")
+    assert not git(target, "ls-files").strip()
+
+    meta = catalog.refresh_source(drive, row)
+    assert not meta.get("error"), meta
+    assert meta["commit"] == git(source, "rev-parse", "HEAD").decode().strip()
+    assert git(target, "config", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"1"
+    for name in ("SKILL.md", "empty", "binary.dat"):
+        assert (target / name).read_bytes() == (source / name).read_bytes()
+    assert config.read_bytes() == before
+
+
+def test_prepared_pointer_is_stable_while_consumer_reads(newline_source, tmp_path, monkeypatch):
+    source, git, _config = newline_source
+    commit = git(source, "rev-parse", "HEAD").decode().strip()
+    url = source.as_uri()
+    target = transport.checkout_at_commit(tmp_path, url, commit)
+    real_git = transport._git
+
+    def concurrent_lookup(args, **kwargs):
+        assert args[0] not in {"rm", "read-tree", "checkout", "fetch"}, "a matching reader must not rewrite a published pointer"
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(transport, "_git", concurrent_lookup)
+    # Pause a consumer between opening its manifest and reading another payload;
+    # a second catalog/install lookup must preserve both paths and their bytes.
+    with (target / "SKILL.md").open("rb") as manifest:
+        assert transport.checkout_at_commit(tmp_path, url, commit) == target
+        assert manifest.read() == (source / "SKILL.md").read_bytes()
+        assert (target / "binary.dat").read_bytes() == (source / "binary.dat").read_bytes()
+
+
+@pytest.mark.parametrize("failed_checkout", [1, 2])
+def test_failed_pointer_repair_is_retried_offline(newline_source, tmp_path, monkeypatch, failed_checkout):
+    source, git, _config = newline_source
+    commit = git(source, "rev-parse", "HEAD").decode().strip()
+    url = source.as_uri()
+    target = transport.sources_state_root(tmp_path) / "pointers" / transport._key(url, commit) / "repo"
+    target.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "--quiet", str(source), str(target))
+    real_git = transport._git
+    checkouts = 0
+
+    def fail_checkout_once(args, **kwargs):
+        nonlocal checkouts
+        assert args[0] != "fetch"
+        if args[0] == "checkout":
+            checkouts += 1
+            if checkouts == failed_checkout:
+                raise transport.SkillSourceFetchError("synthetic interrupted checkout")
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(transport, "_git", fail_checkout_once)
+    with pytest.raises(transport.SkillSourceFetchError, match="synthetic interrupted"):
+        transport.checkout_at_commit(tmp_path, url, commit)
+    assert git(target, "config", "--local", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"pending"
+    assert transport.checkout_at_commit(tmp_path, url, commit) == target
+    assert (target / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+    assert git(target, "config", "--local", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"1"
+
+
+def test_legacy_checkout_with_uninitialized_submodule(newline_source, tmp_path):
+    source, git, _config = newline_source
+    child_commit = git(source, "rev-parse", "HEAD").decode().strip()
+    (source / ".gitmodules").write_bytes(
+        f'[submodule "child"]\n\tpath = child\n\turl = {source.as_uri()}\n'.encode())
+    git(source, "add", ".gitmodules")
+    git(source, "update-index", "--add", "--cacheinfo", f"160000,{child_commit},child")
+    git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "submodule")
+    commit = git(source, "rev-parse", "HEAD").decode().strip()
+    target = tmp_path / "cache"
+    git(tmp_path, "clone", "--quiet", str(source), str(target))
+    assert b"\r\n" in (target / ".gitmodules").read_bytes()
+    assert not list((target / "child").iterdir())
+
+    assert transport.fetch_tree(target, str(source), commit) == commit
+    for name in ("SKILL.md", ".gitmodules"):
+        assert (target / name).read_bytes() == (source / name).read_bytes()
+    assert git(target, "ls-files", "--stage", "child").startswith(f"160000 {child_commit} 0\t".encode())
+    assert not list((target / "child").iterdir())
+    assert git(target, "config", "--local", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"1"
+
+
+def test_checkout_failure_before_writes_preserves_payload_offline(newline_source, tmp_path, monkeypatch):
+    source, git, _config = newline_source
+    drive = tmp_path / "data"
+    row = {"id": "test", "url": str(source)}
+    target = transport.clone_dir(drive, row)
+    target.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "--quiet", str(source), str(target))
+    before = {name: (target / name).read_bytes() for name in ("SKILL.md", "empty", "binary.dat")}
+    assert b"\r\n" in before["SKILL.md"]
+    real_git = transport._git
+
+    def fail_checkout(args, **kwargs):
+        if args[0] == "checkout":
+            raise transport.SkillSourceFetchError("synthetic failure before checkout writes")
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(transport, "_git", fail_checkout)
+    assert transport.update_clone(drive, row)["error"] == "synthetic failure before checkout writes"
+    after_failure = {name: (target / name).read_bytes() if (target / name).is_file() else None for name in before}
+    assert git(target, "config", "--local", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"pending"
+
+    def offline(args, **kwargs):
+        if args[0] == "fetch":
+            raise transport.SkillSourceFetchError("synthetic offline fetch")
+        assert args[0] != "checkout", "an offline ordinary refresh cannot reach checkout"
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(transport, "_git", offline)
+    assert transport.update_clone(drive, row)["error"] == "synthetic offline fetch"
+    after_offline = {name: (target / name).read_bytes() if (target / name).is_file() else None for name in before}
+    assert git(target, "config", "--local", "--get", "ouroboros.sourceCheckoutPolicy").strip() == b"pending"
+    assert after_failure == before, "pre-checkout failure removed the cached payload"
+    assert after_offline == before, "offline refresh lost the cached payload"

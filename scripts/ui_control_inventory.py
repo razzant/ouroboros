@@ -9,7 +9,7 @@ and files beside it.
 
 It is review evidence, never a gate on wording: the only red is staleness
 (``tests/test_generated_inventories.py``). Extraction is a plain scan of source text for
-countable facts — a ``<button>`` literal whose text is fixed, a created button with a
+countable facts — a ``<button>`` or ``<summary>`` literal whose text is fixed (including ``tr`` fallbacks), a created button with a
 literal ``textContent``, the fixed accessible name of an icon-only button, a module's own
 button factory (an arrow function whose template is one ``<button>`` with a parameter as
 its text) called with a literal label, and every ``ouro:*`` CustomEvent with the modules
@@ -26,8 +26,10 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 UI_CONTROLS_OUT = REPO_ROOT / "docs" / "inventories" / "UI_CONTROL_TEXT_INVENTORY.md"
 
 # A `>` inside a `${…}` expression of an attribute (`${rows.length >= MAX ? 'disabled' : ''}`) is not the tag's end.
-_BUTTON = re.compile(r"<button\b((?:\$\{[^}]*\}|[^>])*)>(.*?)</button>", re.S)
+_BUTTON = re.compile(r"<(?:button|summary)\b((?:\$\{[^}]*\}|[^>])*)>(.*?)</(?:button|summary)>", re.S)
 _ATTR = {name: re.compile(name + r'="([^"]*)"') for name in ("class", "aria-label", "title")}
+# Literal tr fallbacks are fixed host words even though the language is selected at runtime.
+_TRANSLATED = re.compile(r"\$\{(?:escapeHtml\()?tr\((['\"])[^'\"]+\1,\s*(['\"])([^'\"]+)\2\)\)?\}")
 _TAG = re.compile(r"<[^>]+>", re.S)
 _CREATED = re.compile(r"(?:const|let)\s+(\w+)\s*=\s*document\.createElement\('button'\)")
 _EVENT = re.compile(r"new CustomEvent\(\s*['\"`](ouro:[\w:.-]+)['\"`]")
@@ -108,7 +110,7 @@ def scan_controls(text: str) -> tuple[list[tuple[str, str]], int]:
             continue  # a factory's template: its calls are the controls
         attrs, inner = match.group(1), match.group(2)
         found = {name: (rx.search(attrs) or [None, ""])[1] for name, rx in _ATTR.items()}
-        label = _clean(inner)
+        label = _clean(_TRANSLATED.sub(lambda match: match[3], inner))
         if not label:  # an icon-only control is named by its fixed accessible name
             spoken = found["aria-label"] or found["title"]
             label = f"[icon] {spoken}" if spoken else ""

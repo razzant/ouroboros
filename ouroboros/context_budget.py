@@ -21,6 +21,7 @@ the comments give the approximate token equivalents.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional, Tuple
 
@@ -87,31 +88,21 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
+REFUSAL_PASSES = (("host_copies", "bodies"), ("floor", "books", "unseen_bodies"))
 
-# Working room the memory view's physical floor leaves under a known route
-# window: two low-water levels of the reclaim pass above, ceil(W / divisor)
-# each. One is the level an in-task reclaim pass lands on (its goal is the
-# deficit plus one level), the other is room for the work between two passes;
-# with less, the first tool results of a task would re-arm a paid reclaim. The
-# floor turns host facts, room headers, legacy pointers and old pages into
-# addresses only when the view does not fit the window minus the reply reserve
-# and this room; my own replies and people's words become addresses only when
-# the window minus the reply reserve cannot hold them. It never adds memory to
-# fill the room. Structural constant, not a setting;
-# tests/test_context_budget_ssot.py pins it.
-MEMORY_VIEW_WORKING_MARGINS = 2
+def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
+    """Roots (an integrating task that is not a direct chat turn) leave two eighths for their work; a wake
+    (consciousness or a Presence focus), a direct chat turn, another Presence turn and a helper leave one.
 
-# Low-water levels left to the work under an owner-selected Low or Nano target
-# (the target bounds the view the way a window does, with the full reply
-# reserve). One level keeps a Low view at most 250 000 - 65 536 - 31 250 =
-# 153 214 estimated input tokens and a Nano view 85 000 - 8 192 - 10 625 =
-# 66 183, so an in-task reclaim pass still has a level to land on below the
-# target; 0 makes the target a plain frame. The owner chose one level; the
-# value changes here and only here (tests/test_context_budget_ssot.py pins it).
-MODE_TARGET_WORKING_MARGINS = 1
+    A wake is one turn of the mind beside its whole memory, as a direct chat turn is; work it starts runs as
+    its own root (owner decision 2026-10-29, question 3 = A). Decided from task facts, never the task type
+    (``memory_view.start_room`` reads them).
+    """
+    return 2 if role == "integrator" and not direct_chat else 1
 
 
-def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) -> Tuple[Optional[int], int]:
+def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int, *,
+                        working_reserve_tokens: Optional[int] = None) -> Tuple[Optional[int], int]:
     """``(owner target, reply reserve)`` of a rendered mode.
 
     A target binds only the mode the owner selected: task-local Low and a mode the
@@ -120,7 +111,8 @@ def context_mode_limits(mode: str, owner_mode: str, output_reserve_tokens: int) 
     the memory floor and the mode selection use the same R as the send.
     """
     target = {"low": OWNER_LOW_TARGET_TOKENS, "nano": OWNER_NANO_TARGET_TOKENS}.get(mode) if mode == owner_mode else None
-    return target, min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    reserve = min(NANO_MIN_HEADROOM_TOKENS, output_reserve_tokens) if mode == "nano" else output_reserve_tokens
+    return target, max(reserve, working_reserve_tokens or 0)
 
 
 def _reply_floor(caller_max_tokens: int, nano: bool) -> Tuple[int, int]:
@@ -168,7 +160,7 @@ def exact_reply_shortfall(*, caller_max_tokens: int, nano: bool, input_tokens: i
 
 def request_context_budget(
     *, window_tokens: Optional[int], output_reserve_tokens: Optional[int], non_memory_tokens: int,
-    target_tokens: Optional[int] = None, calibration_ratio: float = 1.0, margin_count: int = 1,
+    target_tokens: Optional[int] = None, calibration_ratio: float = 1.0, margin_count: int = 1, boundary_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """One measured frame: the memory allowance with and without the working margins.
 
@@ -185,7 +177,7 @@ def request_context_budget(
     ratio = max(float(calibration_ratio or 1), 0.01)
     reserve = max(0, int(output_reserve_tokens or 0))
     measured = math.ceil(max(0, int(non_memory_tokens)) * ratio)
-    margin = (math.ceil(boundary / RECLAIM_LOW_WATER_DIVISOR) * margin_count
+    margin = (math.ceil((min(boundary, boundary_tokens) if boundary_tokens else boundary) / RECLAIM_LOW_WATER_DIVISOR) * margin_count
               if boundary is not None else 0)
     free = boundary - reserve - measured if boundary is not None else None
 
@@ -243,6 +235,27 @@ def output_or_body_size_message(text: Any) -> bool:
     return any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS)
 
 
+# Limit phrases share their parser with recovery. Generic lengths require token
+# units; header/character limits and bare numbers never establish a window.
+_CTX_LIMIT_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in (
+    r"context (?:window|length)\s*(?:of|is)?\s*\(?\s*([0-9][0-9,]*)\s*tokens?\b",
+    r"maximum allowed length\s*\(?\s*([0-9][0-9,]*)\s*tokens?\b",
+    r"maximum (?:input |prompt )?(?:length|tokens?)\s*(?:is|of)?\s*([0-9][0-9,]*)\s*tokens?\b",
+    r"tokens\s*>\s*([0-9][0-9,]*)\s*maximum",
+    r"context limit:\s*[0-9][0-9,]*\s*\+\s*[0-9][0-9,]*\s*>\s*([0-9][0-9,]*)",
+    r"maximum number of tokens allowed\s*\(?\s*([0-9][0-9,]*)",
+))
+
+
+def _parse_ctx_limit_number(text: str) -> int:
+    """Extract a stated context-token limit, or 0 when its units are unknown."""
+    for pattern in _CTX_LIMIT_PATTERNS:
+        match = pattern.search(str(text or ""))
+        if match:
+            return int(match.group(1).replace(",", ""))
+    return 0
+
+
 def context_overflow_message(text: Any) -> bool:
     """True when a provider error message matches the shared overflow markers.
 
@@ -255,7 +268,7 @@ def context_overflow_message(text: Any) -> bool:
     low = str(text or "").lower()
     if output_or_body_size_message(low):
         return False
-    return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS)
+    return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low) > 0
 
 MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
 ReclaimStatus = Literal[
@@ -361,34 +374,26 @@ LARGE_CONTEXT_SECTION_CHARS = 200_000
 # Char-equivalent for ONE image block in chars/4 token estimates (~1.1K tokens):
 # vision models bill per tile, not per base64 char.
 IMAGE_BLOCK_CHAR_EQUIVALENT = 4_400
-# Live image blocks kept in the transcript (single counter across owner
-# uploads, browser screenshots, and transport injections). Older images are
-# replaced by a caption placeholder pointing to the re-view path.
+# Initial image cap and batch-eviction target, across owner uploads, browser
+# screenshots and transport injections. Running history grows to the high-water
+# mark, then replaces oldest images with caption/re-view placeholders down to 5.
 # 3 -> 5 (v6.81.1, owner decision 2026-07-29): with tool-result images now
 # auto-attached (screenshots arrive every observation round), 3 kept too little
 # visual history for compare-two-screens reasoning; 5 costs at most ~2.2K extra
 # estimated tokens per request and only when that many images are actually live.
 MAX_LIVE_IMAGE_BLOCKS = 5
+# Owner decision 2026-10-21: batch eviction above 10 back to the 5-image floor of 2026-07-29.
+LIVE_IMAGE_BLOCKS_HIGH_WATER = 10
+# Owner 29.10: Nano uses the same batch shape, with a two-image floor.
+NANO_LIVE_IMAGE_BLOCKS = 2
+NANO_LIVE_IMAGE_BLOCKS_HIGH_WATER = 4
 
-# --- Scratchpad size thresholds (SSOT; previously scattered literals) -------
-# Context-section soft budget for the rendered scratchpad (warn-only).
+# --- Context-section soft budgets (warn-only log lines; no section is cut by them) ---
+# The rendered scratchpad: tier-0, always whole. No count, size or age cap evicts or
+# compresses its blocks; only a fold the mind accepts replaces them (#918).
 SCRATCHPAD_SECTION_BUDGET_CHARS = 90_000
-# Health-invariant bloat warning ("extract durable insights to knowledge").
-SCRATCHPAD_BLOAT_WARN_CHARS = 50_000
-# Block-storage consolidation trigger (consolidator compresses oldest blocks).
-SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS = 30_000
-# Source-side content cap for Memory.append_scratchpad_block (ibl-2b09abdadd25).
-# SINGLE SOURCE OF TRUTH for the new content cap; obeys the ordering invariant
-#   SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS (30_000)
-#     < SCRATCHPAD_MAX_CONTENT_CHARS (60_000)
-#     <= SCRATCHPAD_SECTION_BUDGET_CHARS (90_000) - RENDERING_HEADROOM
-# Pinned at 60_000 so the consolidator (trigger at >30_000) still fires before
-# this cap kicks in, AND the rendered section's framing (header + per-block
-# '### [...]' / '---' / journal-pointer lines) fits under the section budget
-# at the 10-block cap. Measured in characters (len(str)), matching the family
-# naming convention. The count cap (_SCRATCHPAD_MAX_BLOCKS in ouroboros/memory.py)
-# is AND'd with this cap (single-pass eviction), not replaced by it.
-SCRATCHPAD_MAX_CONTENT_CHARS = 60_000
+# Context-section soft budget for the mind's world map (warn-only; `update_world` notices above it).
+WORLD_SECTION_BUDGET_CHARS = 16_000
 
 
 def estimate_message_chars(messages: Any) -> int:

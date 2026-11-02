@@ -28,6 +28,12 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.workspace_executor import map_backend_path, normalize_executor_ref
 
 from tests._workspace_executor_shared import _init_repo
+from tests._safety_fixtures import disable_safety
+
+
+@pytest.fixture(autouse=True)
+def _executor_policy_without_safety(monkeypatch):
+    disable_safety(monkeypatch)
 
 
 def test_is_absolute_path_text_is_cross_platform():

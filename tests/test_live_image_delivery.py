@@ -538,3 +538,19 @@ def test_caption_quota_wait_switch_reprepares_pixels_and_identity(live_wait, mon
         repeated, failure = vr._caption_for_block(block, ctx=SimpleNamespace(), llm=client, accumulated_usage=usage)
         assert repeated == caption and not failure
         assert len(transport.uploads) == len(sent) == 1, 'the switched route reuses its exact-pixel caption'
+
+
+def test_an_engine_wire_counts_its_images_as_images_not_as_base64_text():
+    """28.10: a Gemini renewal whose history held four screenshots measured 308,943 tokens against a 92,000 window
+    (its wire was 1.2 MB of base64) and ended the call as context_capacity; the images cost hundreds of tokens."""
+    import base64
+    from ouroboros.context_fit import estimate_context_prompt_tokens
+    data = base64.b64encode(b"\x89PNG" + b"\x00" * 300_000).decode()
+    gemini = {"events": [{"clientContent": {"turns": [{"role": "user", "parts": [
+        {"inlineData": {"mimeType": "image/png", "data": data}}]}]}}]}
+    openai = {"events": [{"type": "conversation.item.create", "item": {"type": "message", "role": "user", "content": [
+        {"type": "input_image", "image_url": "data:image/png;base64," + data}]}}]}
+    text = {"events": [{"clientContent": {"turns": [{"role": "user", "parts": [{"text": data}]}]}}]}
+    for wire in (gemini, openai):
+        assert estimate_context_prompt_tokens([wire]) < 5_000, wire["events"][0]
+    assert estimate_context_prompt_tokens([text]) > 50_000  # control: text of that size still counts in full

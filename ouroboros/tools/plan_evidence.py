@@ -275,13 +275,8 @@ def resolve_evidence(
 
     def attach(locator: str, kind: str, payload: dict) -> None:
         nonlocal remaining
-        # The filename policy cannot see CONTENT: an allowed notes.md may quote an API key,
-        # and attached text goes verbatim to external reviewers. Redact with the shared
-        # prompt-secret redactor; sha256/bytes keep describing the ORIGINAL source and the
-        # redaction is disclosed on the row.
-        from ouroboros.tools.review_helpers import redact_prompt_secrets
-
-        payload["text"], redacted = redact_prompt_secrets(payload["text"])
+        # Attached text is the source's own bytes (or its named head/selection): the
+        # path, root and deny rules decide what may attach, never its content.
         head_bytes = len(payload["text"].encode("utf-8"))
         if head_bytes > remaining:
             omissions.append({"locator": locator, "reason": "budget_exhausted"})
@@ -294,7 +289,7 @@ def resolve_evidence(
         for key in ("selector", "selection_sha256", "selection_bytes"):
             if key in payload:
                 row[key] = payload[key]
-        if redacted or payload.get("secrets_redacted"):
+        if payload.get("secrets_redacted"):  # a retained source masked before capture says so
             row["secrets_redacted"] = True
         attached.append(row)
         if "selector" not in payload and payload["bytes"] > per_item:
@@ -336,8 +331,8 @@ def resolve_evidence(
             if payload is None:
                 omissions.append({"locator": locator, "reason": reason})
             else:
-                if isinstance(source, dict):
-                    payload["secrets_redacted"] = bool(source.get("secrets_redacted"))
+                if isinstance(source, dict) and source.get("secrets_redacted"):
+                    payload["secrets_redacted"] = True
                 attach(locator, kind, payload)
                 if isinstance(source, dict) and source.get("coverage"):
                     coverage = source["coverage"]
@@ -382,7 +377,7 @@ def resolve_evidence(
 
 def task_evidence_reader(root: pathlib.Path) -> Callable[[str], Optional[str]]:
     """Task-result projection with the WHOLE result; the evidence resolver hashes,
-    budgets and redacts it. One bound: ``EVIDENCE_PER_ITEM_BYTES`` cuts the attached
+    budgets and attaches it. One bound: ``EVIDENCE_PER_ITEM_BYTES`` cuts the attached
     head with the cut named (``truncated_to_N``) while sha256/bytes describe the full
     projection, and a locator selector reads the original. An inner preview here would
     hash the preview, so two results differing past it would share one identity and a

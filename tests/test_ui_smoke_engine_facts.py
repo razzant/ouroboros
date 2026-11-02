@@ -56,20 +56,39 @@ def test_engine_facts_status_line_at_both_widths(direct_server_with_data, tmp_pa
                 page.click('[data-settings-tab="providers"]')
                 line = page.locator('#agents-service-banner')
                 line.wait_for(state='visible')
-                assert 'Last stop: heap exhausted while serving (signal 6)' in line.inner_text()
-                assert 'headroom 13.0 GiB' in line.inner_text()
-                assert 'engine 3.22.0, seen 2026-10-07 19:34 UTC' in line.inner_text()
-                assert 'Loop: p99 3.4 ms' in line.inner_text()
-                assert 'total unlimited (default), model 8 (config)' in line.inner_text()
+                page.locator('.harness-account-row[data-profile="kept-account"]').wait_for(state='visible')
+                toggle = page.locator('#agents-service-diagnostics-toggle')
+                diagnostics = page.locator('#agents-service-diagnostics')
+                # Refined A (owner 21.10): the verdict and the engine version are on the line; the measurements wait
+                # under Diagnostics, which opens by pointer and stays open, focused, across a status refresh.
+                assert diagnostics.is_hidden() and toggle.get_attribute('aria-expanded') == 'false'
+                toggle.click()
+                diagnostics.wait_for(state='visible')
+                page.evaluate("""async () => {
+                    const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
+                    await claudexorStatus.refresh();
+                }""")
+                assert diagnostics.is_visible() and toggle.get_attribute('aria-expanded') == 'true'
+                assert toggle.evaluate('(el) => el === document.activeElement')
+                measured = diagnostics.inner_text()
+                assert 'headroom 13.0 GiB' in measured and 'p99 3.4 ms' in measured
+                assert 'total unlimited (default), model 8 (config)' in measured
+                assert '/temporary-test-root/claudexor' in measured
+                assert 'Loop' not in line.inner_text() and 'headroom' not in line.inner_text()
                 if name.startswith('recovery'):
+                    # Not ready: what blocks work, and why the engine stopped, stay on the line.
                     assert 'Recovery only; product work is not admitted' in line.inner_text()
                     assert 'Import verifying: 2/3 partitions, 1.0/2.0 MiB' in line.inner_text()
                     assert 'accounts' in line.inner_text().lower() and 'could not be read' in line.inner_text()
-                    assert 'integrity unknown' in line.inner_text()
+                    assert 'Last stop: heap exhausted while serving (signal 6)' in line.inner_text()
+                    assert 'integrity unknown' in measured
                 else:
-                    assert 'Store: integrity ok, flusher up' in line.inner_text()
-                page.locator('.harness-account-row[data-profile="kept-account"]').wait_for(state='visible')
-                assert line.evaluate('(el) => el.scrollWidth <= el.clientWidth + 1')
+                    assert line.inner_text().strip() == 'Claudexor ready'
+                    assert page.locator('#agents-service-version').inner_text() == 'engine 4.0.0'
+                    # A stop the ready engine recovered from is a diagnostic, with its own engine and time.
+                    assert 'heap exhausted while serving (signal 6) · engine 3.22.0, seen 2026-10-07 19:34 UTC' in measured
+                    assert 'integrity ok, flusher up' in measured
+                assert page.locator('.agents-service').evaluate('(el) => el.scrollWidth <= el.clientWidth + 1')
                 line.scroll_into_view_if_needed()
                 output = diagnostic_directory(tmp_path, "engine-facts")
                 destination = output / f'engine-facts-{name}.png'

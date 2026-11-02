@@ -330,7 +330,7 @@ def test_view_question_and_back_through_real_history_pages(direct_server_with_da
 
                 assert _decision_posts(log) == [], "View question answers nothing"
                 assert (_waiting_turn(url, chat_id) or {}).get("activity_id") == task_id, "the turn still waits for the owner"
-                assert log["pageerrors"] == [], log["pageerrors"]
+                assert log["pageerrors"].unexpected() == [], log["pageerrors"]
             except Exception:
                 evidence.shot(page, "failure")
                 raise

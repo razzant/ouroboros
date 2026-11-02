@@ -8,7 +8,7 @@ import re
 import pytest
 
 from tests.test_chat_history_paging_browser import (
-    _append, _assert_at_newest, _open, _open_project, _step, _idle, _result, _screenshot, _FRAMES,
+    MAIN, _append, _assert_at_newest, _open, _open_project, _step, _idle, _result, _screenshot, _FRAMES,
 )
 from tests.test_chat_history_recovery_browser import _click_project
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
@@ -91,6 +91,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
                 read_back()
                 _screenshot(page, tmp_path, f"continuity-before-{mode}-{browser_engine}")
                 page.locator('#project-panel-close').click()
+                page.locator(feed).wait_for(state='detached')  # the exit ends before this cold reopen
                 page.evaluate("fault => { window.__continuityFault = fault; }", {
                     "chatId": project["chat_id"], "delay": 800 if mode == "delayed" else 0,
                     "fail": mode if mode in {"recent", "saved"} else None,
@@ -101,6 +102,12 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
                     retry = page.locator(f'{feed} .chat-load-older button')
                     page.wait_for_function("feed => document.querySelector(`${feed} .chat-load-older button`)?.textContent === 'Retry loading messages'", arg=feed)
                     assert 'could not be loaded' in page.locator(feed).locator('..').locator('.chat-load-older-note').inner_text()
+                    # The failed read leaves the CSS-visible feed off screen until the panel's entrance.
+                    page.wait_for_function("""() => {
+                        const panel = document.getElementById('project-panel');
+                        return panel.classList.contains('open')
+                            && !panel.getAnimations().some(a => a.pending || a.playState === 'running');
+                    }""")
                     retry.evaluate("node => node.addEventListener('click', () => { window.__continuityFault = null; }, {once:true, capture:true})")
                     retry.click()
                 _idle(page, feed)
@@ -117,6 +124,7 @@ def test_deep_reopen_delay_retry_and_live_arrival(direct_server_with_data, brows
             # other room; opened again, the room is at its newest message.
             read_back()
             page.locator('#project-panel-close').click()
+            page.locator(feed).wait_for(state='detached')
             page.evaluate("fault => { window.__continuityFault = fault; }", {
                 "chatId": project["chat_id"], "delay": 800})
             _click_project(page, project)
@@ -312,6 +320,7 @@ def test_latest_supersedes_a_held_question_reveal_and_a_later_reveal_lands(direc
             }""")
             page.evaluate(_FRAMES)
             page.locator('#project-panel-close').click()
+            page.locator(feed).wait_for(state='detached')  # reopening mid-exit would keep its loaded pages
             page.evaluate("""project => {
                 window.__holdQuestion = true;
                 window.dispatchEvent(new CustomEvent('ouro:open-project', {
@@ -372,6 +381,26 @@ _FIRST_VISIBLE = """root => {
     const top = root.getBoundingClientRect().top;
     const node = [...root.querySelectorAll('.chat-bubble[data-history-id]')].find(n => n.getBoundingClientRect().bottom > top + 1);
     return node && {id:node.dataset.historyId, offset:node.getBoundingClientRect().top - top, scrollTop:root.scrollTop};
+}"""
+# A Project feed's presses, scrolls, scrollends and the app's own scrollTop writes, in order: what tells
+# a missed thumb, a release without its scrollend and a competing write apart when a drag fails (#2266).
+_FEED_EVENTS = """feedId => {
+    const log = window.__feedEvents = [];
+    const own = node => new RegExp(feedId).test(node?.id || '');
+    const find = () => [...document.querySelectorAll('[id$="messages"]')].find(own);
+    const note = (type, feed, more) => log.push({type, at: Math.round(performance.now()), ...more,
+        ...(feed && {gap: Math.round(feed.scrollHeight - feed.scrollTop - feed.clientHeight), client: feed.clientHeight})});
+    for (const type of ['pointerdown', 'pointerup', 'pointercancel'])
+        addEventListener(type, event => note(type, find(), {target: event.target?.id || event.target?.nodeName,
+            x: event.clientX, y: event.clientY}), {capture: true, passive: true});
+    for (const type of ['scroll', 'scrollend'])
+        addEventListener(type, event => own(event.target) && note(type, event.target), {capture: true, passive: true});
+    addEventListener('resize', () => note('resize', find()), {passive: true});
+    const scrollTop = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop');
+    Object.defineProperty(Element.prototype, 'scrollTop', {...scrollTop, set(value) {
+        if (own(this)) note('write', this, {value: Math.round(value), by: (new Error().stack || '').split('\\n').slice(1, 4).join(' < ')});
+        scrollTop.set.call(this, value);
+    }});
 }"""
 
 
@@ -541,6 +570,7 @@ def test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies(direct_server_
     from playwright.sync_api import sync_playwright
 
     from ouroboros.projects_registry import create_project
+    from tests.test_chat_history_paging_browser import _evidence_dir
     from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
     root = direct_server_with_data['data_dir']
@@ -549,29 +579,42 @@ def test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies(direct_server_
     _append(root, 'chat', [
         {'direction': 'in', 'chat_id': cid, 'ts': f'2026-09-01T10:{index:02d}:00Z',
          'client_message_id': f'drag-{index}', 'text': f'Scrollbar context {index:02d}'} for index in range(60)])
+    facts = {'presses': []}
     with sync_playwright() as pw:
         # Classic scrollbars: headless Chromium hides them by default.
         options = {'ignore_default_args': ['--hide-scrollbars']} if browser_engine == 'chromium' else {}
         browser = getattr(pw, browser_engine).launch(headless=True, **options)
         try:
             page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(f'({_FEED_EVENTS})({json.dumps("^pchat-.*-messages$")})')
             _open(page, direct_server_with_data['url'])
             feed = _open_project(page, project)
             root_feed = page.locator(feed)
-            bar = root_feed.evaluate('n => n.offsetWidth - n.clientWidth')
+            # The panel slides in (--motion-open) and can still be moving after the room settles:
+            # a press measured before it stops lands beside the 6px scrollbar and drags nothing.
+            root_feed.evaluate("""feed => Promise.all(document.getAnimations()
+                .filter(motion => motion.effect?.target?.contains?.(feed) && motion.effect.getComputedTiming().endTime !== Infinity)
+                .map(motion => motion.finished.catch(() => {})))""")
+            bar = facts['bar'] = root_feed.evaluate('n => n.offsetWidth - n.clientWidth')
             assert bar > 0, 'a classic feed scrollbar is present'
             _bookmark_place(page, page.locator(f'{feed} [data-client-message-id="drag-10"]'), 40)
-            box = root_feed.bounding_box()
-            x = box['x'] + box['width'] - bar / 2
             thumb_js = """n => n.getBoundingClientRect().top
                 + (n.scrollTop + n.clientHeight / 2) / n.scrollHeight * n.clientHeight"""
+            end_gap = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
 
-            def drag(to_y):
-                page.mouse.move(x, root_feed.evaluate(thumb_js))
+            def drag(to_y, hold=0):
+                box = root_feed.bounding_box()  # where the scrollbar is at this press
+                press = {'x': box['x'] + box['width'] - bar / 2, 'y': root_feed.evaluate(thumb_js), 'to_y': to_y}
+                facts['presses'].append(press)
+                page.mouse.move(press['x'], press['y'])
                 page.mouse.down()
-                page.mouse.move(x, to_y, steps=12)
+                page.mouse.move(press['x'], to_y, steps=12)
+                if hold:
+                    page.wait_for_timeout(hold)
                 page.mouse.up()
                 page.evaluate(_FRAMES)
+                press['gap'] = root_feed.evaluate(end_gap)
+                return press['gap']
 
             def reply(key):
                 _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': cid, 'content': f'A new reply {key}',
@@ -579,33 +622,147 @@ def test_feed_scrollbar_drag_to_the_live_edge_follows_new_replies(direct_server_
                 page.locator(f'{feed} [data-client-message-id="{key}"]').wait_for(state='attached')
                 page.evaluate(_FRAMES)
 
-            drag(box['y'] + box['height'] - 2)
-            dragged = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            dragged = facts['dragged'] = drag(root_feed.evaluate('n => n.getBoundingClientRect().bottom') - 2)
             assert dragged <= 2, dragged
             reply('drag-new')
-            gap = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            gap = facts['gap'] = root_feed.evaluate(end_gap)
             _screenshot(page, tmp_path, f'scrollbar-drag-follows-{browser_engine}')
             assert gap <= 2, f'the dragged-to-bottom feed follows the new reply ({gap}px short)'
 
             # Released a little above the end; a taller window then clamps the feed
             # to its end. Only the release decided following: a new reply stays below.
+            # The thumb rests before the release, as a hand's does: WebKit then reports the
+            # drag's last scroll and its scrollend before the release, none after it.
             ratio = root_feed.evaluate('n => n.scrollHeight / n.clientHeight')
-            drag(root_feed.evaluate(thumb_js) - 90 / ratio)
-            released = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            released = facts['released'] = drag(root_feed.evaluate(thumb_js) - 90 / ratio, hold=300)
             assert 48 < released < 150, released
             page.set_viewport_size({'width': 1280, 'height': 1000})
             page.wait_for_timeout(150)
             page.evaluate(_FRAMES)
-            resized = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
-            first = root_feed.evaluate(_FIRST_VISIBLE)
+            resized = facts['resized'] = root_feed.evaluate(end_gap)
+            assert resized <= 2, ('the taller window clamps the feed to its end', released, resized)
+            first = facts['first'] = root_feed.evaluate(_FIRST_VISIBLE)
             reply('drag-away')
-            kept = page.locator(f'{feed} [data-history-id="{first["id"]}"]').evaluate(_OFFSET)
-            away = root_feed.evaluate('n => n.scrollHeight - n.scrollTop - n.clientHeight')
+            kept = facts['kept'] = page.locator(f'{feed} [data-history-id="{first["id"]}"]').evaluate(_OFFSET)
+            away = facts['away'] = root_feed.evaluate(end_gap)
             _screenshot(page, tmp_path, f'scrollbar-drag-released-away-{browser_engine}')
-            (tmp_path / f'scrollbar-drag-{browser_engine}.json').write_text(json.dumps({
-                'bar': bar, 'dragged': dragged, 'gap': gap, 'released': released, 'resized': resized,
-                'first': first, 'kept': kept, 'away': away}))
             assert abs(kept - first['offset']) <= 2 and away > 20, ('a drag released away does not follow', first, kept, away)
             assert page.evaluate('() => window.__historyReads.every(read => !read.cursor)'), 'a scrollbar drag pages nothing'
         finally:
+            try:
+                facts['events'] = page.evaluate('() => window.__feedEvents')
+            except Exception as error:  # the measured facts still go out with the page gone
+                facts['events'] = repr(error)
+            (_evidence_dir(tmp_path) / f'scrollbar-drag-{browser_engine}.json').write_text(json.dumps(facts, indent=1))
+            browser.close()
+
+
+# A settled Main question copy retires after a delay (chat_decision.js settleMirror); held here so that
+# its retirement can run right after a scrollbar release.
+_HOLD_RETIREMENT = """() => {
+    const later = window.setTimeout;
+    window.setTimeout = (callback, ms, ...rest) => String(callback).includes('removeMirror')
+        ? (window.__retire = callback, 0) : later(callback, ms, ...rest);
+}"""
+
+
+@pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
+def test_scrollbar_drag_released_away_stays_when_a_question_copy_below_retires(direct_server_with_data, browser_engine, tmp_path):
+    """#2266: a settled Main question copy below a passage a scrollbar drag left retires through the
+    app's own write; the browser clamps the shorter feed to its end. That is no scroll of the drag:
+    a new reply still stays below."""
+    from urllib.parse import urlsplit
+
+    from playwright.sync_api import sync_playwright
+
+    from tests.test_chat_history_paging_browser import _evidence_dir
+    from tests.ui_chat_viewport_smoke import _OBSERVE_STATE_READS, _emit_ws_frame
+
+    root = direct_server_with_data['data_dir']
+    _append(root, 'chat', [
+        {'direction': 'in', 'chat_id': 1, 'ts': f'2026-09-01T10:{index:02d}:00Z',
+         'client_message_id': f'main-{index}', 'text': f'Main context {index:02d}'} for index in range(60)])
+    question = {'task_id': 'retire-task', 'quiz_id': 'retire-q', 'quiz_state': 'open', 'project_id': 'retire-room',
+                'project_name': 'Retire room', 'project_chat_id': 12, 'question': 'Keep this copy of the output?',
+                'options': ['Yes', 'No'], 'ts': '2026-09-01T11:00:00Z'}
+    facts = {}
+    with sync_playwright() as pw:
+        options = {'ignore_default_args': ['--hide-scrollbars']} if browser_engine == 'chromium' else {}
+        browser = getattr(pw, browser_engine).launch(headless=True, **options)
+        try:
+            page = browser.new_page(viewport={'width': 1280, 'height': 850})
+            page.add_init_script(f'({_FEED_EVENTS})({json.dumps("^chat-messages$")})')
+            page.add_init_script(f'({_HOLD_RETIREMENT})()')
+            page.add_init_script(f'({_OBSERVE_STATE_READS})()')
+            # Main keeps a question copy only while a complete census names it (chat_decision.js
+            # syncCurrentQuestions); as on a real host, this one is named until it is answered.
+            census = {'current_questions': [question], 'current_questions_complete': True}
+
+            def state_read(route):
+                response = route.fetch()
+                route.fulfill(response=response, json={**response.json(), **census})
+
+            page.route(lambda url: urlsplit(url).path == '/api/state', state_read)
+            page.route('**/api/tasks/retire-task', lambda route: route.fulfill(json={
+                'task_id': 'retire-task', 'project_id': 'retire-room',
+                'question_rooms': {'retire-q': {'state': 'known', 'chat_id': 12, 'project_id': 'retire-room'}},
+                'owner_quiz': {'retire-q': {**question, 'state': 'open', 'asked_at': question['ts']}}}))
+            _open(page, direct_server_with_data['url'])
+            feed = page.locator(MAIN)
+            _emit_ws_frame(page, {**question, 'type': 'chat', 'chat_id': 1, 'role': 'system',
+                                  'system_type': 'project_question_pointer'})
+            copy = page.locator(f'{MAIN} .chat-quiz-card[data-quiz-id="retire-q"]')
+            copy.wait_for(state='visible')
+            # A census read made since the copy appeared has applied (one may have been in flight before it).
+            census_since = '(settled) => window.__stateReadsInFlight === 0 && window.__stateReadsSettled >= settled + 2'
+            page.wait_for_function(census_since, arg=page.evaluate('() => window.__stateReadsSettled'))
+            assert copy.count() == 1, 'the census names the open copy: it stays'
+            _emit_ws_frame(page, {'type': 'quiz_state', 'task_id': 'retire-task', 'quiz_id': 'retire-q',
+                                  'state': 'answered', 'answered_index': 0})
+            page.wait_for_function("() => typeof window.__retire === 'function'")
+            census['current_questions'] = []
+            page.wait_for_function(census_since, arg=page.evaluate('() => window.__stateReadsSettled'))
+            page.evaluate(_FRAMES)
+            bar = facts['bar'] = feed.evaluate('n => n.offsetWidth - n.clientWidth')
+            assert bar > 0, 'a classic feed scrollbar is present'
+            end_gap = 'n => n.scrollHeight - n.scrollTop - n.clientHeight'
+            assert feed.evaluate(end_gap) <= 2, 'Main opens at its newest message, the copy at the bottom'
+            facts['copy_height'] = copy.evaluate('n => n.closest(".chat-bubble").getBoundingClientRect().height')
+            # Released a little above the end, the thumb at rest first (WebKit then reports the
+            # drag's scrollend before the release); the copy's retirement runs right after the release.
+            box = feed.bounding_box()
+            x = box['x'] + box['width'] - bar / 2
+            y = feed.evaluate("""n => n.getBoundingClientRect().top
+                + (n.scrollTop + n.clientHeight / 2) / n.scrollHeight * n.clientHeight""")
+            ratio = feed.evaluate('n => n.scrollHeight / n.clientHeight')
+            page.evaluate("() => addEventListener('pointerup', () => setTimeout(() => window.__retire(), 0), {once: true})")
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(x, y - 90 / ratio, steps=12)
+            page.wait_for_timeout(300)
+            page.mouse.up()
+            copy.wait_for(state='detached')
+            page.evaluate(_FRAMES)
+            facts['released_events'] = page.evaluate('() => window.__feedEvents.filter(e => e.type === "pointerup").length')
+            retired = facts['retired'] = feed.evaluate(end_gap)
+            assert retired <= 2 < facts['copy_height'], ('the retirement clamped the feed to its end', facts)
+            first = facts['first'] = feed.evaluate(_FIRST_VISIBLE)
+            _screenshot(page, tmp_path, f'scrollbar-retire-before-reply-{browser_engine}')
+            _emit_ws_frame(page, {'type': 'chat', 'role': 'user', 'chat_id': 1, 'content': 'A new reply after the retirement',
+                                  'ts': '2026-09-01T11:30:00Z', 'client_message_id': 'main-after',
+                                  'sender_session_id': 'other-tab'})
+            page.locator(f'{MAIN} [data-client-message-id="main-after"]').wait_for(state='attached')
+            page.evaluate(_FRAMES)
+            kept = facts['kept'] = feed.evaluate('(root, id) => root.querySelector(`[data-history-id="${id}"]`)'
+                                                 '.getBoundingClientRect().top - root.getBoundingClientRect().top', first['id'])
+            away = facts['away'] = feed.evaluate(end_gap)
+            _screenshot(page, tmp_path, f'scrollbar-retire-after-reply-{browser_engine}')
+            assert abs(kept - first['offset']) <= 2 and away > 20, ('a retirement below does not make the drag follow', facts)
+            assert page.evaluate('() => window.__historyReads.every(read => !read.cursor)'), 'a scrollbar drag pages nothing'
+        finally:
+            try:
+                facts['events'] = page.evaluate('() => window.__feedEvents')
+            except Exception as error:  # the measured facts still go out with the page gone
+                facts['events'] = repr(error)
+            (_evidence_dir(tmp_path) / f'scrollbar-retire-{browser_engine}.json').write_text(json.dumps(facts, indent=1))
             browser.close()

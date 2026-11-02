@@ -340,6 +340,8 @@ def test_a_successor_starts_past_an_unrestorable_gap_and_keeps_every_addressed_s
     its own."""
     from ouroboros.agent_startup_checks import validate_task_authority_sources
     from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.tools.control import _get_task_result
+    from ouroboros.tools.registry import ToolContext
     from tests.test_doc_context import _make_env_and_memory
 
     env, _memory = _make_env_and_memory(tmp_path)
@@ -360,7 +362,11 @@ def test_a_successor_starts_past_an_unrestorable_gap_and_keeps_every_addressed_s
     carried = build_task_contract(task)["predecessor_authority"]
 
     assert carried["plan_review_source_gap"]["code"] == "PLAN_REVIEW_SOURCE_UNAVAILABLE"
-    carried_wave = carried["plan_review_state"]["waves"][-1]
+    # The review history itself stays behind the reader (THESIS I-7, C5); its addresses keep their own there.
+    assert "plan_review_state" not in carried and carried["omitted_fields"]["plan_review_state"] > 0
+    read = json.loads(_get_task_result(ToolContext(repo_dir=env.repo_dir, drive_root=root), pred,
+                                       include_authority=True))
+    carried_wave = read["authority"]["plan_review_state"]["waves"][-1]
     assert carried_wave["wave_artifact"]["path"] == intact["path"]
     assert carried_wave["spec_source_ref"]["availability"] == "unavailable"
     assert "path" not in carried_wave["spec_source_ref"]

@@ -301,6 +301,7 @@ def test_context_ack_does_not_suppress_output_metadata_or_refresh_its_clock(tmp_
     from ouroboros.response_limits import resolve_response_limit
 
     root = tmp_path / 'evidence'
+    monkeypatch.setattr(ce, 'canonical_evidence_root', lambda: root)
     route = dict(provider='openai-compatible', model='openai-compatible::new-model', base_url='https://compat.test/v1')
     ce.record_owner_ack(root, **route, window_tokens=32768)
     calls = []
@@ -311,6 +312,7 @@ def test_context_ack_does_not_suppress_output_metadata_or_refresh_its_clock(tmp_
     monkeypatch.setattr('httpx.get', get)
     evidence = ce.probe(root, **route)
     assert evidence.window_tokens == 32768 and evidence.source == 'owner_ack'
+    assert evidence.server_window['tokens'] == 50000
     assert evidence.response_limit['max_output_tokens'] == 4096
     stamp = evidence.response_limit['observed_at']
     ce.record_owner_ack(root, **route, window_tokens=65536)

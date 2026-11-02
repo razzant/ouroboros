@@ -70,7 +70,6 @@ def test_root_checkpoint_prevents_a_second_facts_row_and_buys_no_summary(tmp_pat
     llm = Llm()
     monkeypatch.setattr(llm_mod, "LLMClient", lambda: llm)
     monkeypatch.setattr(memory_mod, "Memory", lambda **_kwargs: object())
-    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *_a, **_k: None)
     monkeypatch.setattr(evolution, "maybe_promote", lambda *_a, **_k: None)
     env = SimpleNamespace(
         repo_dir=tmp_path / "repo", drive_root=tmp_path,
@@ -456,10 +455,12 @@ def test_child_projection_enters_main_cognition_and_project_lineage_not_main_ui(
     _a, _b, main_context, _cap = blocks(env, memory, {"id": "main-turn", "chat_id": 1})
     _a, _b, project_context, _cap = blocks(env, memory, {"id": "project-turn", "chat_id": project_chat})
     # The memory view: the child's terminal row is a host fact of its root task in the Project's
-    # room (lane 2, one line per root task); Main names that room in one line. The child's own
-    # answer is never repeated: it is a turn of its own, read by address.
-    assert f"### {room} — open" in section(main_context, "## Live rooms")
-    assert "task facts 1" in section(main_context, "## Live rooms")
+    # room (lane 2, one line per root task). A host fact alone does not keep a room live, so Main
+    # counts that room in the one aggregate line with its reader. The child's own answer is never
+    # repeated: it is a turn of its own, read by address.
+    live = section(main_context, "## Live rooms")
+    assert f"### {room} — open" not in live
+    assert "1 open rooms;" in live and "task facts 1" in live and "memory_read(room_id='*', start=0)" in live
     lane = section(project_context, f"## This room ({room})")
     assert "; host; task root] " in lane and "children 1 (completed 1)" in lane
     assert "Reviewed exact SHA" not in main_context and "Reviewed exact SHA" not in project_context

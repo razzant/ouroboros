@@ -4,7 +4,7 @@ import pathlib
 
 import pytest
 
-from ouroboros import dialogue_import as di, dialogue_store as ds, notice_receipts, owner_words
+from ouroboros import chat_chain, dialogue_import as di, dialogue_store as ds, notice_receipts, owner_words
 from ouroboros.gateway.routing_decision import _origin_message, handle_routing_decision
 from ouroboros.project_dialogue import (
     append_chat_annotation, build_owner_message_ref, latest_chat_annotations, resolve_owner_message_source,
@@ -280,7 +280,7 @@ def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_pa
     from types import SimpleNamespace
     from ouroboros import server_routing_context as routing
 
-    monkeypatch.setattr(routing, "_addressable_root_tasks", lambda *args: [])
+    monkeypatch.setattr(routing, "addressable_roots", lambda *args: routing.RootSnapshot())
     monkeypatch.setattr(routing, "_recent_root_results", lambda *args: ([], {}))
     seed(tmp_path, archives={"chat_20261016T000000.jsonl": [owner("archive")]})
     ds.ensure(tmp_path)
@@ -288,7 +288,11 @@ def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_pa
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path)
     partial = routing._main_routing_manifest(ctx)
     assert partial["omissions"]["dialogue_gaps"] == ["history is still importing"]
-    assert partial["recent_canonical_dialogue"][0]["text"] == owner()["text"].strip()
+    shown = partial["recent_canonical_dialogue"][0]
+    assert "text" not in shown and shown["chars"] == len(owner()["text"].strip())
+    address = shown["reader"]["arguments"]
+    assert address["from"] == address["to"]
+    assert chat_chain.resolve_row(tmp_path, address["from"])[0] == owner()
     for index in range(20):
         ds.append(tmp_path, "chat", owner(f"recent-{index}"))
         ds.append(tmp_path, "chat", {"chat_id": 1, "type": "task_summary"})
@@ -301,13 +305,17 @@ def test_routing_recent_text_discloses_recorded_invalid_intervals(tmp_path, monk
     from types import SimpleNamespace
     from ouroboros import server_routing_context as routing
 
-    monkeypatch.setattr(routing, "_addressable_root_tasks", lambda *args: [])
+    monkeypatch.setattr(routing, "addressable_roots", lambda *args: routing.RootSnapshot())
     monkeypatch.setattr(routing, "_recent_root_results", lambda *args: ([], {}))
     seed(tmp_path, live={"chat": [owner(), "{broken\n"]})
     ds.ensure(tmp_path)
     result = routing._main_routing_manifest(SimpleNamespace(DRIVE_ROOT=tmp_path))
     assert result["omissions"]["dialogue_gaps"] == ["recorded invalid intervals"]
-    assert result["recent_canonical_dialogue"][0]["text"] == owner()["text"].strip()
+    shown = result["recent_canonical_dialogue"][0]
+    assert "text" not in shown and shown["chars"] == len(owner()["text"].strip())
+    address = shown["reader"]["arguments"]
+    assert address["from"] == address["to"]
+    assert chat_chain.resolve_row(tmp_path, address["from"])[0] == owner()
 
 
 def test_empty_accepted_wake_keeps_late_rows_with_older_timestamps(tmp_path):

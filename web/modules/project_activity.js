@@ -7,7 +7,7 @@
 // previous projection when reconciling an incomplete body.
 
 import { activeModelWaits, mergeModelWaits } from './model_wait.js';
-import { activityWord, amberNote, roomAmber, workLine } from './work_status.js';
+import { activityWord, amberNote, roomAmber, roomSpeaker, workLine } from './work_status.js';
 import { tr } from './i18n.js';
 
 /** Whether a census row's own model waits are current, and whether one needs the owner (Activity reads the same rule). */
@@ -37,9 +37,7 @@ export function summarizeRoom(room, works = []) {
     if (!room || typeof room !== 'object' || room.activity === 'idle') return IDLE_SUMMARY;
     const mark = MARK_RANK.includes(room.mark) ? room.mark : 'ring';
     const word = activityWord(room);
-    const byId = new Map((Array.isArray(works) ? works : []).map((work) => [work?.work_id, work]));
-    const speaker = (Array.isArray(room.works) ? room.works : []).map((id) => byId.get(id))
-        .find((work) => work && activityWord(work) === word);
+    const speaker = roomSpeaker(room, works, word);
     const line = speaker ? workLine(speaker, word) : '';
     const note = amberNote(roomAmber(room));
     return { mark, owner: Boolean(room.amber), word, note, label: [word, line, note].filter(Boolean).join(' · ') };

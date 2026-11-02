@@ -176,6 +176,15 @@ function observeSize(element, onResize) {
 
 const keepFocus = (event) => event.preventDefault();
 
+/** The room `slot` keeps before its `first` chip, on its inline-start side (the right in a right-to-left page). */
+function leadOf(slot, first) {
+    const box = slot.getBoundingClientRect?.();
+    const chip = first?.getBoundingClientRect?.();
+    if (!box || !chip) return 0;
+    const rtl = slot.ownerDocument?.defaultView?.getComputedStyle?.(slot)?.direction === 'rtl';
+    return Math.max(0, (rtl ? box.right - chip.right : chip.left - box.left) || 0);
+}
+
 /**
  * One room's chips in `composer.chipsSlot`. `menu` is the composer's menu factory (composer.js `createPlusMenu`), used
  * for the "+N" list. Returns the disposer.
@@ -242,13 +251,15 @@ export function bindComposerChips({ composer, menu, feed = getChipFeed(), notice
         for (const button of shown) button.hidden = false;
         more.hidden = true;
         delete slot.dataset.folded;
+        // The slot's own room before its first chip (style.css: the row's gap, carried inside the slot).
+        const lead = shown.length ? leadOf(slot, shown[0]) : 0;
         let keep = shown.length;
         if (shown.length && slot.scrollWidth > slot.clientWidth + 1) {
             slot.dataset.folded = '1';  // folded, the slot takes all the room the capsules leave
             more.hidden = false;
             more.textContent = `+${shown.length}`;
             const gap = Number.parseFloat(doc.defaultView?.getComputedStyle?.(slot).columnGap) || 0;
-            const room = slot.clientWidth - more.offsetWidth;
+            const room = slot.clientWidth - lead - more.offsetWidth;
             let used = 0;
             keep = 0;
             for (const button of shown) {
@@ -261,7 +272,7 @@ export function bindComposerChips({ composer, menu, feed = getChipFeed(), notice
         shown.forEach((button, index) => { button.hidden = index >= keep; });
         folded = entries.slice(keep);
         // No room even for "+N" (a phone's row, where ☰ leads the capsules): the chips are listed in "+" instead.
-        const roomless = folded.length > 0 && !keep && slot.clientWidth + 0.5 < more.offsetWidth;
+        const roomless = folded.length > 0 && !keep && slot.clientWidth - lead + 0.5 < more.offsetWidth;
         more.hidden = !folded.length || roomless;
         if (roomless) slot.dataset.roomless = '1';
         else delete slot.dataset.roomless;

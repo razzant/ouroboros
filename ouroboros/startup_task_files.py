@@ -65,7 +65,12 @@ def recover_terminal_task_files(drive_root, protected):
     (``obligations.DutyRest``) on its row and its drives' store identities, reported as it was found."""
     from ouroboros import obligations as o
     from ouroboros.cancel_intents import cancel_pending
-    from ouroboros.headless import prepare_terminal_task_files, terminal_task_files_ready
+    from ouroboros.headless import (
+        _child_drive_from_task,
+        prepare_terminal_task_files,
+        task_requires_workspace_capture,
+        terminal_task_files_ready,
+    )
     from ouroboros.observability import _has_pending_ref_promotion
     from ouroboros.task_custody import own_child_drives
     from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
@@ -87,13 +92,18 @@ def recover_terminal_task_files(drive_root, protected):
             continue  # examined below, which reports why
     rest = o.DutyRest(root, "drive_recovery", stamps)
     for task_id in sorted(candidates.keys() - protected):
-        if task_id in rest.resting:
-            if (rest.resting[task_id].get("report") or {}).get("unresolved"):
-                report["unresolved"].append(task_id)
-            continue
         acted, waits, unresolved = False, set(), len(report["unresolved"])
         try:
             validate_task_id(task_id)
+            child = _child_drive_from_task(candidates[task_id])
+            canonical = child is None or child.resolve(strict=False) == root.resolve(strict=False)
+            rested = rest.resting.get(task_id)
+            # A canonical capture never depended on an absent child. Re-examine
+            # that old rest only for addressed members with no split-drive source.
+            if rested and not (canonical and rested.get("waits_on") == ["child_drive_absent"]):
+                if (rested.get("report") or {}).get("unresolved"):
+                    report["unresolved"].append(task_id)
+                continue
             current = load_task_result(root, task_id, strict=True) or {}
             for child_root in own_child_drives(root, task_id):
                 if not child_root.is_dir() or child_root.is_symlink() or child_root.parent.is_symlink():
@@ -133,8 +143,20 @@ def recover_terminal_task_files(drive_root, protected):
             if current and terminal_task_files_ready(root, {**current, "id": task_id}, current):
                 o.drive_finished(root, {**current, "id": task_id}, current)
             elif not acted and current.get("status") in SETTLED_STATUSES:
-                rest.wait(task_id, *(waits or {"child_drive_absent"}),
-                          report={"unresolved": len(report["unresolved"]) > unresolved})
+                child = _child_drive_from_task(current)
+                if (not waits and task_requires_workspace_capture(current)
+                        and (child is None or child.resolve(strict=False) == root.resolve(strict=False))):
+                    # A failed optional fork runs in the canonical store. Its
+                    # capture is still owed; a busy publisher must not put it to rest.
+                    task = {**current, "id": task_id}
+                    prepared = prepare_terminal_task_files(root, task)
+                    if prepared["error"] or not terminal_task_files_ready(root, task, prepared.get("result")):
+                        report["unresolved"].append(task_id)
+                    else:
+                        report["recovered"].append(task_id)
+                else:
+                    rest.wait(task_id, *(waits or {"child_drive_absent"}),
+                              report={"unresolved": len(report["unresolved"]) > unresolved})
         except Exception as exc:
             report["unresolved"].append(task_id)
             report["errors"].append(f"{task_id}: {type(exc).__name__}: {exc}")

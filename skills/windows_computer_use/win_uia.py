@@ -800,6 +800,11 @@ def act_in_session(automation, plan, window: WindowInfo, resolve_pid):
     cache = _build_cache(automation)
     walker = automation.ControlViewWalker
     target_pid = resolve_pid(window.hwnd)
+    # The window an action call goes to, as window_list prints it; the guard below
+    # re-checks this pid just before the call. An unread title is named, not blank.
+    delivered_to = {"hwnd": f"0x{window.hwnd:X}", "title": window.title, "pid": target_pid}
+    if window.unread:
+        delivered_to["unread"] = list(window.unread)
 
     def keep_waiting(walk_s: float) -> bool:
         """True after a pause that leaves room for one more whole walk."""
@@ -870,11 +875,12 @@ def act_in_session(automation, plan, window: WindowInfo, resolve_pid):
                     "ok": False, "error": str(error), "requested": plan.act,
                     "mutating": act_mutating(plan.act), "action_call_made": True,
                     "action_outcome": "unknown", "select": plan.select.json(), "element": before,
+                    "delivered_to": delivered_to,
                     "hint": "the action call was made but its outcome is unknown. Do not retry blindly; "
                     "check the window state first",
                 }
             after = _describe(element, role, cached=False)
-            return receipt(plan, before, after, int((time.monotonic() - started) * 1000), polls)
+            return receipt(plan, before, after, int((time.monotonic() - started) * 1000), polls, delivered_to)
         if choice.which == "ambiguous":
             candidates = [m.describe() for m in found]
             return ambiguous_error(choice.total, candidates)

@@ -1,4 +1,4 @@
-"""Immutable positive authority compiled from one reviewed presence profile."""
+"""Decode frozen Presence authority; new focuses use consciousness authority."""
 
 from __future__ import annotations
 
@@ -21,22 +21,11 @@ from ouroboros.dialogue_provenance import (  # the provenance predicate; authori
 )
 from ouroboros.presence_capabilities import (
     PresenceArgumentBinding,
-    PresenceProfileResolution,
-    PresenceResourceTarget,
-    PresenceScriptTarget,
-    PresenceToolTarget,
 )
-from ouroboros.tool_capabilities import COGNITIVE_MEMORY_TOOL_NAMES
 from ouroboros.contracts.task_contract import canonical_tool_name
 
 PRESENCE_CEILING_SCHEMA_VERSION = 1
 _SHA256_LEN = 64
-# The own-work baseline (owner Q1/Q2): a Presence mind may find, read and message
-# the independent work it started from ANY conversation of its own binding. The two
-# readers arrive bound to that scope (the host overwrites the argument); tell_task
-# is narrowed by its handler for every Presence caller. A profile that selected one
-# of these names keeps that grant, so a selected global reader stays global.
-_OWN_WORK_BASELINE = (("get_task_result", True), ("recent_tasks", True), ("tell_task", False))
 
 
 class PresenceAuthorityError(ValueError):
@@ -302,77 +291,6 @@ def presence_ceiling_from_payload(value: Any) -> PresenceCapabilityCeiling:
     return ceiling
 
 
-def build_presence_capability_ceiling(
-    *,
-    skill_name: str,
-    skill_content_hash: str,
-    state_fingerprint: str,
-    resolution: PresenceProfileResolution,
-) -> PresenceCapabilityCeiling:
-    """Compile active selections; missing required requests refuse admission."""
-
-    if not isinstance(resolution, PresenceProfileResolution) or not resolution.required_selections_present:
-        raise PresenceAuthorityError("presence_authority_missing_required", "resolution.missing_required")
-    tools: list[PresenceToolGrant] = []
-    resources: list[PresenceResourceGrant] = []
-    for selection in resolution.active:
-        target = selection.target
-        if isinstance(target, PresenceToolTarget):
-            tools.append(PresenceToolGrant(target.name, selection.argument_bindings))
-        elif isinstance(target, PresenceScriptTarget):
-            bindings = (
-                PresenceArgumentBinding(("skill",), "static", static_value=target.skill),
-                PresenceArgumentBinding(("script",), "static", static_value=target.script),
-                *selection.argument_bindings,
-            )
-            tools.append(PresenceToolGrant("skill_exec", tuple(bindings)))
-        elif isinstance(target, PresenceResourceTarget):
-            resources.append(
-                PresenceResourceGrant(
-                    target.root,
-                    target.operations,
-                    target.path_prefix,
-                    target.bucket,
-                    target.skill_name,
-                )
-            )
-    # The cognitive baseline is part of the ceiling, not of the profile: an
-    # admitted conversation is still this mind, so it keeps its own memory in
-    # every room instead of losing what the exchange taught it. It adds no
-    # authority over settings, delivery, or the filesystem. A name the profile
-    # already selected keeps THAT grant, because its host-authored argument
-    # bindings are the exact facts apply_presence_argument_bindings overrides
-    # the model with; an unselected name arrives with no bindings at all.
-    selected = {grant.name for grant in tools}
-    tools.extend(
-        PresenceToolGrant(name)
-        for name in sorted(COGNITIVE_MEMORY_TOOL_NAMES)
-        if name not in selected
-    )
-    scope = (PresenceArgumentBinding(("presence_scope",), "static", static_value=PRESENCE_OWN_WORK_SCOPE),)
-    tools.extend(
-        PresenceToolGrant(name, scope if scoped else ())
-        for name, scoped in _OWN_WORK_BASELINE
-        if name not in selected
-    )
-    provisional = PresenceCapabilityCeiling(
-        skill_name=_text(skill_name, "skill_name"),
-        skill_content_hash=_sha(skill_content_hash, "skill_content_hash"),
-        profile_fingerprint=resolution.profile_fingerprint,
-        state_fingerprint=_sha(state_fingerprint, "state_fingerprint"),
-        selection_fingerprint=resolution.selection_fingerprint,
-        model_slot=resolution.runtime.model_slot,
-        inline_max_rounds=resolution.runtime.inline_max_rounds,
-        tool_grants=tuple(sorted(tools, key=lambda item: item.name)),
-        resource_grants=tuple(sorted(resources, key=lambda item: (item.root, item.path_prefix))),
-        digest="0" * _SHA256_LEN,
-    )
-    payload = presence_ceiling_payload(provisional)
-    return PresenceCapabilityCeiling(
-        **{**provisional.__dict__, "digest": payload["digest"]}
-    )
-
-
 def presence_ceiling_allows_tool(ceiling: PresenceCapabilityCeiling, tool_name: str) -> bool:
     return any(canonical_tool_name(grant.name) == tool_name for grant in ceiling.tool_grants)  # frozen old spellings
 
@@ -556,7 +474,7 @@ def presence_effective_refusal(ctx: Any, task_id: str, effective: Any, *, drive_
         if presence_work_refusal(ctx, hop, drive_root=drive_root, same_tree=same_tree):
             return (
                 f"⚠️ PRESENCE_CAPABILITY_BLOCKED: task {task_id}'s effective result continues in work "
-                "that was not started from this Presence binding; a Presence turn reads only that work."
+                "that was not started from this place; a place turn reads only that work."
             )
     return ""
 
@@ -591,7 +509,7 @@ def presence_work_refusal(ctx: Any, task_id: str, *, drive_root: Any = None, sam
             return ""
     return (
         f"⚠️ PRESENCE_CAPABILITY_BLOCKED: task {target or '?'} is not independent work started from "
-        "this Presence binding (same binding_id, any of its conversations); a Presence turn "
+        "this place (any of its conversations); a place turn "
         "addresses only that work."
     )
 
@@ -611,7 +529,6 @@ __all__ = [
     "PresenceCapabilityCeiling",
     "PresenceResourceGrant",
     "PresenceToolGrant",
-    "build_presence_capability_ceiling",
     "apply_presence_argument_bindings",
     "presence_ceiling_allows_binding",
     "presence_ceiling_allows_delegated_surface",

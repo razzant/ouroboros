@@ -114,8 +114,11 @@ def test_quiz_pending_persistent_profile_recovery_and_keyboard(tmp_path, engine,
         page.evaluate(BOOT, {"id": "draft-restore", "theme": theme})
         assert page.locator('.chat-quiz-comment').input_value() == 'Restored unsent words'
         assert page.locator('.chat-quiz-close').is_disabled()
-        page.locator('.chat-quiz-clear').click()
+        # No separate control clears a draft (owner 19.10, A): emptying the field by hand releases it.
+        assert page.locator('.chat-quiz-clear').count() == 0
+        page.locator('.chat-quiz-comment').fill('')
         assert page.locator('.chat-quiz-close').is_enabled()
+        assert page.evaluate("localStorage.length") == 0
         page.close()
 
         page = mount(context, "keyboard")

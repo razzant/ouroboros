@@ -49,7 +49,7 @@ def test_every_wake_reader_needs_a_proven_absent_panic_flag(root, monkeypatch, f
     assert state_initialization.read_witness(root)[1]["phase"] == "complete"
     admitted: list = []
     monkeypatch.setattr(worker_chat_lane, "_pool", lambda: SimpleNamespace(DRIVE_ROOT=root))
-    monkeypatch.setattr(worker_chat_lane, "wake_gate_open", lambda: True)
+    monkeypatch.setattr(worker_chat_lane, "wake_gate_refusal", lambda: "")
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
     monkeypatch.setattr(worker_chat_lane, "_admit_chat_task", lambda *a, **kw: admitted.append(a))
     if errors == "windows":

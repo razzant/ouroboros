@@ -441,6 +441,40 @@ test('a compact surface binds only its tables, follows later writes, and an ance
     }
 });
 
+test('a resize batch measures every table first, then marks every one: a mark never lays out the next table', () => {
+    const prior = globalThis.ResizeObserver;
+    let resized = null;
+    globalThis.ResizeObserver = class {
+        constructor(fn) { resized = fn; }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+    };
+    const steps = [];
+    const wraps = ['one', 'two'].map((name) => {
+        const wrap = fakeTableWrap(name);
+        let width = wrap.scrollWidth;
+        Object.defineProperty(wrap, 'scrollWidth', { get: () => { steps.push(`read ${name}`); return width; } });
+        const toggle = wrap.toggleAttribute;
+        wrap.toggleAttribute = (key, force) => { steps.push(`mark ${name}`); return toggle(key, force); };
+        return wrap;
+    });
+    const root = {
+        nodeType: 1, querySelectorAll: (selector) => selector === '.md-table-wrap' ? wraps : [],
+        setAttribute() {}, removeAttribute() {}, addEventListener() {}, removeEventListener() {},
+    };
+    try {
+        const dispose = bindMarkdownTables(root);
+        resized(wraps.flatMap((wrap) => [{ target: wrap }, { target: wrap.firstElementChild }]));
+        assert.deepEqual(steps, ['read one', 'read two', 'mark one', 'mark one', 'mark two', 'mark two'],
+            'each table once, read before any write');
+        assert.equal(wraps.every((wrap) => wrap.attributes.has('data-scroll-end')), true);
+        dispose();
+    } finally {
+        globalThis.ResizeObserver = prior;
+    }
+});
+
 test('a chat instance binds its own column, so compact tables need no caller of their own', async () => {
     const { installDom, restoreDom } = await import('./chat_dom_fixture.js');
     const { createChatInstance } = await import('../modules/chat.js');

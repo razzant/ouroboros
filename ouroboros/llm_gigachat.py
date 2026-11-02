@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.model_concurrency import limit_physical_send
+
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, token_count
 from ouroboros.llm_attempt import (
     _attempt_request,
@@ -270,7 +272,7 @@ class _GigaChatLaneMixin:
         request = _attempt_request(target, candidate, source="llm.gigachat")
         completion = _execute_candidate(
             request,
-            lambda: client.chat(candidate),
+            limit_physical_send(target, lambda: client.chat(candidate)),
             _candidate_before_dispatch(candidate, request),
         )
         return self._normalize_gigachat_response(completion, target)

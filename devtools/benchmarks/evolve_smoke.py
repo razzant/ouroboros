@@ -176,7 +176,7 @@ def main() -> int:
                 absorb = server.wait_for_absorb(server.current_sha(), absorbed_cycles_done(data_root), timeout=args.timeout)
                 _log(f"task {i}: self-evolution absorbed={absorb.get('absorbed')}")
     finally:
-        server.stop()
+        teardown_unconfirmed = server.stop()
 
     refl_after = _knowledge_revisions_count(data_root)
     live_status_after = _git(["status", "--porcelain"], REPO_DIR)[1]
@@ -194,7 +194,7 @@ def main() -> int:
     _log(f"ledger: {ledger_path}")
 
     ok = acceptance["no_budget_emergency"] and acceptance["budget_reset_worked"] and acceptance["live_repo_untouched"]
-    if not args.keep:
+    if not args.keep and not teardown_unconfirmed:  # an unconfirmed stop keeps its root for inspection
         shutil.rmtree(run_root, ignore_errors=True)
     return 0 if ok else 1
 

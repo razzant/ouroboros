@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { promptCampaignObjective } from '../modules/evolution.js';
-import { confirmAndSendPanic, shouldFirePanic } from '../modules/chat_activity.js';
+import { sendPanic } from '../modules/chat_activity.js';
 import { chooseAndSendReview } from '../modules/review_command.js';
 import { shouldPollStatus } from '../modules/claudexor_status_store.js';
 import {
@@ -44,73 +44,32 @@ test('promptCampaignObjective: cancel starts nothing, confirmed-empty starts the
     // A dialog that never resolves a shape (glitch) reads as cancel, not start.
     const glitch = await promptCampaignObjective({ dialogImpl: async () => undefined });
     assert.deepEqual(glitch, { confirmed: false, objective: '' });
+
+    // A running campaign is asked for a new objective in place; its words say an empty one keeps the current one.
+    const asked = [];
+    const retarget = await promptCampaignObjective({ running: true,
+        dialogImpl: async (options) => { asked.push(options); return { confirmed: true, value: ' faster history ' }; } });
+    assert.deepEqual(retarget, { confirmed: true, objective: 'faster history' });
+    assert.deepEqual([asked[0].title, asked[0].confirmLabel, asked[0].input], ['New campaign objective', 'Set objective', true]);
+    assert.match(asked[0].body, /continues with this objective\. Leave it empty to keep the current one\.$/);
 });
 
 // ---------------------------------------------------------------------------
-// chat: /panic — CRITICAL CONTROL. Fires on explicit boolean true, only.
+// Panic is immediate; ordinary confirmations keep their own tests below.
 // ---------------------------------------------------------------------------
 
-test('/panic fires on an explicit confirm and on NOTHING else', () => {
-    assert.equal(shouldFirePanic(true), true);
-    // Cancel, backdrop, and Escape all resolve false from openConfirmDialog.
-    assert.equal(shouldFirePanic(false), false);
-    // Defensive strictness: a dialog API drift toward object results (the
-    // input mode's {confirmed, value} shape), or any truthy junk, must NOT
-    // kill all workers.
-    assert.equal(shouldFirePanic({ confirmed: true, value: '' }), false);
-    assert.equal(shouldFirePanic('true'), false);
-    assert.equal(shouldFirePanic(1), false);
-    assert.equal(shouldFirePanic(undefined), false);
-    assert.equal(shouldFirePanic(null), false);
-});
-
-test('/panic confirm-and-send flow sends exactly one /panic command', async () => {
-    // Consumer-level coverage (adversarial round 3): this is the REAL flow the
-    // header action runs — confirmAndSendPanic({openConfirmDialog, ws}) — not
-    // just the boolean gate. A broken await, option drift, or command typo
-    // fails here instead of leaving the live Panic button silently inert.
-    const sent = [];
-    const seenOptions = [];
-    const fired = await confirmAndSendPanic({
-        openConfirmDialog: async (options) => {
-            seenOptions.push(options);
-            return true;
-        },
-        ws: { send: (msg) => sent.push(msg) },
-    });
-
-    assert.equal(fired, true);
-    assert.deepEqual(sent, [{ type: 'command', cmd: '/panic' }]);
-    assert.equal(seenOptions.length, 1);
-    assert.equal(seenOptions[0].danger, true);
-    assert.match(seenOptions[0].title, /Panic/);
-    assert.equal(seenOptions[0].confirmLabel, 'Kill all workers');
-});
-
-test('/panic goes out first; only then does the page hear ouro:panic (its page modules stop with it)', async () => {
+test('/panic sends once without a confirmation and then stops page work', () => {
     const order = [];
     const prior = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
     globalThis.dispatchEvent = (event) => { order.push(`event:${event.type}`); return true; };
     try {
-        await confirmAndSendPanic({ openConfirmDialog: async () => true, ws: { send: (msg) => order.push(msg.cmd) } });
-        await confirmAndSendPanic({ openConfirmDialog: async () => false, ws: { send: (msg) => order.push(msg.cmd) } });
+        sendPanic({ ws: { send: (msg) => order.push(msg) },
+            openConfirmDialog: () => { throw Error('Panic must not ask'); } });
     } finally {
         if (prior) Object.defineProperty(globalThis, 'dispatchEvent', prior);
         else delete globalThis.dispatchEvent;
     }
-    assert.deepEqual(order, ['/panic', 'event:ouro:panic'], 'a cancelled confirm raises nothing');
-});
-
-test('/panic cancel/backdrop/Escape resolutions send NOTHING', async () => {
-    for (const resolution of [false, undefined, null, 'true', 1, { confirmed: true, value: '' }]) {
-        const sent = [];
-        const fired = await confirmAndSendPanic({
-            openConfirmDialog: async () => resolution,
-            ws: { send: (msg) => sent.push(msg) },
-        });
-        assert.equal(fired, false, `resolution ${JSON.stringify(resolution)} must not fire`);
-        assert.deepEqual(sent, [], `resolution ${JSON.stringify(resolution)} must send nothing`);
-    }
+    assert.deepEqual(order, [{ type: 'command', cmd: '/panic' }, 'event:ouro:panic']);
 });
 
 // ---------------------------------------------------------------------------

@@ -17,7 +17,8 @@ _NOTE_REQUIRED = ("authored_note_required: inspect the working view, then supply
                   "(keep_unit_ids or keep_last_n select what stays raw); no helper writes it for you.")
 
 
-def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONICAL_OBSERVATION) -> None:
+def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONICAL_OBSERVATION,
+                        fit_measurement=None) -> None:
     """Capture a usable turn's canonical source; prospective pricing never calls this.
 
     Nothing is added to the prompt or cache identity. Inspect pins this one
@@ -28,9 +29,16 @@ def record_context_view(ctx, messages, tool_schemas, *, physical_capture=_CANONI
     from ouroboros.context_compaction import context_reclaim_transcript_sha256
 
     observed = copy.deepcopy(messages)
+    plan, mode = getattr(ctx, "context_fit_plan", None), getattr(ctx, "active_context_mode", "") or "max"
+    memory = bool(getattr(getattr(plan, "core", None), "memory_view_json", ""))
     ctx._last_context_observation = {
         "revision": context_reclaim_transcript_sha256(observed),
         "messages": observed, "tool_schemas": copy.deepcopy(tool_schemas),
+        # Continuations retain values, never the live plan. The same core can
+        # render this captured selection even after another form was chosen.
+        "memory_core_sha256": plan.core_sha256 if memory else "",
+        "memory_facts": copy.deepcopy(plan.projection(mode).memory_facts) if memory else {},
+        "fit_measurement": copy.deepcopy(fit_measurement),
     }
     if physical_capture is _CANONICAL_OBSERVATION:
         return  # Existing non-Main actors retain their own observation boundary.
@@ -122,11 +130,33 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
         if exposed is not None:
             row["exposed"] = (unit.unit_id, unit.raw_sha256) in exposed
         rows.append(row)
+    from ouroboros.memory_floor import view_inventory
+    plan = getattr(ctx, "context_fit_plan", None)
+    memory_available = bool(observed.get("memory_core_sha256")) and (
+        observed["memory_core_sha256"] == getattr(plan, "core_sha256", None))
+    memory_rows = view_inventory(plan if memory_available else None, getattr(ctx, "active_context_mode", "") or "max",
+                                 memory_facts=observed.get("memory_facts"))
+    rows.extend(memory_rows)
+    counts['memory'] += 0
+    tokens['memory'] += 0
+    for row in memory_rows:
+        counts[row['kind']] += 1
+        tokens[row['kind']] += row['tokens']
+    measurement = observed.get('fit_measurement')
+    if measurement is None:
+        from ouroboros.loop_model_call import _measure_main_context_view
+        measurement = _measure_main_context_view(plan, messages, observed['tool_schemas'],
+            getattr(ctx, 'active_context_mode', '') or 'max', getattr(ctx, 'active_effort', ''), 'inspect')
     body = {
+        "fit_measurement": measurement,
+        "work_room": observed.get('work_room'),
+        "resident_memory": (observed.get('memory_facts') or {}).get('blocks', {}),
         **({"review_attachment_transfer": transfers} if transfers else {}),
         **({"review_decisions": decisions} if decisions else {}),
         "view_revision": observed["revision"],
         "restore_checkpoint": restore_checkpoint,
+        "memory_view_status": "observed_snapshot" if memory_available else "unavailable",
+        "memory_re_read_price": "Changing a memory form rewrites the system prefix; later cached input may need re-reading.",
         "inventory": {"units": len(rows), "eligible": sum(row["eligible"] for row in rows),
                       "tokens": sum(tokens.values()),
                       "by_kind": {kind: {"units": counts[kind], "tokens": tokens[kind]} for kind in sorted(counts)}},
@@ -138,7 +168,8 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "call inspect again with that offset). Select complete unit IDs to keep and write a local working_note; "
                  "a restore_unit_refs entry is {checkpoint_ref: restore_checkpoint, unit_id, raw_sha256}. Earlier notes "
                  "stay where they are unless selected for replacement; select several to merge their account and sources. "
-                 "The system view, the assignment and newer owner/tool messages remain untouched."),
+                 "view_address selects listed memory forms from this snapshot; a note's restore_view_address restores it whole. Core, governing words, the assignment "
+                 "and newer owner/tool messages stay whole."),
     }
     start = max(0, int(offset or 0))
 
@@ -161,7 +192,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
                      expected_view_revision: str = "", working_note: str | None = None,
                      keep_unit_ids: List[str] | None = None, restore_unit_refs: List[dict] | None = None,
                      schema_names: List[str] | None = None, review_transfers: List[dict] | None = None,
-                     review_notes: List[dict] | None = None, **kwargs) -> str:
+                     review_notes: List[dict] | None = None, view_address: List[str] | None = None, **kwargs) -> str:
     """Inspect or queue a replacement through the existing context materializer.
 
     The authored view (inspect / working_note / restore) addresses the dialogue scope:
@@ -188,6 +219,8 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
                 text="Standalone restore_unit_refs keeps current units, schemas and review accounts. "
                      "Omit other selectors, or supply working_note to combine restoration with an authored view."))
         working_note = ""
+    if working_note is None and view_address:
+        working_note = ""
     if working_note is None:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=_NOTE_REQUIRED))
     # This invocation is a response to the actor's recorded physical send.
@@ -205,7 +238,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
     if (not isinstance(working_note, str)
             or any(values is not None and (not isinstance(values, list)
                    or not all(isinstance(v, str) and v for v in values))
-                   for values in (keep_unit_ids, schema_names))
+                   for values in (keep_unit_ids, schema_names, view_address))
             or review_notes is not None and not isinstance(review_notes, list)
             or review_transfers is not None and not isinstance(review_transfers, list)
             or restore_unit_refs is not None and (not isinstance(restore_unit_refs, list)
@@ -214,6 +247,16 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
             text="Invalid context view request: use a prose working_note, arrays of exact unit/schema names and checkpoint reference objects."))
     from ouroboros.review_history_view import resolve_observed_review_notes
     review_notes = resolve_observed_review_notes(review_notes or [], observed)
+    if view_address:
+        from ouroboros.memory_floor import select_view
+        try:
+            plan = getattr(ctx, "context_fit_plan", None)
+            if plan is None or observed.get("memory_core_sha256") != plan.core_sha256:
+                raise ValueError("memory snapshot changed; inspect the current view")
+            select_view(plan, getattr(ctx, "active_context_mode", "") or "max", view_address,
+                        owner_note=bool(working_note.strip()))
+        except ValueError as exc:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
     if keep_unit_ids is None and keep_last_n is not None:
         # keep_last_n counts completed tool units; everything from the N-th most recent
         # tool unit onward (prose rows between and after them included) stays raw.
@@ -226,6 +269,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
     ctx._pending_compaction = {
         "observed": observed, "working_note": working_note, "review_transfers": list(review_transfers or []),
         "review_notes": list(review_notes or []),
+        "view_address": tuple(view_address or ()),
         "expected_view_revision": observed["revision"],
         "keep_unit_ids": None if keep_unit_ids is None else tuple(keep_unit_ids),
         "restore_unit_refs": tuple(restore_unit_refs or ()),
@@ -241,49 +285,44 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "compact_context",
                 "description": (
-                    "Fold complete-input context under your own authored working_note (inspect optional), or "
-                    "restore exact sources with restore_unit_refs alone. No helper summarizes for you: a request "
-                    "without working_note is refused (authored_note_required). Native review does not apply "
-                    "schema_names, review_notes or review_transfers; its inspect response reports window evidence, "
-                    "serialized characters and previous-request input, not current free tokens. "
-                    "inspect answers a bounded inventory (counts and tokens by kind) plus one page of units in "
-                    "transcript order (offset / next_offset), each with kind and eligibility; the owner's words and "
-                    "your typed owner-directed dialogue, the assignment and the system view stay whole. "
-                    "Earlier notes stay in place unless selected for replacement; select several to merge them. "
-                    "The note occupies the first replaced unit. Rewriting can lose prefix-cache "
-                    "reuse from the earliest change: fold for space/clarity in useful batches, with a note shorter than its sources. "
-                    "A selected older assistant tool call and all of its "
-                    "contiguous matching results stay atomic; Ouroboros checkpoints their exact "
-                    "actor-visible bytes before replacement, with checkpoint/CAS provenance. Raw evidence remains retrievable (restore_unit_refs; an emergency "
-                    "record lists its checkpoint once and its member units separately)."
+                    "Fold context under your working_note; no helper summarizes for you. Only view_address or "
+                    "restore_unit_refs may be used without a note. Core, assignment, owner words, typed owner-directed "
+                    "dialogue and newer tail stay whole. Each older tool call and contiguous results is atomic; exact "
+                    "bytes are checkpointed with CAS provenance before replacement, so raw evidence remains retrievable. "
+                    "Unselected notes stay; replacement "
+                    "occupies the first selected unit. Batch usefully, shorter than sources: rewriting loses prefix-cache "
+                    "reuse and signed reasoning from the earliest change. "
+                    "Native review ignores schema_names, review_notes and review_transfers; its inspection reports "
+                    "window evidence, serialized characters and previous input, never current free tokens."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "inspect": {"type": "boolean", "description": "Return and pin the last observed view revision: an inventory by kind and size, one page of complete unit IDs, the restore checkpoint and current schema names, without changing context."},
-                        "offset": {"type": "integer", "minimum": 0, "description": "With inspect: zero-based position of the first unit of the page; the reply names next_offset while units remain."},
-                        "expected_view_revision": {"type": "string", "description": "Optional view_revision from inspect, checked exactly. Omitted binds the actual model-send view that produced this call; inspect is not required to replace all completed units."},
-                        "working_note": {"type": "string", "description": "For a future reader without selected sources in view: preserve the source-supported situation and purpose behind conclusions, who decided what, its status within those sources, scope, changes, corrections and unresolved work. Distinguish inference and gaps; invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches. Proposals are not approvals; do not retain obsolete restrictions after a later scoped approval. Be concise, no fixed template. Required for every fold except a standalone restore."},
-                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected complete units to retain raw; takes precedence over keep_last_n, empty keeps none eligible. If both selectors are omitted, an authored note keeps all. Owner words, the assignment, the system view and the newer tail are preserved whatever the selection."},
+                        "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address restores a note whole. Applied at the next tool boundary from the same snapshot, preserving other choices and arrivals; receipt measures the complete result and prefix re-reading."},
+                        "inspect": {"type": "boolean", "description": "Pin view_revision; return counts/tokens by kind, one transcript-ordered page of unit IDs/eligibility, restore_checkpoint and schema names; no mutation."},
+                        "offset": {"type": "integer", "minimum": 0, "description": "Inspection page's zero-based start; next_offset names remaining units."},
+                        "expected_view_revision": {"type": "string", "description": "Exact inspected revision; omitted binds the model-send view producing this call, so inspection is optional."},
+                        "working_note": {"type": "string", "description": "For a future reader without sources: keep situation/purpose, who decided what, their status within those sources, scope, changes, corrections and unresolved work; label inference and gaps, invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches; proposals are not approvals, and superseded restrictions do not survive scoped approval. Concise, no fixed template; required for folds."},
+                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact complete units to keep raw, overriding keep_last_n; empty keeps none eligible, both selectors omitted keeps all."},
                         "restore_unit_refs": {"type": "array", "items": {"type": "object", "properties": {
                             "checkpoint_ref": {"type": "object"}, "unit_id": {"type": "string"}, "raw_sha256": {"type": "string"}},
                             "required": ["checkpoint_ref", "unit_id", "raw_sha256"]},
-                            "description": "Read exact checkpoint-local units back as labelled sources, never live tool protocol replay (checkpoint_ref is inspect's restore_checkpoint). In Main a nonempty list may be used alone; native review also requires working_note (empty is valid). Supply a note to combine restoration with other view selectors."},
-                        "schema_names": {"type": "array", "items": {"type": "string"}, "description": "Nano only: desired canonical schemas. This selects residency, never execution permissions. Low/Max retain their full permitted envelope."},
+                            "description": "Restore sources, never protocol replay; checkpoint_ref is restore_checkpoint (emergency records list members separately). Main allows this alone; native review requires working_note, possibly empty; combining selectors requires a note."},
+                        "schema_names": {"type": "array", "items": {"type": "string"}, "description": "Nano schema residency, never permissions; Low/Max keep the full permitted envelope."},
                         "review_notes": {"type": "array", "items": {"type": "object", "properties": {
                             "bound_decision": {"anyOf": [{"type": "object"}, {"type": "string"}]},
                             "bound_decisions": {"type": "array", "items": {"anyOf": [{"type": "object"}, {"type": "string"}]}},
                             "remark": {"type": "string"}, "reason": {"type": "string"}},
                             "required": ["remark", "reason"], "additionalProperties": False},
-                            "description": "With working_note: bound_decision keeps one decision's status with your short remark/reason. Alternatively bound_decisions explicitly replaces a group of closed historical decisions with your account. Use exact bindings or decision_ref values from this observed view; positional IDs alone do not bind a version. Current contracts/statuses, open/deferred/pending facts and gaps stay visible. Missing/stale entries stay full with reasons; no new verdict, host clipping or helper summary."},
+                            "description": "With working_note, exact observed bindings/decision_ref (not positional IDs) annotate one decision or group closed history, preserving verdicts, current contracts, open/deferred/pending facts and gaps; stale/missing bindings stay full with reasons."},
                         "review_transfers": {"type": "array", "items": {"type": "object", "properties": {
                             "source": {"type": "object"}, "operative_spec_sha256": {"type": "string"},
                             "decision_ids": {"type": "array", "items": {"type": "string"}}},
                             "required": ["source", "operative_spec_sha256", "decision_ids"]},
-                            "description": "With working_note only: explicitly declare that an attachment's decisions and reasons have been transferred into the named current plan spec decisions. Inspect supplies exact source/spec identities. No semantic completeness is inferred; absent or stale transfer keeps the attachment full."},
+                            "description": "With working_note, declare attachment decisions/reasons transferred to named current plan decisions using inspected source/spec identities; no completeness is inferred, and absent/stale transfer keeps the attachment whole."},
                         "keep_last_n": {
                             "type": "integer",
-                            "description": "With working_note and no keep_unit_ids: number of recent completed atomic tool units to keep raw (range 2-20). Without a note the request is refused.",
+                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20).",
                         },
                     },
                     "required": [],

@@ -1,8 +1,8 @@
 """Off-loop workspace preparation of acting subagents (claim 9; PREP1-PREP4).
 
-Real queue maps, real reservation/receipt code, real Git copies under a held
-real worktree operations lock. Process-global supervisor state is touched, so
-the module runs in the serial lane.
+Real queue maps, real reservation/receipt code, real Git copies held at their
+snapshot step (a long tree walk; there is no shared copy lock). Process-global
+supervisor state is touched, so the module runs in the serial lane.
 """
 from __future__ import annotations
 
@@ -123,23 +123,22 @@ class Env(SimpleNamespace):
             return [str(row.get("id") or "") for row in queue.PENDING]
 
     @contextlib.contextmanager
-    def ops_lock_held(self):
-        """Hold the REAL worktree operations lock from another thread until the block exits."""
-        held, release = threading.Event(), threading.Event()
+    def copy_blocked(self):
+        """Hold every private-copy provision at its snapshot step (before it records or
+        makes anything, where a large tree spends its time) until the block exits."""
+        release = threading.Event()
+        real = trees.snapshot_commit
 
-        def hold():
-            with trees._ops_lock(trees._resolve_root(), op="test-hold", task_id="holder"):
-                held.set()
-                release.wait(_WAIT_SEC * 4)
+        def blocked(*args, **kwargs):
+            assert release.wait(_WAIT_SEC * 4), "a held copy was never released"
+            return real(*args, **kwargs)
 
-        holder = threading.Thread(target=hold, name="test-ops-lock-holder", daemon=True)
-        holder.start()
-        assert held.wait(_WAIT_SEC)
+        trees.snapshot_commit = blocked
         try:
             yield
         finally:
+            trees.snapshot_commit = real
             release.set()
-            holder.join(_WAIT_SEC)
 
 
 @pytest.fixture
@@ -197,9 +196,9 @@ def spy_provisions(monkeypatch):
 def test_blocked_copy_keeps_event_dispatch_responsive_then_admits_once(env, monkeypatch):
     calls = spy_provisions(monkeypatch)
     acting = env.request("act1", root="root-a")
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(acting), "the event loop waited on the workspace copy"
-        env.wait_phase("act1", "copying")  # the FIFO thread is inside the copy, blocked on the lock
+        env.wait_phase("act1", "copying")  # the FIFO thread is inside the copy, held at its snapshot
         # Unrelated work and owner controls progress through the real handler meanwhile.
         assert env.dispatch_returns(env.readonly("ro1"))
         env.wait_phase("ro1", "admitted")  # the admission lane never waits behind the held copy
@@ -222,7 +221,7 @@ def test_blocked_copy_keeps_event_dispatch_responsive_then_admits_once(env, monk
 def test_duplicate_arrivals_coalesce_into_one_copy_and_one_admission(env, monkeypatch):
     calls = spy_provisions(monkeypatch)
     event = env.request("dup1")
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(event)
         env.wait_phase("dup1", "copying")
         assert env.dispatch_returns(dict(event)) and env.dispatch_returns(dict(event))
@@ -239,7 +238,7 @@ def test_exact_child_stop_during_copy_prevents_admission_and_frees_only_its_copy
 
     monkeypatch.setattr(workers, "WORKERS", {})
     event = env.request("stop1")
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(event)
         env.wait_phase("stop1", "copying")
         cancel_intents.request_cancel(env.data, "stop1", reason="owner Stop", source="test")
@@ -250,7 +249,7 @@ def test_exact_child_stop_during_copy_prevents_admission_and_frees_only_its_copy
     assert row["status"] == "cancelled" and "admission_outcome" not in row  # never overwritten
     assert row["workspace_preparation"]["phase"] == "copying"  # its own claim was not rewritten either
     assert "stop1" not in env.pending_ids() and queue.ADMISSION_RESERVATIONS == {}
-    assert not (trees._resolve_root() / "stop1").exists()
+    assert not trees.copy_path(trees._resolve_root(), "stop1").exists()
     assert not [entry for entry in trees.list_worktrees() if entry.get("task_id") == "stop1"]
 
 
@@ -273,7 +272,7 @@ def test_control_during_copy_refuses_typed_and_disposes_its_copy_only_after_the_
 
     monkeypatch.setattr(trees, "remove_worktree", remove_after_receipt)
     event = env.request("ctl1", root="root-x")
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(event)
         env.wait_phase("ctl1", "copying")
         if control == "root_stop":
@@ -301,7 +300,7 @@ def test_control_during_copy_refuses_typed_and_disposes_its_copy_only_after_the_
 
 def test_queued_preparation_never_starts_once_its_generation_closes(env, monkeypatch):
     calls = spy_provisions(monkeypatch)
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("first", root="r1"))
         env.wait_phase("first", "copying")
         assert env.dispatch_returns(env.request("second", root="r2"))
@@ -330,7 +329,7 @@ def test_preparation_captures_the_current_tree_when_it_runs_not_when_requested(e
     (src / "a.txt").write_bytes(b"base\nedited before the request\n")
     (src / "notes.txt").write_bytes(b"untracked eligible input\n")
     head = git(src, "rev-parse", "HEAD").strip().decode()
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("blocker", root="rb"))
         env.wait_phase("blocker", "copying")
         assert env.dispatch_returns(env.request("timed", root="rt", base_sha=head))
@@ -353,7 +352,7 @@ def test_preparation_captures_the_current_tree_when_it_runs_not_when_requested(e
 def test_head_moved_while_queued_keeps_the_typed_base_refusal(env):
     src = env.source
     head = git(src, "rev-parse", "HEAD").strip().decode()
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("blocker", root="rb"))
         env.wait_phase("blocker", "copying")
         assert env.dispatch_returns(env.request("based", root="rt", base_sha=head))
@@ -541,7 +540,7 @@ def test_crash_after_admission_entry_stays_unresolved_and_is_never_refused(env):
 
 
 def test_recovery_leaves_a_live_preparation_alone(env):
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("live1"))
         env.wait_phase("live1", "copying")
         report = prep.recover_interrupted_preparations(env.data)
@@ -559,7 +558,7 @@ def test_old_generation_claim_that_could_not_settle_is_recovered_by_its_successo
 
     with monkeypatch.context() as patch:
         patch.setattr(task_admission, "persist_never_admitted_refusal", _unwritable)
-        with env.ops_lock_held():
+        with env.copy_blocked():
             assert env.dispatch_returns(env.request("old1", root="ro"))
             env.wait_phase("old1", "copying")
             prep.close_generation(env.gen)
@@ -761,22 +760,36 @@ def test_busy_store_at_entry_is_typed_and_starts_no_preparation(env, monkeypatch
 
 
 @pytest.mark.parametrize("change", ["rebind", "deletion"])
-def test_project_change_during_copy_is_revalidated_at_admission(env, change):
-    from ouroboros import projects_registry as registry
+@pytest.mark.parametrize("phase", ["copy", "admission"])
+def test_project_change_during_copy_is_revalidated_at_admission(env, monkeypatch, change, phase):
+    from ouroboros import projects_registry as registry, settings_integrity
     from ouroboros.startup_migrations import prepare_startup_state
 
     prepare_startup_state(env.data)
     registry.create_project(env.data, "proj", name="Proj")
     event = env.request("projchild", root="proj-root")
     event["project_id"] = "proj"  # the parent's Project, frozen when the request is read
-    with env.ops_lock_held():
-        assert env.dispatch_returns(event)
-        env.wait_phase("projchild", "copying")
+    def change_project():
         if change == "rebind":
             registry.update_project(env.data, "proj", working_dir=str(env.data.parent / "elsewhere"))
         else:
             registry.begin_project_deletion(env.data, "proj")
+
+    original_read, reads = settings_integrity.live_subagents_mode, []
+    def read(**kwargs):
+        reads.append(kwargs)
+        if phase == "admission" and len(reads) == 2:
+            change_project()
+        return original_read(**kwargs)
+    monkeypatch.setattr(settings_integrity, "live_subagents_mode", read)
+    with env.copy_blocked():
+        assert env.dispatch_returns(event)
+        env.wait_phase("projchild", "copying")
+        if phase == "copy":
+            change_project()
     assert env.gen.wait_idle(_WAIT_SEC)
+    if phase == "admission":
+        assert len(reads) == 2
     row = env.row("projchild")
     marker = row["workspace_preparation"]
     if change == "rebind":
@@ -796,7 +809,7 @@ def test_closed_generation_callback_never_admits_or_touches_its_successor(env):
     old = env.gen
     successor = None
     try:
-        with env.ops_lock_held():
+        with env.copy_blocked():
             assert env.dispatch_returns(env.request("old2", root="r-old"))
             env.wait_phase("old2", "copying")
             prep.close_generation(old)

@@ -63,6 +63,7 @@ def cold_registry(tmp_path, monkeypatch, ceiling=None, contract=None):
         ctx.task_contract = dict(contract)
     ctx.active_model, ctx.active_effort = "same-model", "high"
     ctx.active_use_local, ctx.active_context_mode = False, "max"
+    ctx.route_choice = {"kind": "explicit", "source": "switch_model"}  # the mind's own route rides the checkpoint
     ctx._owner_wait_requested = "quiz"
     ctx._cost_ceiling = ceiling or task_pacing.CostCeiling(state="disabled")
     messages = _plan().messages_for("max") + [

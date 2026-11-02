@@ -20,6 +20,7 @@ import stat
 from typing import Dict, List
 
 from ouroboros.artifacts import copy_directory_to_task_artifacts, copy_file_to_task_artifacts, iter_artifact_tree, stream_artifact_file
+from ouroboros.artifact_directories import iter_artifact_entries
 from ouroboros.runtime_mode_policy import (
     is_protected_runtime_path,
 )
@@ -47,6 +48,10 @@ from ouroboros.workspace_executor import BackendPathNoMatch, executor_ref_from_c
 from ouroboros.workspace_executor import map_backend_path as executor_map_backend_path
 from ouroboros.workspace_executor import map_backend_path_lexical as executor_map_backend_path_lexical
 from ouroboros.workspace_executor import map_host_path as executor_map_host_path
+from ouroboros.workspace_executor_paths import (
+    DockerOutputContext, DockerOutputPath, OutputResolutionUnavailable,
+    prepare_docker_outputs, resolve_docker_output,
+)
 
 
 log = logging.getLogger(__name__)
@@ -146,6 +151,7 @@ def _resolve_declared_output(
     binding: ResolvedResourceBinding | None = None,
     *,
     judge_changes: bool = True,
+    resolved_output: DockerOutputPath | None = None,
 ) -> tuple[pathlib.Path | None, str]:
     text = str(raw_item or "").strip()
     if not text:
@@ -155,11 +161,16 @@ def _resolve_declared_output(
     except ValueError as exc:
         return None, f"declared output is not a usable path: {exc}"
     executor_ref = executor_ref_from_ctx(ctx)
+    if executor_ref is not None and executor_ref.kind == "docker_exec" and not _backend_cwd(executor_ref, work_dir):
+        executor_ref = None
     if not (is_absolute_path_text(text) or text.startswith("~")):
         # Outputs alone may spell ``..`` (#1797): the root walk below judges the
         # resolved location as for the absolute spelling, and the original spelling
         # is resolved, never a collapsed one, so a symlinked parent keeps its meaning.
-        backend_cwd = _backend_cwd(executor_ref, work_dir) if ".." in pathlib.PurePosixPath(relative).parts else ""
+        # A local executor runs in this host cwd (workspace_executor.execute), so the host resolves
+        # its ``..`` as it does without an executor; only a backend with its own namespace remaps it.
+        backend = executor_ref if executor_ref is not None and executor_ref.kind != "local" else None
+        backend_cwd = _backend_cwd(backend, work_dir) if ".." in pathlib.PurePosixPath(relative).parts else ""
         if backend_cwd:
             # In a mapped cwd the backend resolves ``..``: the same spelling as an absolute backend path.
             text, relative = f"{backend_cwd.rstrip('/')}/{relative}", ""
@@ -167,7 +178,9 @@ def _resolve_declared_output(
     # is_absolute_path_text (not Path.is_absolute) so a backend output path like
     # "/workspace/out.txt" maps through the executor on Windows too, where
     # Path.is_absolute() is False for drive-less roots.
-    if executor_ref is not None and is_absolute_path_text(text) and not text.startswith("~"):
+    if resolved_output is not None:
+        lexical_source, source = resolved_output.lexical_source, resolved_output.source
+    elif executor_ref is not None and is_absolute_path_text(text) and not text.startswith("~"):
         try:
             lexical_source = executor_map_backend_path_lexical(executor_ref, text)
             source = executor_map_backend_path(executor_ref, text)
@@ -276,12 +289,27 @@ def _backend_cwd(executor_ref, work_dir: pathlib.Path) -> str:
         return ""
 
 
+def _prepare_declared_output_context(ctx: ToolContext, outputs, work_dir: pathlib.Path):
+    """Resolve Docker addresses before effects; unreadable byte baselines stay separate."""
+    from ouroboros.tools.tool_result import ToolResult
+
+    try:
+        return prepare_docker_outputs(executor_ref_from_ctx(ctx), work_dir, outputs), None
+    except (OutputResolutionUnavailable, ValueError) as exc:
+        unavailable = isinstance(exc, OutputResolutionUnavailable)
+        code = "CAPABILITY_UNAVAILABLE" if unavailable else "RESOURCE_POLICY_BLOCKED"
+        text = sanitize_tool_result_for_log(f"⚠️ {code}: declared output preflight failed; nothing ran. {exc}")
+        return None, ToolResult(status="unavailable" if unavailable else "blocked", code=code, text=text,
+                                meta={"operation_outcome": "completed_no_effect", "process_not_started": True})
+
+
 def _declared_output_refusal(
     ctx: ToolContext,
     outputs: List[str] | None,
     work_dir: pathlib.Path,
     cwd_root: str = "",
     binding: ResolvedResourceBinding | None = None,
+    output_context: DockerOutputContext | None = None,
 ) -> str:
     """The pre-launch answer for a declaration the resolver already refuses.
 
@@ -292,7 +320,17 @@ def _declared_output_refusal(
         try:
             _source, reason = _resolve_declared_output(
                 ctx, str(raw_item or ""), work_dir, cwd_root=cwd_root, binding=binding, judge_changes=False,
+                resolved_output=output_context.paths.get(str(raw_item).strip()) if output_context else None,
             )
+            resolved = output_context.paths.get(str(raw_item).strip()) if output_context else None
+            for rel, host in resolved.mounts if resolved else ():
+                _source, mount_reason = _resolve_declared_output(
+                    ctx, str(host), work_dir, cwd_root=cwd_root, binding=binding, judge_changes=False,
+                    resolved_output=DockerOutputPath("", "", host, resolved.lexical_source / rel),
+                )
+                if mount_reason:
+                    reason = mount_reason
+                    break
         except (ValueError, RuntimeError) as exc:
             reason = sanitize_tool_result_for_log(f"declared output could not be resolved: {raw_item}: {type(exc).__name__}: {exc}")
         except Exception:  # noqa: BLE001 — unknown I/O; the baseline that follows discloses it
@@ -322,17 +360,21 @@ def _directory_fingerprint_from_entries(root: pathlib.Path, entries: list[tuple[
     return digest.hexdigest()
 
 
-def _directory_fingerprint(path: pathlib.Path, *, strict: bool = False) -> tuple[bool, int, str]:
+def _directory_fingerprint(path: pathlib.Path, *, strict: bool = False,
+                           resolved_output: DockerOutputPath | None = None) -> tuple[bool, int, str]:
     root = pathlib.Path(path).resolve(strict=False)
     total = 0
     entries: list[tuple[str, os.stat_result, pathlib.Path]] = []
     try:
-        for child in iter_artifact_tree(root):
+        children = (iter_artifact_entries(root, resolved_output.mounts) if resolved_output else
+                    (("", child) for child in iter_artifact_tree(root)))
+        for rel, child in children:
             st = child.lstat()
-            try:
-                rel = child.resolve(strict=False).relative_to(root).as_posix()
-            except ValueError:
-                rel = safe_relpath(str(child))
+            if not resolved_output:
+                try:
+                    rel = child.resolve(strict=False).relative_to(root).as_posix()
+                except ValueError:
+                    rel = safe_relpath(str(child))
             entries.append((rel, st, child))
             if stat.S_ISREG(st.st_mode):
                 total += st.st_size
@@ -343,7 +385,8 @@ def _directory_fingerprint(path: pathlib.Path, *, strict: bool = False) -> tuple
         return False, -1, ""
 
 
-def _fingerprint_output(path: pathlib.Path, *, strict: bool = False) -> tuple[bool, int, str]:
+def _fingerprint_output(path: pathlib.Path, *, strict: bool = False,
+                        resolved_output: DockerOutputPath | None = None) -> tuple[bool, int, str]:
     """``(exists, size, digest)``; ``(False, -1, "")`` is absence or, unless ``strict``, unreadability.
 
     ``strict`` is the pre-run baseline: only a path that does not exist is absent, so a
@@ -354,7 +397,7 @@ def _fingerprint_output(path: pathlib.Path, *, strict: bool = False) -> tuple[bo
         except (FileNotFoundError, NotADirectoryError):
             return False, -1, ""
         if stat.S_ISDIR(mode):
-            return _directory_fingerprint(path, strict=strict)
+            return _directory_fingerprint(path, strict=strict, resolved_output=resolved_output)
         if not stat.S_ISREG(mode):
             return False, -1, ""
         measured = stream_artifact_file(path)
@@ -372,9 +415,11 @@ def _snapshot_declared_outputs(
     cwd_root: str = "",
     changed_paths: set[str] | None = None,
     binding: ResolvedResourceBinding | None = None,
+    output_context: DockerOutputContext | None = None,
 ) -> Dict[str, tuple[bool, int, str]]:
     snapshots: Dict[str, tuple[bool, int, str]] = {}
     for raw_item in outputs or []:
+        resolved = output_context.paths.get(str(raw_item).strip()) if output_context else None
         # The static view, as the pre-launch refusal: a tracked file is judged
         # changed or unchanged only after the run, so it keeps its baseline.
         source, block_reason = _resolve_declared_output(
@@ -385,9 +430,10 @@ def _snapshot_declared_outputs(
             changed_paths=changed_paths,
             binding=binding,
             judge_changes=False,
+            resolved_output=resolved,
         )
         if source is not None and not block_reason:
-            snapshots[str(source)] = _fingerprint_output(source, strict=True)
+            snapshots[str(source)] = _fingerprint_output(source, strict=True, resolved_output=resolved)
     return snapshots
 
 
@@ -398,6 +444,7 @@ def _declared_output_baseline(
     cwd_root: str = "",
     changed_paths: set[str] | None = None,
     binding: ResolvedResourceBinding | None = None,
+    output_context: DockerOutputContext | None = None,
 ) -> tuple[Dict[str, tuple[bool, int, str]], str]:
     """``(baseline, problem)``: a baseline that could not be taken is said before launch.
 
@@ -406,6 +453,7 @@ def _declared_output_baseline(
     try:
         return _snapshot_declared_outputs(
             ctx, outputs, work_dir, cwd_root=cwd_root, changed_paths=changed_paths, binding=binding,
+            output_context=output_context,
         ), ""
     except Exception as exc:  # noqa: BLE001 — disclosed, never a clean empty baseline
         problem = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")[:500]
@@ -423,7 +471,8 @@ def _scan_directory_output_members(
     label: str,
     changed_paths: set[str],
     binding: ResolvedResourceBinding | None = None,
-) -> tuple[list[pathlib.Path], int, str, list[str]]:
+    resolved_output: DockerOutputPath | None = None,
+) -> tuple[list, int, str, list[str]]:
     """Return ``(members, dir_size, whole_dir_block_reason, skipped_receipts)``.
 
     D4 (capinv-447): a policy-rejected MEMBER is skipped with a receipt instead
@@ -432,35 +481,41 @@ def _scan_directory_output_members(
     directory as a whole; the complete member list has no inline byte/count cap.
     """
     root = pathlib.Path(source).resolve(strict=False)
-    members: list[pathlib.Path] = []
+    members = []
     skipped: list[str] = []
     dir_size = 0
     try:
-        for child in iter_artifact_tree(root):
+        for rel, child in iter_artifact_entries(root, resolved_output.mounts if resolved_output else ()):
             if child.is_symlink():
                 skipped.append(f"{child}: symlink members are not followed")
                 continue
             if not child.is_file():
                 continue
-            try:
-                rel_parts = child.resolve(strict=False).relative_to(root).parts
-            except ValueError:
-                rel_parts = child.parts
+            rel_parts = pathlib.PurePosixPath(rel).parts
             component_reason = _sensitive_output_component_reason(rel_parts)
             if component_reason:
                 skipped.append(f"{child}: {component_reason}")
                 continue
+            if resolved_output:
+                # Nested binds carry no extra roots or Deliverables rights.
+                _allowed, reason = _resolve_declared_output(
+                    ctx, str(child), root, cwd_root=label, changed_paths=changed_paths, binding=binding,
+                    resolved_output=DockerOutputPath("", "", child, root / rel),
+                )
+                if reason:
+                    skipped.append(f"{child}: {reason}")
+                    continue
             reason = _protected_output_source_reason(
                 ctx, child.resolve(strict=False), label, changed_paths, binding,
             )
             if reason:
                 skipped.append(f"{child}: {reason}")
                 continue
-            members.append(child)
+            members.append((rel, child) if resolved_output else child)
             dir_size += child.stat().st_size
     except OSError as exc:
         return [], dir_size, f"{source}: {type(exc).__name__}: {exc}", skipped
-    return sorted(members, key=lambda item: item.as_posix()), dir_size, "", skipped
+    return sorted(members), dir_size, "", skipped
 
 
 def _record_skipped_members(ctx: ToolContext, output: str, members: List[str]) -> None:
@@ -487,6 +542,7 @@ def _register_process_outputs(
     changed_paths: set[str] | None = None,
     before_outputs: Dict[str, tuple[bool, int, str]] | None = None,
     binding: ResolvedResourceBinding | None = None,
+    output_context: DockerOutputContext | None = None,
 ) -> tuple[str, bool, bool]:
     """Copy declared command outputs into the task artifact store."""
 
@@ -498,9 +554,20 @@ def _register_process_outputs(
     for raw_item in outputs:
         text = str(raw_item or "").strip()
         try:
+            previous = output_context.paths.get(text) if output_context else None
+            resolved = resolve_docker_output(output_context.executor, previous.requested, must_exist=True) if previous else None
             source, block_reason = _resolve_declared_output(
                 ctx, text, work_dir, cwd_root=cwd_root, changed_paths=changed_paths, binding=binding,
+                resolved_output=resolved,
             )
+            for rel, host in resolved.mounts if resolved else ():
+                _, reason = _resolve_declared_output(
+                    ctx, str(host), work_dir, cwd_root=cwd_root, binding=binding, judge_changes=False,
+                    resolved_output=DockerOutputPath("", "", host, resolved.lexical_source / rel),
+                )
+                if reason:
+                    block_reason = reason
+                    break
         except Exception as exc:  # noqa: BLE001 — output failure must not replace the completed process result
             notes.append(sanitize_tool_result_for_log(f"output could not be resolved: {text}: {type(exc).__name__}: {exc}"))
             failed = True
@@ -518,7 +585,7 @@ def _register_process_outputs(
             failed = True
             continue
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
-        after = _fingerprint_output(source)
+        after = _fingerprint_output(source, resolved_output=resolved)
         if before[0] and before == after:
             # Present-but-unchanged is NOT a failure (a deterministic re-run, or a
             # command that re-verifies an existing artifact): note it cosmetically
@@ -550,6 +617,7 @@ def _register_process_outputs(
                 label=str(cwd_root or "cwd"),
                 changed_paths=changed_paths or set(),
                 binding=binding,
+                resolved_output=resolved,
             )
             if skipped_members:
                 # Per-member receipt (D4): the export is PARTIAL, never silently
@@ -579,7 +647,7 @@ def _register_process_outputs(
                     ctx,
                     source,
                     kind="process_output_directory",
-                    member_paths=dir_members,
+                    **({"member_sources": dir_members} if resolved else {"member_paths": dir_members}),
                 )
             except OSError as exc:
                 notes.append(f"failed directory output copy {text}: {type(exc).__name__}: {exc}")

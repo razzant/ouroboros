@@ -69,8 +69,8 @@ def test_pending_enable_and_failed_retry_keep_truth_and_removal(skills_browser, 
         assert card.locator('.skills-toggle').is_checked()
         assert card.locator('.skills-toggle').is_enabled()
         card.locator('[data-skill-menu-trigger]').click()
-        assert page.locator('body > .skills-card-menu-dialog .skills-uninstall').is_visible()
-        assert not page.locator('body > .skills-card-menu-dialog .skills-delete-local').count()
+        assert page.locator('body > .skills-card-menu-dialog:not([data-leaving]) .skills-uninstall').is_visible()
+        assert not page.locator('body > .skills-card-menu-dialog:not([data-leaving]) .skills-delete-local').count()
         capture(page, browser_name, width, 'packages-ready-menu')
         assert no_overflow(page) and not errors
     finally:

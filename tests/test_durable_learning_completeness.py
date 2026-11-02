@@ -41,7 +41,7 @@ def test_closed_objective_before_old_horizon_reaches_chooser(tmp_path, monkeypat
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", fake_chat)
     monkeypatch.setattr(pte, "_active_campaign_objective", lambda: "")
     env = type("Env", (), {"drive_root": tmp_path})()
-    decision = pte._decide_promotion(env, {"id": "root"}, None, object(), force=False)
+    decision = pte._decide_promotion(env, {"id": "root"}, None, object())
     assert decision and decision["promote"] is False
     assert old_objective in captured["prompt"]
 
@@ -69,7 +69,7 @@ def test_closed_objective_unavailable_abstains_before_chooser(tmp_path, monkeypa
 
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", chooser)
     env = type("Env", (), {"drive_root": tmp_path})()
-    assert pte._decide_promotion(env, {"id": "root"}, None, object(), force=False) is None
+    assert pte._decide_promotion(env, {"id": "root"}, None, object()) is None
     assert called == []
 
 
@@ -179,4 +179,5 @@ def test_wake_context_discloses_a_durable_dialogue_gap(tmp_path):
 def test_wake_context_discloses_an_omitted_schedule_count(tmp_path):
     _write_schedules(tmp_path, 9)
     context = _wake_context(tmp_path)
-    assert '"omitted_count": 1' in context
+    runtime = json.loads(context.split("## Runtime context\n\n", 1)[1].split("\n\n## ", 1)[0])
+    assert runtime["scheduled_tasks"]["omitted_count"] == 1

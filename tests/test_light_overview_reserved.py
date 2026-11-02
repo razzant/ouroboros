@@ -1,11 +1,11 @@
 """The overview is the acting mind's own words; a Light helper never writes it.
 
 The overview note is "what I hold true now", loaded into every context. No Light
-operation writes knowledge any more: scratchpad upkeep compresses its blocks and asks
-for nothing else, and the post-task reflection with its shared nomination writer is
-retired. An answer that still nominates the overview (and a neighbour beside it) after
-reading it whole writes neither. The mind's own ``knowledge_write`` of the overview is
-untouched.
+operation writes knowledge any more: the post-task scratchpad upkeep that last carried
+this check is retired (#918: the mind folds its own scratchpad), and so is the post-task
+reflection with its shared nomination writer. An answer of the shared Light transport
+that still nominates the overview (and a neighbour beside it) after reading it whole
+writes neither. The mind's own ``knowledge_write`` of the overview is untouched.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import json
 
 from ouroboros import consolidator as c
 from ouroboros import knowledge as store
-from ouroboros.memory import Memory
 from ouroboros.tools import knowledge as knowledge_tools
 from ouroboros.tools.registry import ToolContext
 from tests import test_consolidator_context_fit as fit_helpers
@@ -60,22 +59,20 @@ class ReadsTheOverviewFirst:
         return {"content": self.answer}, usage
 
 
-def test_scratchpad_upkeep_writes_neither_the_overview_nor_its_neighbour(tmp_path, fit):
+def test_a_light_operation_writes_neither_the_overview_nor_its_neighbour(tmp_path, fit):
     before = _mind_writes_the_overview(tmp_path)
-    memory = Memory(tmp_path)
-    for index in range(4):
-        memory.append_scratchpad_block(f"block-{index}-" + (chr(97 + index) * 8_000), source=f"source-{index}")
-    llm = ReadsTheOverviewFirst(json.dumps({"knowledge_entries": [_OVERVIEW_EDIT, _NEIGHBOUR],
-                                            "compressed_block": "compressed"}))
+    answer = json.dumps({"knowledge_entries": [_OVERVIEW_EDIT, _NEIGHBOUR], "compressed_block": "compressed"})
+    llm = ReadsTheOverviewFirst(answer)
+    reads = c.KnowledgeReadContext(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="light-operation"))
 
-    c.consolidate_scratchpad(memory, llm)
+    content, _usage = c._call_consolidation_llm(llm, "Summarize this episode for my working memory.",
+                                                "Light memory operation", knowledge=reads)
 
     prompt = _normalized(llm.prompts[0])
     assert "knowledge_entries" not in prompt and "nominat" not in prompt
+    assert len(llm.prompts) == 2 and content == answer  # read whole, then answered as text
     assert _overview(tmp_path).path.read_bytes() == before
     assert not _neighbour(tmp_path).path.exists()
-    assert memory.load_scratchpad_blocks()[0]["content"] == "compressed"
-    assert "knowledge_writes" not in memory.load_scratchpad_blocks()[0]["metadata"]
 
 
 def test_the_mind_still_writes_and_revises_the_overview(tmp_path):

@@ -78,7 +78,12 @@ def test_main_receives_terminal_reference_then_finishes_without_second_panel(sub
         findings = [{"item": "bug_hunting", "verdict": "FAIL", "severity": "critical", "reason": "Partial critic finding."}] if partial else []
         actors = ([{"slot_id": "critic1", "status": "responded", "parsed_items": findings},
                    {"slot_id": "critic2", "operation_state": "in_flight", "late_result_pending": True}] if partial else [])
-        return SkillReviewOutcome(skill_name="demo", status="pending", content_hash=compute_content_hash(directory),
+        content_hash = compute_content_hash(directory)
+        # What review_skill projects for a settled wave that formed no verdict: the pending state with the
+        # seats' raw records (the partial feedback an author finish may cite), never a verdict.
+        save_review_state(ctx.drive_root, "demo", SkillReviewState(status="pending", content_hash=content_hash,
+                                                                   findings=findings, raw_actor_records=actors))
+        return SkillReviewOutcome(skill_name="demo", status="pending", content_hash=content_hash,
                                   error="No reviewer quorum: configured route unavailable.",
                                   findings=findings, raw_actor_records=actors)
 
@@ -330,14 +335,12 @@ def test_selected_and_passive_preflight_follow_same_current_authority(subject, m
 
 
 def test_completed_waiter_with_inflight_actor_is_not_unavailable(subject):
-    from ouroboros.skill_review_history import append_history_once
-
+    """A terminal job whose projected record still names a seat in flight is a review still running."""
     reference = _unavailable(subject)
     ctx, _directory, _ = subject
-    append_history_once(ctx.drive_root, "demo", {
-        **reference, "ts": "2026-09-18T10:00:00Z", "status": "pending",
-        "raw_actor_records": [{"slot_id": "critic", "operation_state": "in_flight", "late_result_pending": True}],
-    })
+    save_review_state(ctx.drive_root, "demo", SkillReviewState(
+        status="pending", content_hash=reference["content_hash"],
+        raw_actor_records=[{"slot_id": "critic", "operation_state": "in_flight", "late_result_pending": True}]))
     assert "error" in _finish(subject, reference=reference)
 
 
@@ -401,15 +404,14 @@ def test_prior_substantive_feedback_still_allows_finish_with_another_actor_pendi
 
 
 def test_reserved_operation_without_terminal_actor_does_not_invent_unavailability(subject):
-    from ouroboros.skill_review_runner import _read_review_job
-
+    """A seat still open in the terminal job's projected record (a reserved operation, a late result pending)
+    is a review still running, not an unavailable one: the finish is refused until it settles."""
     reference = _unavailable(subject)
     ctx, _directory, _ = subject
-    path = review_job_state_path(ctx.drive_root, "demo")
-    job = _read_review_job(path)
-    job["review_wave"] = {"chunks": [{"operations": {"critic": "still-unresolved"}}]}
-    _write_review_job(path, job)
-    assert "unresolved physical reviewers" in _finish(subject, reference=reference)["error"]
+    save_review_state(ctx.drive_root, "demo", SkillReviewState(
+        status="pending", content_hash=reference["content_hash"],
+        raw_actor_records=[{"slot_id": "critic", "operation_state": "in_flight", "late_result_pending": True}]))
+    assert "A review still running is not unavailable" in _finish(subject, reference=reference)["error"]
 
 
 def test_author_acceptance_does_not_follow_subsequent_payload_changes(subject, monkeypatch, tmp_path):

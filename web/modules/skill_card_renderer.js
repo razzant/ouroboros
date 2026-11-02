@@ -1,9 +1,10 @@
+import { tr } from './i18n.js';
 // Installed skill cards (Skills → Installed): one head shared with Browse and the
 // detail sheet (name that opens the sheet, marks, purpose, who line), the run
 // state as one status chip beside the switch, and at most two attention trays,
 // each one sentence and its actions — the owner's next step is visible text on
-// every surface, never a hover title. Review history, findings, access, the
-// install record and the Presence runtime form live in Details.
+// every surface, never a hover title. Review history, findings, access and the
+// install record live in Details; a connector's place lives on its sheet, not here.
 import {
     boundedText,
     escapeHtmlAttr as escapeHtml,
@@ -18,8 +19,9 @@ import {
 import { installedTime } from './ui_helpers.js';
 import { hasSemanticVerdict, lifecycleMeta } from './review_presentation.js';
 import {
-    buttonHtml, canUpdateWithoutReview, chipHtml, grantPhrases, officialMarkHtml, permissionWords, plural, relativeAge,
-    shortDate, skipReviewButtonHtml, trayHtml, updateRejectionSentence, versionText,
+    buttonHtml, canUpdateWithoutReview, chipHtml, connectsServices, connectsText, countsAsYoursText, grantPhrases, officialMarkHtml, permissionWords,
+    plural, relativeAge, shortDate, skillIconHtml, skipReviewButtonHtml, trayHtml, updateRejectionSentence, versionText,
+    skillTitle,
 } from './skill_presentation.js';
 
 function hasSkillUiTab(skill, live = {}) {
@@ -545,38 +547,6 @@ function publicationRow(skill) {
     return detailRow('Publication', `${line}${destination ? ` · ${escapeHtml(String(destination))}` : ''} <button type="button" class="skills-link-button" ${actionAttrs(skill.name, 'forget_publication')}>Forget this record</button>`);
 }
 
-function presenceRuntimeBlock(skill) {
-    const runtime = skill.presence_runtime;
-    if (!runtime || typeof runtime !== 'object') return '';
-    if (runtime.error) return `<div class="skills-load-error">Presence runtime unavailable: ${escapeHtml(runtime.error)}</div>`;
-    const defaults = runtime.defaults || {};
-    const overrides = runtime.overrides || {};
-    const modelOverride = ['main', 'light'].includes(overrides.model_slot) ? overrides.model_slot : '';
-    const roundsOverride = Number.isInteger(overrides.inline_max_rounds) ? overrides.inline_max_rounds : '';
-    const fingerprint = String(runtime.state_fingerprint || '');
-    return `<form class="skills-presence-runtime" data-presence-runtime-form data-skill-name="${escapeHtml(skill.name)}" data-state-fingerprint="${escapeHtml(fingerprint)}">
-        <div class="skills-presence-runtime-title">Presence runtime</div>
-        <label class="ui-field">Model
-            <select name="model_slot" class="ui-control">
-                <option value="" ${modelOverride ? '' : 'selected'}>Reviewed default (${escapeHtml(defaults.model_slot || 'main')})</option>
-                <option value="main" ${modelOverride === 'main' ? 'selected' : ''}>Main</option>
-                <option value="light" ${modelOverride === 'light' ? 'selected' : ''}>Light</option>
-            </select>
-        </label>
-        <label class="ui-field">Inline rounds
-            <input name="inline_max_rounds" class="ui-control" type="number" min="1" step="1" value="${escapeHtml(roundsOverride)}" placeholder="${escapeHtml(defaults.inline_max_rounds || 10)}">
-        </label>
-        <label class="ui-field skills-presence-workspace">Working folder
-            <input name="workspace_root" class="ui-control" type="text" value="${escapeHtml(runtime.workspace_root || '')}" placeholder="No external folder">
-        </label>
-        <div class="skills-presence-runtime-actions">
-            <button type="submit" class="btn btn-default btn-sm">Save</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-presence-runtime-reset>Use reviewed defaults</button>
-        </div>
-        <div class="muted">Applies to new Presence turns only. Memory stays shared.</div>
-    </form>`;
-}
-
 function provenanceRows(skill) {
     const prov = sourceTag(skill) === 'clawhub' && skill.provenance && typeof skill.provenance === 'object' ? skill.provenance : null;
     if (!prov) return '';
@@ -667,6 +637,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         isBuiltIn(skill) ? chipHtml('Built in', 'neutral') : '',
         model.install?.official ? officialMarkHtml({ sourceId: model.install.source?.id }) : '',
         model.modified ? chipHtml(model.modified.by === 'owner' ? 'Modified · edited by you' : 'Modified', 'neutral') : '',
+        connectsText(skill) ? chipHtml(connectsText(skill), 'neutral') : '',
     ].join('');
     const widgetsButton = model.widgets && !model.trays.length
         ? `<div class="skills-card-quiet-actions">${buttonHtml('Open widgets', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_widgets') })}</div>` : '';
@@ -674,8 +645,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         skill.lifecycle_status === 'failed' && skill.lifecycle_error && !skill.lifecycle_virtual ? `<div class="skills-load-error">${escapeHtml(skill.lifecycle_error)}</div>` : '',
         skill.health_regressed ? `<div class="skills-load-error">Regression: was live at ${escapeHtml(String((skill.last_known_good || {}).version || '?'))} (${escapeHtml(String((skill.last_known_good || {}).sha || '').slice(0, 12))}); broken after a code update.</div>` : '',
     ].join('');
-    // Details: two fact groups the listing re-reads in place, the review block (kept while its key holds)
-    // and the Presence form (the owner's input; it follows its own saves).
+    // Details: two fact groups the listing re-reads in place and the review block (kept while its key holds).
     const details = `<details class="skills-details"><summary>Details</summary>
         <div class="skills-details-body">
             <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
@@ -683,21 +653,22 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             <div class="skills-details-facts" data-skill-detail-facts>
                 ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
                 ${accessRows(skill)}
+                ${detailRow(tr('skills.id', 'ID'), `<code data-i18n-authored>${escapeHtml(skill.name)}</code>`)}
                 ${installRecordRows(skill)}
                 ${liveRow(skill, live)}
                 ${publicationRow(skill)}
                 ${submit.visible && submit.disabled && submit.reason ? detailRow('Publishing', escapeHtml(submit.reason)) : ''}
                 ${provenanceRows(skill)}
             </div>
-            ${presenceRuntimeBlock(skill)}
         </div>
     </details>`;
-    return `<article class="skills-card skills-installed-card" data-skill="${safeName}"${model.needs ? ' data-needs-you' : ''}${reviewing ? ' data-reviewing="1"' : ''}${repairing ? ' data-repairing="1"' : ''}>
+    return `<article class="skills-card skills-installed-card" data-skill="${safeName}"${skill.lifecycle_virtual ? ' data-lifecycle-virtual' : ''}${model.needs ? ' data-needs-you' : ''}${reviewing ? ' data-reviewing="1"' : ''}${repairing ? ' data-repairing="1"' : ''}>
         <header class="skills-card-head">
             <div class="skills-card-title">
-                <div class="skills-head-title"><button type="button" class="skills-card-name" ${actionAttrs(skill.name, 'open_detail')}>${safeName}<span class="skills-card-name-more" aria-hidden="true">›</span></button><span class="skills-card-marks">${marks}</span></div>
+                <div class="skills-head-title">${connectsServices(skill).length ? `<span class="skills-card-icon" aria-hidden="true">${skillIconHtml(skill.icon, 18)}</span>` : ''}<button type="button" class="skills-card-name" ${actionAttrs(skill.name, 'open_detail')}><span data-i18n-authored>${escapeHtml(skillTitle(skill))}</span><span class="skills-card-name-more" aria-hidden="true">›</span></button><span class="skills-card-marks">${marks}</span></div>
                 ${description ? `<p class="skills-card-purpose">${escapeHtml(description)}</p>` : ''}
                 <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
+                ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
             <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit })}</div>
         </header>

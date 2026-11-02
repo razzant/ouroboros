@@ -45,7 +45,7 @@ def test_processing_settings_save_reopen_and_actor_reference(role_ui):
     roles.capture(page, 'processing-actor-reference-and-inline')
     with page.expect_response('**/api/settings'):
         page.locator('#btn-save-settings').click()
-    saved = [body for path, body in ui['posts'] if path == '/api/settings'][-1]
+    saved = roles.settings_saves(ui)[-1]
     assert saved['OUROBOROS_PROCESSING_PREFERENCE'] == 'fast'
     assert saved['OUROBOROS_MODEL_PROCESSING_PREFERENCES']['main'] == 'standard'
     assert saved['OUROBOROS_MODEL'] == main_model

@@ -59,7 +59,9 @@ def test_the_default_in_slot_wait_is_unchanged_and_selectors_need_a_sleep_mode(t
     out = json.loads(_await_messages(ctx, 1))
     assert out["reason"] == "timeout" and out["slot"] == "held"
     refused = _await_messages(ctx, 1, senders=["x"])
-    assert "give mode warm or cold" in refused
+    assert "requires mode=warm or cold" in refused
+    assert 'await_messages(mode="warm", wake_after_sec=60)' in refused
+    assert not getattr(ctx, "_model_sleep", None)
 
 
 def test_selectors_are_validated_and_a_ready_source_answers_at_once(tmp_path):

@@ -121,7 +121,7 @@ def test_acceptance_and_update_outcomes(skills_browser, browser_name, width, the
         assert builtin.locator('[data-official-mark]').count() == 1
         assert 'Built in' in builtin.inner_text()
         builtin.locator('[data-official-mark]').click()
-        popup = page.locator('.skills-mark-popup')
+        popup = page.locator('.skills-mark-popup:not([data-leaving])')
         assert 'the Built in source' in popup.inner_text()
         assert 'github.com' not in popup.inner_text()
         popup.locator('[data-popup-close]').click()
@@ -158,7 +158,7 @@ def test_source_warning_and_my_skills_opt_in(skills_browser, browser_name, width
         page.locator('[data-tab="installed"]').click()
         card = _only(page, 'update_rejected')
         card.locator('[data-skill-menu-trigger]').click()
-        page.locator('body > .skills-card-menu-dialog .skills-submit-hub').click()
+        page.locator('body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub').click()
         dialog = page.locator('.skills-dialog')
         dialog.wait_for()
         assert skills.posted('/api/skill-sources/my-skills') == [], 'opening Publish has no repository side effect'

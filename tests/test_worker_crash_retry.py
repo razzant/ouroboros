@@ -848,6 +848,27 @@ def test_child_terminal_survives_dead_worker_without_retry(tmp_path, monkeypatch
     assert events.empty() and load_task_result(tmp_path, job['task_id'])['accounted_upper_bound_usd'] == 1.25
 
 
+def test_a_crashed_child_retries_on_its_own_id_under_its_parent_and_root(tmp_path, monkeypatch):
+    """The same-id crash retry is the same delegated child, one attempt later, under the same parent
+    and root: never re-rooted, never a new id or a timeout successor."""
+    import supervisor.queue as q
+    from supervisor.worker_health import recover_confirmed_dead_worker
+    from ouroboros.task_results import write_task_result
+
+    job, _events = _reserved_job(tmp_path, monkeypatch, child=True, exitcode=1, attempt=1)
+    lineage = {'parent_task_id': 'parent-task', 'root_task_id': 'root-task', 'delegation_role': 'subagent'}
+    for task in {id(job['task']): job['task'], id(job['meta']['task']): job['meta']['task']}.values():
+        task.update(lineage)
+    write_task_result(tmp_path, job['task_id'], 'running', **lineage)
+    enqueued = []
+    monkeypatch.setattr(q, 'enqueue_task', lambda task, front=False: enqueued.append(dict(task)) or task)
+    recover_confirmed_dead_worker(job)
+    [retry] = enqueued
+    assert (retry['id'], retry['_attempt']) == (job['task_id'], 2)
+    assert {key: retry.get(key) for key in lineage} == lineage
+    assert not retry.get('timeout_retry_from') and retry.get('original_task_id', job['task_id']) == job['task_id']
+
+
 def test_file_preparation_runs_without_queue_or_lifecycle_lock(tmp_path, monkeypatch):
     import threading
     import supervisor.queue as q

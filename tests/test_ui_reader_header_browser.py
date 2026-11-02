@@ -48,8 +48,8 @@ MOUNT = """async ({kind, name}) => {
         ? media.buildMediaBubble({type: 'photo', role: 'assistant', mime: 'image/png',
             image_base64: image, caption: name})
         : media.buildDocumentBubble({type: 'document', role: 'assistant',
-            mime: kind === 'text' ? 'text/plain' : 'image/png', filename: name,
-            file_base64: kind === 'text' ? btoa('The complete text body.\\n'.repeat(100)) : image});
+            mime: {text: 'text/plain', markdown: 'text/markdown'}[kind] || 'image/png', filename: name,
+            file_base64: kind === 'image' ? image : btoa('The complete text body.\\n'.repeat(100))});
     fixture.append(bubble);
     window.openerTile = fixture.querySelector('.chat-photo-open, .chat-file-card');
     window.openerTile.click();
@@ -271,4 +271,76 @@ def test_clipped_photo_menu_view_keeps_place_and_returns_focus(component_url, tm
             assert abs(after['scroll'] - before['scroll']) <= 1 and abs(after['top'] - before['top']) <= 1, records
         finally:
             (evidence / f'{key}.json').write_text(json.dumps(records, indent=2) + '\n')
+            browser.close()
+
+
+GROUPS = """() => {
+    const dialog = document.querySelector('dialog.document-reader[open]');
+    const box = el => { const r = el.getBoundingClientRect();
+        return {top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right)}; };
+    const group = selector => [...dialog.querySelectorAll(`${selector} button`)].filter(b => b.getClientRects().length)
+        .map(b => { const r = box(b); return {label: b.textContent, ...r,
+            hit: b.contains(document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2))}; });
+    const head = dialog.querySelector('.document-reader-head');
+    return {width: innerWidth, head: box(head), headOverflow: head.scrollWidth - head.clientWidth,
+        close: box(dialog.querySelector('.document-reader-close')), views: group('.document-reader-views'),
+        file: group('.document-reader-file'), menus: dialog.querySelectorAll('[role="menu"], [aria-haspopup="menu"]').length};
+}"""
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_phone_reader_keeps_every_action_in_sight_in_two_groups(component_url, tmp_path, engine):
+    """#5: on a phone the name has its row beside Close and every action stays in sight under it, the view first and
+    the file's own actions after it: one row when both groups fit (a reviewer's answer: Formatted, Source, Download),
+    one row each when they do not (a photo's five). A group never splits and nothing goes under a menu."""
+    from playwright.sync_api import sync_playwright
+
+    evidence = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path / "evidence")))
+    evidence.mkdir(parents=True, exist_ok=True)
+    records, errors = {}, []
+    with sync_playwright() as playwright:
+        browser = getattr(playwright, engine).launch()
+        page = browser.new_page(has_touch=True)
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            for width in (390, 1280):
+                for theme in ("light", "dark"):
+                    page.set_viewport_size({"width": width, "height": 844})
+                    page.goto(component_url)
+                    page.evaluate("theme => { document.documentElement.dataset.theme = theme; }", theme)
+                    for case, kind, name in (("answer", "markdown", "claude-opus-5-5 · answer.md"),
+                                             ("photo", "photo", "A short photo caption")):
+                        key = f"{engine}-{width}-{theme}-{case}"
+                        page.evaluate(MOUNT, {"kind": kind, "name": name})
+                        page.wait_for_function("() => document.querySelector('.document-reader-body')?.getAttribute('aria-busy') === 'false'")
+                        page.wait_for_timeout(300)
+                        state = records[key] = page.evaluate(GROUPS)
+                        page.screenshot(path=str(evidence / f"{key}-groups.png"))
+                        views, file = state["views"], state["file"]
+                        expected = (["Formatted", "Source"], ["Download"]) if case == "answer" else (
+                            ["Fit", "Actual size"], ["Copy", "Open", "Download"])
+                        assert ([b["label"] for b in views], [b["label"] for b in file]) == expected, state
+                        assert state["menus"] == 0 and state["headOverflow"] <= 1, state
+                        for button in views + file:
+                            assert button["hit"] and button["left"] >= 0 and button["right"] <= width + 1, state
+                        # A group is one row; the file's actions never come before the view.
+                        assert len({b["top"] for b in views}) == 1 and len({b["top"] for b in file}) == 1, state
+                        assert file[0]["top"] >= views[0]["top"], state
+                        if width == 390:
+                            # Actions are under the name's row (Close), and only as many rows as the groups need.
+                            assert views[0]["top"] >= state["close"]["bottom"], state
+                            if case == "answer":
+                                assert file[0]["top"] == views[0]["top"], state
+                                assert state["head"]["bottom"] - state["head"]["top"] <= 100, state
+                            else:
+                                assert file[0]["top"] >= views[0]["bottom"], state
+                        else:
+                            # The desk keeps its one head row: the actions beside Close.
+                            assert abs(views[0]["top"] - state["close"]["top"]) <= 1, state
+                            assert file[0]["top"] == views[0]["top"], state
+                        page.keyboard.press("Escape")
+                        page.locator("dialog.document-reader").wait_for(state="detached")
+            assert not errors, errors
+        finally:
+            (evidence / f"{engine}-groups.json").write_text(json.dumps(records, indent=2) + "\n")
             browser.close()

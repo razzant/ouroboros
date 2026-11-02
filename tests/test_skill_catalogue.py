@@ -377,3 +377,92 @@ def test_oversized_named_detail_rides_the_generic_result_source(registry):
     exact = json.loads(read_actor_source_bytes(registry._ctx.drive_root, "catalogue-consumer", ref))
     assert exact["skills"][0]["when_to_use"] == trigger
     assert exact["manifest"]["read"]["arguments"]["path"] == "SKILL.md"
+
+
+@pytest.fixture
+def worker_extensions(registry, monkeypatch):
+    """Real extension producers in a worker-role process with a clean loader."""
+    import ouroboros.extension_companion as extension_companion
+    import ouroboros.extension_loader as extension_loader
+    from tests._shared import clean_extension_runtime_state
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(extension_companion, "is_server_process", lambda: False)
+    monkeypatch.setattr(extension_loader, "is_server_process", lambda: False)
+    clean_extension_runtime_state()
+    yield registry._ctx.drive_root
+    clean_extension_runtime_state()
+
+
+def _extension(data, name, plugin="def register(api):\n    pass\n", frontmatter=""):
+    from ouroboros.skill_loader import SkillReviewState, find_skill, save_review_state
+    from tests._extension_loader_shared import _write_ext_skill
+
+    _write_ext_skill(data / "skills" / "external", name, plugin_body=plugin, permissions=["tool"],
+                     extra_frontmatter=frontmatter)
+    save_enabled(data, name, True, actor="test_fixture")
+    save_review_state(data, name, SkillReviewState(status="pass", content_hash=find_skill(data, name).content_hash))
+    return find_skill(data, name)
+
+
+@pytest.mark.serial
+def test_broken_counts_every_load_error_its_rows_show(registry, worker_extensions, monkeypatch):
+    """#600 (owner choice A): broken is the number of finished rows that show a load_error."""
+    from ouroboros import extension_health, extension_loader
+    from ouroboros.skill_loader import SkillReviewState, find_skill, load_enabled, save_review_state
+
+    data, failing = worker_extensions, "def register(api):\n    raise RuntimeError('register failed')\n"
+    (_seed(registry, "manifest-bad") / "SKILL.md").write_bytes(b"---\nname: [unterminated\n---\n")
+    (_seed(registry, "payload-bad") / ".env").write_text("TOKEN=x\n")
+    _seed(registry, "same")
+    _seed(registry, "same", bucket="clawhub")
+    for name in ("runtime-fail", "old-fail", "disabled-fail"):
+        _extension(data, name, plugin=failing)
+        extension_loader.reconcile_extension(name, data, lambda: {}, retry_load_error=True,
+                                             revert_enabled_on_error=name == "disabled-fail")
+    assert load_enabled(data, "disabled-fail") is False
+    # A new payload no longer matches the hash its failure was recorded at.
+    (data / "skills" / "external" / "old-fail" / "plugin.py").write_text("def register(api):\n    pass\n")
+    save_review_state(data, "old-fail", SkillReviewState(
+        status="pass", content_hash=find_skill(data, "old-fail").content_hash))
+    _extension(data, "healthy")
+    _extension(data, "deps-pending", frontmatter="install_specs:\n  - kind: pip\n    package: wheel\n")
+    companion = _extension(data, "companion")
+    assert extension_loader.load_extension(companion, lambda: {}, drive_root=data) is None
+    extension_health.record_companion_restart_exhausted(data, "companion", "bridge", returncode=7)
+
+    from ouroboros.skill_loader import summarize_skills
+    summary = summarize_skills(data)
+    rows = {(row["name"], row["location"]): row for row in summary["skills"]}
+    failed = {key for key, row in rows.items() if row["load_error"]}
+    assert {name for name, _location in failed} == {
+        "manifest-bad", "payload-bad", "same", "runtime-fail", "disabled-fail", "deps-pending", "companion"}
+    assert summary["broken"] == len(failed) == 8
+    healthy, old = rows["healthy", "external"], rows["old-fail", "external"]
+    assert (healthy["desired_live"], healthy["live_loaded"], healthy["process"]) == (True, False, "worker")
+    assert healthy["live_reason"] == "ready" and old["live_reason"] == "ready" and not old["load_error"]
+    disabled = rows["disabled-fail", "external"]
+    assert disabled["enabled"] is False and disabled["live_reason"] == "disabled"
+    assert "register failed" in disabled["load_error"] and "register failed" in rows["runtime-fail", "external"]["load_error"]
+    assert rows["deps-pending", "external"]["live_reason"] == "deps_missing"
+    assert rows["deps-pending", "external"]["load_error"] == "Its packages are not installed."
+    assert rows["companion", "external"]["live_loaded"] is True
+    assert "exhausting its restart budget" in rows["companion", "external"]["load_error"]
+
+    # The real handler pages the same observation: every page names the whole count, and the
+    # compact records showing a load_error are exactly the counted rows.
+    monkeypatch.setattr(skill_catalogue, "tool_result_limit", lambda _name: 2600)
+    args, pages, shown = {}, 0, []
+    while True:
+        page = json.loads(registry.execute_result("list_skills", args).text)
+        pages += 1
+        assert page["broken"] == 8 and page["count"] == len(rows)
+        shown += [row["name"] for row in page["skills"] if row["load_error"]]
+        if page["next"] is None:
+            break
+        args = page["next"]
+    assert pages > 1 and sorted(shown) == sorted(name for name, _location in failed)
+    for name in ("runtime-fail", "companion", "deps-pending"):
+        named = json.loads(registry.execute_result("list_skills", {"name": name}).text)
+        assert named["skills"][0]["load_error"] == rows[name, "external"]["load_error"]
+    assert not json.loads(registry.execute_result("list_skills", {"name": "healthy"}).text)["skills"][0]["load_error"]

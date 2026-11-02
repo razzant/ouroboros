@@ -184,7 +184,8 @@ def inventory_view(inventory: CodeInventory, *, op: str, query: str = "", path: 
     if op in {"digest", "relevant_files", "symbols", "definition"}:
         coverage = Counter(f.disposition for f in scoped.files)
         view.notes.append(f"files in scope: {len(scoped.files)}; coverage: " + ", ".join(f"{k}={v}" for k, v in sorted(coverage.items())))
-        view.limits.extend(f"{k}: {v}" for k, v in sorted(coverage.items()) if k != "indexed")
+        # A name_absent file cannot hold the queried outline name: complete, not a limit.
+        view.limits.extend(f"{k}: {v}" for k, v in sorted(coverage.items()) if k not in {"indexed", "name_absent"})
         errors = sum(bool(f.syntax_error) for f in scoped.files)
         if errors:
             view.limits.append(f"syntax errors: {errors}; outline may be partial or unavailable")

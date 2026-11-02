@@ -114,22 +114,23 @@ def test_cli_wrapper_owns_a_selected_run_and_keeps_its_full_inventory(tmp_path):
     assert "tests/test_leaf.py::test_leaf" in executed and sorted(executed) == sorted(row["inventory"]["parallel"]["expected"])
 
 
-def test_pr_runs_selected_and_landed_runs_remain_full():
-    from tests.test_platform_ci_events import WORKFLOW, _value
+def test_merges_run_the_selected_scope_and_qualification_runs_remain_full():
+    """The affected selection runs after merges (post-merge.yml, owner decision 3A); manual and
+    release runs of ci.yml keep the full default suite and no selected step."""
+    import yaml
+    from tests.test_platform_ci_events import ROOT, WORKFLOW
 
-    job = WORKFLOW["jobs"]["quick-test"]
-    steps = {step.get("id"): step for step in job["steps"] if step.get("id")}
-    selected = steps["tests_selected"]
-    assert '--selected --base "$PR_BASE"' in selected["run"]
-    assert selected["env"]["PR_BASE"] == "${{ github.event.pull_request.base.sha }}"
-    assert selected["timeout-minutes"] > 0 and "continue-on-error" not in selected
-    for event in ("pull_request", "push", "workflow_dispatch"):
-        # Setup is already proven by each producer's own guard; exercise the event branch.
-        for label, admitted in (("selected", event == "pull_request"), ("parallel", event != "pull_request"),
-                                ("serial", event != "pull_request")):
-            expression = steps[f"tests_{label}"]["if"].replace("steps.setup_python.outcome", "'success'").replace(
-                "steps.setup_node.outcome", "'success'")
-            assert bool(_value(expression, event=event, ref="refs/heads/ouroboros", base="ouroboros")) is admitted
+    post = yaml.safe_load((ROOT / ".github/workflows/post-merge.yml").read_text(encoding="utf-8"))
+    steps = {step.get("id"): step for step in post["jobs"]["post-merge"]["steps"] if step.get("id")}
+    selected = steps["selected"]
+    assert selected["run"].startswith('python scripts/run_tests.py --selected --base "$BASE" --sequential --keep-going')
+    # The run's exit belongs to classify and summary, which retry, bisect and decide the job.
+    assert selected["timeout-minutes"] > 0 and selected["continue-on-error"] is True
+    assert "continue-on-error" not in steps["classify"]
+    for job in ("quick-test", "full-test-runs"):
+        runs = [step.get("run", "") for step in WORKFLOW["jobs"][job]["steps"]]
+        assert not any("--selected" in run for run in runs), job
+        assert sum("python scripts/run_tests.py tests/ -m " in run for run in runs) == 2, job
 
 
 @pytest.mark.parametrize("tier", ["selected", "full"])

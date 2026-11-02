@@ -120,21 +120,30 @@ def test_renews_while_prepared_one_action_per_chat_and_idles_with_zero_reads(mod
 
     async def scenario():
         cue = _cue(mod, host, rec)
-        task = await _start(cue)
-        await asyncio.sleep(REFRESH * 6)
-        assert rec.actions.count(7) >= 4, rec.calls
-        assert set(rec.actions) == {7}
-        host.chats = set()
-        await asyncio.sleep(REFRESH * 2)  # one verified-empty read ends it
-        reads, actions = host.reads, len(rec.actions)
-        await asyncio.sleep(0.3)
-        assert host.reads == reads, "idle reads nothing until a wake"
-        assert len(rec.actions) == actions
-        for _ in range(20):  # a burst of wakes shares reads
-            cue.wake()
-        await asyncio.sleep(0.05)
-        assert reads < host.reads <= reads + 3
-        await _stop(task)
+        empty_projected, targets = [], cue._targets
+
+        def projected(state):  # the verified-empty read the cue goes idle on
+            chats = targets(state)
+            if state.get("complete") and not chats:
+                empty_projected.append(True)
+            return chats
+        cue._targets = projected
+        task = await _start(cue, until=lambda: rec.actions.count(7) >= 4)
+        try:
+            assert set(rec.actions) == {7}
+            host.chats = set()
+            await _until(lambda: empty_projected)  # one verified-empty read ends it
+            reads, actions = host.reads, len(rec.actions)
+            await asyncio.sleep(0.3)
+            assert host.reads == reads, "idle reads nothing until a wake"
+            assert len(rec.actions) == actions
+            for _ in range(20):  # a burst of wakes shares reads
+                cue.wake()
+            await _until(lambda: host.reads > reads)
+            await asyncio.sleep(0.05)
+            assert reads < host.reads <= reads + 3
+        finally:
+            await _stop(task)
 
     asyncio.run(scenario())
 
@@ -252,17 +261,18 @@ def test_permanent_rejection_mutes_that_chat_until_a_message_reaches_it(mod):
 
     async def scenario():
         cue = _cue(mod, host, rec, warnings)
-        task = await _start(cue)
-        await asyncio.sleep(REFRESH * 5)
-        assert rec.actions.count(9) == 1 and rec.actions.count(10) >= 3, rec.calls
-        assert len(warnings) == 1 and "stopped" in warnings[0]
-        await _deliver(cue, 9, rec, delivered=False)
-        await asyncio.sleep(REFRESH * 3)
-        assert rec.actions.count(9) == 1, "a message that did not arrive unmutes nothing"
-        await _deliver(cue, 9, rec)
-        await asyncio.sleep(REFRESH * 3)
-        assert rec.actions.count(9) >= 2
-        await _stop(task)
+        task = await _start(cue, until=lambda: rec.actions.count(10) >= 3)
+        try:
+            assert rec.actions.count(9) == 1, rec.calls
+            assert len(warnings) == 1 and "stopped" in warnings[0]
+            before = rec.actions.count(10)
+            await _deliver(cue, 9, rec, delivered=False)
+            await _until(lambda: rec.actions.count(10) >= before + 2)  # chat 10's renewals are the clock
+            assert rec.actions.count(9) == 1, "a message that did not arrive unmutes nothing"
+            await _deliver(cue, 9, rec)
+            await _until(lambda: rec.actions.count(9) >= 2)
+        finally:
+            await _stop(task)
 
     asyncio.run(scenario())
 

@@ -1,3 +1,4 @@
+import { isPanicFrame } from './panic.js';
 // Owner attachments inside the owner's own chat bubble (docs/DESIGN.md "Chat
 // attachments"): one message, attachments above the caption, whole images
 // (one at its own ratio, several in the shared contain grid), the existing
@@ -126,7 +127,7 @@ function cardHtml(view, atoms, note = view.available ? '' : tr('media.attachment
     const meta = metaText(view, atoms, note);
     const kind = note ? '' : readable(view);
     return `<div class="chat-file-item${view.available ? '' : ' is-unavailable'}">
-        <button type="button" class="chat-file-card" ${view.available ? 'aria-haspopup="dialog"' : 'disabled aria-disabled="true"'}
+        <button type="button" class="btn btn-default chat-file-card" ${view.available ? 'aria-haspopup="dialog"' : 'disabled aria-disabled="true"'}
             aria-label="${escapeHtmlAttr(`${view.name}${meta ? ` — ${meta}` : ''}`)}">
             ${FILE_GLYPH}
             <span class="chat-file-copy">
@@ -348,13 +349,31 @@ export function createComposerAttachments({ preview, attachBtn, fileInput, input
 
 // What a reload keeps of a sent frame: its words, identity, routing and the refs of uploads the
 // host already stores — never bytes, never the send-time client_surface (an honest gap on resend).
-const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'force_plan', 'chat_id', 'project_id', 'reply_to'];
+const KEPT_FRAME_KEYS = ['type', 'content', 'client_message_id', 'sender_session_id', 'chat_id', 'project_id', 'reply_to'];
 
 function keptFrame(frame) {
+    if (isPanicFrame(frame)) return null;
     if (frame?.type !== 'chat' || typeof frame.content !== 'string' || !frame.client_message_id) return null;
     return { ...Object.fromEntries(KEPT_FRAME_KEYS.filter((key) => key in frame).map((key) => [key, frame[key]])),
         attachments: Array.from(Array.isArray(frame.attachments) ? frame.attachments : [], (item) => ({
             filename: String(item?.filename || ''), display_name: String(item?.display_name || ''), mime: String(item?.mime || '') })) };
+}
+
+/**
+ * Where an owner bubble's delivery note stands (docs/DESIGN.md "Chat attachments"). The plain saved fact (its
+ * `[data-ingress-saved]` note, dispatched or still pending, with nothing to act on) is a quiet tick before the message's
+ * time: saved, never read or started; its words stay its text for assistive technology and a pointer's title. A note
+ * with words to read or actions (the delivery doubt, Send again, Send as new) is a row above the time.
+ */
+export function placeIngressNote(bubble, note) {
+    if (!bubble || !note) return;
+    const time = bubble.querySelector('.msg-time');
+    // Only the plain saved states are quiet; every other state (a delivery doubt, a legacy `undispatched`) keeps its words.
+    const quiet = Boolean(time) && ['', 'pending'].includes(note.dataset.ingressSaved)
+        && !note.querySelector('[data-unconfirmed-action]');
+    if (quiet) note.title = note.textContent; else note.removeAttribute('title');
+    if (quiet && note.parentNode !== time) time.insertBefore(note, time.lastChild);
+    else if (!quiet && (note.parentNode !== bubble || note.nextElementSibling !== time)) bubble.insertBefore(note, time);
 }
 
 /**
@@ -428,11 +447,13 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             return;
         }
         // The doubt waits for the next fact; a pending saved row keeps its note, without actions.
-        onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note), true));
+        onDomWrite(() => (note.dataset.ingressUnconfirmed !== undefined ? note.remove() : clearActions(note, bubbleOf(id)), true));
     }
 
-    function clearActions(note) {
+    // Without its actions a pending saved note is the quiet tick again (placeIngressNote).
+    function clearActions(note, bubble = null) {
         for (const button of note.querySelectorAll('[data-unconfirmed-action]')) button.remove();
+        placeIngressNote(bubble, note);
     }
 
     function action(label, kind, onClick) {
@@ -458,7 +479,8 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             bubble.insertBefore(note, bubble.querySelector('.msg-time'));
         }
         note.append(action(tr('chat.send_again', 'Send again'), 'retry', () => retry(id, note)),
-            action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note), true)); }));
+            action(tr('chat.send_discard', 'Discard'), 'discard', () => { forget(id); onDomWrite(() => (clearActions(note, bubble), true)); }));
+        placeIngressNote(bubble, note);  // a pending saved note with actions is a row again
         return true;
     }
 
@@ -482,6 +504,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
             asNew.setAttribute('aria-label', tr('chat.send_as_new', 'Send as a new message'));
             note.append(asNew);
         }
+        placeIngressNote(bubble, note);
         return true;
     }
 
@@ -497,6 +520,7 @@ export function createUnconfirmedSends({ send, root, onDomWrite, showToast, comp
 
     return {
         track(frame, { views = [], ts = '', queued = false } = {}) {
+            if (isPanicFrame(frame)) return;
             const id = String(frame?.client_message_id || '');
             if (!id) return;
             frames.set(id, { frame, views: attachmentViews(views), ts, queued });

@@ -135,7 +135,7 @@ def _hide_root(root, monkeypatch, q, workers, shape):
     task = copy.deepcopy(workers.RUNNING.pop(ROOT)['task'])
     workers.WORKERS[0].busy_task_id = None
     task.pop('_budget_pause_resume', None)
-    task.pop(eb.BUDGET_HOLD_KEY, None)
+    task.pop(eb.SELECTION_KEY, None)
     if shape == 'pending_without_carrier':
         q.PENDING.insert(0, task)
         allowed = workers.repo_writer_task_allowed
@@ -170,11 +170,11 @@ def test_existing_choice_survives_carrier_loss(
 def test_selected_saved_child_keeps_basis_through_acknowledged_restore(tmp_path, monkeypatch):
     q, workers, sent = _world(tmp_path, monkeypatch, 'saved_after_exact')
     child = _select(tmp_path, monkeypatch, q)
-    before = copy.deepcopy(child[eb.BUDGET_HOLD_KEY])
+    before = copy.deepcopy(child[eb.SELECTION_KEY])
     _hide_root(tmp_path, monkeypatch, q, workers, 'absent')
     _restart(q, workers, monkeypatch)
     restored = _row(q, CHILD)
-    assert restored[eb.BUDGET_HOLD_KEY] == before
+    assert restored[eb.SELECTION_KEY] == before
     assert eb.budget_resume_dispatch_allowed(q, restored) is True
     workers.assign_tasks()
     assert [row['id'] for row in sent].count(CHILD) == 1
@@ -292,7 +292,7 @@ def test_consumed_history_cannot_issue_a_new_model_choice_after_root_leaves(
 def test_legacy_choice_is_matching_or_explicitly_reselectable(tmp_path, monkeypatch, kind):
     q, workers, sent = _world(tmp_path, monkeypatch, kind)
     child = _select(tmp_path, monkeypatch, q)
-    child[eb.BUDGET_HOLD_KEY].pop('root_resume_basis')
+    child[eb.SELECTION_KEY].pop('root_resume_basis')
     if kind == 'warm_after_exact':
         def legacy(document):
             document = copy.deepcopy(document)
@@ -316,7 +316,7 @@ def test_legacy_choice_is_matching_or_explicitly_reselectable(tmp_path, monkeypa
 def test_owner_unbound_choice_is_rebound_and_survives_root_completion(tmp_path, monkeypatch):
     q, workers, _ = _saved_tree(tmp_path, monkeypatch)
     assert q.resume_budget_paused_task(CHILD)['ok']
-    assert not _row(q, CHILD)[eb.BUDGET_HOLD_KEY].get('root_grant_id')
+    assert not _row(q, CHILD)[eb.SELECTION_KEY].get('root_grant_id')
     assert q.resume_budget_paused_task(ROOT)['ok']
     sent = []
     _idle_worker(workers, sent)

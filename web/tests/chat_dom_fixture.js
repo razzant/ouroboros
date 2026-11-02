@@ -110,6 +110,7 @@ export class ElementStub {
     after(node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertAdjacentElement(_position, node) { const list = this.parentNode?.children || []; return this.parentNode?.insertBefore(node, list[list.indexOf(this) + 1] || null); }
     insertBefore(node, before) {
+        if (node === before) return node;  // as in a DOM: a node put before itself stays where it is
         if (node?.isDocumentFragment) {
             for (const child of [...node.children]) this.insertBefore(child, before);
             return node;
@@ -131,6 +132,13 @@ export class ElementStub {
         node.parentElement = null;
     }
     remove() { this.parentNode?.removeChild?.(this); this.isConnected = false; }
+    get previousElementSibling() { return this.#sibling(-1); }
+    get nextElementSibling() { return this.#sibling(1); }
+    #sibling(step) {
+        const list = (this.parentNode?.children || []).filter((child) => child.nodeType !== 3);
+        const index = list.indexOf(this);
+        return index < 0 ? null : list[index + step] || null;
+    }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3) || null; }
     get lastElementChild() { return this.children.findLast((child) => child.nodeType !== 3) || null; }
     get firstChild() { return this.children[0] || null; }
@@ -181,11 +189,21 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         sessionStorage: globalThis.sessionStorage, fetch: globalThis.fetch,
         ResizeObserver: globalThis.ResizeObserver,
         requestAnimationFrame: globalThis.requestAnimationFrame,
+        getComputedStyle: globalThis.getComputedStyle,
     };
     const document = {
         byId: new Map(), hidden: false, activeElement: null,
         createElement(tag) { return new ElementStub(tag, document); },
         createTextNode(data) { return new TextStub(data); },
+        createTreeWalker(root) {
+            const texts = [];
+            const collect = node => { for (const child of node.children || []) {
+                if (child.nodeType === 3) texts.push(child); else collect(child);
+            } };
+            collect(root);
+            let index = 0;
+            return { nextNode: () => texts[index++] || null };
+        },
         createDocumentFragment() {
             const fragment = new ElementStub('#document-fragment', document);
             fragment.isDocumentFragment = true;
@@ -194,10 +212,17 @@ export function installDom(fetchImpl = async () => ({ ok: true, json: async () =
         getElementById(id) { return document.byId.get(id) || null; },
         addEventListener() {}, removeEventListener() {},
     };
+    // A mounted chat has a body (room visibility/toasts) and a document root
+    // (language changes). The overlay walks text nodes, not the HTML strings.
+    document.documentElement = new ElementStub('html', document);
+    document.documentElement.isConnected = true;
+    document.body = new ElementStub('body', document);
+    document.documentElement.appendChild(document.body);
     const mount = new ElementStub('div', document);
-    mount.isConnected = true;
+    document.body.appendChild(mount);
     document.byId.set('content', mount);
     const storage = new Map();
+    globalThis.getComputedStyle = () => ({ lineHeight: '24px', height: '168px', getPropertyValue: () => '7' });
     globalThis.document = document;
     globalThis.window = {
         document, location: { href: 'http://local/' }, history: { replaceState() {} },

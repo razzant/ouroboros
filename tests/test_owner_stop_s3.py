@@ -360,7 +360,6 @@ def _expiry_enforcement_queue(monkeypatch, tmp_path, task_id, meta):
     q_isolated = _isolate_queue(monkeypatch, tmp_path, running={task_id: meta})
     monkeypatch.setattr(q, "FINALIZATION_GRACE_SEC", 120.0, raising=False)
     monkeypatch.setattr(q, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(q, "get_per_call_timeout_ceiling_sec", lambda: 0.0)
     monkeypatch.setattr(q, "get_task_abs_ceiling_sec", lambda: 10_000_000.0)
     monkeypatch.setattr(q, "_ensure_reaper_started", lambda: None)
     jobs = []
@@ -1027,9 +1026,12 @@ def test_child_result_projection_is_bounded_and_includes_cancelled_children(tmp_
     assert projection.startswith("[CHILD_RESULTS]")
     for i in range(3):
         assert f"kid-{i} (cancelled):" in projection
-    # Each preview is bounded to the cap (240 chars + ellipsis).
-    for line in projection.splitlines()[1:]:
-        assert len(line) < 340
+    # Each task preview is bounded; its exact omission and full receipt reader survive.
+    for line in projection.splitlines():
+        if line.startswith("- kid-"):
+            assert len(line) < 340
+            assert "characters omitted" in line
+    assert "include_authority=True" in projection
     # A childless root projects nothing (the control stays the bare reason).
     assert ostop._child_result_projection(q, "t-lonely") == ""
 

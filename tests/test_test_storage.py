@@ -88,13 +88,17 @@ def test_explicit_env_keeps_outer_containment_membership(monkeypatch):
 def test_controller_signatures_survive_a_bounded_preview(tmp_path):
     from ouroboros.preflight_runner import _controller_diagnostics, _classify_pass_result
     from ouroboros.test_evidence import preview_file
-    (tmp_path / 'stdout.bin').write_bytes(b'H' * 300_000 + b'\n[gw2] node down: crashed\n' + b'T' * 300_000)
+    line = b"[gw2] pytest-timeout callback invoked (300s) while running 't.py::test_x'; worker subsequently lost\n"
+    (tmp_path / 'stdout.bin').write_bytes(b'H' * 300_000 + b'\n[gw2] node down: crashed\n' + line + b'T' * 300_000)
     (tmp_path / 'stderr.bin').write_bytes(b'+++++ Timeout +++++\n')
     preview = preview_file(tmp_path / 'stdout.bin')
     assert '[gw2]' not in preview
     output = _controller_diagnostics(tmp_path) + preview
     verdict = _classify_pass_result('parallel', 1, output, 8000, parallel=True)
-    assert 'PARALLEL_WORKER_CRASH' in verdict and 'Do NOT mark' in verdict
+    # The crash label and the controller's readable timeout line survive the cut. Neither that line nor a
+    # banner names the cause: only the pass's own recorded crash rows do (tests/test_preflight_runner.py).
+    assert 'PARALLEL_WORKER_CRASH' in verdict and 'callback invoked (300s)' in verdict
+    assert 'nothing recorded why' in verdict and 'Do NOT mark' not in verdict
 
 
 def test_retention_unknown_siblings_and_symlinks_are_not_released(tmp_path):

@@ -124,17 +124,34 @@ def test_custody_nested_receipts_survive_fresh_current_read(tmp_path, settled):
     assert [receipt["interaction_id"] for receipt in actual] == ["first", "second"]
 
 
+@pytest.mark.parametrize("debt", ["cost-owed", "cost-paid", "later-receipt"])
 @pytest.mark.parametrize("writer_first", [True, False])
-def test_custody_ack_serializes_with_result_membership(tmp_path, monkeypatch, writer_first):
-    """The acknowledgement reads the result row and retires the closing receipts in ONE store
-    transaction: a debt the result shows (``delegated_runs_unreconciled``) is never removed."""
+def test_custody_ack_serializes_with_result_membership(tmp_path, monkeypatch, writer_first, debt):
+    """The acknowledgement reads the result row and retires the closing receipts it observed in ONE
+    store transaction: a debt the result shows (``delegated_runs_unreconciled``), a receipt closed
+    after the observation and an unpaid ``cost_revision`` each survive it. Only the money owner
+    retires a revision, the one it observed: a revision raised while it publishes stays owed."""
     from ouroboros import delegate_custody as custody, delegate_terminal, store
     from ouroboros.delegate_custody_current import snapshot
+    from supervisor import events_task_done as done, queue
+
+    def owed():
+        with store.open_store(tmp_path, write=False) as txn:
+            return txn.get_row("delegated_runs", "task")
+
+    monkeypatch.setattr(queue, "task_has_live_ownership", lambda *a, **kw: False)
     migrations.prepare_startup_state(tmp_path)
     results.write_task_result(tmp_path, "task", "completed")
     custody.emit(tmp_path, custody.STARTED, {"run_id": "old", "task_id": "task"})
     custody.emit(tmp_path, custody.SETTLED, {"run_id": "old", "task_id": "task", "state": "succeeded"})
+    if debt == "cost-paid":
+        delegate_terminal._refresh_custody_cost(tmp_path, "task")
+    assert set(owed()["closed_runs"]) == {"old"} and ("cost_revision" in owed()) is (debt != "cost-paid")
     observed = snapshot(tmp_path)
+    if debt == "later-receipt":  # every custody change owes money; this receipt closed after the observation
+        custody.emit(tmp_path, custody.STARTED, {"run_id": "late", "task_id": "task"})
+        custody.emit(tmp_path, custody.SETTLED, {"run_id": "late", "task_id": "task", "state": "succeeded"})
+    before = owed()
     if writer_first:
         results.write_task_result(tmp_path, "task", "completed", delegated_runs_unreconciled=["new"])
     opened = []
@@ -144,14 +161,34 @@ def test_custody_ack_serializes_with_result_membership(tmp_path, monkeypatch, wr
         with real_open(root, **kwargs) as txn:
             opened.append(kwargs.get("write"))
             yield txn
-    monkeypatch.setattr(store, "open_store", tracked)
-    delegate_terminal._ack_current_receipts(tmp_path, "task", observed)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "open_store", tracked)
+        delegate_terminal._ack_current_receipts(tmp_path, "task", observed)
     assert opened == [True], "one write transaction covers the row read and the retirement"
-    monkeypatch.undo()
+    unobserved = {rid: raw for rid, raw in before["closed_runs"].items() if rid != "old"}
+    if debt == "cost-paid" and not writer_first:
+        assert owed() is None, "nothing left to owe: the row retires"
+    else:
+        assert owed() == {**before, "closed_runs": unobserved}, "the exact revision and later receipts survive"
     if not writer_first:
-        assert "task" not in o.members(tmp_path, "delegated_runs")
+        assert ("task" in o.members(tmp_path, "delegated_runs")) is (debt != "cost-paid")
         results.write_task_result(tmp_path, "task", "completed", delegated_runs_unreconciled=["new"])
     assert "task" in o.members(tmp_path, "delegated_runs")
+    if debt != "cost-paid":
+        refresh, raced = done._refresh_terminal_task_cost, []
+
+        def racing(*args, **kwargs):
+            published = refresh(*args, **kwargs)
+            if not raced:
+                raced.append(custody.emit(tmp_path, custody.STARTED, {"run_id": "racer", "task_id": "task"}))
+            return published
+
+        monkeypatch.setattr(done, "_refresh_terminal_task_cost", racing)
+        delegate_terminal._refresh_custody_cost(tmp_path, "task")
+        assert owed()["cost_revision"] > before["cost_revision"], "the revision raised meanwhile stays owed"
+        delegate_terminal._refresh_custody_cost(tmp_path, "task")
+        assert "cost_revision" not in (owed() or {})
+        assert set((owed() or {}).get("closed_runs", {})) == set(unobserved)
 
 
 def test_unavailable_recovery_sets_do_not_escape_a_boot_door(tmp_path, monkeypatch):
@@ -179,10 +216,9 @@ def test_notice_receipts_import_once_and_publication_never_reads_chat(tmp_path, 
 
 
 def test_prunes_wait_off_ready_path_and_trees_wait_for_readable_recovery_links(tmp_path, monkeypatch):
-    """Startup prunes nothing (off the ready path); task trees go on a reconcile pass only once the
-    recovery links read, and on every pass after that, never once per process. The worktree family
-    is the custody pass's, never the reconcile pass's."""
-    from ouroboros import headless, subagent_worktrees
+    """Startup prunes nothing; a due child needs readable recovery links before retiring trees.
+    Repair re-arms a resting pass. The worktree family remains the custody pass's."""
+    from ouroboros import headless, maintenance_jobs, subagent_worktrees
     migrations.prepare_startup_state(tmp_path)
     monkeypatch.setattr(maintenance, "DATA_DIR", tmp_path)
     monkeypatch.setattr(maintenance, "_STARTUP_RECOVERY_GAPS", [False])
@@ -192,12 +228,14 @@ def test_prunes_wait_off_ready_path_and_trees_wait_for_readable_recovery_links(t
     o.add(tmp_path, "pending_drives", "task")
     maintenance._startup_prune_sweeps(preserve_task_sources=True, recovery_report={"unresolved": ["task"]})
     assert calls == []
-    maintenance._run_reconcile_prunes()
+    _retire(tmp_path)
     assert calls == [], "a recovery link that cannot be read keeps every tree for this pass"
     o.remove(tmp_path, "pending_drives", "task")
-    maintenance._run_reconcile_prunes()
-    maintenance._run_reconcile_prunes()
-    assert calls == ["trees", "trees"]
+    assert _retire(tmp_path) is None and calls == [], "a recovery-set change alone does not walk history"
+    maintenance_jobs.record(tmp_path, "runtime_retirement", state="pending")  # explicit repair after the gap clears
+    _retire(tmp_path)
+    assert _retire(tmp_path) is None
+    assert calls == ["trees"], "an unchanged generation rests"
 
 
 @pytest.mark.parametrize("gap", [None, "unreadable", "coarse"])
@@ -217,15 +255,15 @@ def test_reconcile_prunes_keep_live_tree_and_wait_out_recovery_gaps(tmp_path, mo
     unreadable = unreadable_result(monkeypatch, "running") if gap == "unreadable" else {"on": False}
     maintenance._startup_prune_sweeps(preserve_task_sources=bool(gap),
         recovery_report={"errors": ["ownership unknown"]} if gap == "coarse" else {"unresolved": ["running"]})
-    maintenance._run_reconcile_prunes()
+    _retire(tmp_path)
     if gap:
         assert (tmp_path / "task_trees/settled").exists() and service.exists()
-        maintenance._run_reconcile_prunes()
+        _retire(tmp_path)
         assert (tmp_path / "task_trees/settled").exists() and service.exists(), "a later pass keeps them too"
         unreadable["on"] = False
         assert results.load_task_result(tmp_path, "running", strict=True) == running
         maintenance._startup_prune_sweeps()  # the next generation's boot, with recovery complete
-        maintenance._run_reconcile_prunes()
+        _retire(tmp_path)
     assert not (tmp_path / "task_trees/settled").exists() and not service.exists()
     assert (tmp_path / "task_trees/running").exists()
 
@@ -251,13 +289,19 @@ def test_a_failed_prune_step_spares_the_others_and_the_next_pass_runs_it_again(t
     monkeypatch.setattr("ouroboros.delegate_state_sweep.sweep_settled_delegate_state",
                         lambda *a: calls.append("delegate") or {})
     latch = SimpleNamespace(release=lambda: None)
+    maintenance._startup_prune_sweeps()
     maintenance._run_periodic_reconcile_sweep([0], latch=latch)
+    _retire(tmp_path)
     assert calls == ["trees-unavailable", "delegate"]
     monkeypatch.setattr(headless, "prune_task_trees", lambda *a, **kw: calls.append("trees"))
     monkeypatch.setattr(services, "prune_service_logs", lambda *a: calls.append("services") or {})
+    from ouroboros.maintenance_jobs import record
+    record(tmp_path, "runtime_retirement", state="pending")  # explicit repair wakes the failed input
     maintenance._run_periodic_reconcile_sweep([0], latch=latch)
+    _retire(tmp_path)
     maintenance._run_periodic_reconcile_sweep([0], latch=latch)
-    assert calls == ["trees-unavailable", "delegate"] + ["trees", "services", "delegate"] * 2
+    _retire(tmp_path)
+    assert calls == ["trees-unavailable", "delegate"] + ["trees", "services", "delegate"]
 
 
 def test_tree_exclusions_follow_only_addressed_links_and_own_child_results(tmp_path, monkeypatch):
@@ -281,3 +325,9 @@ def test_tree_exclusions_follow_only_addressed_links_and_own_child_results(tmp_p
     monkeypatch.setattr(results, "list_task_results", own_results)
     expected = {"running", "child", *fields}
     assert startup_tree_exclusions(tmp_path) == set(seen) == expected
+
+
+def _retire(root):
+    from ouroboros.maintenance import run_job
+    maintenance._run_reconcile_prunes()
+    return run_job(root, "runtime_retirement")

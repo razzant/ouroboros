@@ -147,7 +147,7 @@ def _server_command(args: argparse.Namespace) -> int:
 
     try:
         sys.argv = [old_argv[0]]
-        return int(server.main())
+        return server.executable_main()
     finally:
         sys.argv = old_argv
 
@@ -751,9 +751,18 @@ def _add_mcp_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _client(args: argparse.Namespace, *, start: bool = False) -> OuroborosHTTPClient:
     client = OuroborosHTTPClient(getattr(args, "url", "") or "")
+    own = None  # --start with no URL named: only this data root's main server will do
+    if start and not (getattr(args, "url", "") or os.environ.get("OUROBOROS_URL", "").strip()):
+        from ouroboros.launch_roots import data_dir
+        from ouroboros.server_process import serves_data_root
+
+        own = data_dir()
+    answered = False
     try:
         client.request("GET", "/api/health")
-        return client
+        if own is None or serves_data_root(client.base_url, own):
+            return client
+        answered = True
     except ConnectionCLIError:
         if not start:
             raise
@@ -762,17 +771,30 @@ def _client(args: argparse.Namespace, *, start: bool = False) -> OuroborosHTTPCl
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise CLIError("--start can only launch a local loopback Ouroboros server")
     proc = _start_local_server(client.base_url)
-    return _wait_for_dialogue(client, proc)
+    if answered:
+        print(f"the Ouroboros answering at {client.base_url} is not the one for {own}; starting its own "
+              "server (pass --url to use the one answering)", file=sys.stderr, flush=True)
+    return _wait_for_dialogue(client, proc, data_dir=own)
 
 
-def _wait_for_dialogue(client: OuroborosHTTPClient, proc) -> OuroborosHTTPClient:
+def _wait_for_dialogue(client: OuroborosHTTPClient, proc, *, data_dir=None) -> OuroborosHTTPClient:
     """Wait until the started server accepts owner messages (``/api/health`` answers and its
     ``boot`` says ``dialogue_ready``; an older core without ``boot`` counts at its first answer),
     or its boot is ``ready`` without them (no model provider configured yet).
     No clock: the wait ends with readiness, with the boot's own ``failed`` verdict, or with the
-    server process's exit."""
+    server process's exit. Started for ``data_dir`` with no URL named, it follows the port that
+    root's server took (its port file; a busy port moves it to a fallback) and counts an answer
+    only from that server, never from another installation on the port it left."""
+    if data_dir is not None:
+        from ouroboros.server_process import serves_data_root
     last_phase = ""
     while proc.poll() is None:
+        if data_dir is not None:
+            url = _default_base_url().rstrip("/")
+            client = client if url == client.base_url else OuroborosHTTPClient(url)
+            if not serves_data_root(url, data_dir):
+                time.sleep(0.5)
+                continue
         try:
             health = client.request("GET", "/api/health")
         except CLIError:
@@ -814,6 +836,12 @@ def _default_base_url() -> str:
 def _start_local_server(base_url: str) -> subprocess.Popen:
     if os.environ.get("OUROBOROS_PACKAGED_CLI") == "1":
         raise CLIError("packaged CLI must launch the desktop app for --start, not source server.py")
+    from ouroboros.launch_roots import AmbiguousDataRoot, direct_data_dir
+
+    try:  # the server's own refusal would be lost with its discarded output
+        direct_data_dir()
+    except AmbiguousDataRoot as exc:
+        raise CLIError(f"server not started: {exc}") from None
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or DEFAULT_HOST
     port = int(parsed.port or DEFAULT_PORT)
@@ -1062,7 +1090,8 @@ def _await_cost_finality(
             )
         except CLIError:
             return result
-        if latest.get("cost_final") or latest.get("cost_with_children_partial") is False:
+        if (latest.get("cost_final") is not False and latest.get("cost_with_children_partial") is not True
+                and (latest.get("cost_final") or latest.get("cost_with_children_partial") is False)):
             return latest
     return latest
 

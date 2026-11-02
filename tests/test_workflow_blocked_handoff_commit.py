@@ -67,6 +67,9 @@ def test_second_task_reviews_and_commits_only_explicitly_selected_correction(tmp
     (root / "dirty.txt").write_text("unrelated owner WIP\n", encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
+    # This scenario owns retained correction and exact staging; release forms have real-Git tests elsewhere.
+    monkeypatch.setattr("ouroboros.commit_admission.release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     reviews, checks, publications = [], [], []
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda _ctx: False)
     monkeypatch.setattr(git, "_post_commit_result", lambda *_a, **_kw: None)

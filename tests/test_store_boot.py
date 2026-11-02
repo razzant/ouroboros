@@ -1,4 +1,4 @@
-"""Boot opens current facts with cost independent of frozen history and child stores."""
+"""Boot SQL work ignores frozen history; compatibility checks only child file headers."""
 from __future__ import annotations
 
 import pytest
@@ -26,7 +26,7 @@ def _boot_fixture(root, count, children, template):
         state.mkdir(parents=True)
         for filename in ("current.sqlite", "migrations.json"):
             shutil.copyfile(template / "state" / filename, state / filename)
-    startup_migrations.prepare_startup_state(root)
+    startup_migrations.prepare_startup_state(root, initialize_journal=True)
     with store.open_store(root, write=False) as txn:
         sha = txn.meta("last_store_body")["sha"]
     (root / "state/state.json").write_text(json.dumps({"current_sha": sha}), encoding="utf-8")
@@ -75,13 +75,13 @@ def _boot_cost(root, monkeypatch):
         if accessor := getattr(pathlib.Path, "_accessor", None):  # Python 3.10 keeps bound OS functions here.
             patch.setattr(accessor, "stat", measured_stat)
             patch.setattr(accessor, "scandir", measured_scan)
-        report = startup_migrations.prepare_startup_state(root)
+        report = startup_migrations.prepare_startup_state(root, initialize_journal=True)
     assert report["status"] == "unchanged" and report["drives"] == {}
     assert report["opened_ms"] >= 0
     return counts
 
 
-def test_second_boot_has_constant_work_and_no_history_or_writes(tmp_path, monkeypatch):
+def test_second_boot_has_constant_sql_work_and_no_history_or_writes(tmp_path, monkeypatch):
     template = tmp_path / "template"
     store_import.ensure_current_store(template, with_children=False)
     costs = []

@@ -229,8 +229,7 @@ def test_a_claudexor_receipt_keeps_its_own_key_type_through_the_supervisor(tmp_p
     assert persisted["api_key_type"] == "claudexor" and persisted["provider"] == "claudexor"
 
 
-def test_cache_health_reads_only_rounds_that_measured_a_cache(tmp_path):
-    from ouroboros.context_health import _compute_cache_hit_rate
+def test_round_events_keep_an_unreported_cache_unknown(tmp_path):
     from ouroboros.loop_llm_call import call_llm_with_retry
 
     replies = [{"prompt_tokens": 100, "cached_tokens": 40}] * 5 + [{"prompt_tokens": 900}] * 3
@@ -247,5 +246,4 @@ def test_cache_health_reads_only_rounds_that_measured_a_cache(tmp_path):
                             "low", 1, logs, "task", 1, None, {}, "task", False)
     rows = [json.loads(line) for line in (logs / "events.jsonl").read_text().splitlines()]
     assert sum(row.get("type") == "llm_round" and row["cached_tokens"] is None for row in rows) == 3
-    env = SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
-    assert _compute_cache_hit_rate(env) == pytest.approx(200 / 600)  # silent rounds join neither side
+    assert [row["cached_tokens"] for row in rows if row.get("type") == "llm_round"][-1] == 0  # a reported zero stays 0

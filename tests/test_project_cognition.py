@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 
 from ouroboros import config, projects_registry as projects
 from ouroboros.composer_cognition import COGNITION_KEYS, cognition_overrides, read_cognition
-from ouroboros.gateway.owner_effort import api_owner_effort_range
+from ouroboros.gateway.owner_effort import api_owner_effort_range, api_owner_subagents_mode
 from ouroboros.gateway.settings import api_owner_context_mode, api_settings_post
 from ouroboros.settings_scales import EFFORT_FORMAT_KEY, EFFORT_RANGE_KEYS, choose_effort, effort_range
 
@@ -34,6 +34,7 @@ def room_settings(tmp_path, monkeypatch):
         }), encoding="utf-8")
         config.apply_settings_to_env(config.load_settings())
         app = Starlette(routes=[
+            Route("/api/owner/subagents-mode", api_owner_subagents_mode, methods=["POST"]),
             Route("/api/owner/effort-range", api_owner_effort_range, methods=["POST"]),
             Route("/api/owner/context-mode", api_owner_context_mode, methods=["POST"]),
             Route("/api/settings", api_settings_post, methods=["POST"]),
@@ -67,7 +68,7 @@ def test_two_projects_keep_independent_choices_and_saves_never_project_to_env(ro
     assert response.json()["project_id"] == "a" and response.json()["effort_range"] == effort
     response = client.post("/api/owner/context-mode", json={"project_id": "a", "mode": "nano"})
     assert response.status_code == 200, response.text
-    assert response.json()["cognition"] == {"context_mode": "nano", "effort_range": effort}
+    assert response.json()["cognition"] == {"context_mode": "nano", "effort_range": effort, "subagents_mode": "auto"}
     assert config.SETTINGS_PATH.read_bytes() == before_file
     assert {key: os.environ.get(key) for key in COGNITION_KEYS} == before_env
     assert read_cognition(root, "b") == read_cognition(root) == baseline
@@ -84,7 +85,7 @@ def test_main_effort_readback_keeps_forwarded_context(room_settings, monkeypatch
     values = {"min": "low", "recommended": "max", "max": "medium"}
     response = client.post("/api/owner/effort-range", json=values)
     assert response.status_code == 200, response.text
-    assert response.json()["cognition"] == {"context_mode": "nano", "effort_range": values}
+    assert response.json()["cognition"] == {"context_mode": "nano", "effort_range": values, "subagents_mode": "auto"}
     assert config.get_context_mode() == "nano"
 
 

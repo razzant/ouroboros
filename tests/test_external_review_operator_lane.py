@@ -4,11 +4,17 @@ review-only cycle, run in the runtime's isolated checkout of the staged index
 (record + the helper's full answer), drift artifact and custody-bound retention."""
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tests import _contributor_packet_shared as shared
 
+REPO = Path(__file__).resolve().parents[1]
 _PREFLIGHT_ANSWER = json.dumps([{"item": "code_quality", "verdict": "PASS", "severity": "advisory",
                                  "reason": "the preflight seat read README.md in full"}])
 
@@ -234,3 +240,94 @@ def test_operator_lane_without_isolation_reviews_this_worktree(tmp_path, monkeyp
     assert exit_code == 0, (output / "outcome.json").read_text(encoding="utf-8")
     assert {Path(brief["session_root"]) for brief in briefs if brief["session_root"]} == {repo}
     assert not (tmp_path / "drive" / "state" / "review_checkouts").exists()
+
+
+def _fresh_operator_lane(root: str) -> None:
+    """The child of the fresh-process test below: one operator lane, then the same
+    process's proof binding read by the record's own reader. Facts land in ``facts.json``."""
+    cold = "ouroboros.tools.browser" not in sys.modules
+    from pytest import MonkeyPatch
+
+    import scripts.run_external_review as module
+    from ouroboros import review_ledger
+    from ouroboros.tools.commit_gate import _review_tests_facts
+    from ouroboros.tools.registry import ToolContext
+
+    tmp = Path(root)
+    with MonkeyPatch.context() as monkeypatch:
+        repo, _briefs = _operator_fixture(tmp, monkeypatch)
+        exit_code, output = _run_operator_lane(module, monkeypatch, tmp)
+        record_id = json.loads((output / "outcome.json").read_text(encoding="utf-8"))["outcome"]["review_record_id"]
+        browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        facts = {"cold": cold, "exit_code": exit_code, "browsers_path": browsers_path,
+                 "record": review_ledger.load_record(tmp / "drive", record_id)["tests"]}
+        ctx = ToolContext(repo_dir=repo, drive_root=tmp / "binding-drive")
+        shared.passing_test_runner(ctx)
+        readme = repo / "README.md"
+        staged = readme.read_text(encoding="utf-8")
+        facts["same"] = _review_tests_facts(ctx, True)
+        readme.write_text("other worktree bytes\n", encoding="utf-8")
+        facts["worktree"] = _review_tests_facts(ctx, True)
+        readme.write_text("other index bytes\n", encoding="utf-8")
+        shared.git(repo, "add", "README.md")
+        readme.write_text(staged, encoding="utf-8")  # only the index differs from the tested candidate
+        facts["index"] = _review_tests_facts(ctx, True)
+        shared.git(repo, "add", "README.md")
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp / "other-browsers"))
+        facts["other_browsers_path"] = _review_tests_facts(ctx, True)
+        if browsers_path is None:  # the stub armed nothing; the parent reports that fact first
+            monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH")
+        else:
+            monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", browsers_path)
+        facts["restored"] = _review_tests_facts(ctx, True)
+    (tmp / "facts.json").write_text(json.dumps(facts), encoding="utf-8")
+
+
+@pytest.mark.parametrize("browsers_path", ["packaged", "explicit"])
+def test_a_fresh_operator_lane_binds_its_test_proof_after_the_tool_catalog(tmp_path, browsers_path):
+    """#2363 in a fresh interpreter whose Playwright ships a browser (a stub package shadows
+    the installed one). A worker's registry imports every tool module before its gate mints
+    a test proof, so the browser module's packaged-browser default is already part of the
+    environment that proof binds. The operator lane loads the catalog first as well. Otherwise
+    the panel's first registry changes that environment, and the record says the green run of
+    this very candidate does not cover it. An explicit owner path stays as given, and the
+    binding stays strict: another worktree, index or browser path is not this candidate."""
+    from ouroboros.process_containment import ProcessContainer
+    from ouroboros.test_environment import isolated_environment, retain_tree
+
+    site = tmp_path / "site"
+    bundle = site / "playwright" / "driver" / "package" / ".local-browsers" / "webkit-1"
+    bundle.mkdir(parents=True)
+    (bundle / "pw_run.sh").write_text("", encoding="utf-8")
+    (site / "playwright" / "__init__.py").write_text("", encoding="utf-8")
+    env = isolated_environment(tmp_path / "env", REPO)
+    env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    env["PYTHONPATH"] = os.pathsep.join([str(site), str(REPO)])
+    owner_path = str(tmp_path / "owner-browsers")
+    if browsers_path == "explicit":
+        env["PLAYWRIGHT_BROWSERS_PATH"] = owner_path
+    child = ("import sys\nfrom tests.test_external_review_operator_lane import _fresh_operator_lane\n"
+             "_fresh_operator_lane(sys.argv[1])\n")
+    container = ProcessContainer(lifeline=True, overload=True)
+    proc = None
+    try:
+        proc = container.spawn([sys.executable, "-c", child, str(tmp_path / "lane")], cwd=REPO, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        output, _ = proc.communicate(timeout=240)
+    finally:
+        error = container.reap()
+        container.close()
+        if proc is not None:
+            proc.wait(timeout=5)
+        if error:
+            retain_tree(tmp_path, error)
+    assert not error, error
+    assert proc.returncode == 0, output.decode(errors="replace")[-6000:]
+    facts = json.loads((tmp_path / "lane" / "facts.json").read_text(encoding="utf-8"))
+    bound = {"policy": "run", "result": "passed", "proof": "candidate_bound"}
+    stale = {"policy": "NOT_RUN", "result": "unknown", "reason": "tests_proof_not_for_this_candidate"}
+    assert facts["cold"] and facts["exit_code"] == 0, facts
+    assert facts["browsers_path"] == ("0" if browsers_path == "packaged" else owner_path), facts
+    assert facts["record"] == bound, facts
+    assert facts["same"] == facts["restored"] == bound, facts
+    assert facts["worktree"] == facts["index"] == facts["other_browsers_path"] == stale, facts

@@ -1,7 +1,7 @@
 """Stale-marker ATTRIBUTION (community #783, owner decision 6A).
 
 The advisory stale marker is a fact about a checkout: one task's edit on a
-shared tree really does invalidate every task's advisory coverage there. The
+shared tree really does invalidate every task's preflight look there. The
 community donor (``ac2b0025``) filtered the marker out of other tasks' evidence
 by task id, which hid a genuinely stale tree — the panel said ``stale`` with no
 reason while ``review_status`` and the commit gate still reported the edit. The
@@ -21,10 +21,7 @@ import pytest
 from ouroboros import review_ledger
 from ouroboros.review_evidence import collect_review_evidence
 from ouroboros.review_state import (
-    AdvisoryReviewState,
-    AdvisoryRunRecord,
-    compute_snapshot_hash,
-    format_status_section,
+    CommitAttemptRecord,
     invalidate_advisory_after_mutation,
     load_state,
     make_repo_key,
@@ -51,14 +48,19 @@ def _drive(tmp_path):
 
 
 def _fresh(drive, *repos, owner="task-a"):
-    """Rows a former install wrote (no writer remains): the coverage an edit invalidates."""
-    state = AdvisoryReviewState()
+    """Each checkout's preflight look (a ``surface=preflight`` ledger record): what an edit makes stale."""
     for repo in repos:
-        state.advisory_runs.append(AdvisoryRunRecord(
-            snapshot_hash=compute_snapshot_hash(repo), commit_message="ready", status="fresh",
-            ts="2026-09-28T00:00:00+00:00", repo_key=make_repo_key(repo), task_id=owner,
-        ))
-    save_state(drive, state)
+        review_ledger.write_record(drive, {
+            "record_id": review_ledger.new_record_id(), "state": "settled", "surface": "preflight",
+            "ts": "2026-09-28T00:00:00+00:00", "task_id": owner, "verdict": {"aggregate": "PASS"},
+            "subject": {"root": str(repo)}, "rows": []})
+
+
+def _reviewed(drive, repo, *, attempt=1):
+    """A reviewed attempt on the checkout, so its review history (and the marker in it) renders."""
+    update_state(drive, lambda state: state.record_attempt(CommitAttemptRecord(
+        ts=f"2026-09-28T00:0{attempt}:00+00:00", commit_message="reviewed", status="reviewed",
+        repo_key=make_repo_key(repo), tool_name="commit_reviewed", task_id="task-history", attempt=attempt)))
 
 
 def _ctx(drive, repo, task_id):
@@ -86,7 +88,6 @@ def test_another_tasks_edit_keeps_the_shared_checkout_stale_and_names_the_writer
     other, own = _panel(drive, shared, "task-b"), _panel(drive, shared, "task-a")
 
     # Not hidden: the task that did not edit still sees the stale checkout and why.
-    assert other["advisory_status"] == "stale"
     assert "edit_text mutated the worktree" in other["stale_reason"] and other["stale_ts"]
     assert (other["stale_task_id"], other["stale_attribution"]) == ("task-a", "other_task")
     assert (own["stale_task_id"], own["stale_attribution"]) == ("task-a", "this_task")
@@ -106,29 +107,35 @@ def test_a_marker_scoped_to_another_checkout_is_neither_shown_nor_attributed(tmp
 
     assert panel["stale_reason"] == panel["stale_ts"] == ""
     assert all(panel[key] == "" for key in _ATTRIBUTION_KEYS)
-    run = load_state(drive).find_by_hash(compute_snapshot_hash(other), repo_key=make_repo_key(other))
-    assert run.status == "fresh"
+    from ouroboros.review_status_projection import build_review_projection
+
+    look = build_review_projection(drive, repo_dir=other, reader_task_id="task-b")["preflight"]
+    assert (look["marked"], look["stale_from_edit"]) == (False, False)
 
 
 def test_an_ambiguous_scope_mutation_stales_every_checkout_and_says_so(tmp_path):
     drive = _drive(tmp_path)
     shared, other = _checkout(tmp_path, "shared"), _checkout(tmp_path, "other")
     _fresh(drive, shared, other)
+    _reviewed(drive, other)
     invalidate_advisory_after_mutation(drive, mutation_root=None, changed_paths=[],
                                        source_tool="run_shell", mutating_task_id="task-a")
 
     panel = _panel(drive, other, "task-b")
 
-    # The unscoped marker genuinely applies here: the other checkout's run IS stale.
-    assert panel["advisory_status"] == "stale" and panel["stale_reason"]
+    # The unscoped marker genuinely applies here: the other checkout's look IS stale.
+    assert panel["stale_reason"]
     assert (panel["stale_task_id"], panel["stale_attribution"], panel["stale_repo_key"]) == (
         "task-a", "other_task", "")
-    assert "applies to every checkout" in format_status_section(load_state(drive), repo_dir=other)
+    from ouroboros.agent_task_pipeline import build_review_context
+
+    assert "applies to every checkout" in build_review_context(types.SimpleNamespace(drive_root=drive, repo_dir=other))
 
 
 def test_a_legacy_marker_without_a_writer_stays_unknown_for_every_reader(tmp_path):
     drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
     _fresh(drive, shared)
+    _reviewed(drive, shared)
     _edit(drive, shared, "task-a")
     path = drive / "state" / "advisory_review.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -139,7 +146,47 @@ def test_a_legacy_marker_without_a_writer_stays_unknown_for_every_reader(tmp_pat
         panel = _panel(drive, shared, reader)
         assert "edit_text mutated the worktree" in panel["stale_reason"], reader
         assert (panel["stale_task_id"], panel["stale_attribution"]) == ("", "unknown"), reader
-    assert "Invalidated by: an unrecorded writer" in format_status_section(load_state(drive), repo_dir=shared)
+    from ouroboros.agent_task_pipeline import build_review_context
+
+    assert "invalidated_by=an unrecorded writer" in build_review_context(
+        types.SimpleNamespace(drive_root=drive, repo_dir=shared))
+
+
+def test_a_marker_no_preflight_look_precedes_is_history_never_current(tmp_path):
+    """The retired advisory lane wrote markers with no look behind them (owner decision:
+    archive only). Such a marker stays in the file; no reader treats it as current
+    freshness or copies it into debt, and a look written after it does not revive it.
+    Only an edit after a look stales that look."""
+    from ouroboros.agent_task_pipeline import build_review_context
+    from ouroboros.review_status_projection import build_review_projection
+
+    drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
+    _reviewed(drive, shared)
+    state = load_state(drive)
+    state.last_stale_from_edit_ts = "2026-09-20T00:00:00+00:00"
+    state.last_stale_reason = "run_command mutated the worktree; advisory freshness invalidated."
+    save_state(drive, state)
+    _reviewed(drive, shared, attempt=2)  # a reviewed attempt syncs the debts
+
+    def surfaces():
+        projection = build_review_projection(drive, repo_dir=shared, reader_task_id="task-b")
+        context = build_review_context(types.SimpleNamespace(drive_root=drive, repo_dir=shared))
+        return _panel(drive, shared, "task-b"), projection, context
+
+    for _situation in ("no look", "a look written after the marker"):
+        panel, projection, context = surfaces()
+        assert panel["stale_reason"] == panel["stale_ts"] == "" and all(panel[k] == "" for k in _ATTRIBUTION_KEYS)
+        assert (projection["stale_from_edit"], projection["stale_from_edit_ts"], projection["stale_reason"]) == (
+            False, None, None)
+        assert "stale_marker=" not in context and "advisory freshness" not in context
+        assert load_state(drive).get_open_commit_readiness_debts(repo_key=make_repo_key(shared)) == []
+        assert load_state(drive).last_stale_from_edit_ts == "2026-09-20T00:00:00+00:00", "history stays in the file"
+        _fresh(drive, shared)  # the second pass reads a look newer than the marker
+
+    _edit(drive, shared, "task-a")  # an edit after the look is the current stale fact
+    panel, projection, context = surfaces()
+    assert "edit_text mutated the worktree" in panel["stale_reason"] and projection["stale_from_edit"] is True
+    assert "stale_marker=" in context
 
 
 def test_missing_identity_on_either_side_is_unknown_never_a_guess(tmp_path):
@@ -180,12 +227,12 @@ def test_text_surfaces_without_a_reader_identity_state_only_the_recorded_writer(
 
     drive, shared = _drive(tmp_path), _checkout(tmp_path, "shared")
     _fresh(drive, shared)
+    _reviewed(drive, shared)
     _edit(drive, shared, "task-a")
 
     context = build_review_context(types.SimpleNamespace(drive_root=drive, repo_dir=shared))
 
     assert "invalidated_by=task task-a" in context
-    assert "Invalidated by: task task-a" in context
     assert "this task" not in context and "another task" not in context
 
 
@@ -201,10 +248,8 @@ def test_the_writer_round_trips_names_the_invalidation_and_clears_with_a_commit(
     assert state.last_stale_task_id == "task-a"
 
     for commit_scope in (repo_key, None):
-        # mark_repo_stale only writes the marker while a row is still invalidatable.
-        state.advisory_runs.append(AdvisoryRunRecord(snapshot_hash=f"before-{commit_scope}", commit_message="m",
-                                                     status="fresh", ts="2026-09-28T01:00:00+00:00", repo_key=repo_key))
-        state.mark_repo_stale(repo_key=repo_key, reason_ts="2026-09-28T02:00:00+00:00", reason="r",
+        # A look's marker is written once, by the first mutation after it.
+        state.mark_look_stale("2026-09-28T01:00:00+00:00", reason_ts="2026-09-28T02:00:00+00:00", reason="r",
                               stale_repo_key=repo_key, stale_task_id="task-a")
         assert state.last_stale_task_id == "task-a"
         state.on_successful_commit(repo_key=commit_scope)
@@ -214,7 +259,6 @@ def test_the_writer_round_trips_names_the_invalidation_and_clears_with_a_commit(
 def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
     """Same staleness written by three different writers reads identically everywhere
     except the attribution itself."""
-    from ouroboros.review_state import CommitAttemptRecord
     from ouroboros.review_status_projection import build_review_projection
 
     shared = _checkout(tmp_path, "shared")
@@ -233,19 +277,19 @@ def test_attribution_never_changes_freshness_obligations_or_debt(tmp_path):
         save_state(drive, state)
         invalidate_advisory_after_mutation(drive, mutation_root=shared, changed_paths=["tracked.py"],
                                            source_tool="edit_text", mutating_task_id=writer)
+        _reviewed(drive, shared, attempt=2)  # a later reviewed attempt syncs the debts
         state = load_state(drive)
         projection = build_review_projection(drive, repo_dir=shared, reader_task_id="task-a")
         observed[writer] = (
-            [run.status for run in state.advisory_runs],
-            state.is_fresh(compute_snapshot_hash(shared), repo_key=repo_key),
             [(d.category, d.title, d.summary, list(d.evidence), d.fingerprint, d.status)
              for d in state.get_open_commit_readiness_debts(repo_key=repo_key)],
             [(o.item, o.status) for o in state.get_open_obligations(repo_key=repo_key)],
-            {key: projection[key] for key in ("stale_from_edit", "effective_status", "effective_is_fresh")},
+            {key: projection[key] for key in ("stale_from_edit", "effective_status")},
         )
     assert observed["task-a"] == observed["task-b"] == observed[""]
-    assert observed[""][0] == ["stale"] and observed[""][2], "the stale debt is still owed"
-    assert observed[""][3] == [("tests_affected", "still_open")], "the obligation is still owed"
+    assert observed[""][0] == [], "the marker is the one freshness fact: no debt copies it"
+    assert observed[""][1] == [("tests_affected", "still_open")], "the obligation is still owed"
+    assert observed[""][2] == {"stale_from_edit": True, "effective_status": "stale"}
 
 
 @pytest.mark.serial
@@ -293,7 +337,6 @@ def test_registered_writer_persists_identity_without_changing_shared_freshness(t
         result = tools.execute_result("run_command", {
             "cwd": "system_repo", "cmd": ["/usr/bin/printf", "x = 1\n"]})
         assert result.status == "ok", result.text
-        assert load_state(drive).is_fresh(compute_snapshot_hash(shared), make_repo_key(shared))
         assert not load_state(drive).last_stale_from_edit_ts
 
     result = (tools.execute_result("write_file", {
@@ -307,7 +350,7 @@ def test_registered_writer_persists_identity_without_changing_shared_freshness(t
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     state = load_state(drive)
     assert state.last_stale_task_id == "task-a"
-    assert state.advisory_runs[0].status == "stale"
+    assert state.last_stale_repo_key == make_repo_key(shared)
     panel = _panel(drive, shared, "task-b")
     assert panel["stale_attribution"] == "other_task" and panel["stale_reason"]
     assert panel["stale_task_id"] == "task-a"

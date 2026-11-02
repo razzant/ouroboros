@@ -20,16 +20,21 @@ function status() {
     };
 }
 
-test('the existing daemon banner carries measured loop, store and effective admission', () => {
+// The banner's Diagnostics as `Label: value` lines, the words the long banner used to carry.
+const diagnostics = (line) => (line.facts || []).map(([label, value]) => `${label}: ${value}`).join(' · ');
+
+test('the daemon banner says ready and keeps measured loop, store and admission in its Diagnostics', () => {
     const payload = status();
     const original = structuredClone(payload);
     const line = daemonStatusLine(payload);
     assert.equal(line.tone, 'ok');
-    assert.match(line.text, /Loop: p99 3\.4 ms, max 9 ms, busy 25% \(10004 ms window\)/);
-    assert.match(line.text, /Store: integrity ok, flusher up, flush lag 7 ms, WAL 1\.0 MiB, obligations 0/);
-    assert.match(line.text, /Jobs: model 1 active \/ 0 queued; other 24 active \/ 3 queued/);
-    assert.match(line.text, /Effective caps: total unlimited \(default\), model 8 \(config\), other unlimited \(environment\)/);
-    assert.doesNotMatch(line.text, /Import|Recovery only|restartRequired/);
+    assert.equal(line.text, 'Claudexor ready');
+    assert.equal(line.version, 'engine 4.0.0');
+    assert.match(diagnostics(line), /Loop: p99 3\.4 ms, max 9 ms, busy 25% \(10004 ms window\)/);
+    assert.match(diagnostics(line), /Store: integrity ok, flusher up, flush lag 7 ms, WAL 1\.0 MiB, obligations 0/);
+    assert.match(diagnostics(line), /Jobs: model 1 active \/ 0 queued; other 24 active \/ 3 queued/);
+    assert.match(diagnostics(line), /Effective caps: total unlimited \(default\), model 8 \(config\), other unlimited \(environment\)/);
+    assert.doesNotMatch(line.text + diagnostics(line), /Import|Recovery only|restartRequired/);
     assert.deepEqual(payload, original); // A display never changes caps or admission.
 });
 
@@ -44,11 +49,12 @@ test('recovery is running with import progress and unknown SQL measurements, nev
     payload.daemon.loop = null;
     const line = daemonStatusLine(payload);
     assert.equal(line.tone, 'warn');
+    // What blocks work stays on the line: recovery and its import progress; the store's figures are Diagnostics.
     assert.match(line.text, /Claudexor running/);
     assert.match(line.text, /Recovery only; product work is not admitted/);
-    assert.match(line.text, /integrity unknown, flusher unknown, flush lag unknown, WAL unknown, obligations unknown/);
     assert.match(line.text, /Import verifying: 2\/3 partitions, 1\.0\/2\.0 MiB \(project-fixture\)/);
-    assert.doesNotMatch(line.text, /Claudexor ready|Loop:|obligations 0|flush lag 0/);
+    assert.match(diagnostics(line), /Store: integrity unknown, flusher unknown, flush lag unknown, WAL unknown, obligations unknown/);
+    assert.doesNotMatch(line.text + diagnostics(line), /Claudexor ready|Loop:|obligations 0|flush lag 0/);
 });
 
 test('a stale account facet cannot hide engine recovery or erase its retained accounts', () => {
@@ -76,11 +82,59 @@ test('a stale account facet cannot hide engine recovery or erase its retained ac
 
 test('legacy finite totals keep class caps unknown and missing engine facts stay absent', () => {
     const payload = { daemon: { state: 'running', engine_version: '3.25.1', capacity: { maxConcurrent: 24 } } };
-    const text = daemonStatusLine(payload).text;
+    const text = diagnostics(daemonStatusLine(payload));
     assert.match(text, /total 24 \(source unknown\), model unknown \(source unknown\), other unknown \(source unknown\)/);
     assert.doesNotMatch(text, /unlimited|Loop:|Store:|Jobs:/);
     delete payload.daemon.capacity;
-    assert.equal(daemonStatusLine(payload).text, 'Claudexor ready (engine 3.25.1) · home ');
+    assert.deepEqual(daemonStatusLine(payload), { tone: 'ok', text: 'Claudexor ready', version: 'engine 3.25.1', facts: [] });
+});
+
+test('explicit store failures stay visible without Diagnostics and never reassure ready', () => {
+    for (const [integrity, flusher, expected] of [
+        ['failed', 'up', ['Store integrity failed']],
+        ['ok', 'down', ['Store flusher down']],
+        ['failed', 'down', ['Store integrity failed', 'Store flusher down']],
+    ]) {
+        const payload = status();
+        payload.daemon.store.integrity = integrity;
+        payload.daemon.store.flusher.state = flusher;
+        const original = structuredClone(payload);
+        for (const line of [daemonStatusLine(payload), serviceBannerLine({ snapshot: payload,
+            reads: payload.reads, everSettled: true })]) {
+            assert.equal(line.tone, 'warn');
+            assert.doesNotMatch(line.text, /Claudexor ready/);
+            for (const fact of expected) assert.equal(line.text.split(fact).length, 2);
+            assert.match(diagnostics(line), new RegExp(`integrity ${integrity}, flusher ${flusher}`));
+        }
+        assert.deepEqual(payload, original);
+    }
+});
+
+test('store failures retain existing facet and runtime diagnoses without promoting unknowns', () => {
+    const payload = status();
+    payload.daemon.store.integrity = 'failed';
+    payload.daemon.store.flusher.state = 'down';
+    payload.reads.quota = 'failed';
+    const store = { snapshot: payload, reads: payload.reads, everSettled: true,
+        unavailableNote: () => ({ tone: 'warn', text: 'Limits could not be read.' }) };
+    const partial = serviceBannerLine(store);
+    assert.match(partial.text, /Limits could not be read/);
+    assert.equal(partial.text.split('Store integrity failed').length, 2);
+    assert.equal(partial.text.split('Store flusher down').length, 2);
+    payload.daemon.runtime = { state: 'error', last_error: 'engine installation failed' };
+    const repair = daemonStatusLine(payload);
+    assert.equal(repair.tone, 'error');
+    assert.match(repair.text, /Claudexor needs repair: engine installation failed/);
+    assert.match(repair.text, /Store integrity failed/);
+    for (const [integrity, flusher] of [[null, null], ['pending', 'starting']]) {
+        const pending = status();
+        pending.daemon.store.integrity = integrity;
+        pending.daemon.store.flusher = flusher ? { state: flusher } : null;
+        const line = daemonStatusLine(pending);
+        assert.equal(line.tone, 'ok');
+        assert.equal(line.text, 'Claudexor ready');
+        assert.doesNotMatch(line.text, /failed|down/);
+    }
 });
 
 test('invalid partial values do not imply healthy zero or an unlimited default', () => {
@@ -91,7 +145,7 @@ test('invalid partial values do not imply healthy zero or an unlimited default',
     payload.daemon.admission = { active: { model: 0, non_model: null }, queued: null };
     for (const invalid of [null, 0, -1, true, 1.5, '24', Number.MAX_SAFE_INTEGER + 1]) {
         payload.daemon.capacity = { maxConcurrent: invalid };
-        const text = daemonStatusLine(payload).text;
+        const text = diagnostics(daemonStatusLine(payload));
         assert.match(text, /Loop: p99 unknown, max unknown, busy unknown/);
         assert.match(text, /integrity failed, flusher down/);
         assert.match(text, /model 0 active \/ unknown queued; other unknown active \/ unknown queued/);

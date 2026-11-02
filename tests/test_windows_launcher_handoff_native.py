@@ -52,7 +52,7 @@ receipt.with_suffix(".writing").replace(receipt)
 '''
 
 HANDING_LAUNCHER = r'''
-import ctypes, json, pathlib, sys
+import ctypes, json, pathlib, subprocess, sys
 from ouroboros import launcher_bootstrap as lb
 out = pathlib.Path(sys.argv[1])
 kernel = ctypes.WinDLL("kernel32")
@@ -65,7 +65,8 @@ class Log:
     warning = error = info
 context = lb.BootstrapContext(bundle_dir=out, repo_dir=pathlib.Path(sys.argv[2]), data_dir=out,
                               settings_path=out / "settings.json", embedded_python=sys.argv[3], app_version="0",
-                              hidden_run=None, save_settings=None, log=Log())
+                              hidden_run=lambda command, **_: subprocess.CompletedProcess(command, 0, "", ""),
+                              save_settings=None, log=Log())  # the import probe passes; the handoff is the subject
 note = lambda name: (out / name).write_text("1", encoding="utf-8")
 lb.exec_source_launcher(context, ["--launch-intent", "owner"], release_lock=lambda: note("released"),
                         acquire_lock=lambda: note("acquired") or True, before_release=lambda: note("before_release"),

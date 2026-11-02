@@ -4,6 +4,8 @@ The history is the server's dialogue store: rows stored as the server stores the
 and the frozen JSONL archive of an older install imported as the upgrade imports it.
 Only the request transport can be held/failed; every successful page and cursor
 comes from the real history endpoint. The shared server uses its local mock LLM.
+The layout-count guard at the end is the exception: its pages come from
+web/tests/history_layout_fixture.html, the real chat instance over a stubbed transport.
 """
 from __future__ import annotations
 
@@ -508,9 +510,9 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     popup.value.close()
                     assert line.get_attribute("data-expanded") == "1", "nested link must not toggle its title owner"
 
-                    card.locator('[data-review-section-toggle]').click()
+                    card.locator('[data-live-review-summary]').click()
                     card.locator('[data-review-group-toggle]').click()
-                    card.locator('[data-review-attempt-toggle]').first.click()
+                    card.locator('[data-review-facts] > summary').first.click()
                     detail = card.locator('[data-review-attempt-detail]').first
                     assert "REVIEW_DETAIL_SENTINEL" in detail.inner_text()
                     page.evaluate("""({feed, lineKey}) => {
@@ -518,7 +520,7 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                         const line = root.querySelector(`[data-live-line-key="${lineKey}"]`);
                         const card = line.closest('.chat-live-card');
                         const detail = card.querySelector('[data-review-attempt-detail]');
-                        const focus = card.querySelector('[data-review-attempt-toggle]');
+                        const focus = card.querySelector('[data-review-facts] > summary');
                         focus.focus({preventScroll:true});
                         root.scrollTop += detail.getBoundingClientRect().top - root.getBoundingClientRect().top - 80;
                         const range = document.createRange(); range.selectNodeContents(line.querySelector('.chat-live-line-title'));
@@ -562,7 +564,8 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                         const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
                         const copied = selection.toString(); selection.removeAllRanges(); return copied;
                     }""")
-                    assert "[RESULT]" in result_copy and "TERMINAL_CHILD_RESULT" in result_copy
+                    # A completed child's result is its report to the parent (#2273); [RESULT] stays for other endings.
+                    assert result_copy.startswith("Report to parent\n") and "TERMINAL_CHILD_RESULT" in result_copy
                     assert "Result heading\n" in result_copy and "UNIQUE_CHILD_TAIL" in result_copy
                     quiz = page.locator(f'{feed} [data-quiz-id="saved-choice"]')
                     assert quiz.get_attribute("data-state") == "answered"
@@ -761,5 +764,80 @@ def test_a_room_behind_other_rooms_archives_opens_at_its_newest_message_and_page
                     _screenshot(page, tmp_path, f"deep-room-beginning-{browser_engine}-{width}")
                 finally:
                     context.close()
+        finally:
+            browser.close()
+
+
+
+# One `Load more history` press costs a bounded number of layouts, however many rows its page holds: the page is applied
+# and released in one viewport transaction whose layout reads are batched (`web/modules/layout_batch.js`). Before, each
+# row's read laid the whole document out again (136-713 layouts per press here; 25-38 s per deep press at ~48k elements
+# in the macOS app's WKWebView). CDP `LayoutCount` also sees layouts the engine forces natively (Chromium lays out on a
+# selection read), which a JS-side counter misses. The fixture is the real chat instance with only its transport
+# stubbed; `shared` reuses the same expanded cards on every page, so mounted cards move and their timelines replay.
+_WAIT_FRAMES = "async n => { for (let i = 0; i < n; i++) await new Promise(requestAnimationFrame) }"
+_MARK_PASSAGE = """() => { const feed = document.querySelector('#chat-messages'), box = feed.getBoundingClientRect();
+    const node = [...feed.children].find(n => n.dataset.historyId && n.getBoundingClientRect().bottom > box.top);
+    window.__place = { node, top: node.getBoundingClientRect().top - box.top }; }"""
+_PASSAGE_KEPT = """() => { const { node, top } = window.__place, feed = document.querySelector('#chat-messages');
+    const shift = node.getBoundingClientRect().top - feed.getBoundingClientRect().top - top;
+    return node.isConnected && Math.abs(shift) <= 1; }"""
+
+
+def _layout_count(cdp):
+    return next(m["value"] for m in cdp.send("Performance.getMetrics")["metrics"] if m["name"] == "LayoutCount")
+
+
+def _layouts_per_press(browser, url, size, kind):
+    context = browser.new_context(viewport={"width": 1000, "height": 800})
+    try:
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        cdp = context.new_cdp_session(page)
+        cdp.send("Performance.enable")
+        page.goto(f"{url}/static/tests/history_layout_fixture.html?n={size}&kind={kind}")
+        page.wait_for_function("window.__ready")
+        if kind == "shared":
+            page.locator("[data-live-disclosure]").evaluate_all("buttons => buttons.forEach(b => b.click())")
+        page.evaluate(_WAIT_FRAMES, 36)
+        layouts, rows = [], []
+        for _ in range(5):
+            page.evaluate("""() => { const feed = document.querySelector('#chat-messages');
+                feed.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 })); feed.scrollTop = 160; }""")
+            page.evaluate(_WAIT_FRAMES, 36)
+            page.evaluate(_MARK_PASSAGE)
+            reads = page.evaluate("window.__reads.length")
+            before = _layout_count(cdp)
+            page.locator(".chat-load-older button").evaluate("button => button.click()")  # no actionability scroll
+            page.wait_for_function("""n => window.__reads.length > n
+                && !document.querySelector('.chat-load-older button').disabled""", arg=reads)
+            page.evaluate(_WAIT_FRAMES, 36)  # Markdown, observers and the 30-frame changed-row sleep tail
+            layouts.append(_layout_count(cdp) - before)
+            rows.append(page.locator("#chat-messages > *").count())
+            assert page.evaluate("window.__reads.length") == reads + 1, "one older page per press"
+            assert page.evaluate(_PASSAGE_KEPT), "the passage being read stays in place"
+        assert not errors, errors
+        assert len(set(rows[-3:])) == 1, ("the page cap releases older pages", rows)
+        assert page.locator(".project-answer.is-folded").count() > 0
+        assert page.locator(".chat-quote-text").count() > 0
+        assert page.locator("code.hljs").count() > 0
+        return layouts
+    finally:
+        context.close()
+
+
+def test_history_page_layout_count_is_bounded_by_batches(direct_server_with_data):
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            url = direct_server_with_data["url"]
+            for kind in ("mixed", "shared"):
+                small, large = (_layouts_per_press(browser, url, rows, kind) for rows in (24, 96))
+                facts = (browser.version, kind, small, large)
+                assert max(small + large) <= 24, facts
+                assert all(big <= little + 4 for little, big in zip(small, large)), facts
         finally:
             browser.close()

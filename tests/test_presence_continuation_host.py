@@ -49,11 +49,12 @@ def _seed_reviewing_behavior(data_dir: pathlib.Path) -> str:
     """``test_host_service_api``'s fixture behavior, bound to any room of the account, whose owner also
     selected ``review_change``: its turns may review their own result (a result review takes no workspace
     binding, so no resource is selected)."""
-    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint, new_presence_binding_id, save_presence_binding
-    from ouroboros.presence_capabilities import (
+    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
+    from tests.frozen_presence_bindings import new_presence_binding_id, save_presence_binding
+    from tests.frozen_presence_capabilities import (
         PresenceSelection, PresenceState, PresenceToolTarget, presence_state_fingerprint, save_presence_state,
     )
-    from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
+    from tests.frozen_presence_profile import parse_presence_profile, presence_request_fingerprint
     from ouroboros.skill_loader import SkillReviewState, load_skill, save_enabled, save_review_state
 
     skill_dir = data_dir / "skills" / "external" / "community-helper"
@@ -88,6 +89,10 @@ def _seed_reviewing_behavior(data_dir: pathlib.Path) -> str:
 
 @pytest.fixture
 def host(harness, monkeypatch):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("supervisor.consciousness_carriers.autonomous_work_enabled", lambda *_: True, raising=False)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})
     h = harness
     monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "1")
     _seed_token(h.data, skill="telegram-bot", token=_TOKEN, permissions=["presence"], manifest_permissions=["presence"])
@@ -101,7 +106,12 @@ def host(harness, monkeypatch):
 
     with TestClient(create_host_service_app(h.data, presence_runner=runner)) as client:
         h.client = client
-        yield h
+        try:
+            yield h
+        finally:
+            h.release.set()
+            executions = client.app.state.host_service_context.presence_turns
+            wait_for(lambda: not executions.live(), timeout=90, what="Host author teardown")
 
 
 def turn(h, number, text="Please prepare the status report", version=1, thread="topic-1", reporting=0, transport_queue=None):
@@ -124,7 +134,60 @@ def poll(h, ref):
 
 
 def test_identity_advertises_the_continuation_version(host):
-    assert host.client.get("/identity", headers=_HEADERS).json()["presence_continuation_version"] == 1
+    identity = host.client.get("/identity", headers=_HEADERS).json()
+    assert identity["presence_continuation_version"] == 1  # deployed consumers compare the scalar exactly
+    assert identity["presence_continuation_versions"] == [1, 2]
+
+
+def test_v2_early_answer_lends_nothing_and_the_real_park_returns_the_reservation_once(host, monkeypatch):
+    import threading
+    from ouroboros.conversation_lease import live_author
+
+    h = host
+    original = h.Agent.handle_task
+
+    def opens_intake(self, task):
+        # ``OuroborosAgent._handle_task_scoped`` fires it once its prepared loop opens intake; this harness
+        # agent runs the loop directly, so it fires it here, twice: a repeat answers nothing again.
+        callback = getattr(self, "intake_opened_callback", None)
+        for _ in range(2):
+            callback(task)
+        return original(self, task)
+
+    monkeypatch.setattr(h.Agent, "handle_task", opens_intake)
+    proceed, step = threading.Event(), author(deliver)
+
+    def held(messages):
+        assert proceed.wait(60), "the test never let the author's model call return"
+        return step(messages)
+
+    h.script = held
+    reservations = h.client.app.state.host_service_context._inflight
+    first = turn(h, 42, version=2).json()
+    ref = first["continuation_ref"]
+    assert (first["status"], first["continuation_version"], first["turn_ref"]) == ("continuing", 2, ref)
+    record = load_task_result(h.data, ref)["presence_continuation"]
+    assert "lent_at" not in record and "first_lent_at" not in record and record["continuation_version"] == 2
+    assert reservations["telegram-bot:presence"] == 1 and live_author(record["conversation_key"], drive_root=h.data) == ref
+    proceed.set()
+    wait_for(lambda: parked(h, ref), what="the review park")
+    wait_for(lambda: reservations["telegram-bot:presence"] == 0, what="the park's return of the reservation")
+    record = load_task_result(h.data, ref)["presence_continuation"]
+    assert record["lent_at"] and record["first_lent_at"] and record["initial"] == {
+        "status": "continuing", "outcome": "deferred", "text": "", "output_ref": "", "work_ref": ""}
+    h.quick.add("telegram:bot-1:43")  # the lent conversation and slot run the next event at once
+    assert turn(h, 43, NEW_WORDS, version=2).json()["text"] == "Noted."
+    assert turn(h, 42, version=2).json() == first  # still the write-once envelope
+    h.release.set()
+    wait_for(lambda: poll(h, ref).status_code == 200, timeout=60, what="the late result")
+    late = poll(h, ref).json()
+    assert (late["text"], late["continuation_version"]) == (ANSWER, 2)
+    # The resumed author's final model send carried event 43 whole in its reentry note: that is the last
+    # input its answer covers, so the reply anchors there, with 43's exact captured message.
+    assert "(event telegram:bot-1:43, taken by turn" in str(h.inputs[-1]) and NEW_WORDS in str(h.inputs[-1])
+    assert late["reply_anchor"] == {"source_event_id": "telegram:bot-1:43", "message": {"message_id": "43"}}
+    wait_for(lambda: reservations["telegram-bot:presence"] == 0, what="no second return")
+    assert reservations["telegram-bot:presence"] == 0
 
 
 def test_v1_consumer_gets_the_envelope_the_next_event_runs_and_the_late_result_polls_once(host):
@@ -289,7 +352,7 @@ def test_a_parked_author_still_live_in_this_process_stays_pending_and_is_never_r
 
 
 def _initiate(h, *args):
-    from ouroboros.tools.presence import get_tools
+    from tests.presence_legacy_helpers import legacy_tools as get_tools
     from ouroboros.tools.registry import ToolContext
 
     initiate = next(item for item in get_tools() if item.name == "initiate_presence")
@@ -308,7 +371,7 @@ def test_initiated_turn_outlives_the_callers_operation_bound(host, monkeypatch):
 
     h = host
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
-    monkeypatch.setattr("ouroboros.tools.presence._INITIATION_MARGIN_SEC", 0.5)
+    monkeypatch.setattr("tests.presence_legacy_helpers._INITIATION_MARGIN_SEC", 0.5)
     monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
                         functools.partial(run_presence_turn, agent_factory=lambda **_kw: h.Agent()))
     gate = threading.Event()

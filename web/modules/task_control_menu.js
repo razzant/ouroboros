@@ -13,9 +13,10 @@
 // retry and verbatim refusals are shared.
 
 import { cancelTask, hurryTask, pauseTask, resumeTask } from './api_client.js';
+import { openConfirmDialog } from './confirm_dialog.js';
 import { haptic } from './haptics.js';
 import { showToast } from './toast.js';
-import { tr } from './i18n.js';
+import { fmt, tr } from './i18n.js';
 
 export const ACTION_FINALIZE = 'finalize';
 export const ACTION_HURRY = 'hurry';
@@ -59,7 +60,7 @@ export function createTaskResumeButton(taskId, { canResume, onSettled = () => {}
     const button = document.createElement('button');
     button.type = 'button';
     // Resume is the one primary of a paused card (its Stop… beside it stays neutral).
-    button.className = 'btn btn-sm btn-primary';
+    button.className = 'btn btn-sm btn-primary ui-hit-area';
     button.dataset.resumeRun = '1';
     button.textContent = tr('task.control.resume', 'Resume');
     button.addEventListener('click', async (event) => {
@@ -199,8 +200,27 @@ const HELD_FACTS = {
     running_member: (b) => `task ${b.task_id} is still running`,
     dispatchable_member: (b) => `task ${b.task_id} is queued to run`,
     owned_process: (b) => `a process of task ${b.task_id} is still alive`,
-    model_handoff: () => 'a model request has no recorded result',
-    tool_handoff: (b) => `a tool call of task ${b.task_id} has not returned`,
+    // Mirrors work_stop.model_handoff_words (local_custody_repair.receiver_reason).
+    model_handoff: (b) => ({
+        local_call_live: `a model answer for task ${b.task_id} is awaited by a live worker`,
+        local_completion_unknown: `it is unknown whether the model answer receiver of task ${b.task_id} ended: `
+            + 'its worker cannot be proven ended',
+    })[b.reason] || 'a model request has no recorded result',
+    // Mirrors work_stop.tool_handoff_words: the server classifies (tool_custody.tool_handoff_reason).
+    tool_handoff: (b) => {
+        const tool = b.tool || 'tool';
+        const effects = (Array.isArray(b.effects) && b.effects.length ? b.effects.join(' and ') : 'outside effect');
+        return ({
+            local_call_live: `the ${tool} call of task ${b.task_id} is in a live worker: still running, `
+                + 'or its finished result is not recorded yet',
+            local_completion_unknown: `it is unknown whether the ${tool} call of task ${b.task_id} finished: `
+                + 'its worker cannot be proven ended',
+            owner_ended_effect_unknown: `the ${tool} call of task ${b.task_id} ended with its worker; `
+                + `the outcome of its ${effects} is unknown`,
+            returned_effect_unconfirmed: `the ${tool} call of task ${b.task_id} returned; its ${effects} `
+                + `${Array.isArray(b.effects) && b.effects.length > 1 ? 'are' : 'is'} not confirmed`,
+        })[b.reason] || `a ${tool} call of task ${b.task_id} is held`;
+    },
     merge_operation: (b) => `a merge of task ${b.task_id} is not settled`,
     workspace_executor: (b) => `a workspace process of task ${b.task_id} is not settled`,
     delegated_run: (b) => (b.state === 'running' ? `delegated run ${b.run_id} is running`
@@ -221,17 +241,69 @@ export function heldWorkFacts(blockers, limit = 3) {
         ? `${facts.slice(0, limit).join('; ')}; and ${facts.length - limit} more` : facts.join('; ');
 }
 
-export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast } = {}) {
+// The damaged saved records an accepted Continue or Resume did not wait for (`membership_gaps`: the census
+// tied them to no task; at most 20 named, all counted). The Pause row says the same fact in the transcript
+// (ouroboros/pause_notices.py). Named, never called another task's; whether they belong here is unknown.
+const GAP_WORDS = {
+    continue: ['Continue did not wait for {n} saved task record that could not be read and that nothing ties to '
+        + 'this task ({names}); whether it belongs here is unknown.', 'Continue did not wait for {n} saved task '
+        + 'records that could not be read and that nothing ties to this task ({names}); whether they belong here is unknown.'],
+    resume: ['The Pause did not wait for {n} saved task record that could not be read and that nothing ties to '
+        + 'this task ({names}); whether it belongs here is unknown.', 'The Pause did not wait for {n} saved task '
+        + 'records that could not be read and that nothing ties to this task ({names}); whether they belong here is unknown.'],
+};
+
+/** @returns {string} the gap an accepted `action` ('continue' | 'resume') answered with, '' without one */
+export function membershipGapWords(gaps, action) {
+    const count = gaps?.count;
+    if (!Number.isInteger(count) || count <= 0 || !GAP_WORDS[action]) return '';
+    const names = (Array.isArray(gaps.rows) ? gaps.rows : []).map((row) => String(row?.task_id || '')).filter(Boolean);
+    return fmt(GAP_WORDS[action][count === 1 ? 0 : 1],
+        { n: count, names: [...names, ...(count > names.length ? ['…'] : [])].join(', ') });
+}
+
+/** A warning beside the action's own toast, kept until dismissed: a Continue's gap, or one found after the Pause
+ *  row, has no other on-screen home (docs/DESIGN.md: a warning whose line is its only home stays). */
+export function announceMembershipGap(gaps, action, toast = showToast) {
+    const words = membershipGapWords(gaps, action);
+    if (words) toast(words, 'warn', { ttl: 0, dismissLabel: 'Dismiss notice' });
+    return words;
+}
+
+const KEPT_PAUSED = Symbol('kept_paused');
+
+// Every holder is a held call whose outcome is unknown (the server lists their ids): the owner may go on
+// without their results. They are never run again; the task records the decision (local_custody_repair).
+async function resumeWithoutUnknown(id, refusal, { resume, askOwner }) {
+    const named = refusal?.body?.acceptable_unknown;
+    if (!Array.isArray(named) || !named.length) throw refusal;
+    const facts = heldWorkFacts(refusal.body.blockers, 5);
+    const one = named.length === 1;
+    const confirmed = await askOwner({
+        title: 'Resume without these results?',
+        body: `${facts.charAt(0).toUpperCase()}${facts.slice(1)}. If you resume, ${one ? 'this call is' : 'these calls are'} `
+            + `never run again, whatever ${one ? 'it' : 'they'} changed outside stays as it is, `
+            + 'and your decision is recorded on the task.',
+        confirmLabel: 'Resume anyway',
+    });
+    return confirmed ? resume(id, { accept_unknown: named, reason: 'The owner resumed without these results.' })
+        : KEPT_PAUSED;
+}
+
+export async function resumeTaskAction(taskId, { resume = resumeTask, toast = showToast, askOwner = openConfirmDialog } = {}) {
     const id = String(taskId || '').trim();
     if (!id || inFlight.has(id)) return;
     inFlight.add(id);
     try {
-        const ack = await resume(id);
+        const ack = await resume(id).catch((refusal) => resumeWithoutUnknown(id, refusal, { resume, askOwner }));
+        if (ack === KEPT_PAUSED) return;
         if (ack?.ok !== true) throw new Error('Resume acknowledgement is unknown; retry this action.');
         pauseRequestIds.delete(id);
         // An answered root's late work (D10) continues in place; its answer stays delivered.
-        toast(ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
+        toast(ack.tree_only ? 'Resumed. Ouroboros or you choose which helpers continue.'
+            : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
             : 'Resuming: the task returns to the queue.', 'info');
+        announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record
     } catch (exc) {
         // The server names the refusal (replay_unsafe / fence missing /
         // not budget-paused): show it verbatim instead of a generic failure,
@@ -239,7 +311,7 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         // Handled here, never rethrown: the menu callback is fire-and-forget.
         const facts = heldWorkFacts(exc?.body?.blockers);
         toast(facts ? `Resume refused: ${facts}.${exc.body.action === 'wait_or_stop_the_previous_work'
-            ? ' Wait for that work or stop it.' : ''}` : `Resume refused: ${exc?.message || exc}`, 'error');
+            ? ' Wait for that work or stop it.' : ''}` : exc?.body?.message || `Resume refused: ${exc?.message || exc}`, 'error');
     } finally {
         inFlight.delete(id);
     }

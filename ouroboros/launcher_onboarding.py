@@ -16,6 +16,7 @@ from ouroboros.config import (
     load_settings,
 )
 from ouroboros.launcher_appearance import NativeAppearance
+from ouroboros.launcher_window_chrome import paint_room
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 
 # The launcher's own logger: these lines belong in launcher.log next to the
@@ -23,16 +24,16 @@ from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startu
 log = logging.getLogger("launcher")
 
 
-def setup_recovery_menu(window, read_port: Callable[[], int | None], *, setup: bool = False) -> list:
+def setup_recovery_menu(window, read_port: Callable[[], int | None]) -> list:
     """macOS recovery outside the selected page; other hosts keep their existing chrome.
 
     pywebview 5.4 retains its application menu across GUI loops. Each normal
     window gets a fresh binding; a retained action cannot navigate a successor
     (including Startup Failed) or use an endpoint the launcher no longer owns.
-    The main window also offers "Start without plugins": the page reloads with
-    skills' page code switched off (``?plugins=off``, web/modules/host_modules.js),
-    which a page that such code froze cannot do for itself. The ``setup`` window
-    runs no such code and does not offer it.
+    Foreign code that froze the page is not this menu's to rescue: a hung web view
+    commits no new load until the loop ends, so the way out is Quit and reopen, and
+    the start ledger (web/modules/holds.js) keeps the code that did not finish its
+    start from running again by itself.
     """
     if sys.platform != "darwin":
         return []
@@ -52,10 +53,7 @@ def setup_recovery_menu(window, read_port: Callable[[], int | None], *, setup: b
         except Exception:
             log.warning("Could not open %s in this window.", path, exc_info=True)
 
-    items = [MenuAction("Open built-in setup", lambda: open_page("/onboarding?builtin=1"))]
-    if not setup:
-        items.append(MenuAction("Start without plugins", lambda: open_page("/?plugins=off")))
-    return [Menu("Help", items)]
+    return [Menu("Help", [MenuAction("Open built-in setup", lambda: open_page("/onboarding?builtin=1"))])]
 
 
 def prepare_first_run_settings() -> tuple[dict, bool]:
@@ -166,9 +164,10 @@ def present_first_run_onboarding(
         min_size=(840, 640),
     )
     appearance.attach(window)
+    paint_room(window)  # macOS: opens in the Mac's room colour until its page paints the saved choice
     # Share persistent local UI storage with the same-origin main window.
     # This includes cookies and website data, not only the appearance choice.
-    webview.start(private_mode=False, menu=setup_recovery_menu(window, read_port or (lambda: port), setup=True))
+    webview.start(private_mode=False, menu=setup_recovery_menu(window, read_port or (lambda: port)))
     return outcome
 
 

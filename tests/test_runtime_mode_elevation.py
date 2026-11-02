@@ -29,6 +29,7 @@ import os
 import pathlib
 
 import pytest
+from tests._safety_fixtures import disable_safety, clear_safety_provider_env as _clear_safety_provider_env
 
 
 # ---------------------------------------------------------------------------
@@ -67,18 +68,6 @@ def _seed_disk(settings_path: pathlib.Path, payload: dict) -> None:
     settings_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _clear_safety_provider_env(monkeypatch) -> None:
-    """Keep post-check tests from depending on live safety LLM credentials."""
-    for key in (
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-
 # ---------------------------------------------------------------------------
 # 1. save_settings chokepoint
 # ---------------------------------------------------------------------------
@@ -114,7 +103,7 @@ def test_save_settings_allows_elevation_with_explicit_flag(isolated_settings):
 
     _seed_disk(isolated_settings, {"OUROBOROS_RUNTIME_MODE": "light"})
     save_settings(
-        {"OUROBOROS_RUNTIME_MODE": "advanced", "OPENAI_API_KEY": "irrelevant"},
+        {"OUROBOROS_RUNTIME_MODE": "advanced", "TOTAL_BUDGET": "42.0"},
         allow_elevation=True,
     )
     on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
@@ -341,7 +330,7 @@ def test_write_file_preserves_ordinary_content_json(tmp_path, monkeypatch, body)
     drive_root = tmp_path / "data"
     drive_root.mkdir()
     monkeypatch.setattr(cfg, "DATA_DIR", drive_root, raising=True)
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     ctx = _make_drive_ctx(tmp_path)
     ctx.repo_dir.mkdir()
@@ -702,8 +691,14 @@ def test_settings_save_warns_when_an_agent_task_is_running(isolated_settings, mo
     assert data["status"] == "saved"
     assert data.get("agent_task_running") is True
     warnings = data.get("warnings") or []
-    assert any("keeps the models, reviewers and subagents it started with" in w for w in warnings), warnings
+    assert any("keeps the reviewers, subagents, context and effort it started with" in w for w in warnings), warnings
     assert any("next task" in w for w in warnings), warnings
+    # A route key alone (models, accounts, keys) reaches running work on its next call: no such warning.
+    resp_route = client.post("/api/settings", json={"OUROBOROS_MODEL_ACCOUNTS": {"main": "account-two"}})
+    assert resp_route.status_code == 200, resp_route.text
+    assert "agent_task_running" not in resp_route.json()
+    assert not any("it started with" in w for w in resp_route.json().get("warnings") or [])
+    assert any("a task that chose its own model keeps it" in w for w in resp_route.json().get("warnings") or [])
 
     # No running task -> no warning noise.
     monkeypatch.setattr(settings_mod, "_has_started_agent_tasks", lambda: False)
@@ -712,6 +707,8 @@ def test_settings_save_warns_when_an_agent_task_is_running(isolated_settings, mo
     data2 = resp2.json()
     assert "agent_task_running" not in data2
     assert not any("An agent task is running" in w for w in (data2.get("warnings") or []))
+    quiet = client.post("/api/settings", json={"OUROBOROS_MODEL_ACCOUNTS": {"main": "account-three"}})
+    assert not any("chose its own model" in w for w in quiet.json().get("warnings") or [])
 
 
 def test_started_predicate_is_read_only_and_never_constructs_the_agent(monkeypatch):
@@ -894,6 +891,9 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
 
     # (module, function) -> why it may write settings.json without the prologue
     exempt = {
+        ("ouroboros/safety_config.py", "_migrate_consciousness_safety"):
+            "one-time startup migration under the settings lock: copies only the existing "
+            "owner level to the new consciousness key; merging defaults would author unrelated settings.",
         ("ouroboros/utils.py", "atomic_write_json"):
             "generic atomic serializer: the settings filename selects indentation only; "
             "semantic settings writers enforce the prologue before calling this primitive.",
@@ -904,6 +904,8 @@ def test_every_settings_writer_routes_through_the_shared_prologue():
             "into authorship.",
         ("ouroboros/usage_journal.py", "legacy_snapshot"):
             "reads/hashes the settings file for the usage archive; its writes target the archive.",
+        ("ouroboros/query_data_sql.py", "run_sql"):
+            "forwards OUROBOROS_SETTINGS_PATH to its child; writes only the temporary SQL request, not settings.",
         ("ouroboros/review_run_isolation.py", "isolate_review_data"):
             "points the isolated review at the host settings (or the drive's unwritten default path) "
             "and hashes them for the integrity pin; its one write is the drive's isolation record "
@@ -1000,7 +1002,7 @@ def test_owner_endpoint_authors_its_own_key_even_at_the_default(isolated_setting
     from starlette.testclient import TestClient
 
     from ouroboros import config as cfg
-    from ouroboros.gateway.settings import api_owner_safety_mode
+    from ouroboros.gateway.safety_settings import api_owner_safety_mode
 
     _own_ratchet_env(monkeypatch)
     _os.environ["OUROBOROS_SAFETY_MODE"] = "light"
@@ -1671,7 +1673,7 @@ def test_run_shell_writes_skill_state_examples(shape, filename, tmp_path, monkey
     payload = tmp_path / "payload.json"
     payload.write_text('{"status":"pass","enabled":true}', encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
     if os.name == "nt":
         # ``bash`` on hosted Windows resolves to WSL, which has no distro in
@@ -1811,7 +1813,7 @@ def test_run_shell_waits_for_a_helper_writing_a_skill_state_example(tmp_path, mo
         "child.wait(timeout=5)\n"
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
     result = reg.execute("run_command", {"cmd": [sys.executable, "-c", parent_code, str(drive_root), child_code]})
     assert "exit_code=0" in result, result
@@ -1831,7 +1833,7 @@ def test_detached_helper_does_not_make_printed_words_a_skill_state_mutation(tmp_
         "print('state skills')\n"
     )
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    disable_safety(monkeypatch)
     reg = ToolRegistry(repo_dir=tmp_path, drive_root=drive_root)
     result = reg.execute("run_command", {"cmd": [sys.executable, "-c", code]})
     assert "exit_code=0" in result and "state skills" in result, result

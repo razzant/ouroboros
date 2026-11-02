@@ -342,7 +342,7 @@ def test_unresolved_summary_changes_once_and_caps_one_row_for_300_candidates(env
     _terminal(env)
     row = _final(env, _attempt(env, provider='claudexor'))
     rows = [{**row, 'attempt_id': f'row-{index:03}'} for index in range(2)]
-    monkeypatch.setattr(usage_store.Txn, 'attempts', lambda self, where='1', params=(): list(rows))
+    monkeypatch.setattr(usage_store, 'decode_attempts', lambda captured: list(rows))  # the open set the read captured
     monkeypatch.setattr('ouroboros.llm_claudexor.recover_model_attempt', lambda *a, **kw: None)
     monkeypatch.setattr(duty, '_LAST_UNRESOLVED', {})
     def observed():

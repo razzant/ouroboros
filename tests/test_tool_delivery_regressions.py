@@ -91,10 +91,11 @@ def test_completed_batch_measurement_includes_auto_image(tmp_path, monkeypatch, 
         {"id": "picture", "type": "function", "function": {"name": "ext_fixture_screenshot", "arguments": "{}"}},
     ]}]
     ctx.messages = messages
-    attached = []
+    attached, stamps = [], []
 
-    def attach(inner, path):
+    def attach(inner, path, *, stamp=None, observation=None):
         attached.append(path)
+        stamps.append(stamp)
         inner.messages.append({"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,SYNTHETIC_ONLY"}}]})
         return True, "synthetic attachment; no image file was opened"
@@ -131,6 +132,7 @@ def test_completed_batch_measurement_includes_auto_image(tmp_path, monkeypatch, 
         SimpleNamespace(_ctx=ctx), fit_candidate=measure, tool_schemas=[]) == 0
     assert [row["role"] for row in messages][:3] == ["assistant", "tool", "tool"]
     assert len(attached) == int(auto_image)
+    assert all(stamp is ctx for stamp in stamps), "an eviction is stamped on the live slot, not a staged copy"
     report = {"auto_image": auto_image, "batch": trace["tool_result_delivery"][0],
               "actual_input_tokens": facts(messages, [])["estimated_input_tokens"],
               "reserve": reserve, "window": window,

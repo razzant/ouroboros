@@ -405,12 +405,16 @@ def test_bundle_and_loaded_versions_stay_separate_after_source_update(launch, mo
 
 def test_source_shell_spawns_body_with_plain_python_and_installed_app_version(launch, monkeypatch):
     l = launch
+    monkeypatch.delenv("OUROBOROS_AGENT_PYTHON", raising=False)
     monkeypatch.setattr(l.module.sys, "frozen", False)
     monkeypatch.setattr(l.module.sys, "executable", str(l.entry))
     monkeypatch.setattr(l.module, "_external_seed_bundle", l.seed)
     monkeypatch.setattr(l.module, "APP_VERSION", "8.0.0")
     monkeypatch.setattr(l.module, "_load_settings", lambda: {})
     monkeypatch.setattr(l.module, "_apply_settings_to_env", lambda settings: None)
+    # The launcher process never imports server.py, whose import exports OUROBOROS_AGENT_PYTHON into this
+    # pytest process when an earlier test in the same worker imported it (an order-dependent full-battery red).
+    monkeypatch.delenv("OUROBOROS_AGENT_PYTHON", raising=False)
     seen = {}
 
     def popen(cmd, **kwargs):

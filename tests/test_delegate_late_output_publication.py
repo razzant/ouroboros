@@ -18,6 +18,7 @@ import pytest
 
 from ouroboros import delegate_custody as custody
 from ouroboros import delegate_custody_current, delegate_terminal, obligations, store
+from ouroboros import usage_accounting as usage
 from ouroboros.task_results import load_task_result, write_task_result
 from ouroboros.tools.registry import ToolContext
 from tests.test_delegate_retry_output import (
@@ -51,15 +52,21 @@ def refresh(data, monkeypatch):
         return delegate_terminal.backfill_terminal_reconciliations(data)
 
 
-def discharged_retry(tmp_path, monkeypatch, state="succeeded", *, acknowledged=True):
+def discharged_retry(tmp_path, monkeypatch, state="succeeded", *, acknowledged=True,
+                     stored_usd=1.75, ledger_usd=1.75):
     ctx = retry_context(tmp_path, monkeypatch, split=True)
     data = custody.custody_root(ctx)
     held = durable_run(ctx, state=state)
     # Multiple historical receipts must survive refreshing only the late run.
     for rid in ("old-failed", "old-cancelled"):
         durable_run(ctx, run_id=rid, state=rid.removeprefix("old-"))
+    if ledger_usd is not None:
+        # The task's money is the ledger's: the held run's session receipt. The older runs stay
+        # unpriced, so the known subtotal is partial (cost_final False), never a result-only literal.
+        usage.record_subscription_session(held.run_id, drive_root=data, route="test-route", model="test-model",
+                                          task_id=held.task_id, root_task_id=held.task_id, spend_usd=ledger_usd)
     write_task_result(data, held.task_id, "failed", reason_code="idle_timeout",
-                      accounted_upper_bound_usd=1.75, cost_final=False,
+                      accounted_upper_bound_usd=stored_usd, cost_final=False,
                       delegated_runs_started=3, delegated_runs_settled=0,
                       outcome_axes={"execution": {"status": "infra_failed"}})
     if acknowledged:
@@ -137,8 +144,24 @@ def test_late_retry_wait_republishes_discharged_owner_receipt(tmp_path, monkeypa
     assert set(new) == set(old)
     assert new["old-failed"] == old["old-failed"]
     assert new["old-cancelled"] == old["old-cancelled"]
-    assert {k: v for k, v in new[held.run_id].items() if k != "staged_output"} == old[held.run_id]
+    assert {k: v for k, v in new[held.run_id].items()
+            if k not in {"staged_output", "terminal_observation"}} == old[held.run_id]
     assert new[held.run_id]["staged_output"]["sha256"] == artifact["sha256"]
+    # The late wait also retains the exact engine observation on the physical
+    # owner's canonical drive; both published sources survive the retry drive.
+    observed = new[held.run_id]["terminal_observation"]
+    source = delegate_custody_current.run(data, held.run_id).terminal_source
+    assert observed == {
+        **{key: value for key, value in source.items() if key != "read"},
+        "complete": True, "content_kind": "terminal_observation",
+        "source_read": {"tool": "get_task_result", "arguments": {
+            "task_id": held.task_id, "delegated_output_sha256": source["sha256"]}},
+    }
+    observation_page = source_page(reader, held.task_id, observed)
+    assert observation_page["status"] == "available"
+    assert observation_page["content_kind"] == "terminal_observation"
+    assert observation_page["staging_task_id"] == held.task_id
+    assert observation_page["source_complete"] is True
     assert [row for row in custody.custody_rows(data) if row["type"] == custody.SETTLED] == settled
     assert not receipts(ctx), "digest publication/read grants no D7 receipt"
     assert obligations.members(data, "custody_open") == {}
@@ -393,6 +416,7 @@ def test_a_committed_late_output_is_published_or_durably_owed(tmp_path, monkeypa
     for key in ("status", "reason_code", "outcome_axes", "accounted_upper_bound_usd",
                 "cost_final", "delegated_runs_started", "delegated_runs_settled"):
         assert after[key] == before[key]
+    assert (after["accounted_upper_bound_usd"], after["cost_final"]) == (1.75, False), "the ledger's partial subtotal"
     receipts_by_run = {row["run_id"]: row for row in after["delegate_terminal_reconciliation"]["terminal_runs"]}
     assert set(receipts_by_run) == {held.run_id, "old-failed", "old-cancelled"}
     assert after["delegated_runs_unreconciled"] == []
@@ -402,3 +426,36 @@ def test_a_committed_late_output_is_published_or_durably_owed(tmp_path, monkeypa
     assert again["sha256"] == artifact["sha256"]
     assert load_task_result(data, held.task_id) == published
     assert obligations.members(data, "delegated_runs") == {}
+
+
+@pytest.mark.parametrize("money", ["unbacked", "ledger-unavailable", "corrected"])
+def test_the_owed_refresh_publishes_only_ledger_money(tmp_path, monkeypatch, money):
+    """The amount a custody refresh publishes is the ledger's, whatever the result stored: a figure
+    with no ledger money behind it becomes unknown (never $0), an unreadable ledger rewrites no
+    money and keeps the debt, and a stored figure the ledger contradicts is corrected."""
+    from ouroboros import usage_store
+
+    ctx, held, before = discharged_retry(tmp_path, monkeypatch, acknowledged=False,
+                                         stored_usd=2.0 if money == "corrected" else 1.75,
+                                         ledger_usd=None if money == "unbacked" else 1.75)
+    data = custody.custody_root(ctx)
+    keys = ("accounted_upper_bound_usd", "cost_final", "cost_accounting_status", "cost_custody")
+    with monkeypatch.context() as patch:
+        if money == "ledger-unavailable":
+            def busy(*_args, **_kwargs):
+                raise usage_store.UsageLockUnavailable("injected: usage store busy", reason="contention")
+
+            patch.setattr(usage_store, "read", busy)
+        delegate_terminal.refresh_recently_settled_terminals(data)
+    after = load_task_result(data, held.task_id)
+    owed = obligations.members(data, "delegated_runs").get(held.task_id, {})
+    if money == "ledger-unavailable":
+        assert {key: after.get(key) for key in keys} == {key: before.get(key) for key in keys}
+        assert owed.get("cost_revision"), "an unread ledger acknowledges no cost debt"
+        delegate_terminal.refresh_recently_settled_terminals(data)
+        after = load_task_result(data, held.task_id)
+    assert "cost_revision" not in obligations.members(data, "delegated_runs").get(held.task_id, {})
+    expected = None if money == "unbacked" else 1.75
+    assert after["accounted_upper_bound_usd"] == expected and after["cost_final"] is False
+    assert after["cost_custody"]["unrecorded_run_ids"] == (
+        sorted([held.run_id, "old-cancelled", "old-failed"]) if money == "unbacked" else ["old-cancelled", "old-failed"])

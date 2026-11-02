@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { cardRowView, createRoomWork, latestRepresentedRoot, workCard } from '../modules/room_work.js';
 import { markView } from '../modules/status_mark.js';
@@ -347,7 +348,8 @@ test('the one mark after the word is the room\'s shape, the owner\'s amber dot i
         // owner's move together, as chat.js writes them.
         const paint = (view) => {
             badge.textContent = view.text;
-            Object.assign(badge.dataset, { tone: view.tone, mark: view.mark, owner: view.owner ? '1' : '', amber: view.amber });
+            Object.assign(badge.dataset, { tone: view.tone, mark: view.mark, owner: view.owner ? '1' : '', amber: view.amber,
+                step: view.step || '' });
             work.update();
             return [trigger.dataset.tone, mark.hidden ? 'hidden' : mark.dataset.shape, mark.dataset.hue,
                 waitNote.hidden ? '' : waitNote.textContent];
@@ -380,6 +382,161 @@ test('the one mark after the word is the room\'s shape, the owner\'s amber dot i
         // One mark node throughout, repainted in place.
         assert.equal(trigger.children.filter(el => el.classList.contains('status-mark')).length, 1);
         assert.equal(trigger.children.find(el => el.classList.contains('status-mark')), mark);
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
+// DESIGN "Shell" on a phone (375 px), where the bar leaves the status about 90 px: a preparing room's start step goes
+// first, then the word whole; the mark stays and the control's name keeps the whole status (touch has no hover).
+test('on a phone-width bar a preparing room drops its start step before its word, and the name keeps both', () => {
+    const css = readFileSync(new URL('../room_work.css', import.meta.url), 'utf8');
+    for (const rule of ['.status-badge[data-step]:not([data-step=""])::after { content: " · " attr(data-step); }',
+        '.rw-trigger[data-step="off"] .status-badge::after { content: none; }',
+        '.rw-trigger[data-word="off"] .status-badge { display: none; }']) assert.ok(css.includes(rule), rule);
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work, resized = null;
+    try {
+        globalThis.ResizeObserver = class { constructor(fn) { resized = fn; } observe() {} disconnect() {} };
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge thinking', node('div', 'app-page-actions ui-chrome-group', header));
+        // Those rules at 7 px a character: the step shows unless the control drops it, the word unless the control
+        // drops it whole, and the badge clips at the width the bar leaves it.
+        let space = 600;
+        const shown = () => {
+            const off = badge.parentNode.dataset;
+            if (off.word === 'off') return '';
+            return badge.textContent + (badge.dataset.step && off.step !== 'off' ? ` · ${badge.dataset.step}` : '');
+        };
+        Object.defineProperty(badge, 'scrollWidth', { get: () => 7 * shown().length });
+        Object.defineProperty(badge, 'clientWidth', { get: () => Math.min(7 * shown().length, space) });
+        Object.defineProperty(titleRow, 'clientWidth', { get: () => space });
+        work = createRoomWork({ page, statusBadge: badge, messagesDiv: node('div', 'chat-messages', page),
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(), liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        const trigger = titleRow.children.find(el => el.classList.contains('rw-trigger'));
+        const paint = (state) => {
+            const view = roomStatusView(state);
+            badge.textContent = view.text;
+            Object.assign(badge.dataset, { tone: view.tone, mark: view.mark, owner: view.owner ? '1' : '', amber: view.amber,
+                step: view.step || '' });
+            work.update();
+            return [shown(), trigger.title];
+        };
+        const resize = (width) => { space = width; resized([{ target: header }]); return [shown(), trigger.title]; };
+        const whole = 'Preparing · Building context';
+        const preparing = reconcileWorkState(emptyWorkState(),
+            { supervisor_ready: true, ...structuredClone(SERVER_CASES.direct_preparing) }, 1);
+        assert.deepEqual(paint(preparing), [whole, whole], 'a wide bar says both');
+        assert.deepEqual(resize(90), ['Preparing', whole], 'room for the word, not for its step');
+        assert.deepEqual(resize(40), ['', whole], 'narrower still: the word goes whole, the mark stays');
+        assert.deepEqual(resize(90), ['Preparing', whole], 'a wider bar brings the word back first');
+        assert.deepEqual(resize(600), [whole, whole]);
+        // A room without a step is fitted by its word alone.
+        assert.deepEqual(paint(workState([], room('working'))), ['Working', 'Working']);
+        assert.deepEqual(resize(40), ['', 'Working']);
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
+// A Project's bar and its room, as app.js and chat.js mount them: the name in the title row, the consciousness chip,
+// and the instance's page whose status badge the room's control takes.
+function projectRoom(mount) {
+    const node = (tag, cls, parent) => {
+        const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+    };
+    const panel = node('div', 'project-panel', mount);
+    const bar = node('div', 'project-panel-bar', panel);
+    const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', bar));
+    const name = node('h2', 'app-page-title', titleRow);
+    const chip = node('button', 'cx-chip', bar);
+    const page = node('div', 'chat-instance-panel', node('div', 'project-panel-body', panel));
+    page.closest = (selector) => (selector === '.project-panel' ? panel : null);
+    const badge = node('span', 'status-badge online', node('div', 'chat-panel-statusbar', page));
+    return { bar, titleRow, name, chip, page, badge, messages: node('div', 'chat-messages', page) };
+}
+
+// DESIGN "Shell": a Project's name keeps one line and wins its bar. On a phone a name that line still cuts makes the
+// consciousness chip show its brain alone (the chip's name keeps the whole state); a desk keeps the chip's word and
+// the name ends in an ellipsis; a name that fits leaves the chip whole.
+test('a Project bar gives its one-line name the chip\'s word on a phone only while the name is cut', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work, resized = null, relayout = null;
+    try {
+        globalThis.ResizeObserver = class { constructor(fn) { resized = fn; } observe() {} disconnect() {} };
+        globalThis.window.addEventListener = (type, fn) => { if (type === 'ouro:layout-changed') relayout = fn; };
+        const root = document.documentElement;
+        root.dataset.layout = 'stack';
+        const { bar, titleRow, name, chip, page, badge, messages } = projectRoom(mount);
+        // At 7 px a character the name's one line holds 30 characters beside the whole chip, 40 beside its brain alone;
+        // a longer name is cut (its box narrower than its text).
+        let length = 20, width = 200;
+        Object.defineProperty(name, 'scrollWidth', { get: () => 7 * length });
+        Object.defineProperty(name, 'clientWidth', { get: () => 7 * Math.min(length, chip.dataset.fit === 'mark' ? 40 : 30) });
+        Object.defineProperty(badge, 'scrollWidth', { get: () => 0 });
+        Object.defineProperty(badge, 'clientWidth', { get: () => 0 });
+        Object.defineProperty(titleRow, 'clientWidth', { get: () => width });
+        work = createRoomWork({ page, asPanel: true, statusBadge: badge, messagesDiv: messages,
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(), liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        const fit = () => chip.dataset.fit || 'whole';
+        const named = (chars) => { length = chars; width += 1; resized([{ target: bar }]); return fit(); };
+        assert.equal(named(20), 'whole', 'a name that fits leaves the chip whole');
+        assert.equal(named(36), 'mark', 'a name its one line would cut: the chip shows its brain alone');
+        assert.equal(named(60), 'mark', 'still cut beside the brain: the name ends in an ellipsis, the chip stays small');
+        assert.equal(named(12), 'whole', 'a short name gives the chip its word back');
+        // A desk keeps the chip's word and lets the name end in an ellipsis; a layout switch fits again.
+        length = 60;
+        root.dataset.layout = 'docked';
+        relayout();
+        assert.equal(fit(), 'whole', 'a desk keeps the chip\'s word beside a cut name');
+        root.dataset.layout = 'stack';
+        relayout();
+        assert.equal(fit(), 'mark', 'back on a phone the cut name takes the word again');
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
+// DESIGN "Room work status" and "Shell": a Project's list starts with the room's whole name, which its one-line title
+// may cut, so the title opens it even when the room has no work; the list then says so in Activity's words.
+test('a Project\'s list opens on its whole name, also with no work, and says when nothing is listed', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work;
+    try {
+        const { bar, titleRow, name, page, badge, messages } = projectRoom(mount);
+        const whole = 'Archive — reconcile every cited source with its appendix / Appendix B';
+        name.textContent = whole;
+        Object.assign(badge.dataset, { tone: 'online', mark: 'none', owner: '', amber: '' });
+        badge.textContent = 'Online';
+        let works = [];
+        work = createRoomWork({ page, asPanel: true, statusBadge: badge, messagesDiv: messages,
+            ws: { isConnected: () => true }, reading: { cancel() {}, scroll() {} },
+            works: () => workState(works), liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const caret = trigger.children.find((el) => el.classList.contains('rw-caret'));
+        const surface = bar.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0];
+        const [head, list, note] = surface.children;
+        assert.ok(head.classList.contains('rw-title') && list.classList.contains('rw-list'), 'the name comes first');
+        assert.equal(trigger.disabled, false, 'an empty Project\'s title still opens its list');
+        assert.equal(caret.hidden, false, 'and its caret says so');
+        titleRow.click();
+        assert.equal(work.isOpen(), true, 'a press on the name opens the list');
+        assert.deepEqual([head.textContent, head.hidden], [whole, false], 'the whole name, never cut');
+        assert.equal(list.children.length, 0);
+        assert.deepEqual([note.textContent, note.hidden], ['Nothing running or queued.', false]);
+        // With work listed the name still leads and the empty sentence goes.
+        works = [running('t-run')];
+        work.update();
+        assert.deepEqual(list.children.map((row) => row.dataset.id), ['t-run']);
+        assert.equal(surface.children[0], head);
+        assert.equal(note.hidden, true, 'nothing to say while work is listed');
+        work.close();
+        assert.equal(work.isOpen(), false);
+        assert.equal(trigger.disabled, false, 'the title stays a door once the work ends');
+        works = [];
+        work.update();
+        assert.equal(trigger.disabled, false);
     } finally { work?.destroy(); restoreDom(prior); }
 });
 

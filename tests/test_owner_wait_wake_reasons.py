@@ -372,6 +372,7 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     from ouroboros.owner_wait import checkpoint_owner_wait, load_owner_wait, resume_native_loop, set_owner_wait
     from ouroboros.task_pacing import CostCeiling
     from ouroboros.task_results import write_task_result
+    from ouroboros.tool_policy import format_capability_omissions, initial_tool_schemas
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
@@ -386,7 +387,9 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     write_task_result(tmp_path, "cold", "running")
     record_asked(tmp_path, "cold", quiz_id="q1", question="?", options=["a", "b"],
                  wait_for_answer=True, assumption="a meanwhile")
-    wait = checkpoint_owner_wait(ctx, [{"role": "user", "content": "go"}], {}, {}, 1, [], set())
+    # Keep the catalog unchanged so these assertions isolate the wake notice.
+    wait = checkpoint_owner_wait(ctx, [{"role": "user", "content": "go"}], {}, {}, 1,
+                                 initial_tool_schemas(registry, context_mode="max"), set())
     set_owner_wait(tmp_path, "cold", {**wait, "state": "waiting"})
     ctx.owner_wait_resume = {**wait, "restart_transaction_id": "confirmed"}
     if outcome == "mail:peer-1":
@@ -399,6 +402,9 @@ def test_a_cold_continuation_explains_a_non_answer_wake_like_warm(tmp_path, monk
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *a, **k: (None, "max"))
     messages = []
     resume_native_loop(registry, saved, messages, {}, {}, set())
+    notes = format_capability_omissions(registry.capability_omissions())
+    if notes:
+        assert messages.pop(1) == {"role": "user", "content": "[SYSTEM NOTICE]\n" + "\n".join(notes)}
     assert messages[0]["content"] == "go"
     assert "continued from its saved owner wait" in messages[1]["content"]
     if expects is None:

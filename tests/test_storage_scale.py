@@ -17,27 +17,38 @@ from tests._store_journal_shared import held_open, tree_state
 pytestmark = pytest.mark.scale
 
 
+def _decoded_rows(monkeypatch):
+    """Count the documents each ``task_store._decode`` call decodes (its input is captured pages)."""
+    decoded, real = [], task_store._decode
+
+    def decode(pages):
+        documents = real(pages)
+        decoded.append(len(documents))
+        return documents
+
+    monkeypatch.setattr(task_store, "_decode", decode)
+    return decoded
+
+
 @pytest.mark.parametrize("count", [1, 64, 256])
 def test_listing_decodes_only_the_rows_the_status_prefilter_selects(tmp_path, monkeypatch, count):
     for index in range(count):
         write_task_result(tmp_path, f"task-{index}", "completed")
-    decode = Mock(wraps=task_store._decode)
-    monkeypatch.setattr(task_store, "_decode", decode)
+    decoded = _decoded_rows(monkeypatch)
     assert list_task_results(tmp_path, statuses=["running"]) == []
-    assert [len(call.args[0]) for call in decode.call_args_list] == [0]
+    assert decoded == [0]
     assert len(list_task_results(tmp_path)) == count
-    assert [len(call.args[0]) for call in decode.call_args_list] == [0, count]
+    assert decoded == [0, count]
 
 
 def test_child_lookup_selects_only_the_lineage_rows_on_every_call(tmp_path, monkeypatch):
     for index in range(32):
         write_task_result(tmp_path, f"task-{index}", "completed", delegation_role="subagent",
                           parent_task_id="parent" if index == 0 else "other", root_task_id="parent" if index == 0 else "other")
-    decode = Mock(wraps=task_store._decode)
-    monkeypatch.setattr(task_store, "_decode", decode)
+    decoded = _decoded_rows(monkeypatch)
     for _ in range(2):
         assert [row["task_id"] for row in find_child_tasks(tmp_path, parent_task_id="parent", materialize_artifacts=False)] == ["task-0"]
-    assert [len(call.args[0]) for call in decode.call_args_list] == [1, 1]
+    assert decoded == [1, 1]
 
 
 def test_swarm_rollup_reads_one_event_and_resolves_depth_once(tmp_path, monkeypatch):

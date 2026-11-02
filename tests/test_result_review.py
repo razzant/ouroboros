@@ -274,6 +274,10 @@ def test_required_reviews_presence_results_without_holding_them_and_ignores_a_de
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False, \
         "Presence speech is never held for a review"
     assert shown == [] and len(sends) == 3, "its owed review still runs, with nobody waiting for it"
+    [run] = trace["review_runs"]
+    presence = review_ledger.load_record(ctx.drive_root, run["record_id"])
+    assert presence["panel"]["chosen_by"] == "host" and presence["panel"]["composition"] == "full_pool"
+    assert set(presence["panel"]["assigned"]) == {"t1", "t2", "s1"}
     assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, shown.append) is False and len(sends) == 3
     sends.clear()
 
@@ -843,3 +847,64 @@ def test_alternating_answers_at_a_spent_blocking_ceiling_hold_with_each_refusal_
     for answer in ("FINAL ANSWER: 2", "FINAL ANSWER: 3", "FINAL ANSWER: 2", "FINAL ANSWER: 3"):
         assert rr.result_review_at_delivery(ctx, answer, trace, shown.append) is True, answer
     assert "raises the review ceiling" in shown[-1] and len(sends) == 3
+
+
+def test_the_host_floor_seats_the_whole_pool_and_records_that_the_host_chose(tmp_path, monkeypatch):
+    from ouroboros.review_projection import ledger_record_panel
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement="blocking")
+    _produced_answer_protocol(monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    trace = {"tool_calls": []}
+
+    assert result_review_at_delivery(ctx, "FINAL ANSWER: 2", trace, lambda _text: None) is False
+    assert len(sends) == 3
+    [run] = trace["review_runs"]
+    record = review_ledger.load_record(ctx.drive_root, run["record_id"])
+    assert record["panel"]["chosen_by"] == "host" and record["panel"]["composition"] == "full_pool"
+    assert set(record["panel"]["assigned"]) == {"t1", "t2", "s1"} and record["panel"]["widened_from"] == []
+    assert ledger_record_panel(record)["panel_facts"]["chosen_by"] == "host"
+
+
+def test_a_minds_review_of_a_required_root_stays_chosen_by_ouroboros(tmp_path, monkeypatch):
+    from ouroboros.tools.review_result import result_review_at_delivery
+
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement="blocking")
+    _produced_answer_protocol(monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    answer = "FINAL ANSWER: 2"
+
+    first = run_review_change(ctx, subject="result", answer=answer)
+    assert first["panel"]["chosen_by"] == "ouroboros" and set(first["panel"]["assigned"]) == {"t1", "t2", "s1"}
+    assert result_review_at_delivery(ctx, answer, {"tool_calls": []}, lambda _text: None) is False
+    assert len(sends) == 3, "a review the mind already ran is not bought again as the host's"
+
+
+def test_advisory_required_refuses_an_unexplained_subset_and_composes_a_reason(tmp_path, monkeypatch):
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+
+    with pytest.raises(ReviewChangeArgumentError, match="REVIEW_PANEL_REASON_REQUIRED"):
+        run_review_change(ctx, subject="result", answer="Two findings.", reviewers=["t1"])
+    assert sends == []
+    composed = run_review_change(ctx, subject="result", answer="Two findings, with a reason.",
+                                 reviewers=["t1"], reason="the risky claim")
+    assert composed["panel"]["assigned"] == ["t1"] and composed["panel"]["chosen_by"] == "ouroboros"
+    assert composed["panel"]["widened_from"] == [] and [send["slot_id"] for send in sends] == ["t1"]
+
+
+def test_auto_blocking_composes_a_named_subset_and_a_child_is_not_widened(tmp_path, monkeypatch):
+    auto = _floor_ctx(tmp_path / "auto", monkeypatch, mode="auto", enforcement="blocking")
+    sends: list[dict] = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
+    named = run_review_change(auto, subject="result", answer="Auto keeps the named row.", reviewers=["t1"])
+    assert named["panel"]["assigned"] == ["t1"] and named["panel"]["widened_from"] == []
+
+    child = _floor_ctx(tmp_path / "child", monkeypatch, enforcement="blocking", root=False)
+    widened = run_review_change(child, subject="result", answer="A child keeps the named row.", reviewers=["t1"])
+    assert widened["panel"]["assigned"] == ["t1"] and widened["panel"]["widened_from"] == []
+    assert sorted(send["slot_id"] for send in sends) == ["t1", "t1"]

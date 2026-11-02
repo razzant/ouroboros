@@ -485,6 +485,8 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
         raise ExtensionRegistrationError("ui render must be an object")
     clean = copy.deepcopy(render)
     kind = _text(clean.get("kind"))
+    if kind != "module" and ("entry_type" in clean or "assets" in clean):
+        raise ExtensionRegistrationError("entry_type/assets apply to module widgets only")
     if kind not in _UI_RENDER_KINDS:
         raise ExtensionRegistrationError(f"ui render kind {kind!r} is unsupported; expected one of {sorted(_UI_RENDER_KINDS - {''})}")
     _validate_start_mode(clean, kind=kind)
@@ -494,6 +496,11 @@ def validate_ui_render(render: Dict[str, Any]) -> Dict[str, Any]:
     if kind == "iframe" and not _text(clean.get("route")):
         raise ExtensionRegistrationError("iframe widget render requires route (the extension route the frame loads)")
     if kind == "module":
+        from ouroboros.extension_widget_assets import validate_widget_files
+
+        validate_widget_files(clean)
+        if clean.get("entry_type") == "module":
+            return clean
         entry = _text(clean.get("entry"))
         if not entry:
             raise ExtensionRegistrationError("module widget render requires entry filename (e.g. 'widget.js')")
@@ -630,15 +637,14 @@ def read_module_sources(skill_dir: pathlib.Path | None, *entries: str) -> Dict[s
 
 # Contribution catalog: the projection publishes icons so clients share this vocabulary.
 CONTRIBUTION_PLACEMENTS = ("composer.plus", "composer.chips", "message.action")
-CONTRIBUTION_PROVIDERS = ("stt", "tts")
+CONTRIBUTION_PROVIDERS = ("stt", "tts", "conversation", "place")
 CONTRIBUTION_RUNTIMES = ("server", "client")
 CONTRIBUTION_DESTINATIONS = ("device", "host")  # or vendor:<nonblank name>
 CONTRIBUTION_VERBS = ("draft.insert", "skill.request", "open.tab", "notice")
 CONTRIBUTION_RENDER_KINDS = ("declarative", "host")
-CONTRIBUTION_ICONS = (
-    "sparkle", "mic", "volume", "list", "plus", "template", "gauge", "check", "book",
-    "chat", "projects", "files", "skills", "widgets", "dashboard", "settings",
-)
+from ouroboros.icon_geometry import HOST_ICON_NAMES, validate_icon
+
+CONTRIBUTION_ICONS = HOST_ICON_NAMES
 CONTRIBUTION_AUDIO_FORMATS = ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav")
 
 
@@ -695,16 +701,71 @@ def _contribution_action(value: Any) -> dict:
     return action
 
 
+def _contribution_source(value: Any) -> dict:
+    source = _contribution_object(value, "source", ("route", "refresh_s"))
+    source["route"] = _contribution_path(source.get("route"), "source.route")
+    source["refresh_s"] = _contribution_int(source.get("refresh_s"), "source.refresh_s", 15, 3600)
+    return source
+
+
+def _place_contribution(item: dict, manifest: Any) -> dict:
+    from ouroboros.places import WAKE_FACTS, is_wake_signal
+
+    if not manifest.is_extension() or "presence" not in manifest.permissions:
+        raise ValueError("place requires type: extension and permissions: [presence]")
+    destination = _contribution_text(item.get("destination"), "destination", 120)
+    if not destination.startswith("vendor:") or not destination[7:].strip():
+        raise ValueError("place destination must be vendor:<Name>")
+    item.setdefault("scope", "account")
+    if item["scope"] not in ("account", "conversation"):
+        raise ValueError("place scope must be account or conversation")
+    supported = set(WAKE_FACTS)
+    if "facts" in item:
+        if not isinstance(item["facts"], list):
+            raise ValueError("place facts must be a list of core facts or labelled kinds")
+        supported = set()
+        for fact in item["facts"]:
+            if isinstance(fact, dict):
+                if set(fact) != {"id", "label"} or not (fact.get("id") in WAKE_FACTS or is_wake_signal(fact.get("id"))):
+                    raise ValueError("place fact needs a core id or signal.<slug> and label")
+                fact["label"] = _contribution_text(fact["label"], "facts.label", 120)
+                name = fact["id"]
+            elif isinstance(fact, str) and fact in WAKE_FACTS:
+                name = fact
+            else:
+                raise ValueError("place facts must contain core fact names or labelled kinds")
+            if name in supported:
+                raise ValueError("place facts must have unique ids")
+            supported.add(name)
+    wakes = item.get("wakes", [])
+    if not isinstance(wakes, list) or any(not isinstance(wake, str) or wake not in supported for wake in wakes):
+        raise ValueError("place wakes must be a subset of declared facts (core facts when facts is absent)")
+    item["wakes"] = list(dict.fromkeys(wakes))
+    if "source" in item:
+        item["source"] = _contribution_source(item["source"])
+    if "settings" in item:
+        value = _contribution_text(item["settings"], "settings", 40)
+        if not all(char.isascii() and (char.isalnum() or char in "_-") for char in value):
+            raise ValueError("settings must name a settings section id")
+    if "read_only" in item and item["read_only"] != "provider":
+        raise ValueError("read_only must be provider when the provider can withhold writes")
+    return item
+
+
 def _validate_contribution(entry: dict, manifest: Any, skill_dir: pathlib.Path | None) -> dict:
     common = ("id", "label", "title", "icon", "order", "render")
     fields = (("placement", "action", "source") if "placement" in entry else
+              ("provides", "destination", "scope", "facts", "wakes", "source", "settings", "read_only") if entry.get("provides") == "place" else
               ("provides", "runtime", "route", "destination", "languages", "formats", "install_size", "max_bytes", "max_seconds"))
     item = _contribution_object(entry, "contribution", common + fields)
     item["label"] = _contribution_text(item.get("label"), "label", 40)
     item["title"] = _contribution_text(item.get("title", ""), "title", 200, empty=True)
-    if item.get("icon", "") not in ("", *CONTRIBUTION_ICONS):
-        raise ValueError(f"icon must be one of {CONTRIBUTION_ICONS}")
-    item.setdefault("icon", "")
+    try:
+        default_icon = validate_icon(getattr(manifest, "raw_extra", {}).get("icon", ""))
+    except ValueError:
+        # Staging reports the manifest icon problem; it must not hide every control/place.
+        default_icon = ""
+    item["icon"] = validate_icon(item.get("icon", default_icon))
     if type(item.get("order", 0)) is not int:
         raise ValueError("order must be an integer")
     item.setdefault("order", 0)
@@ -724,15 +785,14 @@ def _validate_contribution(entry: dict, manifest: Any, skill_dir: pathlib.Path |
     if render["kind"] == "host" or item.get("runtime") == "client":
         if not manifest.is_extension() or "page_module" not in manifest.permissions:
             raise ValueError("page code requires type: extension and permissions: [page_module]")
+    if item.get("provides") == "place":
+        return _place_contribution(item, manifest)
     if "placement" in item:
         if item["placement"] not in CONTRIBUTION_PLACEMENTS:
             raise ValueError(f"placement must be one of {CONTRIBUTION_PLACEMENTS}")
         item["action"] = _contribution_action(item.get("action"))
         if item["placement"] == "composer.chips":
-            source = _contribution_object(item.get("source"), "source", ("route", "refresh_s"))
-            source["route"] = _contribution_path(source.get("route"), "source.route")
-            source["refresh_s"] = _contribution_int(source.get("refresh_s"), "source.refresh_s", 15, 3600)
-            item["source"] = source
+            item["source"] = _contribution_source(item.get("source"))
         elif "source" in item:
             raise ValueError("source is only supported on composer.chips")
         return item

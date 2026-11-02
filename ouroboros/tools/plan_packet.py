@@ -8,14 +8,17 @@ What one participant receives for one ask, in this order (DESIGN §3):
    constitutional pack (BIBLE.md and ARCHITECTURE.md inline for a packet seat,
    mandatory full reads for a retrieving seat) plus the DESIGN navigation map. A
    non-body plan carries no Ouroboros governance and no navigation maps (owner 4.3=A);
-2. the PARTICIPANT part (``build_participant_content``, the user content): the
-   owner's verbatim words (task objective, then the exact own-room snapshot the
-   delivery layer fits per seat), the plan — whole the first time this participant
-   sees it, afterwards the delta since the revision it last answered about plus the
-   current text — everything said in the council since the ask this participant last
-   answered in (peers' answers attributed by seat and model, the mind's messages),
-   its OWN open objections to adjudicate first, the mind's message, and the attached
-   evidence with every omission named.
+2. the PARTICIPANT part (``build_participant_content``, the user content): the task
+   objective with its author (``owner_words.objective_author_line``), the owner's
+   verbatim words, then the own room's conversation the delivery layer fits per seat —
+   the cache-stable prefix (``plan_user_stable_len``) — then the plan:
+   whole the first time this participant sees it, afterwards the delta since the
+   revision it last answered about plus the current text, and before any revision no
+   plan at all (a reading of the request); this ask's room snapshot facts and related
+   rooms; everything said in the council since the ask this participant last answered
+   in (peers' answers attributed by seat and model, the mind's messages), its OWN open
+   objections to adjudicate first, the mind's message, and the attached evidence, each
+   labelled by kind, with every omission named.
 
 The reply contract (``PLAN_REPLY_CONTRACT`` / ``PLAN_REPLY_SESSION_OUTPUT_SCHEMA``) is
 one JSON object ``{prose, objections[{id,text}], withdrawn[{id,why}]}``; the host never
@@ -35,7 +38,7 @@ class PlanPacketError(ValueError):
 
 PLAN_REPLY_CONTRACT = """\
 Return ONE JSON object, optionally inside one code fence, and nothing after it:
-{"prose": "<your reading of the plan: questions, suggestions, agreement or disagreement with peers — free text>",
+{"prose": "<your reading of the plan, or of the request before any plan: questions, suggestions, agreement or disagreement with peers — free text>",
  "objections": [{"id": "<your own short stable id, e.g. o1>", "text": "<what in the plan causes which failure>"}],
  "withdrawn": [{"id": "<an id YOU raised earlier>", "why": "<why it no longer stands>"}]}
 An objection is yours alone: it stands until YOU list it under "withdrawn"; an open objection of
@@ -43,6 +46,9 @@ yours that you do not mention stays open and is flagged to the author as not adj
 one you keep (same id, the residual in "text"). Suggestions, questions and preferences are prose and
 never hold anything. You cannot withdraw another participant's objection — agree or disagree with it
 in prose. A reply the host cannot read as this object changes nothing and is reported as unreadable.
+Only replies to a stored plan revision update standing objections. A reading before any plan neither
+raises nor withdraws them: put that reading in the JSON object's prose field and leave objections and
+withdrawn empty; its reply remains visible as advice.
 """
 
 # Strict structured-output providers (OpenAI strict mode) require EVERY property and reject
@@ -71,16 +77,18 @@ PLAN_REPLY_SESSION_OUTPUT_SCHEMA: dict = {
 _ROLE = (
     "You are one independent participant of the council that weighs an INTENTION before the work "
     "starts — a plan for code, research, a deliverable, a computer-use flow or an action in the "
-    "world. Ouroboros authors the plan and asks you; it keeps its own judgment and answers you on the "
+    "world. Before any plan exists, Ouroboros may ask how you read the request. "
+    "Ouroboros authors the plan and asks you; it keeps its own judgment and answers you on the "
     "record. Judge the plan against ITS OWN domain with the evidence in front of you; say when the "
     "direction itself is wrong and what the simpler path to the owner-chosen outcome is. You speak "
     "for yourself: the host never aggregates the council's replies into a verdict and nobody votes. "
     "Other participants' answers reach you on later asks; the first ask is blind by construction."
 )
 
-# The user content's cache-stable prefix ends where the plan begins: owner words and
-# the room snapshot are byte-identical across the asks of one task, the plan and the
-# council's talk change.
+# The user content's cache-stable prefix ends where the plan begins: the objective, the
+# owner's words and the room's conversation rows are byte-identical across the asks of
+# one task while those rows stay the same; each capture's snapshot facts (locator, counts,
+# capture time, related rooms), the plan and the council's talk follow it.
 _PLAN_MARKER = "## THE PLAN"
 
 
@@ -102,8 +110,8 @@ def build_stable_prompt(
     parts = [
         _ROLE + "\n\n"
         f"Review enforcement for this task: {str(enforcement or 'unknown').strip()} (host information; under "
-        "Blocking an open objection of an owner-marked reviewer holds the author's final answer, under Advisory "
-        "and in Cyber Pro it is disclosed; it does not change what you should say).\n\n"
+        "Blocking an open objection of an owner-marked reviewer to a plan revision holds the author's final answer, "
+        "under Advisory and in Cyber Pro it is disclosed; it does not change what you should say).\n\n"
         f"## Reply contract\n\n{PLAN_REPLY_CONTRACT}\n---\n",
     ]
     if checklist_section:
@@ -141,8 +149,19 @@ def _cell(value: Any) -> str:
     return str(value or "").replace("|", "\\|").replace("\n", " ")
 
 
+def _evidence_author(item: Mapping[str, Any]) -> str:
+    """Whose words an attachment carries, by the kind its resolver recorded (``plan_evidence``)."""
+    kind = str(item.get("kind") or "")
+    if kind == "task":
+        task_id = str(item.get("locator") or "").split(":", 1)[-1].split("::", 1)[0].strip()
+        return f"the result of Ouroboros's task {task_id} with host facts about it"
+    if kind == "chat":
+        return "room rows, each signed with its author"
+    return "file content; its author is not attested by the host"
+
+
 def render_evidence(manifest: Mapping[str, Any]) -> str:
-    """The attached evidence, every absence named."""
+    """The attached evidence, each item labelled with whose words it carries, every absence named."""
     declared = list(manifest.get("declared") or [])
     if not declared and not manifest.get("omissions"):
         return "(nothing attached)\n"
@@ -152,6 +171,7 @@ def render_evidence(manifest: Mapping[str, Any]) -> str:
         lines.append(
             f"### {item.get('locator')} (kind={item.get('kind')}, sha256={item.get('sha256')}, "
             f"bytes={item.get('bytes')}, attached_bytes={item.get('attached_bytes')}{redacted})\n"
+            f"Carries: {_evidence_author(item)}.\n"
             f"----- BEGIN {item.get('locator')} -----\n{item.get('text') or ''}\n"
             f"----- END {item.get('locator')} -----\n"
         )
@@ -274,9 +294,11 @@ def render_cross_talk(asks: Sequence[Mapping[str, Any]], *, seat_id: str) -> str
     are not repeated to it."""
     if not asks:
         return ""
+    from ouroboros.plan_record import ask_subject
+
     sections = []
     for ask in asks:
-        head = f"### Ask {ask.get('ask_id')} (about revision {ask.get('revision')}, {ask.get('ts') or '?'})"
+        head = f"### Ask {ask.get('ask_id')} (about {ask_subject(ask.get('revision'))}, {ask.get('ts') or '?'})"
         if ask.get("late_replies"):
             head += " — answers that arrived after your last delivery"
         message = str(ask.get("message") or "").strip()
@@ -289,15 +311,20 @@ def render_cross_talk(asks: Sequence[Mapping[str, Any]], *, seat_id: str) -> str
     return "\n".join(sections)
 
 
-def render_own_objections(objections: Sequence[Mapping[str, Any]]) -> str:
+def render_own_objections(objections: Sequence[Mapping[str, Any]], *, reading: bool = False) -> str:
+    """This participant's open objections; a reading (before any plan) cannot withdraw or restate them."""
+    from ouroboros.plan_record import ask_subject
+
     if not objections:
-        return "You have no open objection on this plan.\n"
-    lines = ["Adjudicate these FIRST: list each under \"withdrawn\" with why, or restate it with what is still missing. "
-             "One you do not mention stays open and is flagged as not adjudicated.\n"]
+        return "You have no open objection.\n" if reading else "You have no open objection on this plan.\n"
+    lines = [("They stand as they are: a reading before any plan neither withdraws nor restates them; a reply to a plan "
+              "revision does.\n") if reading else
+             ("Adjudicate these FIRST: list each under \"withdrawn\" with why, or restate it with what is still missing. "
+              "One you do not mention stays open and is flagged as not adjudicated.\n")]
     for item in objections:
         flag = " (flagged: not adjudicated in your last reply)" if item.get("not_adjudicated") else ""
         where = ("your blocking finding in this task's previous plan review, imported; it holds the task until you withdraw it"
-                 if item.get("legacy") else f"raised in ask {item.get('raised_in')} about revision {item.get('revision')}")
+                 if item.get("legacy") else f"raised in ask {item.get('raised_in')} about {ask_subject(item.get('revision'))}")
         lines.append(f"- {item.get('id')} ({where}){flag}: {item.get('text')}")
     return "\n".join(lines) + "\n"
 
@@ -307,26 +334,38 @@ def build_participant_content(
     objective: str,
     owner_words: str,
     dialogue_section: str,
-    revision: Mapping[str, Any],
+    revision: Optional[Mapping[str, Any]],
     delta: Optional[Mapping[str, Any]],
     cross_talk: str,
     own_objections: Sequence[Mapping[str, Any]],
     message: str,
     evidence_section: str,
     first_time: bool,
+    objective_author: str = "",
+    snapshot_section: str = "",
 ) -> str:
-    """One participant's user content for one ask (see the module docstring for the order)."""
-    plan = ("You see this plan for the first time; it follows whole.\n\n" if first_time or not delta or delta.get("first")
-            else _render_delta(delta) + "\nThe current text follows whole.\n\n") + render_revision(revision)
+    """One participant's user content for one ask (see the module docstring for the order).
+    ``objective_author`` is static per task, so it rides the cache-stable prefix; a reading
+    (``revision=None``) says so after the plan marker, where everything changes per ask, and
+    so does ``snapshot_section`` (``plan_dialogue.render_dialogue``: what each capture changes)."""
+    if revision is None:
+        plan = "No plan yet: Ouroboros asks how you read the request before it writes one.\n"
+    else:
+        plan = ("You see this plan for the first time; it follows whole.\n\n" if first_time or not delta or delta.get("first")
+                else _render_delta(delta) + "\nThe current text follows whole.\n\n") + render_revision(revision)
     sections = [
-        "## TASK OBJECTIVE\n\n" + (objective or "(none declared)") + "\n",
+        "## TASK OBJECTIVE\n\n" + (objective or "(none declared)")
+        + (f"\n\nThe objective above: {objective_author}." if objective_author else "") + "\n",
         *([owner_words + "\n"] if str(owner_words or "").strip() else []),
         dialogue_section,
         _PLAN_MARKER + "\n\n" + plan,
+        *([snapshot_section] if snapshot_section else []),
         "## THE COUNCIL SO FAR (since the ask you last answered in)\n\n"
-        + (cross_talk if cross_talk else ("Nothing yet: this is the first ask on this plan and every first answer is blind.\n" if first_time else "Nothing was said since your last answer.\n")),
-        "## YOUR OPEN OBJECTIONS\n\n" + render_own_objections(own_objections),
-        "## WHAT OUROBOROS ASKS YOU NOW\n\n" + (str(message or "").strip() or "(no message beyond the plan itself)") + "\n",
+        + (cross_talk if cross_talk else (f"Nothing yet: this is the first ask{' on this plan' if revision is not None else ''} "
+                                          "and every first answer is blind.\n" if first_time else "Nothing was said since your last answer.\n")),
+        "## YOUR OPEN OBJECTIONS\n\n" + render_own_objections(own_objections, reading=revision is None),
+        "## WHAT OUROBOROS ASKS YOU NOW\n\n"
+        + (str(message or "").strip() or f"(no message beyond the {'plan' if revision is not None else 'request'} itself)") + "\n",
         "## ATTACHED EVIDENCE\n\n" + evidence_section,
     ]
     return "\n".join(sections)
@@ -334,8 +373,9 @@ def build_participant_content(
 
 def plan_user_stable_len(user_content: str) -> int:
     """Byte offset where the cache-stable prefix ends: everything before the plan
-    (objective, owner words, the room snapshot) is byte-identical while the owner
-    said nothing new; the plan and the council's talk change between asks."""
+    (objective, owner words, the room's conversation rows) is byte-identical while that
+    conversation is unchanged; the snapshot facts, the plan and the council's talk change
+    between asks."""
     index = str(user_content or "").find(_PLAN_MARKER)
     return index if index > 0 else 0
 

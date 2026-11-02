@@ -20,6 +20,7 @@ def geometry(tmp_path, monkeypatch):
     monkeypatch.setattr(pathlib.Path, "home", lambda: home)
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(home))
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     return home, repo, data, first
 
 

@@ -12,8 +12,10 @@ from ouroboros.request_wire_attempt import (
     validate_normalized_wire_success,
     validate_physical_wire_attempt,
 )
+from ouroboros.anthropic_native_custody import is_replayed_native_content
 from ouroboros.request_wire_contract import (
     ANTHROPIC_REASONING_FIELDS,
+    CACHE_HINT_FIELDS,
     NESTED_REASONING_FIELD,
     TOOL_DIALECTS,
     WIRE_REASON_CODES,
@@ -383,7 +385,52 @@ def _validate_physical_tool_choice(
     return catalog_names
 
 
+def cache_hint_holders(payload: Mapping[str, Any], field: str) -> list:
+    """The objects carrying the prompt-cache hint ``field`` names (``CACHE_HINT_FIELDS``):
+    ``tools`` items, ``system``/``messages`` items, their blocks and a tool_result's nested
+    blocks, the send-time finalizer's holder set (replayed native content stays untouched)."""
+    holders: list = []
+    for key in ("tools",) if field == "tools.cache_control" else ("tools", "system", "messages"):
+        part = payload.get(key)
+        for item in part if isinstance(part, list) else [part]:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            blocks = [block for block in content if isinstance(block, dict)] if (
+                isinstance(content, list) and not is_replayed_native_content(content)) else []
+            nested = [inner for block in blocks if isinstance(block.get("content"), list)
+                      for inner in block["content"] if isinstance(inner, dict)]
+            holders.extend(holder for holder in (item, *blocks, *nested) if "cache_control" in holder and (
+                field != "cache_control.ttl"
+                or isinstance(holder["cache_control"], dict) and "ttl" in holder["cache_control"]))
+    return holders
+
+
+def _drop_cache_hint(payload: Dict[str, Any], field: str) -> None:
+    holders = cache_hint_holders(payload, field)
+    if not holders:
+        raise ValueError("drop action source field is absent")
+    for holder in holders:
+        if field == "cache_control.ttl":
+            holder["cache_control"].pop("ttl", None)
+        else:
+            holder.pop("cache_control", None)
+    if field != "cache_control":
+        return
+    # A user/tool row that became a one-part text list to carry its marker reads as the
+    # plain string again, the shape this lane sent before it carried markers.
+    for message in payload.get("messages") or ():
+        content = message.get("content") if isinstance(message, dict) else None
+        if (isinstance(content, list) and len(content) == 1 and message.get("role") in {"user", "tool"}
+                and isinstance(content[0], dict) and set(content[0]) == {"type", "text"}
+                and content[0]["type"] == "text" and isinstance(content[0]["text"], str)):
+            message["content"] = content[0]["text"]
+
+
 def _drop_path(payload: Dict[str, Any], path: str) -> None:
+    if path in CACHE_HINT_FIELDS:
+        _drop_cache_hint(payload, path)
+        return
     current: Any = payload
     parts = path.split(".")
     for part in parts[:-1]:

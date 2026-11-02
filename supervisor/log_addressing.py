@@ -53,6 +53,11 @@ def resolve_quiz_publication(root: Any, task_id: str, block: dict, proposed_chat
                 or block.get("publication_evidence") not in {"pre_exposure", "history"}):
             raise ValueError("publication_address_unknown")
         return block["publication_chat_id"]
+    # A host-bound place question is private Main contact even if its work is
+    # later bound to a Project. The external room is never a fallback address.
+    from ouroboros.presence_owner_contact import private_main_contact
+    if private_main_contact(block, task_id):
+        return WEB_UI_CHAT_ID
     from ouroboros.projects_registry import RoomResolver
 
     # Use the public task-tree room rule before the immutable publication is bound.
@@ -253,12 +258,15 @@ class TurnEventQueue:
     pooled task's control events are handled while its RUNNING row exists and
     keep their producer shape. The direct lane stamps every task-scoped event,
     plus its turn-only extras: the origin label and the Stop marker on work frames.
+    ``on_frame(kind, data)`` sees each of the task's own frames as it passes (the
+    direct lane reads its start facts there).
     """
 
     def __init__(self, inner: Any, task_id: Any, chat_id: Any, initiator: Any = "",
                  on_first_work: Optional[Callable[[], None]] = None, *,
                  lineage: Optional[Dict[str, Any]] = None, direct_chat: bool = True,
-                 telemetry_only: bool = False) -> None:
+                 telemetry_only: bool = False,
+                 on_frame: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> None:
         self._inner = inner
         self._task_id = str(task_id or "")
         # None is absence (a task admitted without an address stamps none);
@@ -272,6 +280,7 @@ class TurnEventQueue:
         # the lane hangs the turn namer on it, so a turn is named exactly
         # when its block becomes a task card and never for a greeting.
         self._on_first_work = on_first_work
+        self._on_frame = on_frame
 
     @property
     def task_id(self) -> str:
@@ -300,6 +309,11 @@ class TurnEventQueue:
         data = item.get("data") if kind == "log_event" else item
         if not isinstance(data, dict) or str(data.get("task_id") or "") != self._task_id:
             return item
+        if self._on_frame is not None:
+            try:
+                self._on_frame(kind, data)
+            except Exception:
+                log.debug("frame observer failed for %s", self._task_id, exc_info=True)
         if kind == "task_dispatch_resolved":
             # The worker's own dispatch resolution (XG-2R.1) is the one place the
             # effective lane becomes known inside the task: refresh by value.

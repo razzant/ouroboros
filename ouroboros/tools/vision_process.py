@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any
+from typing import Any, Optional
 
 from jsonschema import Draft202012Validator
 
@@ -48,6 +48,10 @@ _CONTEXT = _object({
     "target_total_tokens": _NULL_INT, "capacity_total_tokens": _NULL_INT,
     "context_target_miss": {"type": "boolean"}, "automatic_pass_used": {"type": "boolean"},
     "measurement_density": {"type": ["number", "null"]},
+    "view_kind": _STRING,
+    "response_reserve_tokens": {"type": "integer", "minimum": 0},
+    "window_witness_bound": {"type": "boolean"},
+    "window_observation_fp": _STRING,
 })
 _CAPTURE = _object({
     **{key: _STRING for key in ("attempt_id", "model", "provider", "provider_code", "provider_error_type", "provider_error")},
@@ -263,8 +267,10 @@ def _decode_terminal(value: dict, receipt_id: str) -> tuple[str, dict]:
     raise error
 
 
-def run_vision_child(*, child_timeout: float, subscription: bool, **kwargs: Any) -> tuple[str, dict]:
-    """Run exactly one killable child; every retry remains the parent's decision."""
+def run_vision_child(*, child_timeout: Optional[float], subscription: bool, **kwargs: Any) -> tuple[str, dict]:
+    """Run exactly one killable child; every retry remains the parent's decision. ``None`` (a
+    subscription call no task clock bounds) waits without a timeout: Stop reaches it through the
+    control watcher below, Panic through the tracked process tree."""
     from ouroboros.tools.shell import _tracked_subprocess_run
 
     poll = kwargs.pop("model_poll_control", None)

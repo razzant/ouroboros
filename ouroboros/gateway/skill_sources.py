@@ -41,15 +41,6 @@ def _refusal(exc: SkillInstallError) -> JSONResponse:
     return JSONResponse(exc.payload(), status_code=exc.status)
 
 
-def _resync_schedules(drive_root: pathlib.Path) -> None:
-    try:
-        from supervisor.queue import resync_skill_schedules
-
-        resync_skill_schedules(drive_root)
-    except Exception:
-        log.debug("skill schedule resync failed", exc_info=True)
-
-
 async def _start_job(kind: str, target: str, message: str, work: Any, after: Any = None) -> str:
     """Run ``work(progress)`` in the lifecycle lane in the background; answer its job id."""
     handle = JobHandle()
@@ -298,7 +289,6 @@ def _after_install(drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Any:
     def after(result: Dict[str, Any]) -> None:
         if result.get("needs_review") and result.get("name"):
             start_review(drive_root, result["name"], repo_dir=repo_dir)
-        _resync_schedules(drive_root)
 
     return after
 
@@ -397,7 +387,6 @@ async def api_skill_uninstall(request: Request) -> JSONResponse:
             runner=lambda: run_blocking_preserving_cancellation(uninstall_installed, drive_root, name))
     except SkillInstallError as exc:
         return _refusal(exc)
-    await asyncio.to_thread(_resync_schedules, drive_root)
     return JSONResponse(result)
 
 

@@ -39,7 +39,7 @@ def test_saved_root_resume_then_model_selects_one_child_through_final_dispatch(t
     assert not pushed[-1]["ok"] and pushed[-1]["error"] == "root_resume_grant_missing"
     assert q.resume_budget_paused_task("saved-root")["ok"]
     grant = eb.live_root_resume_grant(q, "saved-root", tmp_path)
-    assert grant["grant_id"] == rows["saved-root"][eb.BUDGET_HOLD_KEY]["root_grant_id"]
+    assert grant["grant_id"] == rows["saved-root"][eb.SELECTION_KEY]["root_grant_id"]
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()
@@ -49,7 +49,7 @@ def test_saved_root_resume_then_model_selects_one_child_through_final_dispatch(t
     assert pushed[-1]["error"] == "not_a_budget_paused_descendant"
     eb._handle_budget_resume_child(request, ctx)
     assert pushed[-1]["ok"]
-    assert rows["first"][eb.BUDGET_HOLD_KEY]["root_grant_id"] == grant["grant_id"]
+    assert rows["first"][eb.SELECTION_KEY]["root_grant_id"] == grant["grant_id"]
     workers.WORKERS[0].busy_task_id = None
     workers.assign_tasks()
     assert [t["id"] for t in sent] == ["saved-root", "first"]
@@ -62,11 +62,11 @@ def test_explicit_owner_child_selection_survives_later_root_grant_visibility(tmp
 
     q, workers, rows = _saved_tree(tmp_path, monkeypatch)
     assert q.resume_budget_paused_task("first")["ok"]
-    assert rows["first"][eb.BUDGET_HOLD_KEY]["selected_by"] == "owner"
-    assert not rows["first"][eb.BUDGET_HOLD_KEY].get("root_grant_id")
+    assert rows["first"][eb.SELECTION_KEY]["selected_by"] == "owner"
+    assert not rows["first"][eb.SELECTION_KEY].get("root_grant_id")
     assert q.resume_budget_paused_task("saved-root")["ok"]
     grant = eb.live_root_resume_grant(q, "saved-root", tmp_path)
-    assert rows["first"][eb.BUDGET_HOLD_KEY]["root_grant_id"] == grant["grant_id"]
+    assert rows["first"][eb.SELECTION_KEY]["root_grant_id"] == grant["grant_id"]
     assert eb.budget_resume_dispatch_allowed(q, rows["first"])
     sent = []
     _idle_worker(workers, sent)
@@ -91,7 +91,7 @@ def test_child_selection_is_revalidated_before_dispatch(tmp_path, monkeypatch, c
     if change == "new_fence":
         eb._set_root_budget_pause_locked("saved-root", {"fence_id": "new-fence"})
     elif change == "generation":
-        root[eb.BUDGET_HOLD_KEY]["root_grant_id"] = "later-explicit-selection"
+        root[eb.SELECTION_KEY]["root_grant_id"] = "later-explicit-selection"
     elif change == "unknown_pause":
         monkeypatch.setattr(budget_pause, "budget_pause_row", lambda *a: (_ for _ in ()).throw(OSError("unreadable")))
     elif change == "owner_pause":
@@ -132,7 +132,7 @@ def test_failed_root_snapshot_restores_existing_owner_selection(tmp_path, monkey
 
     def snapshot(*args, **kwargs):
         if kwargs.get("reason") == "budget_hold_selected":
-            observed.append(rows["first"][eb.BUDGET_HOLD_KEY].get("root_grant_id"))
+            observed.append(rows["first"][eb.SELECTION_KEY].get("root_grant_id"))
             return False
         return real_snapshot(*args, **kwargs)
 
@@ -148,10 +148,10 @@ def test_a_new_generation_refuses_the_rebound_owner_selection(tmp_path, monkeypa
     q, workers, rows = _saved_tree(tmp_path, monkeypatch)
     assert q.resume_budget_paused_task("first")["ok"]
     assert q.resume_budget_paused_task("saved-root")["ok"]
-    selected = copy.deepcopy(rows["first"][eb.BUDGET_HOLD_KEY])
-    rows["saved-root"][eb.BUDGET_HOLD_KEY]["root_grant_id"] = "new-root-resume"
+    selected = copy.deepcopy(rows["first"][eb.SELECTION_KEY])
+    rows["saved-root"][eb.SELECTION_KEY]["root_grant_id"] = "new-root-resume"
     assert not eb.budget_resume_dispatch_allowed(q, rows["first"])
-    assert rows["first"][eb.BUDGET_HOLD_KEY] == selected, "reader never repairs authority"
+    assert rows["first"][eb.SELECTION_KEY] == selected, "reader never repairs authority"
     sent = []
     _idle_worker(workers, sent)
     workers.assign_tasks()
@@ -182,10 +182,10 @@ def test_a_consumed_exact_grant_does_not_override_a_new_saved_work_resume(tmp_pa
     assert bp.budget_pause_row(tmp_path, "saved-root")["grant"] == old["grant"]
     assert q.resume_budget_paused_task("saved-root")["ok"]
     fresh = eb.live_root_resume_grant(q, "saved-root", tmp_path)
-    assert fresh["grant_id"] == rows["saved-root"][eb.BUDGET_HOLD_KEY]["root_grant_id"]
+    assert fresh["grant_id"] == rows["saved-root"][eb.SELECTION_KEY]["root_grant_id"]
     assert fresh["grant_id"] != old["grant"]["grant_id"]
     assert q.resume_budget_paused_task("first", selected_by="saved-root")["ok"]
-    assert rows["first"][eb.BUDGET_HOLD_KEY]["root_grant_id"] == fresh["grant_id"]
+    assert rows["first"][eb.SELECTION_KEY]["root_grant_id"] == fresh["grant_id"]
     assert q.persist_queue_snapshot(reason="selected_saved_tree")
     # Inspect the durable snapshot itself: no read-side mutation supplies these ids.
     import json
@@ -228,7 +228,7 @@ def test_selected_saved_hold_is_superseded_by_a_real_warm_resume(tmp_path, monke
     resumed = resume_warm_owner_pause_root("saved-root")
     assert resumed["ok"], resumed
     assert "_budget_pause_resume" not in live
-    assert live[eb.BUDGET_HOLD_KEY]['root_grant_id'] == resumed['grant_id']
+    assert live[eb.SELECTION_KEY]['root_grant_id'] == resumed['grant_id']
     assert eb.live_root_resume_grant(q, "saved-root", tmp_path)["grant_id"] == resumed["grant_id"]
     before = copy.deepcopy(workers.RUNNING["saved-root"])
     assert not eb.fold_consumed_resume(workers.RUNNING["saved-root"], tmp_path, {
@@ -239,7 +239,7 @@ def test_selected_saved_hold_is_superseded_by_a_real_warm_resume(tmp_path, monke
     assert eb.live_root_resume_grant(q, "saved-root", tmp_path)["grant_id"] == resumed["grant_id"]
     q.PENDING.remove(stale)
     assert q.resume_budget_paused_task("first", selected_by="saved-root")["ok"]
-    assert not rows["first"][eb.BUDGET_HOLD_KEY].get("fence_id")
+    assert not rows["first"][eb.SELECTION_KEY].get("fence_id")
     assert eb.budget_resume_dispatch_allowed(q, rows["first"])
     workers.WORKERS[0].busy_task_id = None
     workers.assign_tasks()
@@ -267,9 +267,9 @@ def test_a_stop_hold_masks_historical_grants_before_root_resume(tmp_path, monkey
     assert eb.live_root_resume_grant(q, "saved-root", tmp_path) == {}
     assert q.resume_budget_paused_task("first", selected_by="saved-root")["error"] == "root_resume_grant_missing"
     assert q.resume_budget_paused_task("first")["ok"], "the human's own selection is still allowed"
-    assert not rows["first"][eb.BUDGET_HOLD_KEY].get("root_grant_id")
+    assert not rows["first"][eb.SELECTION_KEY].get("root_grant_id")
     assert q.resume_budget_paused_task("saved-root")["ok"]
-    assert rows["first"][eb.BUDGET_HOLD_KEY]["root_grant_id"] == eb.live_root_resume_grant(
+    assert rows["first"][eb.SELECTION_KEY]["root_grant_id"] == eb.live_root_resume_grant(
         q, "saved-root", tmp_path)["grant_id"]
 
 
@@ -315,7 +315,7 @@ def test_global_zero_dispatch_pause_blocks_existing_bound_child(
     # The owner's child choice is bound to the currently running root grant.
     assert q.resume_budget_paused_task("selected")["ok"]
     child = rows["selected"]
-    selection = child[eb.BUDGET_HOLD_KEY]
+    selection = child[eb.SELECTION_KEY]
     assert selection["selected_by"] == "owner"
     assert selection["root_grant_id"]
     assert selection["root_resume_basis"]
@@ -359,7 +359,7 @@ def test_global_zero_dispatch_pause_blocks_existing_bound_child(
     workers.assign_tasks()
     assert [row["id"] for row in sent] == ["zero-root"]
     assert child in q.PENDING
-    assert eb.budget_hold_fact(child)["selected"] is False
+    assert eb.budget_hold_fact(child) and eb.SELECTION_KEY not in child
     assert eb.budget_hold_fact(rows["sibling"])
     assert parked["_budget_pause"], "no root Resume occurred"
 
@@ -383,7 +383,7 @@ def test_terminal_root_still_allows_explicit_owner_unbound_child(
 
     assert q.resume_budget_paused_task("selected")["ok"]
     child = rows["selected"]
-    selection = child[eb.BUDGET_HOLD_KEY]
+    selection = child[eb.SELECTION_KEY]
     assert selection["selected_by"] == "owner"
     assert not selection.get("root_grant_id")
     if legacy:

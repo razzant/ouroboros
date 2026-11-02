@@ -75,8 +75,9 @@ def pywebview_exposed(api):
 
 def test_the_bridge_exposes_the_alert_methods_and_hides_its_background():
     api = bridge(Recorder())
-    assert pywebview_exposed(api) == ["notify_owner", "request_attention", "request_native_notifications",
-                                      "set_native_appearance", "shell_info", "show_native_notification"]
+    assert pywebview_exposed(api) == ["notify_owner", "panic_stop", "request_attention", "request_native_notifications",
+                                      "set_interface_size", "set_native_appearance", "shell_info",
+                                      "show_native_notification"]
     assert api.notify_owner(True, "Task finished", "", False) == {"ok": True, "args": (True, "Task finished", "", False)}
 
 
@@ -107,6 +108,7 @@ def test_the_persistent_storage_claim_is_the_webview_flag():
 def test_no_adapter_is_a_typed_unavailable_answer():
     api = bridge(None)
     assert api.shell_info()["native_notifications"]["status"] == "unavailable"
+    assert api.shell_info()["interface_size"] == {"supported": False}, "no window zoom: the page keeps 100 % and says so"
     assert api.request_native_notifications() == {"available": False, "status": "unavailable",
                                                   "platform": dn.platform_name(), "reason": "no_platform_adapter"}
     assert api.show_native_notification("Task finished", "", True, "n1-a") == {

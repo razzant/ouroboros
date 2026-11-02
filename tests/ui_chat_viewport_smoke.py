@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import time
+from urllib.parse import urlsplit
 
 import pytest
 
 from ouroboros.test_evidence import diagnostic_directory
 
 from tests.ui_failure_evidence import FailureEvidence
+
+
+def state_reads(url: str) -> bool:
+    """Every shared state read of the page: the first `/api/state` and each `?bindings_since=` read after it
+    (#2307, state_snapshots.js createStateSnapshotSequencer). A `**/api/state` glob matches the first alone."""
+    return urlsplit(url).path == "/api/state"
 
 _CAPTURE_TEST_SOCKET = """() => {
     const NativeWebSocket = window.WebSocket;
@@ -21,10 +28,10 @@ _CAPTURE_TEST_SOCKET = """() => {
         }
     };
 }"""
-# One page-wide /api/state read is in flight at a time (chat_activity.js
+# One page-wide /api/state read is in flight at a time (state_snapshots.js
 # createStateSnapshotSequencer.gate): a forced refresh that lands behind an
-# in-flight read starts only after that read settles, so the socket-open census
-# can still be reading after the socket reports OPEN. A frame emitted on the test
+# in-flight read starts once that read settles, or at once when a socket change
+# retires it, so the socket-open census can still be reading after OPEN. A frame emitted on the test
 # socket exists nowhere on the server; a complete census whose request started
 # after that frame concludes its card by absence, exactly as it would a task the
 # queue really lost. Tests that emit such frames wait for the reads to land first.
@@ -317,7 +324,7 @@ def run_chat_viewport_smoke(
         held_census.append(route)
 
     def release_census(page):
-        page.unroute("**/api/state", hold_census)
+        page.unroute(state_reads, hold_census)
         while held_census:
             held_census.pop(0).fallback()
 
@@ -331,7 +338,7 @@ def run_chat_viewport_smoke(
         # cards (switched below between complete and incomplete) repaints them,
         # and inside the follow zone that repaint follows. The frame under test
         # is the window's only writer; the census answers after it.
-        page.route("**/api/state", hold_census)
+        page.route(state_reads, hold_census)
         page.locator("#chat-scroll-bottom").dispatch_event("click")
         read_to_latest(page)
         state = jump_state(page)
@@ -391,7 +398,7 @@ def run_chat_viewport_smoke(
             evidence = FailureEvidence(page, browser, evidence_dir, nodeid, browser_engine)
             with evidence:
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
-                page.route("**/api/state", incomplete_activity_census)
+                page.route(state_reads, incomplete_activity_census)
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 page.add_style_tag(
                     content="#chat-messages, #chat-messages * { overflow-anchor: none !important; }"
@@ -846,9 +853,11 @@ def run_chat_viewport_smoke(
                     raise AssertionError(f"Late child did not grow its parent: {geometry}") from exc
                 assert parent.evaluate("card => card.getBoundingClientRect().height") > parent_before_mount + 30
                 assert abs(card_top(page, anchor_id) - anchor_before) <= 6
+                # The row's own sleep mark (chat_row_sleep.js `data-laid`) is the browser's rendering hint, not a write of
+                # the card: a no-op frame writes nothing else.
                 parent.evaluate("""card => { window.__subagentNoopMutations = []; window.__subagentNoopObserver = new MutationObserver(records => window.__subagentNoopMutations.push(...records)); window.__subagentNoopObserver.observe(card, {attributes: true, attributeOldValue: true, childList: true, characterData: true, subtree: true}); }""")
                 assert_noop_frame(page, late_child_frame)
-                noop_mutations = page.evaluate("""() => { window.__subagentNoopObserver.disconnect(); return window.__subagentNoopMutations.map(record => `${record.type}:${record.target.dataset?.taskId || record.target.dataset?.subagentsFor || record.target.className}:${record.attributeName || ''}:${record.oldValue || ''}->${record.target.getAttribute?.(record.attributeName) || ''}`); }""")
+                noop_mutations = page.evaluate("""() => { window.__subagentNoopObserver.disconnect(); return window.__subagentNoopMutations.filter(record => record.attributeName !== 'data-laid').map(record => `${record.type}:${record.target.dataset?.taskId || record.target.dataset?.subagentsFor || record.target.className}:${record.attributeName || ''}:${record.oldValue || ''}->${record.target.getAttribute?.(record.attributeName) || ''}`); }""")
                 assert noop_mutations == [], noop_mutations
                 put_at_viewport_top(page, anchor_selector)
                 enriched_child = {
@@ -958,7 +967,7 @@ def run_chat_viewport_smoke(
                 # The cancelable frame is then a duplicate and never sets the
                 # activity bit. Install the census only after that bit is observed.
                 page.route(
-                    "**/api/state",
+                    state_reads,
                     lambda route: route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -1012,8 +1021,8 @@ def run_chat_viewport_smoke(
                 )
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
-                page.unroute("**/api/state")
-                page.route("**/api/state", incomplete_activity_census)
+                page.unroute(state_reads)
+                page.route(state_reads, incomplete_activity_census)
 
                 # A production-shaped review reference hydrates asynchronously;
                 # both the fetch result and its review DOM reconcile stay anchored.
@@ -1053,8 +1062,9 @@ def run_chat_viewport_smoke(
 
                 # Repeating the exact applied revision consumes the frame but
                 # changes no projection, so it must not manufacture activity
-                # (the census poll waits, as in every no-op window).
-                page.route("**/api/state", hold_census)
+                # (the census poll waits, as in every no-op window). The row's own sleep
+                # mark (chat_row_sleep.js) may change between the reads: it is no write of the card.
+                page.route(state_reads, hold_census)
                 button.click()
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 set_remaining(page, 300)
@@ -1062,7 +1072,7 @@ def run_chat_viewport_smoke(
                     """() => {
                         const card = document.querySelector('.chat-live-card[data-task-id="vp-review"]');
                         const messages = document.querySelector('#chat-messages');
-                        return {html: card.outerHTML, height: card.getBoundingClientRect().height,
+                        return {html: card.outerHTML.replace(/ data-laid=""/g, ''), height: card.getBoundingClientRect().height,
                             scrollHeight: messages.scrollHeight};
                     }"""
                 )
@@ -1071,7 +1081,7 @@ def run_chat_viewport_smoke(
                     """() => {
                         const card = document.querySelector('.chat-live-card[data-task-id="vp-review"]');
                         const messages = document.querySelector('#chat-messages');
-                        return {html: card.outerHTML, height: card.getBoundingClientRect().height,
+                        return {html: card.outerHTML.replace(/ data-laid=""/g, ''), height: card.getBoundingClientRect().height,
                             scrollHeight: messages.scrollHeight};
                     }"""
                 )
@@ -1230,7 +1240,7 @@ def run_chat_viewport_smoke(
                     "cards => cards.map(card => card.dataset.taskId).filter(id => id !== 'vp-detail-noop')"
                 )
                 page.route(
-                    "**/api/state",
+                    state_reads,
                     lambda route: route.fulfill(
                         status=200,
                         content_type="application/json",

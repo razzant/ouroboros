@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
 from ouroboros.depth_evidence import parse_task_depth
+from ouroboros.owner_wait import governing_continuation  # re-export for admission callers
 from ouroboros.task_results import (
     STATUS_CANCELLED,
     STATUS_FAILED,
@@ -23,7 +24,6 @@ from ouroboros.task_results import (
     load_task_result,
     write_task_result,
 )
-from ouroboros.utils import utc_now_iso
 from ouroboros.store import StoreError, acquisition_budget
 
 log = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ def restore_terminalization_retry(
     except (TypeError, ValueError, OverflowError):
         restored["_attempt"] = 1
     restored["_queue_seq"] = queue_seq_counter_ref["value"]
-    restored.setdefault("queued_at", utc_now_iso())
+    restored.setdefault("queued_at", None)  # the saved queue time, or unknown: never this restore (#1805)
     pending.append(restored)
     sort_pending()
     return restored
@@ -529,21 +529,6 @@ def commit_dispatch_marks(task: dict, projections: list) -> Optional[bool]:
     return True if all(projection.verify(stored) for projection in projections) else None
 
 
-def governing_continuation(task: dict) -> str:
-    """Name the ONE carrier the loop resumes: owner wait, then exact pause, then saved work.
-
-    The loop loads the first present carrier and never falls back when it fails,
-    so admission validates that carrier alone. A later carrier legitimately
-    retains the earlier saved-work locator; a valid newer one never reads it, and
-    an invalid one never falls back to it. Null snapshot fields are absent.
-    """
-    if task.get("_owner_wait_resume"):
-        return "owner_wait"
-    if task.get("_budget_pause_resume"):
-        return "exact_pause"
-    return "working" if "_working_recovery" in task else ""
-
-
 def _owner_wait_current(task: dict, stored: dict) -> bool:
     """The handoff names the result's still-waiting wait; restart authority stays with restore."""
     handoff, wait = task.get("_owner_wait_resume"), stored.get("owner_wait")
@@ -647,7 +632,7 @@ def revalidate_project_holds() -> None:
         ProjectAdmissionError, _strict_admission_snapshot, host_unscoped,
         project_admission_guard, task_project_membership, validate_project_admission,
     )
-    from supervisor import queue
+    from supervisor import queue, workers
     from supervisor.queue_snapshot import _descends_from, _interrupted_ancestors, _fence_snapshot_running_rows, _exact_pause_row
     from supervisor.schedule_occurrence import first_dispatch_unsent, restore_allowed
     from supervisor.update_merge import assisted_resume_authorizes
@@ -655,7 +640,8 @@ def revalidate_project_holds() -> None:
     from ouroboros.project_placement import pending_placement, refresh_pending_placement
     from ouroboros.owner_wait import restore_owner_wait_allowed
     from ouroboros.delegate_recovery import planned_handoff_resume_allowed
-    from supervisor.events_budget import BUDGET_HOLD_KEY, HOLD_RESTORE_REFUSED_PREFIX, budget_hold_fact
+    from ouroboros.workspace_admission import admitted_absent_workspace
+    from supervisor.events_budget import BUDGET_HOLD_KEY, native_continuation_repair
 
     from supervisor.budget_resume import revalidate_consumed_resume_holds
 
@@ -664,7 +650,7 @@ def revalidate_project_holds() -> None:
     if not held:
         return
     effects = ("_project_admission_restore_hold", "_terminalization_retry", "_owner_hold",
-               "_owner_wait_resume", "_budget_pause", "_budget_pause_resume", BUDGET_HOLD_KEY)
+               "_owner_wait_resume", "_budget_pause", "_budget_pause_resume", "_resume_selection", BUDGET_HOLD_KEY)
     before = [copy.deepcopy({key: task[key] for key in effects if key in task}) for task in held]
     counts = Counter(row.get("id") for row in queue.PENDING)
     # Restore's parent rule, re-read at release: exact continuations are saved work.
@@ -710,7 +696,7 @@ def revalidate_project_holds() -> None:
                     if unseen_pause(task, before_pause):
                         _latch_unseen_pause(task)
                     continue  # retained pause, or its failed conversion; never a Stop
-                if (budget_hold_fact(task) or {}).get("reason") == HOLD_RESTORE_REFUSED_PREFIX + "owner_wait_source_unavailable":
+                if native_continuation_repair(task):
                     from ouroboros.cancel_intents import has_active_intent
 
                     wait = (load_task_result(queue.DRIVE_ROOT, tid, strict=True) or {}).get("owner_wait") or {}
@@ -809,7 +795,9 @@ def revalidate_project_holds() -> None:
                 guard = project_admission_guard(queue.DRIVE_ROOT, basis, snapshot=snapshot)
             with guard:
                 workspace = str(task.get("workspace_root") or "")
-                if workspace:
+                # A folder admitted as merely absent (#1799) keeps that admission while its address stays absent.
+                if workspace and not admitted_absent_workspace(task, system_repo_dir=workers.REPO_DIR,
+                                                               drive_root=queue.DRIVE_ROOT):
                     path = pathlib.Path(workspace)
                     if not path.is_dir() or os.path.normcase(str(path.resolve(strict=True))) != os.path.normcase(workspace):
                         raise ValueError("The original prepared folder is unavailable or resolves elsewhere.")
@@ -1287,6 +1275,7 @@ def enqueue_subagent_with_scheduled_result(
                     admitted.pop("_admission_blocked", None)
                     admitted.pop("_admission_never_admitted", None)
                     admitted["_admission_uncertain"] = "Subagent admission changed before its contended outcome; custody retained."
+                    ctx.persist_queue_snapshot(reason="schedule_subagent_admitted")
                     return "admitted", admitted
                 if admitted.get("_admission_blocked") == "task_id_lookup_failed":
                     return "refused", (

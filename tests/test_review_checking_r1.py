@@ -9,6 +9,7 @@ import subprocess
 
 import pytest
 
+from ouroboros import delegate_named_evidence as dne
 from ouroboros import review_checking as rc
 from ouroboros import subagent_worktrees as sw
 from ouroboros.skill_loader import compute_content_hash
@@ -42,14 +43,10 @@ def test_named_xml_outputs_are_kept_independently_of_patch_filters(tmp_path):
     declared.mkdir(parents=True)
     raw = b"<coverage>\x00byte-exact</coverage>"
     (declared / "coverage.xml").write_bytes(raw)
-    budget, gaps = [len(raw)], []
-    kept = rc.retain_named_evidence(area, tmp_path / "files", budget, gaps)
-    assert not gaps and budget == [0]
-    assert kept[0]["path"] == ".review-evidence/coverage.xml"
-    assert (tmp_path / "files" / kept[0]["path"]).read_bytes() == raw
     gaps = []
-    assert not rc.retain_named_evidence(area, tmp_path / "too-small", [1], gaps)
-    assert gaps[0]["reason"] == "evidence_budget_exceeded"
+    kept = dne.retain_named_evidence(area, tmp_path / "files", gaps)
+    assert not gaps and kept[0]["path"] == ".review-evidence/coverage.xml" and kept[0]["size"] == len(raw)
+    assert (tmp_path / "files" / kept[0]["path"]).read_bytes() == raw
     assert (declared / "coverage.xml").read_bytes() == raw
 
 
@@ -62,7 +59,7 @@ def test_named_symlink_is_a_gap_not_silent_retained_evidence(tmp_path):
     (target / "only-copy.xml").write_bytes(b"data")
     (area / rc.EVIDENCE_DIRNAME).symlink_to(target, target_is_directory=True)
     gaps = []
-    assert rc.retain_named_evidence(area, tmp_path / "files", [100], gaps) == []
+    assert dne.retain_named_evidence(area, tmp_path / "files", gaps) == []
     assert gaps == [{"path": rc.EVIDENCE_DIRNAME, "reason": "evidence_symlink"}]
     assert not (tmp_path / "files").exists()
 
@@ -81,10 +78,9 @@ def test_large_binary_delta_streams_to_file_and_is_retained_whole(author, tmp_pa
         return real_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", observe)
-    monkeypatch.setattr(rc, "EVIDENCE_RETAIN_BYTES", 16 * 1024)  # investigations' bound; never a reviewer's
     result = rc.capture_seat_evidence(data, "task", "large")
     assert streamed and result["status"] == "retained" and result["patch_retained"] and not result["gaps"]
-    assert result["patch_bytes"] > rc.EVIDENCE_RETAIN_BYTES
+    assert result["patch_bytes"] > 256 * 1024  # whole: no bound applies to a reviewer's delta
     assert pathlib.Path(result["evidence_dir"], "delta.patch").stat().st_size == result["patch_bytes"]
     assert not area.exists()
 
@@ -105,7 +101,7 @@ def test_capture_disables_reviewer_configured_host_hooks(author, tmp_path):  # n
     assert not marker.exists()
 
 
-def test_real_linked_worktree_subject_reaches_independent_checking_copy(author, tmp_path):  # noqa: F811
+def test_real_linked_worktree_subject_reaches_its_own_checking_worktree(author, tmp_path):  # noqa: F811
     linked = tmp_path / "linked"
     _git(author, "worktree", "add", "--detach", str(linked), "HEAD")
     assert (linked / ".git").is_file()
@@ -114,7 +110,8 @@ def test_real_linked_worktree_subject_reaches_independent_checking_copy(author, 
     (linked / "f.txt").write_bytes(b"linked unstaged\n")
     source = rc.freeze_checking_source(linked, data_root=tmp_path / "data", subject=rc.SUBJECT_INDEX)
     area = pathlib.Path(rc.prepare_seat_area(tmp_path / "data", "task", "linked", source))
-    assert (area / ".git").is_dir()
+    assert (area / ".git").is_file()  # a linked worktree, sharing the author's object store:
+    assert (area / _git(area, "rev-parse", "--git-common-dir")).resolve() == (author / ".git").resolve()
     assert (area / "f.txt").read_bytes() == b"linked staged\n"
     assert _git(area, "write-tree") == source["tree"]
     assert (linked / "f.txt").read_bytes() == b"linked unstaged\n"
@@ -142,7 +139,7 @@ def test_release_receipt_retries_residual_cleanup_without_recapturing(author, tm
 def test_interrupted_materialization_refuses_unproven_cleanup(author, tmp_path, monkeypatch):  # noqa: F811
     data = tmp_path / "data"
     source = rc.freeze_checking_source(author, data_root=data, subject=rc.SUBJECT_INDEX)
-    area = rc.seat_dir(data, "task", "interrupted") / "area"
+    area = rc.seat_dir(data, "task", "interrupted") / "area.noindex"
     area.mkdir(parents=True)
     (area / "unfinished.txt").write_text("keep me\n", encoding="utf8")
     monkeypatch.setattr(sw, "_force_rmtree", lambda _path: None)
@@ -172,12 +169,11 @@ def test_sticky_refresh_keeps_previous_copy_when_cleanup_is_unproven(author, tmp
 
 
 def _readonly_git_object(area):
+    """A read-only file the reviewer leaves in its copy (a linked worktree keeps no objects of its own)."""
     probe = area / "readonly-probe.txt"
-    probe.write_bytes(b"reviewer-created object, absent from the author's object store\n")
-    oid = _git(area, "hash-object", "-w", probe.name)
-    target = area / ".git" / "objects" / oid[:2] / oid[2:]
-    target.chmod(0o444)
-    return target
+    probe.write_bytes(b"reviewer-created read-only output\n")
+    probe.chmod(0o444)
+    return probe
 
 
 def _windows_readonly_unlink(monkeypatch, target):
@@ -235,7 +231,7 @@ def test_sticky_consumer_refresh_recovers_readonly_objects_in_same_thread(
     first = _run(author, data, source)
     saved = pathlib.Path(first["checking_evidence"]["evidence_dir"])
     saved_bytes = {str(p.relative_to(saved)): p.read_bytes() for p in saved.rglob("*") if p.is_file()}
-    area = rc.seat_dir(data, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(data, "task-1", "thread:plan_review:t1") / "area.noindex"
     events = _windows_readonly_unlink(monkeypatch, targets[0])
     thread_gateway.before_turn = None
     second = _run(author, data, source, operation="op-2", thread_id=first["thread_id"])
@@ -270,7 +266,7 @@ def test_interrupted_materialization_retries_after_readonly_cleanup(author, tmp_
     events = _windows_readonly_unlink(monkeypatch, targets[0])
     area = pathlib.Path(rc.prepare_seat_area(data, "task", "interrupted-readonly", source))
     assert events == ["denied", "chmod", "retried"]
-    assert area == home / "area"
+    assert area == home / "area.noindex"
     assert "materializing" not in json.loads((home / "checking.json").read_text(encoding="utf8"))
     assert _git(area, "write-tree") == source["tree"] and not (area / "readonly-probe.txt").exists()
     assert _author_state(author) == before

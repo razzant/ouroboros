@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.model_concurrency import limit_physical_send
+
 from ouroboros.context_budget import (  # the typed overflow lives with the overflow vocabulary
     LocalContextTooLargeError,
     context_overflow_message,
@@ -159,7 +161,7 @@ class _LocalLaneMixin:
 
             resp = _execute_candidate(
                 request,
-                lambda: client.chat.completions.create(**candidate, **transport_kwargs),
+                limit_physical_send(local_target, lambda: client.chat.completions.create(**candidate, **transport_kwargs)),
                 check_instance,
             )
         except UsageAccountingError:

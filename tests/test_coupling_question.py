@@ -234,6 +234,34 @@ def test_a_fence_is_only_the_lines_that_open_and_close_the_text():
     assert parse_two_part_answer("```json\n" + body + "\n```\n```json\n[]\n```", BOTH) is None
 
 
+SEPARATED_REASON = "the reader cut\u2028a valid line\u2029at a NEL\u0085inside 🙂 text"
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
+def test_unicode_separators_in_a_fenced_answer_are_content_not_fence_lines(eol):
+    """Only CR/LF end a fence line: U+0085/U+2028/U+2029 inside a JSON string stay the
+    reviewer's words, so a fenced answer reads exactly as the same answer bare and its
+    critical findings keep their exact reason (never a parse failure, never clean)."""
+    change = [{"item": "code_quality", "verdict": "FAIL", "severity": "critical", "reason": SEPARATED_REASON}]
+    coupling = [{**row, "reason": SEPARATED_REASON} if row["item"] == "implicit_contracts" else row
+                for row in _matrix(fail="implicit_contracts")]
+    body = json.dumps({"change": change, "change_clean": False, "coupling": coupling}, ensure_ascii=False)
+    raw = "```json" + eol + body + eol + "```"
+    answers = parse_two_part_answer(raw, BOTH, model_label="m", slot_id="s1")
+    assert answers == parse_two_part_answer(body, BOTH, model_label="m", slot_id="s1")
+    assert [(answers[p]["verdict"], answers[p]["critical"], answers[p]["findings"][0]["reason"]) for p in BOTH] == [
+        ("FAIL", 1, SEPARATED_REASON), ("FAIL", 1, SEPARATED_REASON)]
+    array = "```json" + eol + json.dumps(change, ensure_ascii=False) + eol + "```"
+    parsed = parse_seat_answers({"results": [_seat("s1", raw), _seat("s2", array)]}, {"s1": BOTH, "s2": ("change",)})
+    assert [record.status for record in parsed.actor_records] == ["responded", "responded"]
+    assert len(parsed.responsive_models) == 2
+    assert [(f["slot_id"], f["item"], f["severity"], f["reason"]) for f in parsed.findings] == [
+        ("s1", "code_quality", "critical", SEPARATED_REASON), ("s1", "implicit_contracts", "critical", SEPARATED_REASON),
+        ("s2", "code_quality", "critical", SEPARATED_REASON)]
+    # Markdown lines end at CR/LF only: a separator never ends a fence line, even around ASCII JSON.
+    assert parse_two_part_answer("```json\u2028" + _b(coupling=_matrix()) + "\u2028```", BOTH) is None
+
+
 @pytest.mark.parametrize("spelled, clean", [("true", True), ("True", True), ("false", False), (" FALSE ", False)])
 def test_change_clean_spelled_as_a_string_is_the_bool_it_names(spelled, clean):
     raw = json.dumps({"change": [], "change_clean": spelled, "coupling": _matrix()})

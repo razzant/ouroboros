@@ -66,6 +66,8 @@ def _stage_extension_import_tree(
     identity = extension_import_identity(skill)
     import_root = state_dir / "__extension_imports" / identity
     with extension_cache_lock(state_dir, "imports"):
+        if not skill.skill_dir.is_dir():
+            raise RuntimeError(f"extension {skill.name!r} payload was removed before import acquisition")
         if not (import_root / "complete.json").is_file():
             _copy_extension_tree(skill, import_root)
         owners = import_root / "owners"
@@ -98,7 +100,9 @@ def extension_import_identity(skill: LoadedSkill) -> str:
 def extension_cache_lock(state_dir: pathlib.Path, purpose: str):
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
-    path = state_dir / f".extension-{purpose}.lock"
+    # Keep the cache lock beside state so deleting a skill cannot replace its inode.
+    path = (state_dir.parent / f".{state_dir.name}-extension-imports.lock"
+            if purpose == "imports" else state_dir / f".extension-{purpose}.lock")
     fd = acquire_exclusive_file_lock(path, timeout_sec=30, owner_aware_stale=True)
     if fd is None:
         raise RuntimeError(f"extension {purpose} cache lock unavailable")

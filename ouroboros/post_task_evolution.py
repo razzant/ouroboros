@@ -117,18 +117,18 @@ def _loose_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-_DECISION_PROMPT = """You decide whether Ouroboros should run ONE reviewed self-improvement (evolution) cycle now, based on the task it just finished and its improvement backlog.
+_DECISION_PROMPT = """You decide whether Ouroboros should run ONE reviewed self-improvement (evolution) cycle now, based on the task it just finished, its improvement backlog and past attempts.
 
 [JUST-FINISHED TASK — host-recorded facts]
 {task_facts}
 
-[CURRENT IMPROVEMENT BACKLOG — the complete authored note; its structure, statuses and any counts are its author's text]
+[IMPROVEMENT BACKLOG — the complete authored note while it is active (its structure, statuses and any counts are its author's text), otherwise its archived or missing state]
 {backlog}
 
 [SOLVE-CAPABILITY HISTORY — what past evolution cycles actually landed]
 {capability}
 
-[CLOSED / DROPPED — objectives already shipped, abandoned, or hard-blocked; do NOT re-propose these or restatements of them]
+[PAST ATTEMPTS — objectives earlier cycles shipped (ABSORBED), dropped (ABANDONED / NO_OP) or found hard-blocked (BLOCKED); evidence about what happened, not a permanent verdict]
 {closed}
 
 [ACTIVE CAMPAIGN OBJECTIVE — a reviewed cycle is ALREADY running this; do NOT re-propose it]
@@ -137,13 +137,13 @@ _DECISION_PROMPT = """You decide whether Ouroboros should run ONE reviewed self-
 Return ONLY a JSON object:
 {{"promote": true|false, "objective": "<one concrete, self-contained improvement to Ouroboros's own code/process; empty if not promoting>", "requires_plan_review": true|false, "backlog_id": "<the backlog entry this maps to, as the note names it; else empty>"}}
 
-Rules: set promote=true ONLY when there is a concrete, high-value, self-contained code/process improvement worth a reviewed cycle right now. Prefer items already in the backlog, and weigh the solve-capability history: objective classes that historically got ABSORBED are better bets than classes that kept ending no_op/abandoned. Bias toward SMALL, TARGETED objectives that directly improve the ability to solve tasks (a sharper tool, a fixed failure mode, a removed bottleneck) over broad refactors or speculative platform work — small reviewed wins absorb; sprawling objectives historically die as no_op. Do NOT propose anything in the CLOSED / DROPPED list, or a restatement of the ACTIVE CAMPAIGN OBJECTIVE — those are already handled; if the only candidates are closed/active, return promote=false. If nothing is clearly worthwhile, return promote=false. {force_note}"""
+Rules: set promote=true ONLY when there is a concrete, high-value, self-contained code/process improvement worth a reviewed cycle right now. Weigh the solve-capability history: objective classes that historically got ABSORBED are better bets than classes that kept ending no_op/abandoned. Bias toward SMALL, TARGETED objectives that directly improve the ability to solve tasks (a sharper tool, a fixed failure mode, a removed bottleneck) over broad refactors or speculative platform work — small reviewed wins absorb; sprawling objectives historically die as no_op. Do NOT restate the ACTIVE CAMPAIGN OBJECTIVE: a cycle is already running it. Proposing any past objective again (absorbed, abandoned, no-op or blocked) needs a reason its earlier outcome does not cover. If nothing is clearly worthwhile, return promote=false."""
 
 
 def _closed_objectives_digest(drive_root: pathlib.Path) -> Optional[str]:
-    """BUG3 Layer A: the objectives the chooser must NOT re-propose.
+    """BUG3 Layer A: past attempt outcomes the chooser weighs as evidence.
 
-    Built from the STRUCTURED ledger (state/evolution_checkpoints.jsonl), not patterns.md prose,
+    Built from the STRUCTURED ledger (state/evolution_checkpoints.jsonl), not prose,
     so it cannot rot when prose formatting changes. An objective is closed when its latest cycle
     outcome is absorbed (already shipped), abandoned/no_op (attempted and dropped), or the
     objective/review axis recorded outcome_tier == "blocked_with_evidence" (hard-blocked).
@@ -274,7 +274,7 @@ def _task_facts(task: Dict[str, Any], sealed_final: Optional[Dict[str, Any]]) ->
 
 
 def _decide_promotion(env: Any, task: Dict[str, Any], sealed_final: Optional[Dict[str, Any]],
-                      llm_client: Any, *, force: bool) -> Optional[Dict[str, Any]]:
+                      llm_client: Any) -> Optional[Dict[str, Any]]:
     from ouroboros.improvement_backlog import authored_backlog_text
     from ouroboros.utils import truncate_review_artifact
 
@@ -284,24 +284,18 @@ def _decide_promotion(env: Any, task: Dict[str, Any], sealed_final: Optional[Dic
         capability = truncate_review_artifact(build_solve_capability_digest(drive_root), 2000)
     except Exception:
         capability = ""
-    # BUG3 Layer A: give the chooser the objectives it must NOT re-propose (the missing input
-    # that let a CLOSED objective be re-suggested 4-5x). Sourced from the structured ledger
-    # (not patterns.md prose) plus the campaign-local dropped set, deduped by fingerprint.
+    # BUG3 Layer A: give the chooser the past attempt outcomes (without them a CLOSED
+    # objective was re-suggested 4-5x). Sourced from the structured ledger plus the
+    # campaign-local dropped set, deduped by fingerprint; evidence, not a verdict.
     closed = _closed_objectives_digest(drive_root)
     if closed is None:
         log.warning("post_task_evolution: closed-objective history unavailable; abstaining")
         return None
     active_objective = _active_campaign_objective()
-    force_note = (
-        "The cadence already decided WHEN to evolve; choose the single most valuable "
-        "objective and set promote=true unless the backlog is empty/irrelevant."
-        if force else ""
-    )
     prompt = _DECISION_PROMPT.format(
         task_facts=_task_facts(task, sealed_final), backlog=authored_backlog_text(drive_root),
         capability=capability or "(no evolution-cycle history yet)",
         closed=closed or "(none)", active_objective=active_objective or "(no active campaign)",
-        force_note=force_note,
     )
     # Failures raise to the post-task stage: only an abstention returns None.
     from ouroboros.config import SETTINGS_DEFAULTS
@@ -397,10 +391,10 @@ def maybe_promote(env: Any, task: Dict[str, Any], sealed_final: Optional[Dict[st
     if cadence == "off":
         return None
     drive_root = pathlib.Path(str(env.drive_root))
-    force = not cadence.startswith("llm")
+    # A stored every_n schedule says WHEN to ask; whether to evolve stays the chooser's judgment.
     if cadence.startswith("every_n") and not _counter_due(drive_root, _parse_every_n(cadence)):
         return None
-    decision = _decide_promotion(env, task, sealed_final, llm_client, force=force)
+    decision = _decide_promotion(env, task, sealed_final, llm_client)
     if not decision or not decision.get("promote") or not decision.get("objective"):
         return None
     _write_request(drive_root, decision, task)

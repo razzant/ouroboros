@@ -174,9 +174,13 @@ def test_workspace_patch_supports_unborn_sha256_git_worktree(tmp_path):
 
 
 def test_workspace_patch_allows_external_workspace_first_commit(tmp_path):
+    from ouroboros.workspace_preflight import _git_snapshot, summarize_workspace_preflight
+
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    admission = summarize_workspace_preflight({"git": _git_snapshot(repo)})
+    assert admission["git"]["head_state"] == "unborn"
     (repo / "created.txt").write_text("hello\n", encoding="utf-8")
     subprocess.run(["git", "add", "created.txt"], cwd=repo, check=True, capture_output=True)
     subprocess.run(
@@ -185,7 +189,7 @@ def test_workspace_patch_allows_external_workspace_first_commit(tmp_path):
         check=True,
         capture_output=True,
     )
-    task = {"metadata": {"workspace_preflight": {"git": {"head": ""}}}}
+    task = {"metadata": {"workspace_preflight": admission}}
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task=task)
 

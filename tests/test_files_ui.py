@@ -49,8 +49,35 @@ def test_files_layout_uses_internal_scroll_contract():
     assert "overflow: hidden;" in css
     assert ".files-list {" in css
     assert "overscroll-behavior: contain;" in css
-    assert "grid-template-rows: minmax(0, 30%) minmax(0, 1fr);" in css
-    assert 'max-height: none;' in css
+
+
+def test_a_narrow_files_page_shows_the_list_first_and_the_file_once_chosen():
+    """#7: the list and the file share the page only while both fit; the page's own width decides, never a viewport
+    breakpoint (the old 30 % list over an empty preview is gone)."""
+    css = _read("web/style.css")
+    source = _read("web/modules/files.js")
+
+    assert ".files-layout { container: files / inline-size; }" in css
+    narrow = css.split("@container files (max-width: 700px) {", 1)[1].split("\n}\n", 1)[0]
+    assert '.files-layout:not([data-files-view="file"]) .files-preview' in narrow
+    assert '.files-layout[data-files-view="file"] .files-sidebar { display: none; }' in narrow
+    assert ".files-preview-back { display: flex;" in narrow
+    assert "grid-template-rows: minmax(0, 30%) minmax(0, 1fr);" not in css
+    for query in css.split("@media (max-width: 980px)")[1:]:
+        assert ".files-" not in query.split("\n}\n", 1)[0]
+    # Back keeps the draft: it only shows the list again; leaving the file still asks through the one guard.
+    assert '<div class="files-layout" data-files-view="list">' in source
+    back = source.split("function closeFile() {", 1)[1].split("\n    }\n", 1)[0]
+    assert "showPane('list'" in back and "canLeaveEditor" not in back and "resetEditorState" not in back
+    assert "if (!(await canLeaveEditor()) || request !== viewRequest) return;" in source
+    # The file shown alone is a layer of the shell's one stack, closed by the same function as Back to folder; the
+    # app hands Files that stack, and no module keeps a history of its own.
+    assert "backBtn.addEventListener('click', closeFile);" in source
+    assert "layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null, onClose: closeFile });" in source
+    assert "syncLayer(single && view === 'file');" in source
+    app = _read("web/app.js")
+    assert "initFiles({ ...ctx, layers });" in app
+    assert "pushState" not in source and "popstate" not in source
 
 
 def test_files_pdf_preview_and_download_bridge_are_safe():

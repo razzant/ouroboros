@@ -37,7 +37,7 @@ from ouroboros.runtime_mode_policy import (
 from ouroboros.tools.commit_gate import _invalidate_advisory
 from ouroboros.shell_parse import POSIX_SHELL_HEADS, is_absolute_path_text, recover_stringified_argv  # noqa: F401
 from ouroboros.shell_parse import inline_operand_start
-from ouroboros.tools.tool_result import _publish_process_result, _wrap_run_script_process_result
+from ouroboros.tools.tool_result import _publish_process_result
 from ouroboros.tools.verify import check_exit_masking  # noqa: F401 -- ONE exit-masking sensor shared with verify_and_record (pinned here); its disclosure lives in shell_audit
 from ouroboros.tools.registry import (
     ToolContext,
@@ -55,6 +55,7 @@ from ouroboros.tools.shell_audit import (
 )
 from ouroboros.tools.shell_process import (  # noqa: F401
     _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
+    CommandStopped,
     _active_subprocesses,
     _describe_returncode,
     _executor_can_run_cwd,
@@ -64,16 +65,17 @@ from ouroboros.tools.shell_process import (  # noqa: F401
     _shell_env_for_cwd,
     _subprocess_lock,
     _tracked_subprocess_run,
+    command_start_refusal,
     kill_all_tracked_subprocesses,
+    turn_stop_reader,
+    unfinished_command_result,
 )
 from ouroboros.tools.shell_effects import (  # noqa: F401
     _get_changed_files,
     _get_diff_stat,
-    _protected_runtime_dirty_paths,
     _record_scratch_fingerprints,
     _resolve_git_root,
     _resolve_scratch_abs,
-    _restore_protected_runtime_paths,
     _scratch_safety_reason,
     _shallow_listing,
     _status_snapshot,
@@ -83,7 +85,7 @@ from ouroboros.tools.shell_effects import (  # noqa: F401
 from ouroboros.tools.shell_outputs import (  # noqa: F401
     _directory_fingerprint,
     _changed_path_covers,
-    _declared_output_baseline, _declared_output_refusal,
+    _declared_output_baseline, _declared_output_refusal, _prepare_declared_output_context,
     _directory_fingerprint_from_entries,
     _fingerprint_output,
     _protected_output_source_reason,
@@ -130,7 +132,7 @@ _CONTROL_DIR_BACKUP_MAX_BYTES = 5 * 1024 * 1024
 # Historical private spellings stay as aliases for call sites and tests.
 from ouroboros.tools.process_facts import (  # noqa: E402
     active_resolved_runtime as _active_resolved_runtime,
-    process_environment_tool, record_runtime_selection, selected_process_environment,
+    process_environment_tool, record_runtime_selection, selected_process_environment, wrap_script_result, script_refusal_with_source,
     publish_process_facts as _publish_process_facts,  # noqa: F401 — historical private spelling for call sites and tests
 )
 from ouroboros.tools.shell_process import (  # noqa: E402
@@ -156,6 +158,7 @@ _SHELL_BUILTINS = frozenset([
 ])
 
 _SHELL_OPERATORS = frozenset(["&&", "||", "|", ";", ">", ">>", "<", "<<"])
+_PREFER_READERS = "For reading files, prefer `read_file`.\nFor searching code, prefer `search_code`."
 # A redirect GLUED into a single argv element ("2>/dev/null", "2>&1", ">out.log",
 # "&>x") — the standalone-operator set above misses these. Anchored at the element
 # START so a '>' inside a sed/awk/grep expression ("s/a>b/c/g") is NOT flagged.
@@ -293,9 +296,7 @@ def _run_shell(
     **kwargs,
 ) -> str:
     # Per-call timeout override (canonical timeout_sec; timeout accepted as alias).
-    timeout_sec = kwargs.get("timeout_sec")
-    timeout = kwargs.get("timeout")
-    _timeout_override = timeout_sec if timeout_sec is not None else timeout
+    _timeout_override = kwargs["timeout_sec"] if kwargs.get("timeout_sec") is not None else kwargs.get("timeout")
     bucket = str(kwargs.get("bucket") or "")
     skill_name = str(kwargs.get("skill_name") or "")
     if isinstance(cmd, str):
@@ -318,9 +319,7 @@ def _run_shell(
                     'Correct usage:\n'
                     '  run_command(cmd=["git", "log", "--oneline", "-10"])\n\n'
                     'Wrong usage (the failure that brought you here):\n'
-                    '  run_command(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n'
-                    'For reading files, prefer `read_file`.\n'
-                    'For searching code, prefer `search_code`.')
+                    '  run_command(cmd=\'["git", "log", "--oneline", "-10"]\')\n\n' + _PREFER_READERS)
             try:
                 parts = shlex.split(cmd)
                 if parts:
@@ -335,9 +334,7 @@ def _run_shell(
                 '  run_command(cmd=["grep", "-r", "pattern", "path/"])\n'
                 '  run_command(cmd=["python", "-c", "print(1+1)"])\n\n'
                 'Wrong usage:\n'
-                '  run_command(cmd="grep -r pattern path/")\n\n'
-                'For reading files, prefer `read_file`.\n'
-                'For searching code, prefer `search_code`.')
+                '  run_command(cmd="grep -r pattern path/")\n\n' + _PREFER_READERS)
 
     if not isinstance(cmd, list):
         return _pre_spawn_refusal(ctx, "⚠️ SHELL_ARG_ERROR: cmd must be a list of strings.")
@@ -369,7 +366,11 @@ def _run_shell(
     if not work_dir.exists() or not work_dir.is_dir():
         return _pre_spawn_refusal(ctx, f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {work_dir}. "
             f"root={binding.root}, source={binding.source}.")
-    if output_refusal := _declared_output_refusal(ctx, outputs, pathlib.Path(work_dir), cwd_root=cwd_root, binding=binding):
+    output_context, output_error = _prepare_declared_output_context(ctx, outputs, work_dir)
+    if output_error is not None:
+        return _publish_tool_result(ctx, output_error)
+    if output_refusal := _declared_output_refusal(ctx, outputs, pathlib.Path(work_dir), cwd_root=cwd_root, binding=binding,
+                                                 output_context=output_context):
         return _pre_spawn_refusal(ctx, output_refusal)
     # Disclose the room-lens default once; explicit cwd is already caller-visible.
     if not str(cwd or "").strip() and not getattr(ctx, "_room_cwd_noted", False):
@@ -394,7 +395,8 @@ def _run_shell(
         else None
     )
     before_outputs, baseline_problem = _declared_output_baseline(ctx, outputs, pathlib.Path(work_dir), cwd_root=cwd_root,
-                                                                 changed_paths=set(before_changed or []), binding=binding)
+                                                                 changed_paths=set(before_changed or []), binding=binding,
+                                                                 output_context=output_context)
 
     # Scratch is confined/new/untracked, patch-excluded, and never an artifact.
     scratch_abs = _resolve_scratch_abs(scratch, work_dir)
@@ -402,7 +404,6 @@ def _run_shell(
         _scratch_reason = _scratch_safety_reason(ctx, scratch_abs, pathlib.Path(work_dir), repo_root)
         if _scratch_reason:
             return _pre_spawn_refusal(ctx, f"⚠️ SCRATCH_BLOCKED: {_scratch_reason}.")
-    timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=_timeout_override)
     bootstrap_process_path()
     # Emergency bundled-node PATH prepend; None on every healthy path (env stays byte-identical).
     node_resolution = active_node_resolution(ctx)
@@ -410,31 +411,35 @@ def _run_shell(
     selected_env = selected_process_environment()
     run_env = apply_env_path_prepend(overlay_env(_shell_env_for_cwd(ctx, pathlib.Path(work_dir)), selected_env), node_resolution)
     record_runtime_selection(ctx, cmd, work_dir, run_env)
+    timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=_timeout_override)
+    if refusal := command_start_refusal(ctx, "run_command", _timeout_override):  # last, beside the dispatch
+        return _pre_spawn_refusal(ctx, refusal)
     # Two clocks (D2-1): EPOCH feeds the st_mtime audit; MONOTONIC feeds durations.
     _command_start_epoch = time.time()
     _command_start_ts = time.monotonic()
     res = None
+    stop = turn_stop_reader(ctx)  # an in-process turn's Stop now; a pooled worker's Stop is its kill
     try:
-        if _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
-            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec,
+        if output_context is not None or _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
+            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec, stop=stop,
                                    env_overlay=interpreter_path_overlay(node_resolution),
+                                   **({"executor": output_context.executor} if output_context else {}),
                                    **({"target_env": selected_env} if selected_env else {}))
-            process_meta = {"operation_outcome": getattr(res, "operation_outcome", "unknown")}
         else:
             res = _tracked_subprocess_run(
                 cmd, cwd=str(work_dir),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=timeout_sec,
+                text=True, timeout=timeout_sec, stop=stop,
                 **({"env": run_env} if run_env is not None else {}),
             )
-            process_meta = {"operation_outcome": "completed"}
+        process_meta = {"operation_outcome": getattr(res, "operation_outcome", "completed")}
         _lived_ms = _publish_finished_process_facts(ctx, res, _command_start_ts)
         # Post-run hashes exclude scratch only while its exact bytes still match.
         _record_scratch_fingerprints(ctx, scratch_abs)
+        executor_note = ""
+        if getattr(res, "backend_trace", None):
+            executor_note = "\n\nEXECUTOR_TRACE:\n" + json.dumps(res.backend_trace, ensure_ascii=False, indent=2)
         if res.returncode != 0:
-            executor_note = ""
-            if getattr(res, "backend_trace", None):
-                executor_note = "\n\nEXECUTOR_TRACE:\n" + json.dumps(res.backend_trace, ensure_ascii=False, indent=2)
             if _is_search_no_match(res):
                 text = autocorrect_note + (
                     f"{_describe_returncode(res.returncode, cwd=work_dir, binding=binding)} (no matches)\n"
@@ -483,6 +488,7 @@ def _run_shell(
             changed_paths=set(after_changed or []),
             before_outputs=before_outputs,
             binding=binding,
+            output_context=output_context,
         )
         artifact_note += f"\n- output baseline unavailable before the run ({baseline_problem}): a registered output may predate it" if baseline_problem and artifact_note else ""
         audit_note = ""
@@ -520,29 +526,22 @@ def _run_shell(
                 + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n"
                 + f"{_format_process_output(res.stdout or '', res.stderr or '')}"
                 + artifact_note
+                + executor_note
             )
             result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "ARTIFACT_OUTPUT_ERROR", text, exit_code=0, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
             return _disclose_output_audit_failure(ctx, result, audit_error)
-        executor_note = ""
-        if getattr(res, "backend_trace", None):
-            executor_note = "\n\nEXECUTOR_TRACE:\n" + json.dumps(res.backend_trace, ensure_ascii=False, indent=2)
         text = autocorrect_note + f"{_describe_returncode(0, cwd=work_dir, binding=binding)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}{scratch_note}{executor_note}"
         result = _masked_green_disclosure(ctx, _publish_process_result(ctx, "SHELL_REGEX_AUTO_CORRECTED" if regex_autocorrected else "OK", text, exit_code=0, artifact_registered=bool(artifact_registered and not artifact_failed), shell_regex_auto_corrected=regex_autocorrected, meta=process_meta), cmd)
         return _disclose_output_audit_failure(ctx, result, audit_error)
     except OwnerPauseRefused as exc:
         return _publish_tool_result(ctx, launch_refusal_result(exc))
-    except subprocess.TimeoutExpired:
-        _publish_unfinished_process_facts(ctx, _command_start_ts, timed_out=True)
-        # Timeout-created scratch still needs its exclusion fingerprint.
+    except (CommandStopped, subprocess.TimeoutExpired) as ended:
+        stopped = isinstance(ended, CommandStopped)
+        _publish_unfinished_process_facts(ctx, _command_start_ts, timed_out=not stopped,
+                                          killed=stopped and ended.exit_observed)
+        # Timeout- or Stop-created scratch still needs its exclusion fingerprint.
         _record_scratch_fingerprints(ctx, scratch_abs)
-        return (
-            f"⚠️ TOOL_TIMEOUT (run_command): command exceeded the per-command timeout of {timeout_sec}s "
-            f"and the host killed what it could still reach of its process tree; a background child may survive untracked (root={binding.root}, cwd={work_dir}). NOTE: this is the per-command "
-            f"FOREGROUND timeout, NOT the task deadline. For genuinely long-running compute (training, "
-            f"sampling, large builds/downloads), start it with start_service and poll "
-            f"service_status/service_logs while you do other work, or pass an explicit timeout_sec=<seconds> "
-            f"(up to the per-call ceiling) — and preserve a best-effort deliverable before the task deadline."
-        )
+        return unfinished_command_result(ctx, ended, timeout_sec, kwargs.get("_tool"), root=binding.root, cwd=work_dir)
     except Exception as e:
         if res is None:
             _publish_unfinished_process_facts(ctx, _command_start_ts, spawn_error=e)
@@ -584,13 +583,15 @@ def _run_script(
     interp = str(interpreter or "python3").strip()
     body = str(script or "")
     if not body.strip():
-        return _pre_spawn_refusal(ctx, "⚠️ TOOL_ARG_ERROR (run_script): script is required.", tool="run_script")
+        return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, "⚠️ TOOL_ARG_ERROR (run_script): script is required.", tool="run_script"))
+    if refusal := command_start_refusal(ctx, "run_script", timeout_sec if timeout_sec is not None else timeout):
+        return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, refusal, tool="run_script"))
     try:
         binding = _resolved_binding or build_resolved_resource_binding(
             ctx, operation="shell", process_cwd=cwd, bucket=bucket, skill_name=skill_name,
         )
     except (OSError, ValueError) as exc:
-        return _pre_spawn_refusal(ctx, shell_cwd_block_message(ctx, cwd, operation="shell", error=exc), tool="run_script")
+        return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, shell_cwd_block_message(ctx, cwd, operation="shell", error=exc), tool="run_script"))
     # The undeclared-output audit of the script BODY (argv only carries the temp script path, so
     # _run_shell cannot see the body) is POST-exec (v6.56.0): the stat filter needs the files to
     # exist, and a pre-exec scan on not-yet-written paths would either be a no-op or false-flag
@@ -598,8 +599,8 @@ def _run_script(
     # executes in so a relatively-declared scratch path matches a user_files write in the body.
     resolved_workdir = pathlib.Path(binding.target_path)
     if not resolved_workdir.is_dir():
-        return _pre_spawn_refusal(ctx, f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {resolved_workdir}.",
-                                  tool="run_script")
+        return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {resolved_workdir}.",
+                                  tool="run_script"))
     _scratch_abs_body = _resolve_scratch_abs(scratch, resolved_workdir)
     _body_start_epoch = time.time()  # st_mtime audit; monotonic below is for durations
     _body_start_ts = time.monotonic()
@@ -638,18 +639,18 @@ def _run_script(
                 try:
                     script_arg = executor_map_host_path(executor, script_path)
                 except Exception as exc:
-                    return _pre_spawn_refusal(ctx, f"⚠️ RUN_SCRIPT_BLOCKED: executor-backed run_script could not map temp script path: {type(exc).__name__}: {exc}", tool="run_script")
+                    return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, f"⚠️ RUN_SCRIPT_BLOCKED: executor-backed run_script could not map temp script path: {type(exc).__name__}: {exc}", tool="run_script"))
         argv = [interp, script_arg, *[str(item) for item in (args or [])]]
         shell_entered = True
         result = _run_shell(
             ctx, argv, cwd=cwd, outputs=outputs, scratch=scratch,
             _resolved_binding=binding, timeout_sec=timeout_sec, timeout=timeout,
-            env_from_settings=kwargs.get("env_from_settings"),
+            env_from_settings=kwargs.get("env_from_settings"), _tool="run_script",
         )
     except (OSError, ValueError) as exc:
         if shell_entered:
             raise
-        return _pre_spawn_refusal(ctx, f"⚠️ RUN_SCRIPT_BLOCKED: script preparation failed: {exc}", tool="run_script")
+        return script_refusal_with_source(ctx, _pre_spawn_refusal(ctx, f"⚠️ RUN_SCRIPT_BLOCKED: script preparation failed: {exc}", tool="run_script"))
     finally:
         try:
             if run_dir is not None:
@@ -687,7 +688,7 @@ def _run_script(
             + ", ".join(undeclared_user_outputs)
             + ". Re-run with outputs=[...] or write the canonical deliverable via root=artifact_store."
         )
-    result = _wrap_run_script_process_result(ctx, result, audit_note, script_path)
+    result = wrap_script_result(ctx, result, audit_note, script_path)
     return _disclose_output_audit_failure(ctx, result, audit_error)
 
 
@@ -742,8 +743,8 @@ def get_tools() -> List[ToolEntry]:
 	                "timeout_sec": {
 	                    "type": "integer",
 	                    "description": (
-	                        "Optional per-call timeout in seconds for long builds/tests (alias: timeout). "
-	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
+	                        "Optional per-call timeout in seconds for long builds/tests (alias: timeout). Narrowed only by "
+	                        "the task's deadline or budget; one this platform cannot wait on is refused. Omit for the default."
 	                    ),
 	                },
 	                **RESULT_VIEW_PARAMS,
@@ -752,8 +753,9 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("run_script", {
             "name": "run_script",
             "description": (
-                "Run a short task-scoped temporary script with a declared interpreter. "
-                "Use for multi-line diagnostics or harness helpers; generated scripts use a private run directory inside the mapped workspace or the task drive. "
+                "Run an inline script with a declared interpreter from a temporary script file in a private run directory inside the mapped workspace or the task drive. "
+                "For Python, this tool does not add the selected cwd to the import path. "
+                "Keep reusable scripts in a skill payload and invoke those files with run_command. "
                 "The underlying command result echoes the resolved cwd."
             ),
             "parameters": {"type": "object", "properties": {
@@ -787,8 +789,8 @@ def get_tools() -> List[ToolEntry]:
 	                "timeout_sec": {
 	                    "type": "integer",
 	                    "description": (
-	                        "Optional per-call timeout in seconds for long scripts (alias: timeout). "
-	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
+	                        "Optional per-call timeout in seconds for long scripts (alias: timeout). Narrowed only by "
+	                        "the task's deadline or budget; one this platform cannot wait on is refused. Omit for the default."
 	                    ),
 	                },
 	                **RESULT_VIEW_PARAMS,

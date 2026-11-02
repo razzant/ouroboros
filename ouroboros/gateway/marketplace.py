@@ -211,21 +211,6 @@ def _serialize_install_result(result: Any) -> Dict[str, Any]:
     return payload
 
 
-def _resync_skill_schedules_quiet(drive_root: pathlib.Path) -> None:
-    """Mirror skill manifest schedules after a marketplace lifecycle change so a
-    removed/renamed/updated scheduled skill does not fire stale before the
-    periodic scheduler tick. Handlers call it through ``asyncio.to_thread``:
-    the mirror waits for the supervisor queue lock, and that wait must stay off
-    the HTTP event loop (the scheduler tick already runs the same idempotent
-    resync beside lifecycle operations, so nothing new interleaves)."""
-    try:
-        from supervisor.queue import resync_skill_schedules
-
-        resync_skill_schedules(drive_root)
-    except Exception:
-        log.debug("marketplace schedule resync failed", exc_info=True)
-
-
 def _lifecycle_options(
     success_prefix: str,
     failure_fallback: str,
@@ -298,9 +283,6 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         return json_exception(exc, context="marketplace install failed")
-    # Resync regardless of ok: a deps-failure can set ok=false after the payload
-    # was already installed on disk, changing scheduled-task readiness.
-    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     payload = _serialize_install_result(result)
     status = 200 if result.ok else (getattr(result, "error_status", 0) or 400)
     return JSONResponse(payload, status_code=status)
@@ -345,9 +327,6 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         return json_exception(exc, context="marketplace update failed")
-    # Resync regardless of ok: an update can mutate the payload on disk even when
-    # a follow-up deps step reports ok=false, changing scheduled-task readiness.
-    await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     payload = _serialize_install_result(result)
     status = 200 if result.ok else (getattr(result, "error_status", 0) or 400)
     return JSONResponse(payload, status_code=status)
@@ -445,10 +424,6 @@ async def api_marketplace_uninstall(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         return json_exception(exc, context="marketplace uninstall failed")
-    if result.ok:
-        # The skill is gone; drop its scheduled tasks now so the scheduler does
-        # not fire a deleted skill before the next periodic resync.
-        await asyncio.to_thread(_resync_skill_schedules_quiet, drive_root)
     return JSONResponse(
         {
             "ok": result.ok,

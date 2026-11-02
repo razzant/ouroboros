@@ -598,24 +598,24 @@ def _proc_cmdline(pid: int) -> str:
     return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()[:120]
 
 
-def _apply_orphan_scan(row: dict, survivors: list | None) -> None:
+def _apply_orphan_scan(row: dict, survivors: list | None, stop_unconfirmed: list = ()) -> None:
     """The last check of a lane: a process still carrying the lane's data root after stop fails a passing
     lane, and the index never carries a failed row with an empty reason. ``survivors`` are the pids the
     scan still found after the stop wait (empty = clean); ``None`` = no procfs: a typed fact, not a passed
     check. Survivors are NAMED in ``row["orphans"]`` (pid + cmdline head, first 20): the rc.14 paid run
     recorded a bare ``no_orphans_after_stop=false`` with no way to tell which processes outlived the stop."""
+    if stop_unconfirmed:  # exits ``IsolatedServer.stop`` could not prove fail the lane like survivors
+        row["server_stop_unconfirmed"], row["checks"]["server_stop_confirmed"] = list(stop_unconfirmed), False
     if survivors is None:
-        row["no_orphans_after_stop"] = None
-        row["orphan_scan"] = "unavailable:no_procfs"
-        return
-    row["no_orphans_after_stop"] = gone = not survivors
-    if not gone:
+        row["no_orphans_after_stop"], row["orphan_scan"] = None, "unavailable:no_procfs"
+    else:
+        row["no_orphans_after_stop"] = row["checks"]["no_orphans_after_stop"] = not survivors
+    if survivors:
         row["orphans"] = [{"pid": int(pid), "cmdline": _proc_cmdline(int(pid))} for pid in survivors[:20]]
         if len(survivors) > 20:
             row["orphans_omitted"] = len(survivors) - 20
-        if row["status"] == "pass":
-            row["status"], row["reason_code"] = "fail", "checks_failed"
-    row["checks"]["no_orphans_after_stop"] = gone
+    if (survivors or stop_unconfirmed) and row["status"] == "pass":
+        row["status"], row["reason_code"] = "fail", "checks_failed"
 
 
 def _record_row(out: pathlib.Path, lane: pathlib.Path, row: dict) -> None:
@@ -732,7 +732,8 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
                     raise RuntimeError("server unhealthy after the self-mod restart")
                 return server
             log("restarting server on the committed tree")
-            server.stop()
+            if unconfirmed := server.stop():  # it may still run on this clone and data root
+                raise RuntimeError(f"server stop unconfirmed, no second server started: {'; '.join(unconfirmed)}")
             server = start_server(hashlib.sha256(settings_path.read_bytes()).hexdigest())
             return server
 
@@ -794,20 +795,19 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
             ctx.close_ui()
             if scenario.needs_ui:
                 row["ui"] = {"available": not ctx.ui_reason, "reason": ctx.ui_reason}
-        if server is not None:
-            server.stop()
+        stop_unconfirmed = list(server.stop() or []) if server is not None else []
         if stub is not None:
             stub.__exit__(None, None, None)
         survivors = None
         if PROCFS_AVAILABLE:
             gone = harness.wait_until(lambda: not harness.pids_with_env_value(str(data_root)), 30)
             survivors = [] if gone else harness.pids_with_env_value(str(data_root))
-        _apply_orphan_scan(row, survivors)
+        _apply_orphan_scan(row, survivors, stop_unconfirmed)
         row["budget"]["spent_usd"], row["budget"]["unknown_cost_rows"] = lane_spend(data_root)
         row["ended_at"], row["duration_sec"] = now_iso(), round(time.time() - started, 1)
         row["traces"] = traces.publish_lane_traces(lane, data_root, traces.lane_secrets(settings_path, {args.key_env: key or os.environ.get(args.key_env, "")}))
         _record_row(out, lane, row)
-        if args.prune_clones:
+        if args.prune_clones and not (stop_unconfirmed or survivors):  # else a process may still run from it
             shutil.rmtree(clone, ignore_errors=True)
         states[job] = (f"{row['status']} ({row.get('duration_sec')}s)", time.time())
     return row

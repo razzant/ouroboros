@@ -1,11 +1,10 @@
 # Module Size & Complexity
 
 This chapter owns the deterministic size gates and their debt manifest, paydown by
-simplifying in place rather than extracting passthroughs, and the reading-cost
-invariants reviewers check against: hot-reader projections, the source-complete
-decision pipeline, continuation authority, live-only notifications, UI disposers and
-embedded-surface geometry. Each rule bounds reading cost and names its enforcement or
-its absence.
+simplifying in place, and the reading-cost invariants reviewers check against: hot-reader
+projections, the source-complete decision pipeline, continuation authority, live-only
+notifications, UI disposers and embedded-surface geometry. Each rule bounds reading cost
+and names its enforcement or its absence.
 
 P7 makes context fit a maintenance constraint, not a line-count aesthetic. Python
 modules everywhere (`tests/` and `devtools/` included) and first-party `web/**/*.js`
@@ -19,7 +18,7 @@ A stale or newly oversized entry fails; regenerate with
 `scripts/regenerate_size_ratchet.py` (mechanics: ARCHITECTURE §6 "Review stack").
 Methods over 150 lines or eight parameters are decomposition signals, not gates
 (CHECKLISTS item 11(c); BIBLE P7). Runtime function totals are descriptive, with no
-aggregate ceiling, because a repository-wide count penalizes useful decomposition.
+aggregate ceiling: a repository-wide count penalizes useful decomposition.
 
 Enforcement: manual/tag CI runs `size_ratchet` (ARCHITECTURE §8). Without an event
 base its transition check compares only HEAD's parent, not all intervening commits;
@@ -32,12 +31,12 @@ ARCHITECTURE §6 "Commit preflight").
 A change that runs into a band, the hard cap, the function gate or the byte debt pays it
 down by simplifying where the change lives (simpler control and data flow, dead code and
 duplicates removed, an existing SSOT reused, prose made compact), so the module reads
-better afterwards. Extraction is the last resort and counts only for a natural boundary
-that would stay correct with the parent far below the cap: its own reason to change, an
-explicit contract, a real caller. A cap-driven bucket, a one-caller passthrough, or
-bytes bought by deleting contract-bearing comments, docstrings, messages or tests is a
-defect to report, not paydown (BIBLE P7 «first simplify what exists»). Enforcement:
-CHECKLISTS item 27 `size_cap_paydown`, advisory when applicable.
+better. Extraction is the last resort and counts only for a natural boundary that would
+stay correct with the parent far below the cap: its own reason to change, an explicit
+contract, a real caller. A cap-driven bucket, a one-caller passthrough, or bytes bought by
+deleting contract-bearing comments, docstrings, messages or tests is a defect to report,
+not paydown (BIBLE P7 «first simplify what exists»). Enforcement: CHECKLISTS item 27
+`size_cap_paydown`, advisory when applicable.
 
 ### Pragmatic SOLID
 
@@ -62,14 +61,12 @@ follows. Diff size, line count and file count alone are not findings; CHECKLISTS
 
 ### Shared behavior and data-flow changes
 
-When changing shared behavior or data flow, identify the owning authority, the identity
-and scope of its facts, and the affected producers and consumers, including unchanged
-consumers whose inputs or assumptions the change alters. Preserve the promised
-semantics across live and recovery paths at comparable freshness, and make legitimate
-differences explicit. Verify with falsifiable checks at real consumer boundaries, not
-helper outputs or matching field names, choosing the paths from the change and its
-dependencies rather than a fixed inventory. Enforcement: review-only, through the
-coupling `implicit_contracts` item.
+For shared behavior/data changes, name the authority, fact identity/scope and affected
+producers/consumers, including unchanged consumers whose inputs or assumptions change.
+Preserve live/recovery semantics at comparable freshness; explain legitimate differences.
+Verify falsifiable behavior at real consumer boundaries, not helper outputs or matching
+field names; select paths from dependencies, not a fixed inventory. Enforcement:
+review-only, coupling `implicit_contracts`.
 
 ### Invariant: Projection over replay (hot readers of growing stores)
 
@@ -81,28 +78,28 @@ addressed store, outside queue locks, released before display consumers; unavail
 unknown for that request (`tests/test_hot_facts*.py` fix Stop/custody results while settled
 history grows 20→2,000 rows). Main batches question display views and warms lineage by
 generation, keeping strict per-member gaps if a batch fails (`tests/test_main_decisions_reads.py`);
-B3/B3w in `tests/test_cost_contract.py` fix visible questions while delivered history grows.
+`tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows.
 
-- **Measure the growing operation:** history, object count, nesting, cold caches and
-  contention. Where responsiveness suffers, use existing spans and real-reader spies;
-  telemetry adds no steady-state writes/history reads. Remove redundant work or reuse
-  a validated view before adding a projection/cache. Unknown is never empty. This sets
-  no universal time limit, mandatory benchmark or approval gate.
-- **Passive GET:** no new steady-state durable writes. `usage_store.py::read` may
-  initialize an empty store with no pending import; otherwise display reads report
-  unavailable data and leave import to startup (`tests/test_usage_store.py`).
+- **Measure growth:** history, object count, nesting, cold caches and contention, using
+  existing spans and real-reader spies when responsiveness suffers. Telemetry adds no
+  steady-state writes/history reads. Remove repetition or reuse a validated view before
+  adding a projection/cache. Unknown is never empty; no universal time limit, benchmark or approval gate.
+- **Passive GET:** rendering/stored display adds no steady-state writes. Already-performed
+  external discovery may store typed provider facts through their existing evidence owner;
+  this permits no new network or control-state writes. `usage_store.py::read` may initialize
+  an empty store without pending import; otherwise display reports unavailable data and
+  leaves import to startup (`tests/test_usage_store.py`).
 - **Reuse precedents:** a writer seam whose transaction also writes the facts readers
-  address (`dialogue_store.py::append`); current rows reduced by the writing transaction
-  (`delegate_custody_current.py`); bounded filtered tail (`jsonl_tail.py`);
-  transactional summaries (`usage_store.py`, `store.py`);
-  indexed selects (`task_store.py`); task-event SSE v2 cursor (ARCHITECTURE §3).
+  address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
+  bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
+  one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3).
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
 `tests/test_store_boot.py` fixes `prepare_startup_state` at 50/500 frozen results and 20/200
 child stores (a clean boot is one read transaction, no history access or writes);
 `tests/test_store_legacy_reconcile.py` covers both detector outcomes, cursor resume and the
-foreground CLI, and the import/switch suites keep downgrade semantics.
+foreground CLI; the import/switch suites keep downgrade semantics.
 
 ### Invariant: Source-complete decision pipeline
 
@@ -137,15 +134,15 @@ Enforcement: CHECKLISTS item 20 `source_completeness` (critical when applicable)
 
 #### Review presentation adapters
 
-`web/modules/review_presentation.js`, `ouroboros/review_execution_projection.py` (the
-bounded cross-domain `executions[]` wire), `web/modules/review_dom_patch.js` and
-`web/modules/harness_presentation.js` are pure read-side presentation: they never
-author, mutate or feed back canonical verdict, lifecycle, routing, attention or
-enforcement authority, never infer that a requested route executed, and omit an
-incomplete row rather than guess it. They reuse the existing chat-history, task-detail
-and physical-attempt readers and add no review ledger, endpoint, persisted UI state or
-cost copy (ARCHITECTURE §3 "Chat and Projects"). Enforcement:
-`web/tests/review_presentation.test.js`, `web/tests/harness_presentation.test.js`.
+`web/modules/review_presentation.js`, `review_opinions.js`, `review_dom_patch.js`,
+`harness_presentation.js` and `ouroboros/review_execution_projection.py` (bounded
+`executions[]`) only present producer facts: no verdict, lifecycle, routing,
+attention or enforcement changes, no requested-as-observed execution. Incomplete
+rows remain gaps. Existing chat/task/attempt readers supply the view;
+`gateway/task_reviews.py` adds passive paged history and owned saved-text exports
+through ledger/Plan/skill readers. No second ledger, persisted UI state or cost
+copy (ARCHITECTURE §3). Enforcement: `web/tests/review_presentation.test.js`,
+`web/tests/harness_presentation.test.js`, `tests/test_task_review_sources.py`.
 
 #### Context and growth matrix
 
@@ -155,7 +152,7 @@ ARCHITECTURE §10 "Continuity data-flow map" owns sources, projections and reten
 |---|---|---|
 | Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads cost the page, never another room's history; import coverage is disclosed; pages and parts compress the horizon, never delete it; size appears in the storage count |
 | Plan/review evidence | ARCHITECTURE §10.1, "Plan/review authority" | Source and retention rules live in that row |
-| Skill-review root tasks | Per-skill `state/skills/<name>/review_history.jsonl`; `skill_review_runner._append_terminal_history` projects terminal identities to `state/skill_review_root_tasks.jsonl` → `skill_readiness._skill_names_from_review_history` reads a bounded newest-first suffix | Append-only and idempotent by root/task/outcome identity; size appears under App state |
+| Skill-review root tasks | The review ledger's hot index (`state/review_ledger/index.jsonl`; a `surface="skill"` row names its skill) → `skill_readiness._skill_names_from_review_history`, bounded; a legacy `review_history.jsonl` is only read | Append-only; archived segments are disclosed as truncation; size under App state |
 | Task/project execution | ARCHITECTURE §10.1, "Execution evidence" | Promotion and retention rules live in that row |
 
 ### Invariant: Continuation authority and bounded role projections
@@ -167,14 +164,15 @@ summary or a canonical-result mutation (ARCHITECTURE §1 "CLI / Headless Boundar
 optional exact read is `get_task_result(include_authority=True)`.
 
 Every predecessor consumer (the successor's start, children, external work orders) gets
-the same pure, idempotent brief `main_context_authority.project_helper_predecessor_authority`
-of the one envelope producer `contracts.task_contract.bounded_continuation_envelope` (fields
-whole-or-pointer under the serialized budget; previews carry `full_chars` and a
-`source_ref`). Durable `task_results` bodies stay the SSOT; the brief names each omitted
-field and size and never stands in for it. No hop cap, no chain walk: a successor reads its
-predecessor through `get_task_result(include_authority=True)`, and the predecessor mind's
-notes follow the assignment as one foldable row. Enforcement:
-`tests/test_continuation_context_authority.py`, `tests/test_helper_predecessor_history.py`.
+the same pure, idempotent brief
+`main_context_authority.project_helper_predecessor_authority` of the one envelope producer
+`contracts.task_contract.bounded_continuation_envelope` (fields whole-or-pointer under the
+serialized budget; previews carry `full_chars` and a `source_ref`). Durable `task_results`
+bodies stay the SSOT; the brief names each omitted field and size and never stands in for
+it. No hop cap, no chain walk: a successor reads its predecessor through the exact read
+above, and the predecessor mind's notes follow the assignment as one foldable row.
+Enforcement: `tests/test_continuation_context_authority.py`,
+`tests/test_helper_predecessor_history.py`.
 
 ### Invariant: notifications ring for live events only
 
@@ -207,8 +205,8 @@ owns a `destroy()` that releases everything it acquired: WS subscriptions
 `MutationObserver`, `IntersectionObserver`), timers, `requestAnimationFrame` loops and
 `EventSource`/streaming connections.
 
-An instance that can be closed, hidden or replaced (project chat panels are the
-canonical case) is destroyable without leaving an acquisition behind. It may survive
+An instance that can be closed, hidden or replaced (canonically, project chat
+panels) is destroyable without leaving an acquisition behind. It may survive
 being hidden only under an explicit, owner-visible retention reason (a project chat
 with pending work, a widget card set to Keep running); even then it owns its disposer,
 and Stop, unload, reload and shutdown stay force-destroy boundaries. "Hide the DOM
@@ -228,20 +226,18 @@ geometry/overflow contract, a paired disposer for every long-lived resource, dec
 refresh/stream/error semantics, and a named real-consumer visual verification path; an
 intentional omission records why deferring it is safe.
 
-For Widgets, framed `height` values are bounded and module auto-height is
-host-controlled below a finite ceiling. Below that ceiling, updates preserve the
-child's inline-size basis; the host controls vertical scrollbar mode while preserving
-horizontal overflow. Feedback-sensitive verification is event-driven on the relevant engine and proves
-convergence to a quiet fixed point with a real consumer or production-derived fixture
-that crosses the known wrapping threshold, not two snapshots. A module widget's own
-faults are declared error semantics, not silence (the `ouro-widget-error` channel:
-ARCHITECTURE §3 "Skills and Widgets"); with no server-side widget fault ledger they are
-visible only while the Widgets page is open, safe to defer because the browser is a
-widget's verification path. Module source loading and declarative requests have a
-bounded host timeout; declarative job widgets keep their `job_id` and bounded
-retry/timeout behavior in the refresh contract, where missing or malformed job status
-is an immediate protocol error and an unknown in-progress label is a bounded pending
-state.
+For Widgets, framed `height` values are bounded and module auto-height is host-controlled
+below a finite ceiling, where updates preserve the child's inline-size basis; the host
+controls vertical scrollbar mode while preserving horizontal overflow. Feedback-sensitive
+verification is event-driven on the relevant engine and proves convergence to a quiet
+fixed point with a real consumer or production-derived fixture that crosses the known
+wrapping threshold, not two snapshots. A module widget's own faults use
+`ouro-widget-error`; the builtin page sends bounded, best-effort reports to the existing
+event log (ARCHITECTURE §3 "Skills and Widgets"). These page-reported diagnostics are not
+task-execution evidence. Module source loading and declarative requests have a bounded
+host timeout; declarative job widgets keep their `job_id` and bounded retry/timeout
+behavior in the refresh contract, where missing or malformed job status is an immediate
+protocol error and an unknown in-progress label is a bounded pending state.
 
 Enforcement: CHECKLISTS item 9 `perf_lifecycle` points lifecycle changes here; the
 widget geometry/refresh contracts are pinned in `tests/test_widgets_ui_static.py` and

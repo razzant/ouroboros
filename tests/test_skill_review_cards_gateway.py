@@ -183,57 +183,6 @@ def test_review_history_detail_keeps_legacy_same_model_actors_distinct(tmp_path)
     assert markdown.count("### Reviewer:") == 2
 
 
-def test_review_history_detail_renders_exact_canonical_wave_usage(tmp_path, monkeypatch):
-    from ouroboros import usage_accounting as ua
-
-    client, drive_root = _detail_client(tmp_path)
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    append_jsonl(_history_path(drive_root, "alpha"), _terminal_record(
-        paid=True, wave_id="skill-job-1",
-        usage_attribution_schema="physical_attempt_v1",
-    ))
-    base = dict(
-        drive_root=drive_root, task_id="review-alpha", root_task_id="root-alpha",
-        category="skill_review_review", source="review_substrate",
-        review_skill="alpha", review_wave_id="skill-job-1",
-    )
-    with ua.usage_scope(ua.UsageScope(**base, review_slot_id="skill-triad-1")):
-        api = ua.reserve_attempt(ua.AttemptRequest(
-            model="openai/gpt-x", provider="openai", reservation_usd=0.25,
-            drive_root=drive_root, global_limit_usd=100,
-        ))
-        ua.mark_dispatched(api)
-        ua.settle_attempt(
-            api, {"prompt_tokens": 12, "completion_tokens": 4, "cached_tokens": 2},
-            cost_usd=0.125, cost_final=True,
-        )
-    with ua.usage_scope(ua.UsageScope(**base, review_slot_id="skill-triad-2")):
-        session = ua.record_subscription_session(
-            "alpha-session", drive_root=drive_root, route="claude",
-            model="claude-fable-5", prompt_tokens=30, completion_tokens=8,
-            cached_tokens=None, reset_at="2026-08-25T00:00:00Z", spend_usd=0.0,
-            credential_profile_id="fable-profile", access_profile="readonly",
-        )
-
-    resp = client.get("/api/skills/alpha/review-history/skill-job-1")
-
-    assert resp.status_code == 200
-    payload = resp.json()
-    assert set(payload) == {"markdown", "status", "content_hash", "job_status"}
-    markdown = payload["markdown"]
-    assert "### Review accounting" in markdown
-    assert api.attempt_id in markdown and session in markdown
-    assert "Cash: settled $0.125000; confirmed $0.125000" in markdown
-    assert "Calls: API physical=1; subscription sessions=1" in markdown
-    assert "Reported tokens: prompt=42; completion=12; cached=2" in markdown
-    assert "Token coverage: cached=1/2 unreported" in markdown
-    assert "Slot skill-triad-1" in markdown and "Slot skill-triad-2" in markdown
-    assert "claude resets 2026-08-25T00:00:00Z" in markdown
-    assert "model=claude-fable-5, requested route=claude, profile=fable-profile" in markdown
-    assert "ledger integrity=verified; slot attribution=complete" in markdown
-    assert "Cost unavailable" not in markdown
-
-
 def test_review_history_detail_discloses_legacy_paid_wave_as_unattributable(tmp_path):
     client, drive_root = _detail_client(tmp_path)
     append_jsonl(_history_path(drive_root, "alpha"), _terminal_record(paid=True))
@@ -242,179 +191,25 @@ def test_review_history_detail_discloses_legacy_paid_wave_as_unattributable(tmp_
         "/api/skills/alpha/review-history/skill-job-1",
     ).json()["markdown"]
 
-    assert "paid panel dispatch" in markdown
-    assert "exact per-wave physical-attempt attribution was unavailable in this version" in markdown
+    assert "paid panel dispatch (counted toward Max Review Cycles by that version)" in markdown
     assert "### Review accounting" not in markdown
-    assert "Cost unavailable" in markdown
+    assert "Cost unavailable (a row of an earlier version)" in markdown
 
 
-def test_review_history_detail_empty_exact_wave_never_invents_zero_cash(tmp_path):
+def test_review_history_detail_of_a_legacy_paid_row_keeps_its_verdict_without_usage_rows(tmp_path):
+    """A row an earlier version wrote with physical-attempt attribution renders its verdict; no usage
+    projection is consulted any more (a skill wave's seats are its ledger record's rows)."""
     client, drive_root = _detail_client(tmp_path)
     append_jsonl(_history_path(drive_root, "alpha"), _terminal_record(
         paid=True, wave_id="skill-job-1",
         usage_attribution_schema="physical_attempt_v1",
     ))
-
-    markdown = client.get(
-        "/api/skills/alpha/review-history/skill-job-1",
-    ).json()["markdown"]
-
-    assert "no canonical physical-attempt rows are recorded yet" in markdown
-    assert "cash and finality are unavailable" in markdown
-    assert "$0.000000" not in markdown
-    assert "ledger integrity=verified" not in markdown
-    assert "### Review accounting" not in markdown
-    assert "Cost unavailable" in markdown
-
-
-def test_review_history_detail_projects_a_late_dispatch_marker_without_rewriting_history(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import usage_accounting as ua
-    from ouroboros.skill_review_history import load_dispatch_markers, write_dispatch_marker
-
-    client, drive_root = _detail_client(tmp_path)
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    history = _history_path(drive_root, "alpha")
-    append_jsonl(history, _terminal_record(
-        paid=False, wave_id=None, usage_attribution_schema=None,
-    ))
-    raw_before = history.read_bytes()
-    write_dispatch_marker(
-        drive_root, "alpha", wave_id="skill-job-1", group_id="manual:alpha",
-        content_hash="abc123def4567890", review_contract_fingerprint="cf-late",
-    )
-    with ua.usage_scope(ua.UsageScope(
-        drive_root=drive_root, task_id="review-alpha", root_task_id="root-alpha",
-        category="skill_review_review", source="review_substrate",
-        review_skill="alpha", review_wave_id="skill-job-1",
-        review_slot_id="skill-triad-1",
-    )):
-        attempt = ua.reserve_attempt(ua.AttemptRequest(
-            model="openai/gpt-x", provider="openai", reservation_usd=0.25,
-            drive_root=drive_root, global_limit_usd=100,
-        ))
-        ua.mark_dispatched(attempt)
-        ua.settle_attempt(
-            attempt, {"prompt_tokens": 12, "completion_tokens": 4},
-            cost_usd=0.125, cost_final=True,
-        )
-
-    markdown = client.get(
-        "/api/skills/alpha/review-history/skill-job-1",
-    ).json()["markdown"]
-    assert "paid panel dispatch (counts toward Max Review Cycles)" in markdown
-    assert "### Review accounting" in markdown and attempt.attempt_id in markdown
-    assert "Recorded-row cash: settled $0.125000; confirmed $0.125000" in markdown
-    assert "Wave attempt coverage: incomplete (1/2 recorded)" in markdown
-    assert history.read_bytes() == raw_before
-    assert [row["wave_id"] for row in load_dispatch_markers(drive_root, "alpha")] == [
-        "skill-job-1",
-    ]
-
-
-def test_review_history_detail_stays_incomplete_until_late_session_settles(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import usage_accounting as ua
-
-    client, drive_root = _detail_client(tmp_path)
-    monkeypatch.setenv("TOTAL_BUDGET", "100")
-    append_jsonl(_history_path(drive_root, "alpha"), _terminal_record(
-        paid=True, wave_id="skill-job-1",
-        usage_attribution_schema="physical_attempt_v1",
-    ))
-    base = dict(
-        drive_root=drive_root, task_id="review-alpha", root_task_id="root-alpha",
-        category="skill_review_review", source="review_substrate",
-        review_skill="alpha", review_wave_id="skill-job-1",
-    )
-    with ua.usage_scope(ua.UsageScope(**base, review_slot_id="skill-triad-1")):
-        api = ua.reserve_attempt(ua.AttemptRequest(
-            model="openai/gpt-x", provider="openai", reservation_usd=0.25,
-            drive_root=drive_root, global_limit_usd=100,
-        ))
-        ua.mark_dispatched(api)
-        ua.settle_attempt(api, {"prompt_tokens": 12, "completion_tokens": 4},
-                          cost_usd=0.125, cost_final=True)
-    with ua.usage_scope(ua.UsageScope(
-        **{**base, "source": "review_substrate.extraction"},
-        review_slot_id="skill-triad-2",
-    )):
-        extraction = ua.reserve_attempt(ua.AttemptRequest(
-            model="openai/light", provider="openai", reservation_usd=0.01,
-            drive_root=drive_root, global_limit_usd=100,
-        ))
-        ua.mark_dispatched(extraction)
-        ua.settle_attempt(extraction, {"prompt_tokens": 3, "completion_tokens": 1},
-                          cost_usd=0.005, cost_final=True)
-
-    pending = client.get("/api/skills/alpha/review-history/skill-job-1").json()["markdown"]
-    assert "Recorded-row cash: settled $0.130000" in pending
-    assert "Wave attempt coverage: incomplete (1/2 recorded)" in pending
-    assert "whole-wave cash and finality are unavailable" in pending
-
-    with ua.usage_scope(ua.UsageScope(**base, review_slot_id="skill-triad-2")):
-        ua.record_subscription_session(
-            "late-session", drive_root=drive_root, route="claude",
-            model="claude-fable-5", spend_usd=0.0,
-            credential_profile_id="fable-profile", access_profile="readonly",
-        )
-    settled = client.get("/api/skills/alpha/review-history/skill-job-1").json()["markdown"]
-    assert "Cash: settled $0.130000" in settled
-    assert "Wave attempt coverage: complete (2/2 recorded)" in settled
-    assert "whole-wave cash and finality are unavailable" not in settled
-
-
-def test_chunked_coverage_stays_unknown_without_per_occurrence_attempt_identity(tmp_path):
-    from ouroboros.skill_review_usage import skill_review_attempt_coverage
-
-    record = {"raw_actor_records": [
-        {"slot_id": "slot-a"}, {"slot_id": "slot-b"},
-        {"slot_id": "slot-a"}, {"slot_id": "slot-b"},
-    ]}
-    usage = {"attempts": [
-        {"review_slot_id": "slot-a", "kind": "subscription_session", "state": "settled", "source": "review_substrate"},
-        {"review_slot_id": "slot-a", "kind": "attempt", "state": "settled", "source": "review_substrate.extraction"},
-        {"review_slot_id": "slot-b", "kind": "subscription_session", "state": "settled", "source": "review_substrate"},
-        {"review_slot_id": "slot-b", "kind": "subscription_session", "state": "settled", "source": "review_substrate"},
-    ]}
-
-    assert skill_review_attempt_coverage(record, usage) == (False, 4, 3)
-
-
-def test_reserved_row_does_not_count_as_a_physical_review_attempt():
-    from ouroboros.skill_review_usage import skill_review_attempt_coverage
-
-    record = {"raw_actor_records": [{"slot_id": "slot-a"}]}
-    usage = {"attempts": [{
-        "review_slot_id": "slot-a", "kind": "attempt", "state": "reserved",
-        "source": "review_substrate",
-    }]}
-
-    assert skill_review_attempt_coverage(record, usage) == (True, 1, 0)
-
-
-def test_review_history_detail_keeps_verdict_when_usage_projection_is_unavailable(
-    tmp_path, monkeypatch,
-):
-    from ouroboros import usage_accounting
-
-    client, drive_root = _detail_client(tmp_path)
-    append_jsonl(_history_path(drive_root, "alpha"), _terminal_record(
-        paid=True, wave_id="skill-job-1",
-        usage_attribution_schema="physical_attempt_v1",
-    ))
-    monkeypatch.setattr(
-        usage_accounting, "skill_review_usage",
-        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("ledger unavailable")),
-    )
 
     resp = client.get("/api/skills/alpha/review-history/skill-job-1")
 
     assert resp.status_code == 200
     assert "status=clean" in resp.json()["markdown"]
-    assert "exact physical-attempt accounting is currently unavailable" in resp.json()["markdown"]
+    assert "Cost unavailable (a row of an earlier version)" in resp.json()["markdown"]
 
 
 def test_review_history_detail_free_replay_names_zero_physical_dispatch(tmp_path):
@@ -784,6 +579,7 @@ def test_chat_history_passes_skill_review_reference_fields(tmp_path):
         "status": "clean",
         "content_hash": "abc123def4567890",
         "job_id": "skill-job-1",
+        "record_id": "rec-20260815-0001",
         "group_id": "task:root-1:alpha",
         "presentation_owner_task_id": "root-1",
         "root_task_id": "root-1",
@@ -822,6 +618,7 @@ def test_chat_history_passes_skill_review_reference_fields(tmp_path):
     assert reference["system_type"] == "skill_review"
     assert reference["skill"] == "alpha"
     assert reference["job_id"] == "skill-job-1"
+    assert reference["record_id"] == "rec-20260815-0001", "the ledger record the card asks for (a reused review keeps it)"
     assert reference["status"] == "clean"
     assert reference["content_hash"] == "abc123def4567890"
     assert reference["review_round"] == 2
@@ -834,6 +631,6 @@ def test_chat_history_passes_skill_review_reference_fields(tmp_path):
     assert reference["source"] == "skills"
     # Legacy skill_review rows expose empty reference fields (frontend keeps
     # exactly today's local expansion for them).
-    assert legacy["skill"] == "" and legacy["job_id"] == ""
+    assert legacy["skill"] == "" and legacy["job_id"] == "" and legacy["record_id"] == ""
     # Non-skill-review rows do not grow the new keys at all.
     assert "skill" not in plain and "job_id" not in plain

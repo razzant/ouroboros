@@ -15,6 +15,7 @@ export const CARD_RENDER_CONTEXT = Object.freeze({ routePath: () => '', routePre
 
 const COMMIT_TYPES = new Set(['action', 'form']);
 const SENT = { status: 'success', message: 'Sent ✓' };
+const WAITING = { status: 'success', message: 'Saved · the task reads it when it continues' };
 const OWED = { status: 'warning', message: 'Saved, not delivered yet. Press again to retry.' };
 const STALE = { status: 'warning', message: 'This card changed since it was drawn. Look at the new version first.' };
 const KEPT_STALE = { status: 'warning', message: 'This kept copy is out of date. In the chat, remove it and keep it again.' };
@@ -34,11 +35,14 @@ export async function postCardDecision(body) {
     }
 }
 
+// A recorded press: owed, waiting in its paused author's mailbox until it reads it, or sent.
+const recordedFeedback = (entry) => (entry.delivery === 'owed' ? OWED : entry.reason_code === 'awaiting_recipient_read' ? WAITING : SENT);
+
 // What a press's answer means for its control: the feedback it shows, whether the same request id is retried by the
 // next press (no answer, a server failure, delivery still owed), whether the control locks (gone, or a `once`
 // control that already counted) and whether the card changed since it was drawn (`stale`: its current revision).
 function pressOutcome(status, body = {}) {
-    if (status === 200 && body.ok !== false) return { feedback: SENT, sent: true };
+    if (status === 200 && body.ok !== false) return { feedback: body.reason_code === 'awaiting_recipient_read' ? WAITING : SENT, sent: true };
     if (status === 202) return { feedback: OWED, retry: true };
     if (status === 409 && body.reason_code === 'card_stale') return { feedback: STALE, stale: Number(body.revision) || 1 };
     if (status === 409 && body.reason_code === 'card_action_once') {
@@ -83,7 +87,7 @@ export function createCardPresses({ cardId, post = postCardDecision, newId = new
             for (const [actionId, entry] of latest) {
                 const once = onceIds.has(actionId);
                 if (entry.delivery !== 'owed') {
-                    if (once && !locked.has(actionId)) locked.set(actionId, SENT);
+                    if (once && (!locked.has(actionId) || locked.get(actionId) === WAITING)) locked.set(actionId, recordedFeedback(entry));
                 } else if (entry.request_id && !inFlight.has(actionId) && (once || !retry.has(actionId))) {
                     retry.set(actionId, { requestId: entry.request_id, values: null, anyValues: once });
                 }
@@ -158,7 +162,9 @@ export function mountCardComponents(mount, card, { presses = createCardPresses({
             const recorded = latest.get(component.submit.id);
             const lockedFeedback = presses.lockedFeedback(component.submit.id);
             if (lockedFeedback) componentState[`feedback:${key}`] = lockedFeedback;
-            else if (recorded && !componentState[`feedback:${key}`]) componentState[`feedback:${key}`] = recorded.delivery === 'owed' ? OWED : SENT;
+            else if (recorded && (!componentState[`feedback:${key}`] || componentState[`feedback:${key}`] === WAITING)) {
+                componentState[`feedback:${key}`] = recordedFeedback(recorded);  // a wait ends once its author read the press
+            }
         }
     };
     const render = () => {
@@ -239,7 +245,12 @@ export async function setCardPinned(cardId, pinned) {
  *  revision it was kept at (a card replaced since says the copy is out of date). */
 export function mountPinnedCard(mount, tab) {
     const render = tab.render || {};
+    // A kept copy hears no `card_state`, so it never shows a wait whose end it could not see: `Sent ✓`, as before.
+    const post = async (body) => {
+        const answer = await postCardDecision(body);
+        return answer?.body?.reason_code === 'awaiting_recipient_read' ? { ...answer, body: { ...answer.body, reason_code: '' } } : answer;
+    };
     const mounted = mountCardComponents(mount, { card_id: tab.tab_id, revision: Number(tab.revision) || 1,
-        components: render.components, data: render.data });
+        components: render.components, data: render.data }, { presses: createCardPresses({ cardId: tab.tab_id, post }) });
     return () => mounted.dispose();
 }

@@ -86,9 +86,12 @@ def test_server_enables_ws_ping_and_heartbeat():
     assert "ws_ping_timeout=20" in server_source
 
 
-def test_index_includes_reconnect_overlay():
-    source = _read("web/index.html")
-    assert 'id="reconnect-overlay"' in source
+def test_a_dropped_socket_is_said_in_the_room_bar_not_behind_a_veil():
+    """Owner 20.10 (4A): no grey veil covers the app while the socket comes back; the room's own bar says
+    Reconnecting… with its ring, and what was sent waits for the connection."""
+    assert 'reconnect-overlay' not in _read("web/index.html")
+    assert 'reconnect-overlay' not in _read("web/modules/ws.js")
+    assert "view('offline', 'Reconnecting…', 'offline', 'ring')" in _read("web/modules/work_status.js")
 
 
 def test_index_page_disables_cache():
@@ -207,18 +210,16 @@ def test_find_free_port_raises_when_range_stays_busy(monkeypatch):
         raise AssertionError("Expected find_free_port to raise when every candidate stays busy")
 
 
-def test_chat_shows_reconnect_banner_after_reconnect_and_reload():
-    """chat.js should show reconnect status after both soft reconnect and restart reload."""
+def test_reconnect_adds_no_row_and_only_a_changed_code_reload_says_restart_complete():
+    """Room status carries the outage, not the transcript.
+
+    Behaviour: tests/test_reconnect_feed_browser.py (Main, Project, failed resync, reload reasons).
+    """
     source = _read("web/modules/chat.js")
     assert "wsHasConnectedOnce" in source, "Missing reconnect-once tracking flag"
-    assert "Reconnected" in source, "Missing reconnect banner text"
-    # reconnectBannerText moved verbatim to chat_activity.js (chat.js byte ceiling).
-    assert "Restart complete" in _read("web/modules/chat_activity.js"), (
-        "Missing restart-complete banner text"
-    )
     assert "_ouro_reason" in source, "Missing restart reload reason handling"
-    assert "history.replaceState" in source, "Reconnect params should be cleared after showing banner"
-    # Ensure banner is ephemeral (not persisted to history)
+    assert "history.replaceState" in source, "Reload params should be cleared after the first open"
+    # The restart notice is ephemeral (not persisted to history)
     assert "ephemeral: true" in source
 
 
@@ -284,7 +285,7 @@ def test_task_done_live_summary_distinguishes_typed_failure():
     assert "if (severity === 'warn') return 'warn';" in source
     assert source.count("taskTerminalPhase(evt)") >= 2
     assert "const terminal = taskDoneIsTerminal(evt);" in source
-    assert "const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working');" in source
+    assert "const presentation = taskPresentation(terminal || outcome === 'error' ? outcome : 'working'," in source
     assert "headline: presentation.headline" in source
 
 
@@ -386,11 +387,8 @@ def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch
 
     source = _read("ouroboros/server_restart.py")
     assert "Stopping active task. New settings apply to the next message." in source
-    assert "owner_restart_no_resume.flag" in source
-    assert "owner_restart_no_resume" in source
-    assert "panic_stop.flag" in source
-    assert "owner_restart_flag.unlink(missing_ok=True)" in source
-    assert "stable_skip_flag.unlink(missing_ok=True)" in source
+    assert "prepare_owner_restart" in source
+    assert "owner_restart_no_resume" not in source
     # Checkout gate first (a refusal leaves the server intact), then the durable
     # no-resume intent, then the owned-work stop, then the owner's stop notice.
     owner_restart = _read("server.py").split('lowered.startswith("/restart"):', 1)[1].split(
@@ -409,8 +407,9 @@ def test_owner_restart_copy_is_explicit_about_stopped_task(tmp_path, monkeypatch
 
     def stopped(actual):
         assert actual is ctx
-        assert (flags / "owner_restart_no_resume.flag").read_text(encoding="utf-8") == "owner_restart"
-        assert (flags / "panic_stop.flag").read_text(encoding="utf-8") == "owner_restart_no_resume"
+        from ouroboros.delegate_recovery import active_restart_transaction
+        assert active_restart_transaction(tmp_path)["door"] == "owner_restart"
+        assert not (flags / "panic_stop.flag").exists()
         calls.append("stopped")
         return ["active-task"]
 
@@ -546,8 +545,9 @@ def test_owner_restart_proceeds_when_worker_shutdown_fails(tmp_path, monkeypatch
 
     server._process_bridge_updates(Bridge(), 0, Ctx())
 
-    assert (tmp_path / "state" / "owner_restart_no_resume.flag").exists()
-    assert (tmp_path / "state" / "panic_stop.flag").exists()
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert active_restart_transaction(tmp_path)["door"] == "owner_restart"
+    assert not (tmp_path / "state" / "panic_stop.flag").exists()
     assert "New settings apply to the next message." in messages
     assert not any("Stopping active task" in text for text in messages)
     assert not any("cancelled" in text or "deferred" in text for text in messages)
@@ -689,7 +689,7 @@ def _owner_restart_world(tmp_path, monkeypatch, stop):
     run = lambda: server_restart._perform_owner_restart(SimpleNamespace(safe_restart=None),
                                                         lambda text, _suffix: notices.append(text))
     return SimpleNamespace(run=run, exits=exits, notices=notices, queue=queue,
-                           flag=tmp_path / "state" / "owner_restart_no_resume.flag")
+                           flag=tmp_path / "state" / "delegate_recovery_transactions" / "active.json")
 
 
 def test_a_raised_owner_stop_still_restarts_so_its_durable_flags_stay_true(tmp_path, monkeypatch):
@@ -706,7 +706,8 @@ def test_a_raised_owner_stop_still_restarts_so_its_durable_flags_stay_true(tmp_p
     world = _owner_restart_world(tmp_path, monkeypatch, broken)
     assert world.run() == (True, "")
     assert world.exits == [True], "the owner's restart follows"
-    assert world.flag.read_text(encoding="utf-8") == "owner_restart", "the flag describes the restart that happens"
+    from ouroboros.delegate_recovery import active_restart_transaction
+    assert active_restart_transaction(world.flag.parents[2])["door"] == "owner_restart"
     assert world.notices == ["New settings apply to the next message."], "no stopped task is claimed"
 
 

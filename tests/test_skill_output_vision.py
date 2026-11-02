@@ -59,7 +59,7 @@ def test_skill_output_auto_attach_manual_read_and_vision_send(split_image, const
     assert len(blocks) == 1
     assert base64.b64decode(blocks[0]["image_url"]["url"].split(",", 1)[1]) == raw
     copied = Path(blocks[0]["_source_path"])
-    assert copied.is_relative_to(ctx.drive_root / "uploads" / "views")
+    assert copied.is_relative_to(ctx.budget_drive_root / "uploads" / "views")
     assert copied.read_bytes() == raw
     assert "now attached" in vision._view_image(ctx, str(shot))
     assert "now attached" in vision._view_image(ctx, str(copied))

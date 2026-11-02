@@ -199,8 +199,10 @@ def _settle_in(env):
 
     # Pass 2. The owner is gone: the engine's answer pass 1 retained proves the call ended, offline (no
     # second daemon call). Its price is UNKNOWN: the bound is accounted, never zero, and the row keeps its
-    # one late-receipt right. Its evidence was packed in pass 1 (money never held it); the packed
-    # children get one look (their own unlinks moved their directories), and no generation is re-read.
+    # one late-receipt right. Its evidence was packed in pass 1 (money never held it); the settlement wrote
+    # its row, so the packer's census is that one task (the rows written terminal since its position), whose
+    # directories hold the stamp pass 1 recorded after its unlinks: no candidate, no packing pass, no
+    # generation re-read; the packed children, whose directories only their own unlinks moved, are not looked at.
     env.live.discard("kid-ended")
     env.gateway.continue_during_probe = False
     second = _pass(env)
@@ -211,7 +213,7 @@ def _settle_in(env):
     projected = load_task_result(root, "kid-ended")
     assert projected["accounted_upper_bound_usd"] == 1.25 and projected["cost_final"] is False
     assert len(packs.published_generations(root, "kid-ended")) == 1
-    assert (second["packed"], second["examined"], second["verified_bytes"], second["unlinked"]) == (0, len(KIDS) + 3, 0, 0)
+    assert second is None and "evidence_packing" not in child_process.due(root)
 
     # Pass 3: the terminal rows did not move and the last pass unlinked nothing: no child at all.
     assert _pass(env) is None
@@ -238,6 +240,7 @@ def test_late_work_is_handled_by_kind_and_the_history_rests_again(env, monkeypat
     _child(env, "kid-late")
     _attempt(env, "kid-late", price=0.1)
     late = _evidence(env, "kid-03", [json.dumps({"after": "packing"}).encode()], first=9)
+    _child(env, "kid-03", evidence=False)  # late evidence rides a row write (``evidence_packer.terminal_revision``)
     env.refs["kid-03"] += late
     truth = {**truth, "kid-late": [packs.blob_bytes(root, ref) for ref in env.refs["kid-late"]],
              "kid-03": truth["kid-03"] + [packs.blob_bytes(root, ref) for ref in late]}
@@ -280,7 +283,9 @@ def test_late_work_is_handled_by_kind_and_the_history_rests_again(env, monkeypat
     children = {row["task_id"]: row for row in find_child_tasks(root, parent_task_id="root", root_task_id="root")}
     before = {row["task_id"]: row for row in settled["children"]}
     assert set(children) - set(before) == {"kid-late"}
-    assert {tid: children[tid] for tid in KIDS} == {tid: before[tid] for tid in KIDS}
+    others = [tid for tid in KIDS if tid != "kid-03"]  # kid-03's row carried its late evidence; no other row moved
+    assert {tid: children[tid] for tid in others} == {tid: before[tid] for tid in others}
+    assert children["kid-03"]["result"] == before["kid-03"]["result"]
     assert packs.published_generations(root, "kid-late") and not _loose(env.refs["kid-late"][0])
     # The duty arrived after the census and before the unlink: it holds nothing, the new member packs.
     assert arrival["faults"] == 0 and not _loose(late[0]) and len(packs.published_generations(root, "kid-03")) == 2

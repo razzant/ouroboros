@@ -9,8 +9,13 @@ not know, or a shape the server would name differently fails.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import re
+import subprocess
+from types import SimpleNamespace
+
+import pytest
 
 from ouroboros.gateway import work_status
 
@@ -50,7 +55,51 @@ def test_every_census_phase_the_server_classifies_has_the_servers_shape_on_the_c
     for phase, shape in table.items():
         # A census pause names its cause; the owner's own Pause is the plain one (a sleep is the case below).
         facts = {"pause_cause": "owner"} if phase.startswith("budget_") else {}
+        # The census emits budget_pausing only while the member still executes.
+        facts["live"] = phase == "budget_pausing"
         assert _server_mark(phase, **facts) == shape, phase
+
+
+@pytest.mark.parametrize("executing", [True, False])
+def test_pause_census_and_chip_agree_through_the_real_gateway(tmp_path, monkeypatch, executing):
+    from ouroboros import budget_pause
+    from supervisor.events_budget import install_exact_budget_pause
+    from supervisor.owner_pause_control import request_owner_pause
+    from tests._budget_pause_exact_helpers import _install_queue
+    from tests._work_projection_shared import state_fields
+    from tests.test_direct_model_wait_activity import NODE_BIN, WEB_ROOT
+    from tests.test_owner_pause import _live_tree, _owner_park
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _live_tree(tmp_path, workers)
+    assert request_owner_pause("root-1", request_id="census-chip")["ok"]
+    if not executing:
+        ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
+                              WORKERS=workers.WORKERS, sort_pending=lambda: None,
+                              persist_queue_snapshot=queue.persist_queue_snapshot, bridge=None)
+        for task_id in ("child-run", "root-1"):
+            saved = _owner_park(tmp_path, monkeypatch, task_id, [])
+            install_exact_budget_pause(ctx, task_id, budget_pause.exact_pause_marker(saved)["checkpoint"])
+    body = state_fields(tmp_path)
+    [row] = [row for row in body["active_chat_activities"] if row["activity_id"] == "root-1"]
+    [work] = body["works"]
+    assert (row["phase"], row["live"]) == (
+        "budget_pausing" if executing else "budget_paused", executing)
+    assert work["members"]["states"]["root-1"]["live"] is executing
+    # A tree's own Pause exposes Resume on the work, not the member-selection census bit.
+    assert ("resume" in {control["action"] for control in work["controls"]}) is (not executing)
+    script = """
+import { censusTaskPhase } from './modules/task_phase_chip.js';
+let raw = '';
+for await (const chunk of process.stdin) raw += chunk;
+process.stdout.write(JSON.stringify(censusTaskPhase(JSON.parse(raw))));
+"""
+    rendered = subprocess.run([NODE_BIN, "--input-type=module", "-e", script], input=json.dumps(row),
+                              text=True, encoding="utf-8", capture_output=True, cwd=WEB_ROOT, timeout=30)
+    assert rendered.returncode == 0, rendered.stderr
+    chip = json.loads(rendered.stdout)
+    assert chip["text"] == ("Pausing…" if executing else "Paused")
+    assert chip["mark"] == work["mark"] == ("moving" if executing else "pause")
 
 
 def test_a_cold_sleep_waits_by_itself_on_both_sides():

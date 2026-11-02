@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any, Dict, Optional
 
@@ -30,6 +31,8 @@ log = logging.getLogger(__name__)
 CLIENT_SURFACE_UA_LIMIT = 512
 _CLIENT_SURFACE_SHORT_LIMIT = 64
 _CLIENT_SURFACE_VIEWPORT_MAX = 100_000
+_INTERFACE_SIZE_MIN, _INTERFACE_SIZE_MAX = 25, 500  # percent
+_PIXEL_RATIO_MIN, _PIXEL_RATIO_MAX = 0.25, 16.0
 # An IANA key (``Area/City``, ``UTC``, ``Etc/GMT+3``): no path traversal, no spaces.
 _IANA_ZONE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_+\-]*(?:/[A-Za-z0-9_+\-]+){0,2}")
 
@@ -77,6 +80,14 @@ def normalize_client_surface(value: Any) -> Optional[Dict[str, Any]]:
             fact["viewport"] = {"w": w, "h": h}
         except (TypeError, ValueError, OverflowError):
             pass
+    # The page's Interface size in percent and the window's pixels per CSS px (web/modules/interface_size.js);
+    # numbers only, bounded, a bool never counting as one.
+    size = value.get("interface_size")
+    if isinstance(size, (int, float)) and not isinstance(size, bool) and math.isfinite(size):
+        fact["interface_size"] = int(max(_INTERFACE_SIZE_MIN, min(round(size), _INTERFACE_SIZE_MAX)))
+    ratio = value.get("device_pixel_ratio")
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and math.isfinite(ratio) and ratio > 0:
+        fact["device_pixel_ratio"] = round(max(_PIXEL_RATIO_MIN, min(float(ratio), _PIXEL_RATIO_MAX)), 2)
     captured_at = value.get("captured_at")
     if isinstance(captured_at, str) and captured_at.strip():
         fact["captured_at"] = truncate_within_limit(captured_at.strip(), _CLIENT_SURFACE_SHORT_LIMIT)

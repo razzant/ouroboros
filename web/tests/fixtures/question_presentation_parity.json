@@ -161,6 +161,27 @@
   "status": "Answer recorded · delivery pending"
  },
  {
+  "case": "answered, waiting in its paused task's mailbox until it reads",
+  "block": {
+   "state": "answered",
+   "delivery": {
+    "kind": "answer",
+    "state": "owed",
+    "reason_code": "awaiting_recipient_read"
+   }
+  },
+  "owner_wait": null,
+  "row": {
+   "quiz_state": "answered",
+   "question_delivery": {
+    "kind": "answer",
+    "state": "owed",
+    "reason_code": "awaiting_recipient_read"
+   }
+  },
+  "status": "Answer saved · the task reads it when it continues"
+ },
+ {
   "case": "late answer accepted, its dispatch witness lost to a restart",
   "block": {
    "state": "answered",

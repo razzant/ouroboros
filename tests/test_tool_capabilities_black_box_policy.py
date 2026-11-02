@@ -277,8 +277,8 @@ def test_black_box_policy_preserves_concrete_operands_without_inline_code_guesse
     ):
         result = registry.execute("run_command", {"cmd": cmd, "cwd": str(repo)})
         assert "RESOURCE_POLICY_BLOCKED" in result, cmd
-    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_diff", {"path": protected.name})
-    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_diff", {})
+    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_read", {"action": "diff", "path": protected.name})
+    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("vcs_read", {"action": "diff"})
     import ouroboros.code_intelligence as code_intelligence
 
     original_file_fact = code_intelligence._file_fact

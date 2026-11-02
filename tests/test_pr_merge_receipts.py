@@ -10,6 +10,7 @@ private identifiers while every unrelated byte of the body survives.
 from __future__ import annotations
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,8 @@ from ouroboros import merge_receipts
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, load_task_result, write_task_result
 from ouroboros.tools import github
 from tests._cancel_intents_shared import DeliveryBus
+
+REAL_GH_RUN = github._gh_run
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -41,6 +44,7 @@ class FakeGh:
         self.fail_view_after_merge = False
         self.fail_edit = False
         self.intent_seen_at_merge = None
+        self.merge_inputs = []
 
     def __call__(self, args, ctx, timeout=30, input_data=None, *, repo=github._GENERIC_TRANSPORT):
         self.calls.append(list(args))
@@ -49,6 +53,7 @@ class FakeGh:
                 return github.GhResult(False, "⚠️ GH_ERROR: boom", 1, 502, "exit")
             return github.GhResult(True, json.dumps(self.pr), 0, None, "")
         if args[:2] == ["pr", "merge"]:
+            self.merge_inputs.append(input_data)
             row = load_task_result(self.drive_root, "merge-task") or {}
             self.intent_seen_at_merge = [r.get("state") for r in row.get("merge_receipts") or []]
             if self.merge == "ok":
@@ -107,7 +112,9 @@ def test_a_reviewed_merge_records_intent_first_and_publishes_one_receipt(world):
     out = _merge(world, review_task_ids=["review-1"], reviewed_head_sha=HEAD, reviewed_base_sha=BASE,
                  review_verdict="PASS")
     assert world.gh.intent_seen_at_merge == ["intent_recorded"]  # written before the effect
-    assert ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD] in world.gh.calls
+    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
+    assert call[:6] == ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD]
+    assert call[6:] == ["--body-file", "-"] and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
     assert not any("--auto" in c or "--admin" in c for c in world.gh.calls)
     (receipt,) = _receipts(world)
     assert receipt["outcome"] == {**receipt["outcome"], "status": "merged", "merge_sha": MERGE, "merge_tree": TREE,
@@ -723,3 +730,34 @@ def test_body_uses_fresh_publication_view_and_confirms_a_lost_edit_reply(world, 
     assert _receipts(world)[0]["publication"]["body"]["status"] == "published"
     _merge(world)
     assert sum(c[:1] == ["api"] and "PATCH" in c for c in world.gh.calls) == 1
+
+
+@pytest.mark.parametrize("method", ["merge", "squash", "rebase"])
+@pytest.mark.parametrize("body_size", [80, 65536])
+def test_merge_body_uses_stdin_at_github_body_limit(world, monkeypatch, method, body_size):
+    from ouroboros import update_qualification as qualification
+
+    body = ("Owner's `code` and Unicode →\n" * 3000)[:body_size]
+    world.gh.pr["body"] = body
+    merges = []
+
+    def transport(argv, **kwargs):
+        args = argv[1:]
+        if args[:2] == ["pr", "merge"]:
+            merges.append((args, kwargs.get("input")))
+            assert len(subprocess.list2cmdline(argv)) < 32767
+        result = world.gh(args, world.ctx, input_data=kwargs.get("input"))
+        return subprocess.CompletedProcess(argv, result.exit_code, result.text if result.ok else "",
+                                           "" if result.ok else result.text)
+
+    monkeypatch.setattr(github, "_gh_run", REAL_GH_RUN)
+    monkeypatch.setattr(github.subprocess, "run", transport)
+    monkeypatch.setattr(github, "_gh_env", lambda ctx: {})
+    assert "merge: merged" in github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method=method)
+    args, stdin = merges[0]
+    prefix = ["pr", "merge", "7", f"--{method}", "--match-head-commit", HEAD]
+    if method == "rebase":
+        assert args == prefix and stdin is None
+    else:
+        assert args == [*prefix, "--body-file", "-"]
+        assert stdin == body.rstrip() + "\n\n" + qualification.commit_summary(_receipts(world)[0]["qualification"])

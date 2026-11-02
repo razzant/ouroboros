@@ -59,7 +59,7 @@ def _old_memory(root, *, blocks=True, flat=None):
 
 @pytest.fixture
 def boot(monkeypatch, tmp_path):
-    """One install on the real state and owner-chat writers; the task-limits notice already went."""
+    """One install on the real state and owner-chat writers; the task-limits and command-timeout notices already went."""
     from supervisor import message_bus as bus, state as ss
 
     for name, path in {"DRIVE_ROOT": tmp_path, "STATE_PATH": tmp_path / "state/state.json",
@@ -71,7 +71,8 @@ def boot(monkeypatch, tmp_path):
     prepare_startup_state(tmp_path)
     delivered = []
     monkeypatch.setattr(bus, "get_bridge", lambda: SimpleNamespace(send_message=lambda *a, **kw: delivered.append(a)))
-    ss.save_state({"owner_chat_id": 7, "owner_id": 1, notices.OPTIONAL_BOUNDS_NOTICE_KEY: "already"})
+    ss.save_state({"owner_chat_id": 7, "owner_id": 1, notices.OPTIONAL_BOUNDS_NOTICE_KEY: "already",
+                   notices.COMMAND_TIMEOUT_NOTICE_KEY: "already"})
 
     def rows():
         return [row for row in dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl") if row.get("type") == NOTICE]

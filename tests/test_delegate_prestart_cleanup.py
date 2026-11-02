@@ -209,6 +209,8 @@ def test_unowned_claim_wait_expiry_retires_without_post(start_case, tmp_path, mo
 
 
 def test_untyped_transport_failure_keeps_possible_run_registration(start_case, tmp_path):
+    from ouroboros.delegate_pending import request_body
+
     start, gateway, _shared, fail, _state = start_case
     error = MemoryError("POST outcome unknown")
     fail(error)
@@ -217,7 +219,11 @@ def test_untyped_transport_failure_keeps_possible_run_registration(start_case, t
     assert caught.value is error
     assert len(gateway().start_requests) == 1 and gateway().removals == []
     pending = custody.pending_invocations(tmp_path)
-    assert len(pending) == 1 and pending[0]["request"]
+    assert len(pending) == 1 and pending[0]["request"] is None and pending[0]["request_ref"]
+    sent = gateway().start_requests[0]
+    body, key = (sent, gateway().start_keys[0]) if isinstance(sent, dict) else sent
+    assert request_body(tmp_path, pending[0]) == body
+    assert pending[0]["invocation_id"] == key
 
 
 def test_successful_start_keeps_its_registration(start_case):

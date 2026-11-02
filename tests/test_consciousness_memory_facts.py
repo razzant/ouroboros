@@ -133,7 +133,7 @@ def test_a_released_mark_is_a_change_that_names_who_released_it(tmp_path):
     assert observe(tmp_path, accepted).counts() == {}  # the marks stand before the accepted wake
     child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="kid-1", current_chat_id=1,
                         task_metadata={"delegation_role": "subagent", "parent_task_id": "t1"})
-    released = json.loads(_memory_mark(child, release_id=answer["id"], reason="Looked settled to me"))
+    released = json.loads(_memory_mark(child, release_ids=[answer["id"]], reason="Looked settled to me"))
     assert released["ok"] and released["operation"] == "mark_release"  # the helper's right is unchanged
     release = next(record for record in store.records() if record["kind"] == "mark_release")
     after_child = observe(tmp_path, accepted)

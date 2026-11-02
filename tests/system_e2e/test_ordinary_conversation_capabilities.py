@@ -20,7 +20,7 @@ import pytest
 from devtools.benchmarks.common.server_runner import _api
 from tests.system_e2e.harness import (
     LANE_MOCK, ArtifactOracle, ModelGate, ScriptedStubModel, body_text,
-    keyless_settings, require_lane, start_server, wait_durable_result, wait_until, ws_url,
+    keyless_settings, message_text, require_lane, start_server, wait_durable_result, wait_until, ws_url,
 )
 from tests.system_e2e.test_system_scenarios_w6 import _WsFrames, _direct_activities
 
@@ -150,9 +150,14 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
                 assert all(not r.get("is_error") for r in rows), rows
             agent_calls = [body for kind, body in stub.calls if kind == "agent"]
             assert len(agent_calls) == 5 and stub.script_consumed(), stub.kinds()
+            # An unpinned server's call schemas load on demand (#2332): every request names its tools in
+            # the connections map and carries the loader; the calls above ran without loading them.
             for body in agent_calls:
                 names = {tool.get("function", {}).get("name") for tool in body.get("tools", [])}
-                assert {read_tool, write_tool} <= names, names
+                system = "\n".join(message_text(m) for m in body.get("messages") or []
+                                   if isinstance(m, dict) and m.get("role") == "system")
+                assert "enable_tools" in names and "### mcp_fixture" in system, names
+                assert "- read_note" in system and "- write_note" in system, system[-3000:]
             assert gate.held == 1 and not gate.timed_out
         finally:
             gate.release.set()

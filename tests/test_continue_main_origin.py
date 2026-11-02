@@ -48,7 +48,7 @@ def test_continued_origin_reaches_main_notice_consumer_without_new_authority(tmp
     assert metadata["objective_author"] == {"kind": "continuation", "predecessor_task_id": "pred-1"}
     # Held quote handles and open relay return addresses survive Continue (K3/K4).
     assert metadata["continuation"]["owner_sources"] == {
-        "original": sources["original"], "later": sources["later"],
+        "original": sources["original"], "schedule": None, "later": sources["later"],
         "held_owner_messages": sources["held_owner_messages"], "open_relays": sources["open_relays"]}
     assert metadata["continuation"]["peer_context"] == sources["peer_context"]
     for key, value in before["billing_group"].items():

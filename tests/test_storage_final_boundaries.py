@@ -15,27 +15,10 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_test_storage import REPO, _repo
 
 
-@pytest.mark.skipif(os.name == 'nt', reason='POSIX SIGINT delivery; Windows keeps Job teardown')
-@pytest.mark.parametrize('entry,workers,repeat', [
-    ('safe_test', 0, False), ('run_tests', 0, False),
-    ('run_tests', 2, False), ('run_tests', 2, True),
-])
-def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, repeat):
-    from ouroboros import platform_layer as pl
-    from ouroboros.process_containment import ProcessContainer
-    from ouroboros.test_evidence import EVIDENCE_ENV
-    from ouroboros.test_parallelism import NESTED_WORKERS_ENV, worker_budget
-
-    if workers:
-        # run_tests admits nested workers by free memory (worker_budget, 1 GiB each): a loaded 7 GB
-        # macOS runner grants one where two are asked, and loadfile then ran both busy files on gw0,
-        # one after the other. Stage one busy file per worker the runner admits.
-        workers = worker_budget(workers, env={NESTED_WORKERS_ENV: str(workers)})
-    evidence = diagnostic_directory(tmp_path / 'evidence', 'ctrl-c')
+def _interrupt_probe(probe, evidence, workers):
+    probe.mkdir()
     ready = [evidence / f'ready-{i}' for i in range(max(workers, 1))]
     survivors = [evidence / f'survivor-{i}' for i in range(max(workers, 1))]
-    probe = tmp_path / 'probe'
-    probe.mkdir()
     # A child the test leaves behind: it outlives the INT-exited pytest root
     # and records the TERM that a graceful teardown owes it.
     (probe / 'survivor.py').write_text(
@@ -51,6 +34,35 @@ def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, r
             f'    subprocess.Popen([sys.executable, {str(probe / "survivor.py")!r}, '
             f'{str(survivors[i])!r}, {str(ready[i])!r}, os.environ.get("PYTEST_XDIST_WORKER", "main")])\n'
             '    print("PYTEST_READY", flush=True)\n    time.sleep(120)\n')
+    # The child's final xdist configuration is the admission authority. Memory can change
+    # between this parent and run_tests; only stage a busy file for each admitted worker.
+    (probe / 'conftest.py').write_text(
+        'from pathlib import Path\n'
+        'def pytest_configure(config):\n'
+        '    if hasattr(config, "workerinput"):\n        return\n'
+        '    workers = config.getoption("numprocesses", default=0) or 0\n'
+        f'    for i in range(max(workers, 1), {max(workers, 1)}):\n'
+        '        (Path(__file__).parent / f"test_wait_{i}.py").unlink()\n'
+        f'    target = Path({str(evidence / "admitted")!r})\n'
+        '    pending = target.with_suffix(".pending")\n'
+        '    pending.write_text(str(workers))\n    pending.replace(target)\n')
+    return ready, survivors
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX SIGINT delivery; Windows keeps Job teardown')
+@pytest.mark.parametrize('entry,workers,repeat', [
+    ('safe_test', 0, False), ('run_tests', 0, False),
+    ('run_tests', 2, False), ('run_tests', 2, True),
+])
+def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, repeat):
+    from ouroboros import platform_layer as pl
+    from ouroboros.process_containment import ProcessContainer
+    from ouroboros.test_evidence import EVIDENCE_ENV
+    from ouroboros.test_parallelism import NESTED_WORKERS_ENV
+
+    evidence = diagnostic_directory(tmp_path / 'evidence', 'ctrl-c')
+    probe = tmp_path / 'probe'
+    ready, survivors = _interrupt_probe(probe, evidence, workers)
     junit = evidence / 'interrupt.xml'
     pytest_args = ['-p', 'tests.conftest', '--rootdir', str(probe), '--confcutdir', str(probe),
                    '-o', 'addopts=', '-s', '-q', f'--junitxml={junit}', str(probe)]
@@ -70,6 +82,14 @@ def test_ctrl_c_exports_real_pytest_terminal_results(tmp_path, entry, workers, r
             # The ready files are the ordering signal; the deadline only bounds a hung launch. Two
             # xdist workers importing tests.conftest under a loaded runner took over 40 s on CI.
             deadline = time.monotonic() + 180
+            admission = evidence / 'admitted'
+            while not admission.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            assert admission.exists(), (evidence / 'launcher.log').read_text()
+            admitted = int(admission.read_text())
+            assert 0 <= admitted <= workers and bool(admitted) == bool(workers)
+            workers = admitted
+            ready, survivors = ready[:max(workers, 1)], survivors[:max(workers, 1)]
             while not all(p.exists() for p in ready) and proc.poll() is None and time.monotonic() < deadline:
                 time.sleep(.02)
             assert all(p.exists() for p in ready), (evidence / 'launcher.log').read_text()

@@ -37,7 +37,9 @@ def test_old_agent_media_pruned_owner_uploads_untouched(tmp_path):
     assert not old_shot.exists() and not old_view.exists()
     assert fresh_shot.exists()
     assert owner_upload.exists()  # owner authority: never swept, any age
-    assert report == {"removed": 2, "kept": 1, "skipped": 0, "errors": 0}
+    from ouroboros.retention import get_gc_retention_days
+    assert report == {"removed": 2, "kept": 1, "skipped": 0, "errors": 0,
+                      "next_due": fresh_shot.stat().st_mtime + get_gc_retention_days() * 86400}
 
 
 def test_missing_media_dirs_are_a_noop(tmp_path):
@@ -90,6 +92,8 @@ def test_every_reconcile_pass_runs_the_media_prune(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
 
     sm._run_reconcile_prunes()
+    from ouroboros.maintenance import run_job
+    run_job(tmp_path, "runtime_retirement")
 
     assert not old_shot.exists()
     assert owner_upload.read_bytes() == b"owner image"

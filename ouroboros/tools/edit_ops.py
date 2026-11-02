@@ -5,8 +5,9 @@ Two editing primitives beyond exact-match ``edit_text`` and full-file
 
 - ``apply_patch``  — context-anchored multi-file diff (V4A-style, no line
   numbers): every hunk is placed against the whole original file by its exact
-  context (else ignoring trailing whitespace only) plus optional ``@@``
-  anchors, and the placement must be unique. Indentation is never adapted.
+  context (else ignoring trailing whitespace only) at or after an optional ``@@``
+  anchor's first hit (a lower bound, not a scope); the placement must be unique, an
+  ambiguous one is reported with every placement counted. Indentation is never adapted.
 - ``edit_batch``   — batch of COUNTED exact replacements, validated as a whole.
   Each edit declares how many occurrences it expects (default 1); a count
   mismatch aborts the whole batch before anything is written. This is the safe
@@ -820,10 +821,29 @@ def normalize_patch_paths(patch: str, normalize) -> str:
 
 
 def _context_matches(hay: List[str], needle: List[str], anchors: List[int]) -> List[int]:
-    """Every start where ``needle`` matches ``hay`` at or after an ``@@`` anchor line."""
+    """Every start where ``needle`` matches ``hay`` at or after the FIRST ``@@`` anchor hit (a lower bound, not a scope)."""
     width = len(needle)
     first = min(anchors) if anchors else 0
     return [i for i in range(first, len(hay) - width + 1) if hay[i:i + width] == needle]
+
+
+_AMBIGUITY_SHOWN, _AMBIGUITY_NAMED = 5, 20  # placements shown with neighbours; further ones named by line
+
+
+def _ambiguity_detail(file_lines: List[str], starts: List[int], width: int, reader: _ReaderLines) -> str:
+    """Every placement counted; the first few with their read_file line range and the
+    line just outside each side (the line to extend the context with); the rest named."""
+    rows = [f"{len(starts)} placements:"]
+    for start in starts[:_AMBIGUITY_SHOWN]:
+        first, last = reader.line(start), reader.line(start) + reader.count(start, width) - 1
+        before = repr(_cut(file_lines[start - 1].strip(), 80)) if start else "<start of file>"
+        after = repr(_cut(file_lines[start + width].strip(), 80)) if start + width < len(file_lines) else "<end of file>"
+        rows.append(f"    {f'line {first}' if first == last else f'lines {first}–{last}'}: before {before} | after {after}")
+    if rest := starts[_AMBIGUITY_SHOWN:]:
+        rows.append(f"    … {len(rest)} more not shown, starting at line(s) "
+                    + ", ".join(str(reader.line(start)) for start in rest[:_AMBIGUITY_NAMED])
+                    + (f" and {len(rest) - _AMBIGUITY_NAMED} more" if len(rest) > _AMBIGUITY_NAMED else ""))
+    return "\n".join(rows)
 
 
 def _apply_hunks_to_text(
@@ -857,8 +877,9 @@ def _apply_hunks_to_text(
             continue
         if not old:
             if len(anchors) != 1:
-                errors.append(f"hunk {hi}: @@ anchor is ambiguous in {path} — matches at "
-                              + ", ".join(f"line {reader.line(i)}" for i in anchors[:5]))
+                errors.append(f"hunk {hi}: @@ anchor {hunk.anchor!r} is ambiguous in {path} — "
+                              + _ambiguity_detail(file_lines, anchors, 1, reader)
+                              + "\nA pure insertion goes after one anchor line: make the anchor unique or add context lines.")
                 continue
             pos = anchors[0] + 1
             changes.append((pos, pos, [t for p, t in hunk.lines if p == "+"], hi))
@@ -878,9 +899,11 @@ def _apply_hunks_to_text(
             )
             continue
         if len(matches) != 1:
-            errors.append(f"hunk {hi}: context is ambiguous in {path} — matches at "
-                          + ", ".join(f"line {reader.line(m)}" for m in matches[:5])
-                          + ". Add an @@ anchor or more context lines.")
+            bound = f" at or after the @@ anchor's first hit (line {reader.line(anchors[0])})" if anchors else ""
+            errors.append(f"hunk {hi}: context is ambiguous in {path}{bound} — "
+                          + _ambiguity_detail(file_lines, matches, len(old), reader)
+                          + "\nExtend the context with a line that differs between placements. An @@ anchor is only "
+                          "a lower bound (its FIRST hit): it singles out a placement only when none follows it.")
             continue
         pos = matches[0]
         actual = file_lines[pos:pos + len(old)]
@@ -1420,7 +1443,7 @@ def get_tools() -> List[ToolEntry]:
                 "so). Format:\n"
                 "*** Begin Patch\n"
                 "*** Update File: relative/path.py\n"
-                "@@ def nearest_function\n"
+                "@@ def some_function\n"
                 " context line (starts with a space)\n"
                 "-removed line\n"
                 "+added line\n"
@@ -1428,10 +1451,8 @@ def get_tools() -> List[ToolEntry]:
                 "+each line of the new file prefixed with +\n"
                 "*** Delete File: old/file.py\n"
                 "*** End Patch\n"
-                "Each hunk is placed in the whole original file by its exact context lines "
-                "(copy them from read_file, without the line numbers; trailing whitespace may "
-                "differ, indentation may not) and must match exactly one place; the optional "
-                "@@ anchor disambiguates repeated contexts. Repeat '*** Update File:' to chain "
+                "The optional @@ line is a lower bound: the hunk is searched at or after its first hit; "
+                "context must still match exactly once. Repeat '*** Update File:' to chain "
                 "edits on an already patched file. Delete File stores the file's exact bytes "
                 "as a task artifact first. On a repo root, a written file whose final Python/JSON "
                 "does not parse (Add File included) is reported as SYNTAX_WARNING after it is "

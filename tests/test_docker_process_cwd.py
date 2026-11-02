@@ -1,6 +1,7 @@
 """Backend cwd aliases use the shared authority binding on every process door."""
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
@@ -328,18 +329,26 @@ def test_output_audit_ignores_matched_traversal_but_keeps_unmapped_host_output(t
 
 
 @pytest.mark.parametrize("surface", ["run_command", "start_service"])
-def test_a_relative_parent_output_in_a_backend_cwd_is_refused_before_launch(workspace, monkeypatch, surface):
-    """The container, not this host, resolves '..' below its mapping; no host reinterpretation."""
+def test_a_relative_output_resolved_outside_backend_mounts_is_refused_before_launch(workspace, monkeypatch, surface):
+    """A physical container escape stays refused before either process door."""
     ctx, active = workspace
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    def probe(argv):
+        if argv[0] == "inspect":
+            return json.dumps({"id": "physical-id", "running": True, "network": "host",
+                               "mounts": [{"Type": "bind", "Source": str(active),
+                                           "Destination": "/workspace/project"}]})
+        assert argv[-2:] == ["/workspace/project/sub/../../out.txt", "prospective"]
+        return "/workspace/out.txt\0"
+    monkeypatch.setattr("ouroboros.workspace_executor_paths._docker_output_probe", probe)
     launched = []
     monkeypatch.setattr("ouroboros.tools.shell.executor_execute", lambda *a, **k: launched.append(a) or executor.ExecutorResult(0, ""))
     monkeypatch.setattr("ouroboros.tools.services.executor_start_service", lambda *a, **k: launched.append(k) or {})
-    args = {"cmd": ["python3", "-c", "print(1)"], "cwd": str(active / "sub"), "outputs": ["../out.txt"]}
+    args = {"cmd": ["python3", "-c", "print(1)"], "cwd": str(active / "sub"), "outputs": ["../../out.txt"]}
     if surface == "start_service":
         args["name"] = "preview"
     result = registry.execute_result(surface, args)
-    assert result.code == "RESOURCE_POLICY_BLOCKED" and "not a usable backend path" in result.text, result.text
+    assert result.code == "RESOURCE_POLICY_BLOCKED" and "no confirmed bind mount" in result.text, result.text
     assert launched == []

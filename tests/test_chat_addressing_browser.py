@@ -7,7 +7,6 @@ card cannot pass by disappearing before the final assertion.
 """
 
 import json
-import re
 import uuid
 
 import pytest
@@ -29,36 +28,11 @@ _OBSERVE_CARDS = """() => {
         if (node.nodeType !== Node.ELEMENT_NODE) return;
         const cards = [...node.querySelectorAll('.chat-live-card')];
         if (node.matches('.chat-live-card')) cards.push(node);
-        for (const card of cards) {
-            window.__mountedCards.push(card.dataset.taskId);
-            window.__journal?.push({ mount: card.dataset.taskId, frame: window.__frame });  // where the journal runs
-        }
+        for (const card of cards) window.__mountedCards.push(card.dataset.taskId);
     };
     new MutationObserver(rows => rows.forEach(row => row.addedNodes.forEach(record)))
         .observe(document.documentElement, {childList:true, subtree:true});
 }"""
-
-
-# Every socket frame, numbered before the page handles it: a card's mount carries the number of the frame
-# being handled, so the frame that made the card is known.
-_FRAME_JOURNAL = """() => {
-    const Socket = window.WebSocket;
-    window.__journal = [];
-    window.__frame = 0;
-    window.WebSocket = class JournalWebSocket extends Socket {
-        constructor(...args) {
-            super(...args);
-            this.addEventListener('message', (event) => {
-                window.__frame += 1;
-                let frame = {};
-                try { frame = JSON.parse(event.data); } catch { /* not a JSON frame */ }
-                window.__journal.push({ frame: window.__frame, type: frame.type || '', task: frame.data?.task_id || '',
-                    checkpoint: frame.data?.checkpoint_kind || '' });
-            });
-        }
-    };
-}"""
-HOST_WAITS = ("usage_lock_wait", "control_store_wait")
 
 
 def _work_order(text):
@@ -148,7 +122,6 @@ def test_ordinary_addressing_card_tracks_real_work_through_metrics_and_reload(
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
-                page.add_init_script(f"({_FRAME_JOURNAL})()")
                 try:
                     page.goto(server.base_url, wait_until="domcontentloaded")
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
@@ -206,29 +179,12 @@ def test_ordinary_addressing_card_tracks_real_work_through_metrics_and_reload(
                     page.get_by_text("The addressing attempt is complete.", exact=True).wait_for(timeout=30000)
                     card = page.locator(f'.chat-live-card[data-task-id="{task_id}"]')
 
-                    def addressing_only():
-                        """A busy host can make the turn wait for its own storage (accounting, control) as the
-                        follow-up starts. That wait is the turn's owner-visible activity (#1355): the turn then
-                        wears a card for it, live and on reload (tests/test_usage_wait_browser.py holds the lock
-                        on purpose). A start-only turn that waited for nothing only addressed work, and wears none."""
-                        return case == "start_only" and not [
-                            row for row in oracle.events("task_checkpoint") if row.get("task_id") == task_id
-                            and row.get("checkpoint_kind") in HOST_WAITS]
-
-                    if addressing_only():
+                    if case == "start_only":
+                        # Addressing alone earns no card, and a host wait the turn sat through as it
+                        # started (accounting, control storage) is a receipt of how the host ran, not
+                        # work (owner decisions 11.09 and 16.09): it never makes one, live or on reload.
                         assert card.count() == 0
                         assert task_id not in page.evaluate("() => window.__mountedCards")
-                    elif case == "start_only":
-                        card.wait_for(timeout=30000)
-                        waits = card.locator(".chat-live-line-title").filter(
-                            has_text=re.compile(r"^Waiting for (accounting access|control storage)$"))
-                        assert waits.count() >= 1, card.inner_html()
-                        # Addressing alone still earned nothing: the card was made by the wait's frame, not before it.
-                        journal = page.evaluate("() => window.__journal")
-                        made = next(row["frame"] for row in journal if row.get("mount") == task_id)
-                        waited = next((row["frame"] for row in journal
-                                       if row.get("task") == task_id and row.get("checkpoint") in HOST_WAITS), None)
-                        assert waited is not None and made >= waited, journal
                     else:
                         card.wait_for(timeout=30000)
                         assert card.count() == 1
@@ -246,7 +202,7 @@ def test_ordinary_addressing_card_tracks_real_work_through_metrics_and_reload(
                     page.screenshot(path=str(evidence / "live.png"), full_page=True, animations="disabled")
                     page.reload(wait_until="domcontentloaded")
                     page.get_by_text("The addressing attempt is complete.", exact=True).wait_for(timeout=30000)
-                    assert page.locator(f'.chat-live-card[data-task-id="{task_id}"]').count() == (0 if addressing_only() else 1)
+                    assert page.locator(f'.chat-live-card[data-task-id="{task_id}"]').count() == (0 if case == "start_only" else 1)
                     if case != "failed_tell":
                         assert page.locator('.msg-routing-annotation[data-annotation-status="scheduled"]').count() == 1
                     page.screenshot(path=str(evidence / "reloaded.png"), full_page=True, animations="disabled")

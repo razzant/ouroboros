@@ -6,7 +6,8 @@ gets only what its starter selection ticks; an existing install keeps what it ha
 Built-ins ride app releases: a changed bundled version re-seeds an unmodified copy in
 place (state, the owner's enablement and unchanged-request grants kept) and never
 rewrites local changes; nothing resurrects a built-in the owner removed; a built-in the
-app stops bundling keeps running as its owner's copy.
+app stops bundling is uninstalled when nobody changed it and keeps running as its owner's
+copy when someone did.
 """
 
 from __future__ import annotations
@@ -283,7 +284,47 @@ def test_hash_comparison_failure_does_not_stop_next_skill(env, caplog, monkeypat
     assert "version: 2.0.0" in (drive_root / "skills" / "native" / "second" / "SKILL.md").read_text(encoding="utf-8")
 
 
-def test_removed_built_in_keeps_running_as_the_owners_copy(env):
+def test_a_retired_built_in_nobody_changed_is_uninstalled_and_its_grants_survive(env):
+    from ouroboros.skill_builtin import release_removed_builtins
+    from ouroboros.skill_install_record import read_install_record
+    from ouroboros.skill_loader import find_skill, skill_state_dir
+    from ouroboros.skill_uninstall_state import UNINSTALL_TOMBSTONE_FILENAME
+
+    seed_dir, drive_root = env
+    seed = _write_skill(seed_dir, "weather")
+    assert _install("weather", seed_dir, drive_root)["ok"]
+    grants = skill_state_dir(drive_root, "weather") / "grants.json"
+    grants.write_text('{"granted_keys": ["WEATHER_KEY"]}', encoding="utf-8")
+    import shutil
+
+    shutil.rmtree(seed)
+    assert release_removed_builtins(drive_root, seed_dir=seed_dir, retire=False) is False, "a failed re-seed defers it"
+    assert (drive_root / "skills" / "native" / "weather" / ".seed-origin").is_file(), "still marked for the next boot"
+    assert release_removed_builtins(drive_root, seed_dir=seed_dir) is True
+    assert not (drive_root / "skills" / "native" / "weather").exists()
+    assert find_skill(drive_root, "weather") is None and read_install_record(drive_root, "weather") is None
+    assert (skill_state_dir(drive_root, "weather") / UNINSTALL_TOMBSTONE_FILENAME).is_file()
+    assert grants.is_file(), "the owner's grants outlive the payload"
+
+
+def test_a_retired_built_in_whose_name_another_folder_uses_stays_as_the_owners_copy(env):
+    """The uninstall refuses a name two folders share; the copy stays, released, and the pass completes."""
+    from ouroboros.skill_builtin import release_removed_builtins
+
+    seed_dir, drive_root = env
+    seed = _write_skill(seed_dir, "weather")
+    assert _install("weather", seed_dir, drive_root)["ok"]
+    _write_skill(drive_root / "skills" / "external", "weather")
+    import shutil
+
+    shutil.rmtree(seed)
+    assert release_removed_builtins(drive_root, seed_dir=seed_dir) is True, "a refused uninstall does not loop every boot"
+    target = drive_root / "skills" / "native" / "weather"
+    assert target.is_dir() and not (target / ".seed-origin").exists()
+    assert (drive_root / "skills" / "external" / "weather" / "SKILL.md").is_file()
+
+
+def test_a_retired_built_in_someone_edited_keeps_running_as_the_owners_copy(env):
     from ouroboros.skill_builtin import release_removed_builtins
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import find_skill
@@ -291,16 +332,18 @@ def test_removed_built_in_keeps_running_as_the_owners_copy(env):
     seed_dir, drive_root = env
     seed = _write_skill(seed_dir, "weather")
     assert _install("weather", seed_dir, drive_root)["ok"]
+    target = drive_root / "skills" / "native" / "weather"
+    (target / "SKILL.md").write_text((target / "SKILL.md").read_text(encoding="utf-8") + "\nMy own line.\n",
+                                     encoding="utf-8")
     import shutil
 
     shutil.rmtree(seed)
-    release_removed_builtins(drive_root, seed_dir=seed_dir)
-    target = drive_root / "skills" / "native" / "weather"
-    assert target.is_dir() and not (target / ".seed-origin").exists()
+    for retire in (False, True):  # an edited copy is the owner's whether or not this pass may retire
+        release_removed_builtins(drive_root, seed_dir=seed_dir, retire=retire)
+        assert target.is_dir() and not (target / ".seed-origin").exists()
     assert read_install_record(drive_root, "weather") is not None
     skill = find_skill(drive_root, "weather")
-    assert skill.source == "external"
-    assert skill.review.gate_for(skill.content_hash)["executable_review"] is True
+    assert skill.source == "external" and "My own line." in (target / "SKILL.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -333,7 +376,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
     assert _reseed(seed_dir, drive_root) == 1
-    assert "version: 1.3.5" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.4.1" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
@@ -343,9 +386,10 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     ("telegram", "7f71fe8d29c975e25b35a235e1c821e1b547674f", "1.3.1"),
     ("telegram", "6014e8896dabe371f5c06cf8adc5dc9902f53c2d", "1.3.2"),
     ("telegram", "08ed0f824df498a1c43c8ff9e04dd42e5c64ee76", "1.3.3"),
-    ("telegram", "214bd5cb13bc9b566571c98171ba8203e7fe35ee", "1.3.4"),  # 1.3.5 only declares secret_fields
+    ("telegram", "de5daf1a8d8831b51a1ad3592ff1bf520d76c857", "1.4.0"),  # 1.4.1 declares secret_fields
     ("unix_computer_use", "ec3fc6e5b5ae5ee99a746b5e1a0f6343a41926d4", "0.4.2"),
     ("unix_computer_use", "1e237c1bc89f0600a7362f69eddafdff4ddd1f2d", "0.4.3"),
+    ("unix_computer_use", "9e2bd962903044a6516917bcb10a933b2d1acafd", "0.5.0"),
 ])
 def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, old_version):
     """Full preceding payload from history: the re-seed delivers the bundled bytes,
@@ -386,6 +430,59 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
         assert (state / path).read_bytes() == payload
     assert read_install_record(drive, name)["release"]["digest"] == skill.content_hash
     assert skill.review.gate_for(skill.content_hash)["blocking_reason"] == "trusted_source"
+
+
+@pytest.mark.parametrize("name,previous_release,previous_version", [
+    (name, 'd51b09bd61944f2e4d000f2fcce5e9a890f209fc', '0.1.0')
+    for name in ('live_conversation', 'gemini_live', 'grok_realtime', 'openai_realtime')
+] + [('live_conversation', '96816f122', '0.1.1'),
+     ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
+@pytest.mark.parametrize("edited", [False, True])
+def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
+                                                                               previous_version, edited):
+    from ouroboros.skill_install_record import read_install_record
+    from ouroboros.skill_loader import compute_content_hash, save_enabled
+    from tests.test_builtin_skill_platforms import git_payload
+
+    # The Unix release applies on macOS/Linux only; pin a host it applies to.
+    monkeypatch.setattr("ouroboros.contracts.skill_manifest.host_platform", lambda: "linux")
+    seeds, drive = env
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    git_payload(previous_release, f"skills/{name}", seeds / name)
+    assert _install(name, seeds, drive)["ok"]
+    installed = drive / "skills" / "native" / name
+    assert f"version: {previous_version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
+    save_enabled(drive, name, False, actor="owner_ui")
+    state = drive / "state" / "skills" / name
+    (state / "config.json").write_text('{"provider":"grok_realtime:grok"}\n', encoding="utf-8")
+    retained = {path: (state / path).read_bytes() for path in ("enabled.json", "config.json")}
+    previous_record = read_install_record(drive, name)
+    if edited:
+        with (installed / "plugin.py").open("a", encoding="utf-8") as stream:
+            stream.write("\n# The owner's local change must survive an app update.\n")
+    previous_hash = compute_content_hash(installed)
+
+    assert _reseed(repo / "skills", drive) == int(not edited)
+
+    if edited:
+        assert compute_content_hash(installed) == previous_hash
+        assert read_install_record(drive, name) == previous_record
+    else:
+        version = {'live_conversation': '0.1.29', 'grok_realtime': '0.1.11', 'gemini_live': '0.1.20', 'openai_realtime': '0.1.9',
+                   'unix_computer_use': '0.6.1'}.get(name, '0.1.1')
+        assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
+        assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
+        assert compute_content_hash(installed) != previous_hash
+        # Pin the files that stayed stale on the stand, not just the manifest.
+        paths = ["plugin.py"]
+        if name == "live_conversation":
+            paths += ["driver.py", "ui/call_settings.js"]
+        elif name == "openai_realtime":
+            paths += ["live.py"]
+        for path in paths:
+            assert (installed / path).read_bytes() == (repo / "skills" / name / path).read_bytes()
+    assert all((state / path).read_bytes() == value for path, value in retained.items())
+    assert _reseed(repo / "skills", drive) == 0
 
 
 # --- the one-time conversion gives existing launcher seeds their install record ------

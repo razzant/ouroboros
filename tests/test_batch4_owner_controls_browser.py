@@ -645,7 +645,7 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 shot("01-held-after-crash")
                 # Activity names the same hold as held after the stop, never as a money pause.
                 held_row = _open_activity(page).locator(".activity-row", has_text="Batch4 Delta")
-                expect(held_row).to_contain_text("held after Restart", timeout=30_000)
+                expect(held_row).to_contain_text("Paused · Saved when the app stopped", timeout=30_000)
                 expect(held_row).not_to_contain_text("budget")
                 shot("01b-held-after-crash-activity")
                 page.locator('[data-nav-page="chat"]').click()

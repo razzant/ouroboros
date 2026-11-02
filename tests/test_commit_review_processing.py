@@ -148,10 +148,7 @@ def test_missing_processing_vector_or_tail_keeps_unbound_compatibility(monkeypat
         assert provider_call(monkeypatch, kwargs)[3] == ("fast" if expected is None else expected)
 
 
-@pytest.mark.parametrize("filter_kind", ["commit_packet_drop", "skill_pass"])
-def test_filtered_vectors_keep_processing_with_the_selected_seats(dispatch, filter_kind):
-    from ouroboros.skill_review_passes import _seat_plan
-
+def test_filtered_vectors_keep_processing_with_the_selected_seats(dispatch):
     settings = {"OUROBOROS_SUBAGENTS": pool_roster(
         pool_seat("packet", MODEL, processing_preference="fast"),
         pool_seat("native", MODEL, delivery="native", processing_preference="economy"),
@@ -159,17 +156,14 @@ def test_filtered_vectors_keep_processing_with_the_selected_seats(dispatch, filt
         "OUROBOROS_PROCESSING_PREFERENCE": ""}
     with task_settings_scope(task_settings_snapshot(settings, settings)):
         plan = seat_vectors(slots.commit_triad_delivery())
-    filtered = drop_api_rows(plan) if filter_kind == "commit_packet_drop" else _seat_plan(plan, [1, 2], 3)
+    filtered = drop_api_rows(plan)
     assert filtered["slot_ids"] == ["native", "native-empty"]
     sent = dispatch(filtered)
     assert sent["native"][0].processing_preference == "economy"
     assert sent["native-empty"][0].processing_preference == ""
 
 
-@pytest.mark.parametrize("filter_kind", ["commit_packet_drop", "skill_pass"])
-def test_filtered_session_rights_stay_with_their_original_seats(filter_kind):
-    from ouroboros.skill_review_passes import _seat_plan
-
+def test_filtered_session_rights_stay_with_their_original_seats():
     settings = {"OUROBOROS_SUBAGENTS": pool_roster(
         pool_seat("packet", MODEL, processing_preference="fast"),
         pool_seat("write", "codex", kind="agent_session", access="workspace_write",
@@ -180,7 +174,7 @@ def test_filtered_session_rights_stay_with_their_original_seats(filter_kind):
                   processing_preference="standard")), "OUROBOROS_PROCESSING_PREFERENCE": ""}
     with task_settings_scope(task_settings_snapshot(settings, settings)):
         plan = seat_vectors(slots.commit_triad_delivery())
-    filtered = drop_api_rows(plan) if filter_kind == "commit_packet_drop" else _seat_plan(plan, [1, 2, 4], 5)
+    filtered = drop_api_rows(plan)
     assert filtered["slot_ids"] == ["write", "native", "full"]
     assert filtered["session_accesses"] == ["workspace_write", "", "full"]
     assert filtered["processing_preferences"] == ["economy", "", "standard"]

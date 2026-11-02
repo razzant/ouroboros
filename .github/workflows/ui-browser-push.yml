@@ -29,8 +29,12 @@ jobs:
     name: ui-smoke
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
     uses: ./.github/workflows/ui-browser.yml
+    # A called workflow cannot raise its caller's token: the lane reads this run's
+    # shard plan (actions) and the accepted-failure issues (issues), as from ci.yml.
     permissions:
       contents: read
+      actions: read
+      issues: read
 
   # Never full-lane proof: one scenario, with no lane guard, no shard, no manifest,
   # no reconciliation and no browser-tools smoke. Its name says so wherever it shows.

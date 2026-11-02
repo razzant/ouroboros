@@ -9,7 +9,7 @@
 // a second Continue — new work goes through the conversation).
 
 import { continueTask, fetchTaskDetail } from './api_client.js';
-import { heldWorkFacts } from './task_control_menu.js';
+import { announceMembershipGap, heldWorkFacts } from './task_control_menu.js';
 import { ensureLiveActionsEl, ownLiveActionsEl } from './chat_activity.js';
 import { fmt, tr, tx } from './i18n.js';
 import { taskDoneIsTerminal, taskReasonPhrase } from './log_events.js';
@@ -37,7 +37,7 @@ export function continueNonce(taskId, storage, retainedNonce = '') {
     return nonce;
 }
 
-/** @returns {{kind: 'offer'|'retry'|'successor'|'refusal'|'none', successorId?: string, cause?: string, actionNonce?: string}} */
+/** @returns {{kind: 'offer'|'retry'|'successor'|'refusal'|'none', successorId?: string, cause?: string, refusal?: string, actionNonce?: string}} */
 export function continueOfferView(detail) {
     const offer = detail?.continuation_offer;
     if (!offer || typeof offer !== 'object') return { kind: 'none' };
@@ -47,7 +47,19 @@ export function continueOfferView(detail) {
     if (offer.eligible === false && offer.refusal === 'hard_limit_reached') {
         return { kind: 'refusal', cause: String(offer.cause || offer.refusal) };
     }
+    // A finite budget whose remainder the saved execution clock cannot establish: the host refuses
+    // rather than guess. Its `cause` is the interruption's, so the note names the budget instead.
+    if (offer.eligible === false && offer.refusal === 'execution_budget_unknown') {
+        return { kind: 'refusal', refusal: 'execution_budget_unknown' };
+    }
     return offer.eligible ? { kind: 'offer', cause: String(offer.cause || '') } : { kind: 'none' };
+}
+
+function refusalPhrase(view) {
+    return view.refusal === 'execution_budget_unknown'
+        ? tr('task.continue.budget_unknown',
+            "The time left in this task's execution budget could not be read from its saved clock, so no new task starts.")
+        : taskReasonPhrase(view.cause);
 }
 
 /**
@@ -76,6 +88,7 @@ export async function continueTaskAction(taskId, { request = continueTask, stora
             ? `Continue accepted; it starts by itself when the earlier attempt's work finishes: ${
                 heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
             : 'Continue accepted.', 'ok');
+        announceMembershipGap(ack.membership_gaps, 'continue', toast);  // a replay answers its admission's gap too
         return successor;
     } catch (exc) {
         const body = exc?.body || {};
@@ -114,7 +127,7 @@ export function continueControlSuccessor(record) {
  * card that did not complete cleanly (a best-effort completion may be a
  * technical limit), the card reads the full detail once to learn the offer.
  */
-export function syncContinueAction(record, detail, { read = fetchTaskDetail } = {}) {
+export function syncContinueAction(record, detail, { read = fetchTaskDetail, write = (fn) => fn() } = {}) {
     if (!detail || typeof detail !== 'object') return false;
     if (!('continuation_offer' in detail)) {
         const status = String(detail.task_terminal_status || detail.status || '').toLowerCase();
@@ -126,7 +139,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail } = 
                     const offer = full?.continuation_offer;
                     if (!offer || typeof offer !== 'object' || Array.isArray(offer)) {
                         offerReads.delete(record);  // null is the production reader's failure result
-                    } else if (record.root?.isConnected) syncContinueAction(record, full, { read });
+                    } else if (record.root?.isConnected) write(() => syncContinueAction(record, full, { read, write }));
                 })
                 .catch(() => { offerReads.delete(record); });  // a later terminal row retries
         }
@@ -151,7 +164,7 @@ export function syncContinueAction(record, detail, { read = fetchTaskDetail } = 
             note.dataset.continueRefusal = String(record.groupId || '');
             actions.appendChild(note);
         }
-        setInlineStatus(note, `${tr('task.continue.unavailable', 'Continue unavailable.')} ${taskReasonPhrase(view.cause)}`, 'neutral');
+        setInlineStatus(note, `${tr('task.continue.unavailable', 'Continue unavailable.')} ${refusalPhrase(view)}`, 'neutral');
         return !refusal;
     }
     refusal?.remove();

@@ -113,6 +113,51 @@ def test_async_timeout_result_stays_while_custody_tracks_actual_unwind(tmp_path,
     assert (result.status, result.code, result.text, result.meta) == returned
 
 
+def test_a_held_runner_ending_during_the_registry_fold_still_settles(tmp_path, monkeypatch):
+    """The registry's settlement fold never writes False over a runner's own concurrent end."""
+    from ouroboros import tool_custody
+
+    entered, release = threading.Event(), threading.Event()
+    async def handler(_ctx):
+        entered.set()
+        while not release.is_set():
+            await asyncio.sleep(.005)
+        return "late answer"
+    registry, queue, workers, name = _local(tmp_path, monkeypatch, handler)
+    actual_join, actual_outcome = threading.Thread.join, tool_custody.invocation_outcome
+    runners, fired = [], []
+
+    def join(thread, timeout=None):
+        if thread.name != f"ext-tool-{name}-async":
+            return actual_join(thread, timeout)
+        runners.append(thread)
+        assert entered.wait(5)
+        return actual_join(thread, 0)  # the caller stops waiting; the runner keeps the invocation
+
+    class Interleaving(dict):
+        def get(self, key, default=None):
+            value = dict.get(self, key, default)  # read before the runner's own write
+            if key in {"settled", "local_extension_returned"} and runners and not fired \
+                    and threading.current_thread() not in runners:
+                fired.append(key)
+                release.set()
+                actual_join(runners[0], 5)  # the runner records its end and releases in between
+            return value
+
+    monkeypatch.setattr(threading.Thread, "join", join)
+    monkeypatch.setattr(tool_custody, "invocation_outcome", lambda *a, **kw: Interleaving(actual_outcome(*a, **kw)))
+    try:
+        assert registry.execute_result(name, {}).code == "EXTENSION_TIMEOUT"
+    finally:
+        release.set()
+        for runner in runners:
+            actual_join(runner, 5)
+            assert not runner.is_alive()
+    assert fired, "the fold read happened while the runner was still live"
+    assert not load_task_result(tmp_path, "root").get("launch_handoffs")
+    _consumers(tmp_path, registry, queue, workers, held=False)
+
+
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_joined_handler_exception_keeps_error_but_releases_local_invocation(tmp_path, monkeypatch, asynchronous):
     entered = []

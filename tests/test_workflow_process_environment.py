@@ -105,8 +105,8 @@ def test_selected_secret_is_masked_before_diagnostic_bounds(
         args.update(cmd=[sys.executable, "-c", program])
     result = registry.execute_result(tool, args)
     rendered = result.text
-    assert "truncated" in rendered
     if tool == "verify_and_record":
+        assert "truncated" in rendered
         receipt = json.loads(verification_receipts_path(data, ctx.task_id).read_text(encoding="utf-8").splitlines()[-1])
         assert receipt["returncode"] == returncode and receipt["matched"] is True
         assert receipt["status"] == ("fail" if returncode else "pass")
@@ -114,10 +114,12 @@ def test_selected_secret_is_masked_before_diagnostic_bounds(
         assert len(rendered) < 6000
         rendered += json.dumps(receipt)
     else:
+        # The command tools return the producer's whole text; only the loop's exact-source delivery bounds
+        # the view (tests/test_tool_output_source_retention.py), so the complete line is here, masked.
         assert result.meta["exit_code"] == returncode
         assert result.status == ("error" if returncode else "ok")
-        assert len(rendered) < 52000
-        assert "yyyyyyyyyy" in rendered, "the bounded tail remains available"
+        assert "truncated" not in rendered
+        assert "x" * padding + "***" + "y" * suffix in rendered
     assert "xxxxxxxxxx" in rendered, "ordinary output remains available"
     assert secret[:10] not in rendered and secret[-10:] not in rendered
 

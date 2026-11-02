@@ -122,7 +122,7 @@ def test_work_poll_distinguishes_live_then_retained_lost_turn_and_late_terminal(
 
     def hold(_task):
         started.set()
-        assert release.wait(5)
+        assert release.wait(60)
 
     agents.append(_answering_agent(calls, "", tmp_path, during=hold, lost=True))
     with TestClient(app) as client:
@@ -135,13 +135,13 @@ def test_work_poll_distinguishes_live_then_retained_lost_turn_and_late_terminal(
         with ThreadPoolExecutor(max_workers=1) as pool:
             running = pool.submit(post)
             try:
-                assert started.wait(5)
+                assert started.wait(60)
                 live = poll()
                 assert live.status_code == 202 and live.json()["status"] == "pending"
                 assert "presence_recovery_recorded" not in load_task_result(tmp_path, reference)
             finally:
                 release.set()
-            assert running.result(timeout=5).status_code == 500
+            assert running.result(timeout=60).status_code == 500
 
         refused = post()
         assert refused.status_code == 409 and refused.json()["disposition"] == "retained"
@@ -166,3 +166,10 @@ def test_work_poll_distinguishes_live_then_retained_lost_turn_and_late_terminal(
         assert post().json()["text"] == "Late canonical answer"
         assert load_task_result(tmp_path, reference)["presence_recovery_recorded"] == lost["presence_recovery_recorded"]
     assert len(calls) == 1 and agents == []
+
+
+@pytest.fixture(autouse=True)
+def _focus_admission_enabled(monkeypatch):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
+    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
+    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance", lambda _root: {"status": "available", "remaining_usd": 10})

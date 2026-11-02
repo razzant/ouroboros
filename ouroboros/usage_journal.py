@@ -37,7 +37,7 @@ IMPORT_REL = pathlib.Path("state/usage_import_watermark.json")  # legacy telemet
 
 def _append_bytes_fsync(path: pathlib.Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o600)
     try:
         view = memoryview(payload)
         while view:
@@ -466,7 +466,7 @@ _SETTLEMENT_FIELDS = frozenset({
 })
 _DISPATCH_FIELDS = frozenset({
     "launch_state", "transport_outcome", "candidate_manifest_ref", "local_answer_owner_pid",
-    "local_answer_consumer_id", "local_answer_task_attempt", "local_answer_owner_birth",
+    "local_answer_consumer_id", "local_answer_task_attempt", "local_answer_owner_birth", "local_answer_owner_proof",
 })
 _STORE_ONLY_FIELDS = ("revision", "seq", "ts", "pre_compaction_seq")
 

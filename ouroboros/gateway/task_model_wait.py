@@ -276,7 +276,7 @@ def _decide(root: Any, body: dict) -> JSONResponse:
 
                     with settings_document_mutation():  # a chosen model is authored, the shown default included
                         _owner_update_settings(transform, boundary=boundary,
-                                               authored_keys=model_role_setting_keys(row["role"]))
+                                               authored_keys=model_role_setting_keys(row["role"]), allow_safety_lowering=True)
                     if transformation_completed:
                         row = mutate(wait_id,
                                      lambda previous: {**previous, "saved_request_id": action["request_id"]})

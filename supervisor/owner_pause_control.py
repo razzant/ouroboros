@@ -46,6 +46,7 @@ import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.work_stop import pause_marker
 
 log = logging.getLogger(__name__)
 
@@ -65,11 +66,29 @@ def _locate_root_locked(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]],
     return (dict(turn), "direct") if isinstance(turn, dict) else (None, "")
 
 
-def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
-    """``(result_row, live_review)`` of an answered root still owning late work, else ``(None, False)``.
+def _presence_pause_refusal(drive_root: Any, task_id: str, row: Optional[Dict[str, Any]]) -> str:
+    """Why Pause cannot take a turn an inline Presence runner holds, else "": nothing saves that stack yet (#2566), so
+    Pause changes nothing and says what it knows, witnessed live or liveness unknown, never "not live". ``row`` is the
+    stored row, {} while a starting turn has none, None when unreadable. A settled or other row reads no census."""
+    from ouroboros.presence_runner import presence_execution_witness
+    from supervisor.cancel_publication import live_presence_row
+
+    if row and not live_presence_row(row):
+        return ""
+    witness = presence_execution_witness(task_id, drive_root=drive_root)
+    if witness:
+        return "presence_pause_unsupported"
+    return "presence_liveness_unknown" if witness is None and row != {} else ""
+
+
+def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool, str]:
+    """``(result_row, late_work, "")`` of an answered root still owning late work, ``(None, False, "")`` when there is
+    none, or ``(None, False, refusal)`` of a turn its inline author may still run (``_presence_pause_refusal``): not an
+    answered root, whatever its tree holds.
 
     Its open or in-flight upkeep is reachable so the Pause can end it at once; a live
     review operation is reachable so its unsent preparation can wait for Resume.
+    Live descendants also belong to the answered root, even after all its own phases ended.
     """
     from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight, post_task_synthesis_is_open
     from ouroboros.review_operation import task_has_live_review_operation
@@ -77,14 +96,22 @@ def _late_work(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
 
     try:
         row = load_task_result(q.DRIVE_ROOT, task_id, strict=True) or {}
+    except Exception:
+        return None, False, _presence_pause_refusal(q.DRIVE_ROOT, task_id, None)
+    try:
+        if refusal := _presence_pause_refusal(q.DRIVE_ROOT, task_id, row):
+            return None, False, refusal
         live_review = bool(row) and task_has_live_review_operation(q.DRIVE_ROOT, task_id)
     except Exception:
-        return None, False
+        return None, False, ""
     checkpoint = row.get("root_phase_checkpoint") if isinstance(row.get("root_phase_checkpoint"), dict) else {}
-    if live_review or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id) or post_task_synthesis_is_open(
+    with q._queue_lock:
+        descendants = any(str(task.get("root_task_id") or "") == task_id and task.get("id") != task_id
+                          for task in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())])
+    if descendants or live_review or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id) or post_task_synthesis_is_open(
             checkpoint.get("post_task_synthesis")):
-        return {**row, "id": task_id}, live_review
-    return None, False
+        return {**row, "id": task_id}, live_review or descendants, ""
+    return None, False, ""
 
 
 def _late_work_settled(root_drive: Any, root_task_id: str) -> bool:
@@ -166,16 +193,25 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
     )
     from ouroboros.task_results import resolve_task_lineage
     from ouroboros.store import acquisition_budget, StoreBusy
+    from ouroboros.control_actor import control_actor, observed_control_stop
+    from ouroboros.work_stop import release_refusal
 
     from supervisor import queue as q
     task_id = str(task_id or "").strip()
-    late_row, late_review = _late_work(q, task_id)  # durable reads stay outside the queue lock
+    late_row, late_review, presence_refusal = _late_work(q, task_id)  # durable reads stay outside the queue lock
     with acquisition_budget(0), q._queue_lock:
+        from supervisor.workers import get_direct_chat_agent
+
+        # A live call has no resumable checkpoint. Its registered
+        # actor still owns work after message admission closes; Stop can end it.
+        actor = get_direct_chat_agent(task_id)
+        if getattr(actor, "_realtime_turn", None) is not None:
+            return {"ok": False, "error": "realtime_pause_unsupported"}
         task, lane = _locate_root_locked(q, task_id)
         if task is None and late_row is not None:
             task, lane = late_row, "late"
         if task is None:
-            return {"ok": False, "error": "task_not_live"}
+            return {"ok": False, "error": presence_refusal or "task_not_live"}
         lineage = resolve_task_lineage(
             task_id, metadata=task.get("metadata"), root_task_id=task.get("root_task_id"),
             parent_task_id=task.get("parent_task_id"), delegation_role=task.get("delegation_role"),
@@ -183,6 +219,9 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
         if not lineage["is_root_task"]:
             return {"ok": False, "error": "not_a_root_task", "root_task_id": str(task.get("root_task_id") or "")}
         root_drive = pathlib.Path(task.get("budget_drive_root") or q.DRIVE_ROOT)
+        if refusal := release_refusal(observed_control_stop(
+                root_drive, task, budget=q.BUDGET_ROOT_FENCES), control_actor()):
+            return refusal
         root_id = lineage["root_task_id"] if lineage["is_retry_root_attempt"] else task_id
         from ouroboros.owner_pause import root_actor
         if not root_actor(root_drive, root_id, task_id):
@@ -225,6 +264,17 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
                 current = read_fence(root_drive, root_id)
                 if not fence_closed(current) or fence.get("fence_id") != current.get("fence_id"):
                     return released
+                latest, _lane = _locate_root_locked(q, task_id)
+                if (latest or {}).get("_budget_pause_hold") != task.get("_budget_pause_hold"):
+                    return {"ok": False, "error": "selection_authority_changed"}
+                if refusal := release_refusal(observed_control_stop(
+                        root_drive, latest, budget=q.BUDGET_ROOT_FENCES, owner=current), control_actor()):
+                    return refusal
+                # The accepted Pause replaces only the decision this actor may release.
+                # Independent exact continuation custody stays on its own marker.
+                for member in [*q.PENDING, *(m.get("task") or {} for m in q.RUNNING.values())]:
+                    if member.get("id") == task_id:
+                        member.pop("_budget_pause_hold", None)
                 latch = _set_root_budget_pause_locked(root_id, {
                     "fence_id": str(fence["fence_id"]), "cause": "owner_pause",
                     "paused_at": str(fence.get("requested_at") or utc_now_iso())})
@@ -281,7 +331,7 @@ def _wake_members(q: Any, root_task_id: str, fence: Dict[str, Any], members: lis
     return woken
 
 
-def refresh_owner_pause_tree(root_task_id: str) -> str:
+def refresh_owner_pause_tree(root_task_id: str, *, gaps: Optional[List[Dict[str, str]]] = None) -> str:
     """Turn the root's fence ``paused`` once the whole tree is saved and its own work stopped.
 
     Saved means: every member of the tree is parked — cold under its exact
@@ -291,7 +341,11 @@ def refresh_owner_pause_tree(root_task_id: str) -> str:
     unknown keeps the tree ``requested`` exactly as it keeps that member's
     Resume refused (#1562; the settle tick re-reads it). Only the owner's one
     exception is disclosed instead of waited for: reviewers already launched,
-    their delegated runs and their own model sends (``finishing_reviews``).
+    their delegated runs and their own model sends (``finishing_reviews``). A
+    damaged old row no surviving link ties to this tree is named on the fence
+    (``membership_gaps``), never waited for; a tied one holds it. A Resume's own
+    read passes ``gaps``: such rows go there, and an already paused fence keeps
+    the ones its Pause recorded.
     Returns the fence state after the check (``""`` when no fence).
     """
     from ouroboros.owner_pause import (
@@ -310,7 +364,7 @@ def refresh_owner_pause_tree(root_task_id: str) -> str:
         running_meta = {task_id: dict(q.RUNNING.get(task_id) or {}) for task_id, _task in running_all}
         queued = [dict(item) for item in q.PENDING if isinstance(item, dict)
                   and root_task_id in (str(item.get("root_task_id") or ""), str(item.get("id") or ""))]
-        parked = [item for item in queued if isinstance(item.get("_budget_pause"), dict)]
+        parked = [item for item in queued if pause_marker(item)]
     try:
         fence = read_fence(root_drive, root_task_id)
     except Exception:
@@ -366,7 +420,10 @@ def refresh_owner_pause_tree(root_task_id: str) -> str:
         return str(fence.get("state") or "")
     from supervisor.continuation_admission import conflicting_writers
 
-    blockers = conflicting_writers(q, root_task_id, drive_root=root_drive, owner_pause_fence_id=fence_id)
+    found: List[Dict[str, str]] = []
+    blockers = conflicting_writers(q, root_task_id, drive_root=root_drive, owner_pause_fence_id=fence_id, gaps=found)
+    if gaps is not None:
+        gaps.extend(found)
     if [b for b in blockers if not review_finishing(b)]:
         return str(fence.get("state") or "")
     reviews = {str(b.get("task_id") or b.get("attempt_id") or "") for b in blockers if review_finishing(b)}
@@ -378,7 +435,12 @@ def refresh_owner_pause_tree(root_task_id: str) -> str:
             log.debug("Live review operations of %s unreadable at the Pause census", task_id, exc_info=True)
     facts = {"parked_members": [str(item.get("id") or "") for item in parked] + warm,
              "warm_members": list(warm), "finishing_reviews": sorted(reviews - {""})}
-    if str(fence.get("state") or "") == FENCE_PAUSED:
+    paused = str(fence.get("state") or "") == FENCE_PAUSED
+    if (found or fence.get("membership_gaps")) and not (paused and gaps is not None):
+        # Rows no surviving link ties to this tree: named, never a member, never what holds it.
+        from ouroboros.pause_notices import gap_fact
+        facts["membership_gaps"] = gap_fact(found)
+    if paused:
         if all(fence.get(key) == value for key, value in facts.items()):
             return FENCE_PAUSED
         try:  # the "still finishing" line changes on the same paused fence
@@ -478,27 +540,6 @@ def complete_owner_pause_latch(root_task_id: str, fence: Dict[str, Any]) -> Opti
         "paused_at": str(fence.get("requested_at") or utc_now_iso())})
 
 
-def retain_late_phase_latch(drive_root: Any, root_task_id: str) -> None:
-    """Startup: an answered root's deferred late review keeps its owner Pause latch (and so
-    its census row and Resume) even when the restored snapshot was too old to carry it.
-    Never a grant."""
-    from ouroboros.owner_pause import fence_closed, read_fence
-    from supervisor import queue as q
-
-    try:
-        if not getattr(q, "INITIALIZED", False) or (
-                pathlib.Path(q.DRIVE_ROOT).resolve() != pathlib.Path(drive_root).resolve()):
-            return
-        fence = read_fence(drive_root, root_task_id)
-        if not fence_closed(fence):
-            return
-        with q._queue_lock:
-            if complete_owner_pause_latch(root_task_id, fence):
-                q.persist_queue_snapshot(reason="late_phase_pause_retained")
-    except Exception:
-        log.warning("Saved late-phase Pause latch of %s was not retained", root_task_id, exc_info=True)
-
-
 _SETTLE_RECHECK_SEC = 5.0
 _LAST_SETTLE_CHECK: Dict[str, float] = {}
 
@@ -515,8 +556,8 @@ def _record_settled_member(q: Any, item: Dict[str, Any]) -> None:
     wins, and this stale observation is dropped for the next pass to redo.
     """
     from ouroboros.budget_pause import (
-        STOP_POLICY_TASK_OWNED, BudgetPauseSuperseded, budget_pause_row, observe_task_runs, set_budget_pause,
-        task_owned_runs_open,
+        STOP_POLICY_TASK_OWNED, BudgetPauseSuperseded, budget_pause_row, episode_fields, observe_task_runs,
+        set_budget_pause, task_owned_runs_open,
     )
     from ouroboros.owner_pause import SETTLEMENT_EXTERNAL_RUNNING, SETTLEMENT_SETTLED
 
@@ -534,6 +575,11 @@ def _record_settled_member(q: Any, item: Dict[str, Any]) -> None:
     # The stops this pause already issued are re-READ, never issued again.
     observed = observe_task_runs(result_root, task_id, reason="owner_pause_settlement_check",
                                  stop_policy=STOP_POLICY_TASK_OWNED, prior=row.get("external_runs"))
+    # This Pause's participants, never fewer. Only its first look at a cold receipt it never observed
+    # begins a whole list; an owner tick an older body ran there left these marks, so that list is partial.
+    seen = row.get("settlement_observed_at") or any(isinstance(run, dict) and run.get("stop_policy") == "request_stop"
+                                                    for run in (row.get("external_runs") or {}).get("runs") or [])
+    participants = episode_fields(row, observed, starts=bool(cold_receipt) and not seen)
     if task_owned_runs_open(observed):
         def facts(external: Any) -> list:
             return sorted((str(run.get("run_id") or run.get("invocation_id") or ""), str(run.get("state") or ""),
@@ -542,7 +588,7 @@ def _record_settled_member(q: Any, item: Dict[str, Any]) -> None:
         if observed.get("custody_read") == "ok" and facts(observed) == facts(row.get("external_runs")):
             return  # nothing moved: no rewrite of the same facts every tick
         try:  # the fresh outcomes (requested -> confirmed, unknown) are the owner's facts
-            set_budget_pause(result_root, task_id, {**row, "external_runs": observed},
+            set_budget_pause(result_root, task_id, {**row, "external_runs": observed, **participants},
                              expected_pause_id=str(row.get("pause_id") or ""),
                              expected_state=str(row.get("state") or ""),
                              expected_grant_id=str((row.get("grant") or {}).get("grant_id") or ""))
@@ -550,7 +596,7 @@ def _record_settled_member(q: Any, item: Dict[str, Any]) -> None:
             log.debug("Owner pause observation of %s superseded by a newer pause row", task_id, exc_info=True)
         return
     try:
-        set_budget_pause(result_root, task_id, {**row, "external_runs": observed,
+        set_budget_pause(result_root, task_id, {**row, "external_runs": observed, **participants,
                                                 **({} if cold_receipt else {"settlement": SETTLEMENT_SETTLED}),
                                                 "settlement_observed_at": utc_now_iso()},
                          expected_pause_id=str(row.get("pause_id") or ""),
@@ -569,7 +615,7 @@ def _reread_warm_member(q: Any, task_id: str, meta: Dict[str, Any]) -> None:
     keep the resumed stack's newer cognition), and this stale observation is
     dropped for the next pass to redo. The RUNNING mirror takes only the facts.
     """
-    from ouroboros.budget_pause import STOP_POLICY_TASK_OWNED, observe_task_runs
+    from ouroboros.budget_pause import STOP_POLICY_TASK_OWNED, episode_fields, observe_task_runs
     from ouroboros.owner_wait import OwnerWaitSuperseded, set_owner_wait
 
     wait = dict(meta.get("owner_wait") or {})
@@ -582,8 +628,10 @@ def _reread_warm_member(q: Any, task_id: str, meta: Dict[str, Any]) -> None:
                                     for r in (external or {}).get("runs") or [] if isinstance(r, dict))
     if observed.get("custody_read") != "ok" or facts(observed) == facts(pause.get("external_runs")):
         return
+    participants = episode_fields(pause, observed)  # this park's, never fewer; a park without a list stays partial
     try:
-        set_owner_wait(result_root, task_id, {**wait, "owner_pause": {**pause, "external_runs": observed}},
+        set_owner_wait(result_root, task_id, {**wait, "owner_pause": {**pause, "external_runs": observed,
+                                                                      **participants}},
                        expected_wait_id=str(wait.get("wait_id") or ""), expected_state=str(wait.get("state") or ""))
     except OwnerWaitSuperseded:
         log.debug("Warm Pause observation of %s superseded by a Resume or newer park", task_id, exc_info=True)
@@ -594,7 +642,7 @@ def _reread_warm_member(q: Any, task_id: str, meta: Dict[str, Any]) -> None:
         if (isinstance(current, dict) and current.get("wait_id") == wait.get("wait_id")
                 and current.get("state") == wait.get("state")):
             live["owner_wait"] = {**current, "owner_pause": {**dict(current.get("owner_pause") or {}),
-                                                             "external_runs": observed}}
+                                                             "external_runs": observed, **participants}}
 
 
 def settle_requested_owner_pauses(q: Any = None, *, now: Optional[float] = None,
@@ -632,7 +680,7 @@ def settle_requested_owner_pauses(q: Any = None, *, now: Optional[float] = None,
         with q._queue_lock:
             parked = [dict(item) for item in q.PENDING if isinstance(item, dict)
                       and root_id in (str(item.get("root_task_id") or ""), str(item.get("id") or ""))
-                      and isinstance(item.get("_budget_pause"), dict)]
+                      and pause_marker(item)]
             warm = [(str(task_id), dict(meta)) for task_id, meta in q.RUNNING.items()
                     if warm_paused_member(meta) and root_id in (
                         str((meta.get("task") or {}).get("root_task_id") or ""), str(task_id))]

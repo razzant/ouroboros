@@ -49,7 +49,7 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     from supervisor import events as events_mod
 
     monkeypatch.setattr(events_mod, "dispatch_event",
-                        lambda evt, ctx: time.sleep(0.05) if evt["type"] == "send_message" else None)
+                        lambda evt, ctx: time.sleep(0.07) if evt["type"] == "send_message" else None)
     bus = ObservedEventQueue()
     for _ in range(2):
         bus.put({"type": "send_message", "task_id": "t", "chat_id": 1, "text": "answer", "ts": _ago(5)})
@@ -65,7 +65,7 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     bus.put({"type": "llm_usage", "task_id": "t"})
     bus.put({"type": "task_heartbeat", "task_id": "t"})  # a telemetry backlog at the moment of the row
     with instruments._queue_lock:
-        time.sleep(0.02)
+        time.sleep(0.04)  # a Windows sleep may end a ~15.6 ms tick early
 
     monkeypatch.setattr(sl, "SUPERVISOR_LOAD_WINDOW_SEC", 0.0)
     row = sl.publish_supervisor_load(bus, tmp_path)
@@ -115,7 +115,7 @@ def test_the_row_reads_the_real_q_and_neither_it_nor_the_drain_waits_for_q(monke
     assert {"rows", "bytes", "evicted", "max_rows"} <= set(sections["dialogue_retry"]())
     queue._queue_lock.drain()
     with queue._queue_lock:
-        time.sleep(0.05)
+        time.sleep(0.07)
     facts = sections["queue_lock"]()
     assert facts["count"] >= 1 and facts["hold_max_sec"] >= 0.05
 

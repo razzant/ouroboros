@@ -1535,7 +1535,7 @@ wheels = [
 
 [[package]]
 name = "ouroboros"
-version = "7.7.0"
+version = "7.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
@@ -1589,6 +1589,10 @@ desktop = [
     { name = "pythonnet", marker = "sys_platform == 'win32'" },
     { name = "pywebview" },
 ]
+linux-desktop = [
+    { name = "pycairo", marker = "sys_platform == 'linux'" },
+    { name = "pygobject", marker = "sys_platform == 'linux'" },
+]
 local-model = [
     { name = "llama-cpp-python" },
 ]
@@ -1621,6 +1625,8 @@ requires-dist = [
     { name = "playwright-stealth", marker = "extra == 'all'" },
     { name = "playwright-stealth", marker = "extra == 'browser'" },
     { name = "psutil", marker = "sys_platform == 'win32'", specifier = ">=7.2" },
+    { name = "pycairo", marker = "sys_platform == 'linux' and extra == 'linux-desktop'", specifier = "==1.26.1" },
+    { name = "pygobject", marker = "sys_platform == 'linux' and extra == 'linux-desktop'", specifier = "==3.46.0" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.0" },
     { name = "pypdf", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=7.0" },
@@ -1641,7 +1647,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"] },
     { name = "websockets" },
 ]
-provides-extras = ["browser", "desktop", "local-model", "build", "all"]
+provides-extras = ["browser", "desktop", "linux-desktop", "local-model", "build", "all"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.12" }]
@@ -1866,6 +1872,12 @@ wheels = [
 ]
 
 [[package]]
+name = "pycairo"
+version = "1.26.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/4f/0d48a017090d4527e921d6892bc550ae869902e67859fc960f8fe63a9094/pycairo-1.26.1.tar.gz", hash = "sha256:a11b999ce55b798dbf13516ab038e0ce8b6ec299b208d7c4e767a6f7e68e8430", size = 346882, upload-time = "2024-06-21T10:37:41.527Z" }
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2039,6 +2051,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/c3/b2/bc9c9196916376152
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/7e/a72dd26f3b0f4f2bf1dd8923c85f7ceb43172af56d63c7383eb62b332364/pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176", size = 1231151, upload-time = "2026-03-29T13:29:30.038Z" },
 ]
+
+[[package]]
+name = "pygobject"
+version = "3.46.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pycairo" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/4a/f24ddf1d20cc4b56affc7921e29928559a06c922eb60077448392792b914/PyGObject-3.46.0.tar.gz", hash = "sha256:481437b05af0a66b7c366ea052710eb3aacbb979d22d30b797f7ec29347ab1e6", size = 723367, upload-time = "2023-09-10T09:56:26.737Z" }
 
 [[package]]
 name = "pyinstaller"

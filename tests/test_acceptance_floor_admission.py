@@ -287,8 +287,8 @@ def test_the_whole_coordination_poll_writes_nothing_and_reports_an_unlatched_tas
     assert not hasattr(ctx, "_time_budget_started_at")  # the one latch a poll could take
 
     # Controls: each armed write really is reachable from its owning path.
-    assert cfg.load_settings().get("OUROBOROS_CONTEXT_MODE") == "max"
-    assert settings_path.read_bytes() != settings_before[0]  # load_settings persists
+    assert cfg.load_settings(migrate=True).get("OUROBOROS_CONTEXT_MODE") == "max"
+    assert settings_path.read_bytes() != settings_before[0]  # the boot's migrating read persists
     assert task_pacing.resolve_budget_profile(ctx)["improvement_policy"] == "adaptive"
     # (the third control of the upstream test — the alias deprecation row and
     # its `_acceptance_pacing_deprecation_emitted` latch — is void: the
@@ -363,7 +363,7 @@ def test_a_single_crash_torn_journal_gets_the_quarantine_its_one_time_import_per
 def test_reading_the_finalization_grace_never_touches_the_settings_file(monkeypatch, tmp_path):
     """`get_finalization_grace_sec` is env → the supplied settings mapping →
     the shipped default. With the env absent it must answer from the default
-    without reading (and therefore migrating) settings from disk."""
+    without reading settings from disk."""
     from ouroboros import config as cfg
 
     monkeypatch.delenv("OUROBOROS_FINALIZATION_GRACE_SEC", raising=False)
@@ -373,6 +373,6 @@ def test_reading_the_finalization_grace_never_touches_the_settings_file(monkeypa
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "9999")
     assert cfg.get_finalization_grace_sec() == 300  # the clamp is unchanged
     assert (settings_path.read_bytes(), settings_path.stat().st_mtime_ns) == before
-    # Control: the file really is one a settings read would rewrite.
-    assert cfg.load_settings().get("OUROBOROS_CONTEXT_MODE") == "max"
+    # Control: the file really is one the boot's migrating read would rewrite.
+    assert cfg.load_settings(migrate=True).get("OUROBOROS_CONTEXT_MODE") == "max"
     assert settings_path.read_bytes() != before[0]

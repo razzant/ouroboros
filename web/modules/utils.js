@@ -1,6 +1,6 @@
 /** Shared frontend utilities. */
 
-import { apiFetch } from './api_client.js';
+import { apiClient } from './api_client.js';
 import { currentLanguage, fmt, isEnglish, tr } from './i18n.js';
 export { fetchJson } from './api_client.js';
 
@@ -512,16 +512,19 @@ export const MARKDOWN_FENCED_CODE = new RegExp(FENCE_START + '\\n([\\s\\S]*?)```
 const FENCE_CLOSE = /```/;
 
 /**
- * Plain-text projection of ATX headings for one-line previews: the markers go,
- * and a heading (by the renderer's own visible-length rule) followed by text keeps
- * ` — ` as its separator, so a collapsed preview reads `summary — …` rather than
- * gluing the label to the sentence. A marker-led line the renderer treats as prose
- * loses only its markers; a heading already ending in a dash or colon gets no
- * second one; lines inside a code fence are code and stay untouched. CRLF and
+ * Plain-text projection of the line-anchored markers for one-line previews, run
+ * while the newlines still exist (a flattened preview can no longer tell a line
+ * start from prose). ATX headings lose their markers, and a heading (by the
+ * renderer's own visible-length rule) followed by text keeps ` — ` as its
+ * separator, so a collapsed preview reads `summary — …` rather than gluing the
+ * label to the sentence. A marker-led line the renderer treats as prose loses only
+ * its markers; a heading already ending in a dash or colon gets no second one.
+ * Bullets lose their `- `, a table row reads as its cells and a divider row
+ * disappears. Lines inside a code fence are code and stay untouched. CRLF and
  * trailing blanks are normalized. Line-by-line on purpose: a regex over the whole
  * text with a lazy or trailing-blank tail is quadratic on long whitespace runs.
  */
-export function joinMarkdownHeadings(text) {
+export function projectMarkdownLines(text) {
     const raw = String(text || '').split('\n');
     const lines = raw.map((line) => line.trimEnd());
     // Index of the next non-blank line and "a closer exists below" for every line:
@@ -539,7 +542,13 @@ export function joinMarkdownHeadings(text) {
         if (fenced) { if (FENCE_CLOSE.test(raw[index])) fenced = false; return line; }
         if (opensFence(index)) { fenced = true; return line; }
         const heading = /^#{1,6} (.*\S)$/.exec(line);
-        if (!heading) return line;
+        if (!heading) {
+            const bullet = /^- (.+)$/.exec(line);
+            if (bullet) return bullet[1];
+            const row = /^\|(.+)\|$/.exec(line);
+            const cells = row ? row[1].split('|').map((cell) => cell.trim()).join(' ') : line;
+            return /^[\s\-:|]+$/.test(cells) ? '' : cells;
+        }
         const next = nextIndex[index];
         // A visibly dash- or colon-terminated heading (`**Steps:**` included) needs no second separator.
         const visible = visibleHeadingText(heading[1], false);
@@ -652,12 +661,39 @@ export function formatDualVersion(data) {
     return `app ${appVersion} | rt ${runtimeVersion}`;
 }
 
+const versionField = (value) => (typeof value === 'string' ? value.trim() : '');
+let versionRead = 0;
+let appVersionRead = '';
+const appVersionWatchers = new Set();
+
+/** The app version the newest landed health read reported (`loadVersion`); '' while none did. */
+export const lastAppVersion = () => appVersionRead;
+
+/** Call `watcher` when a landed health read changes `lastAppVersion()`; returns its disposer. */
+export function watchAppVersion(watcher) {
+    appVersionWatchers.add(watcher);
+    return () => appVersionWatchers.delete(watcher);
+}
+
+/**
+ * The sidebar's runtime version and About's app/runtime pair, from one `/api/health` read. app.js
+ * reads at startup and on every socket open, because a kept page outlives the core that served it.
+ * The newest read started owns both labels: an older answer is dropped even when the newer read
+ * fails, and a failed, refused or versionless answer leaves the text they already show.
+ */
 export async function loadVersion() {
-    try {
-        const resp = await apiFetch('/api/health');
-        const data = await resp.json();
-        const { runtimeVersion } = extractVersions(data);
-        const navVer = document.getElementById('nav-version');
-        if (navVer) navVer.textContent = `v${runtimeVersion}`;
-    } catch {}
+    const read = ++versionRead;
+    let data = null;
+    try { data = await apiClient.health(); } catch { /* keep the labels */ }
+    const runtime = versionField(data?.runtime_version) || versionField(data?.version);
+    if (read !== versionRead || !runtime) return;
+    const versions = { runtime_version: runtime, app_version: versionField(data.app_version) };
+    if (appVersionRead !== versions.app_version) {  // the Updates page's App chip
+        appVersionRead = versions.app_version;
+        appVersionWatchers.forEach((watcher) => watcher());
+    }
+    const nav = document.getElementById('nav-version');
+    if (nav) nav.textContent = `v${runtime}`;
+    const about = document.getElementById('about-version');
+    if (about) about.textContent = formatDualVersion(versions);
 }

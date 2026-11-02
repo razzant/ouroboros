@@ -1,11 +1,11 @@
 # tests/test_dir02_consumed_grant_retry.py
+import json
 import queue as stdqueue
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import budget_pause as bp, owner_pause, working_checkpoint as wc
-from ouroboros.task_results import load_task_result
 from supervisor import events_budget as eb, queue, worker_health, workers
 from supervisor.owner_pause_control import request_owner_pause
 from tests._budget_pause_exact_helpers import _loop_ctx
@@ -24,7 +24,7 @@ pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("return_first", [False, True],
-                         ids=["same-attempt-fenced", "later-attempt-retry"])
+                         ids=["same-attempt-working", "later-attempt-retry"])
 def test_consumed_g1_selection_after_recovery(
         host, monkeypatch, clock, reaper, return_first):
     plan = _fresh_plan(monkeypatch)
@@ -52,11 +52,9 @@ def test_consumed_g1_selection_after_recovery(
     assert eb.live_root_resume_grant(queue, "held", host.root)["grant_id"] == g1["grant_id"]
     assert eb.budget_hold_fact(next(t for t in host.pending if t["id"] == child_id))
 
-    # A held descendant must prevent manufacturing an ordinary idle-retry job.
+    # Silence beside a held descendant manufactures no reap job.
     assert queue._has_pending_descendant("held")
-    assert queue._has_live_descendant("held")
-    clock[0] += max(float(queue.get_task_idle_timeout_sec()),
-                    float(queue.get_per_call_timeout_ceiling_sec()) + 120.0) + 1
+    clock[0] += float(queue.get_task_idle_timeout_sec()) + 1
     queue.enforce_task_timeouts()
     assert "held" in workers.RUNNING
     assert not workers.RUNNING["held"].get("finalization_requested_at")
@@ -82,6 +80,8 @@ def test_consumed_g1_selection_after_recovery(
     meta = workers.RUNNING["held"]
     dead_attempt = meta["attempt"]
     assert (dead_attempt != exact["task_attempt"]) is return_first
+    saved = json.loads(wc.checkpoint_path(host.root, "held", dead_attempt).read_text())
+    assert saved["working"]["boundary"] == ("post_batch" if return_first else "resumed")
     workers.WORKERS[0] = _make_worker(busy_task_id="held", exitcode=1)
     jobs = stdqueue.Queue()
     monkeypatch.setattr(queue, "_reap_queue", jobs)
@@ -98,13 +98,6 @@ def test_consumed_g1_selection_after_recovery(
     job = jobs.get_nowait()
     assert job["kind"] == "confirmed_dead_worker" and job["meta"] is meta
     worker_health.recover_confirmed_dead_worker(job)
-
-    if not return_first:
-        result = load_task_result(host.root, "held")
-        assert result["reason_code"] == "worker_crash_budget_pausing", result
-        assert not any(t["id"] == "held" for t in host.pending)
-        assert eb.budget_hold_fact(next(t for t in host.pending if t["id"] == child_id))
-        return
 
     retry = next(t for t in host.pending if t["id"] == "held")
     assert retry["_attempt"] == dead_attempt + 1
@@ -129,7 +122,7 @@ def test_consumed_g1_selection_after_recovery(
     print("G1 -> acknowledged return -> crash retry -> child:", pushed[-1])
     assert pushed[-1]["ok"], pushed[-1]
     selected = next(t for t in host.pending if t["id"] == child_id)
-    assert selected[eb.BUDGET_HOLD_KEY]["root_grant_id"] == g1["grant_id"]
+    assert selected[eb.SELECTION_KEY]["root_grant_id"] == g1["grant_id"]
     assert eb.budget_resume_dispatch_allowed(queue, selected) is True
     assert [t["id"] for t in _assign(host, monkeypatch)] == [child_id]
 
@@ -204,7 +197,7 @@ def test_holding_stop_lends_no_g1_and_owner_resume_rebinds_the_child(host, monke
     selected = _select_child_as(host, "held")
     assert selected["ok"], selected  # current J by source: root_resume_generation_stale (P3)
     child = _row(host, CHILD)
-    assert child[eb.BUDGET_HOLD_KEY]["root_grant_id"] == g2["grant_id"]
+    assert child[eb.SELECTION_KEY]["root_grant_id"] == g2["grant_id"]
     assert eb.budget_resume_dispatch_allowed(queue, child) is True
 
 
@@ -212,8 +205,8 @@ def test_newer_owner_pause_defeats_projected_g1(host, monkeypatch, clock, reaper
     plan = _fresh_plan(monkeypatch)
     pause, g1, _exact = _consumed_g1_tree(host, monkeypatch, clock, plan)
     _stop_boot(monkeypatch, returning=True)
-    projected = _row(host, "held")[eb.BUDGET_HOLD_KEY]
-    assert projected["selected"] and projected["grant_id"] == g1["grant_id"], projected
+    projected = _row(host, "held")[eb.SELECTION_KEY]
+    assert projected["grant_id"] == g1["grant_id"], projected
     [running] = _assign(host, monkeypatch)
     assert running["id"] == "held"
     assert _loop_once(host, monkeypatch, running, plan=plan)["kind"] == "working"
@@ -232,7 +225,7 @@ def test_newer_owner_pause_defeats_projected_g1(host, monkeypatch, clock, reaper
     assert eb.live_root_resume_grant(queue, "held", host.root)["grant_id"] == g3["grant_id"]
     outcome = _select_child_as(host, "held")
     assert outcome["ok"], outcome
-    assert _row(host, CHILD)[eb.BUDGET_HOLD_KEY]["root_grant_id"] == g3["grant_id"]
+    assert _row(host, CHILD)[eb.SELECTION_KEY]["root_grant_id"] == g3["grant_id"]
 
 
 def test_consumed_exact_grant_beats_an_older_saved_hold_after_return(host, monkeypatch, clock, reaper):
@@ -256,13 +249,13 @@ def test_consumed_exact_grant_beats_an_older_saved_hold_after_return(host, monke
     exact = bp.budget_pause_row(host.root, "held")
     assert exact["state"] == bp.STATE_RESUMED and exact["grant"]["grant_id"] == g5["grant_id"]
     live = workers.RUNNING["held"]["task"]
-    assert live[eb.BUDGET_HOLD_KEY]["root_grant_id"] == g2["grant_id"], "precondition: older hold survives"
+    assert eb.SELECTION_KEY not in live, "the new exact handoff supersedes the older selection"
     assert eb.live_root_resume_grant(queue, "held", host.root)["grant_id"] == g5["grant_id"]
     assert eb.budget_hold_fact(_row(host, CHILD))["root_grant_id"] == g5["grant_id"]
 
     _stop_boot(monkeypatch, returning=True)  # acknowledged automatic return
     returned = _row(host, "held")
-    assert returned[eb.BUDGET_HOLD_KEY]["grant_id"] == g5["grant_id"]
+    assert returned[eb.SELECTION_KEY]["grant_id"] == g5["grant_id"]
     assert eb.live_root_resume_grant(queue, "held", host.root)["grant_id"] == g5["grant_id"]
     outcome = _select_child_as(host, "held")
     assert outcome["ok"], outcome
@@ -305,7 +298,7 @@ def test_retry_actor_return_projects_on_its_physical_row(host, monkeypatch, cloc
     _loop_once(host, monkeypatch, resumed, plan=plan, events=_supervisor_events(host))
     assert eb.live_root_resume_grant(queue, "held", host.root)["grant_id"] == g1["grant_id"]
     _stop_boot(monkeypatch, returning=True)
-    hold = _row(host, running["id"])[eb.BUDGET_HOLD_KEY]
+    hold = _row(host, running["id"])[eb.SELECTION_KEY]
     assert (hold["root_task_id"], hold["grant_id"]) == ("held", g1["grant_id"]), hold
     assert eb.live_root_resume_grant(queue, "held", host.root)["grant_id"] == g1["grant_id"]
     child = _row(host, CHILD)

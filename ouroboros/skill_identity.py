@@ -27,11 +27,14 @@ The file walk, confinement and sensitive-file policy are the loader's own
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import re
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
@@ -192,17 +195,53 @@ def release_digest_from_files(files: Iterable[Dict[str, Any]], declaration: Any 
     return release_digest_from_file_digests(pairs, declaration)
 
 
+# (device, inode) -> ((size, mtime_ns, ctime_ns), the file's SHA-256) of payload files hashed in this process.
+_DIGESTS: "collections.OrderedDict[Tuple[int, int], Tuple[Tuple[int, int, int], bytes]]" = collections.OrderedDict()
+_DIGESTS_KEPT = 8192  # memory: about half a kilobyte per kept digest; the oldest goes first
+_LOCAL_DEVICES: Dict[int, bool] = {}  # st_dev -> the store's local-filesystem verdict, probed once
+_RACY_NS = 2_000_000_000  # a change time this close to the hash may share a coarse clock tick with a later write
+
+
+def _change_key(path: pathlib.Path) -> Optional[Tuple[Tuple[int, int], Tuple[int, int, int]]]:
+    """The file's identity and change key on a filesystem the store calls local, else ``None``: Windows
+    (its ``st_ctime`` is the creation time), network, FUSE and unknown filesystems hash every time."""
+    if os.name == "nt":
+        return None
+    info = os.stat(path)
+    if info.st_dev not in _LOCAL_DEVICES:
+        from ouroboros import store
+
+        _LOCAL_DEVICES[info.st_dev] = store._filesystem_type(path) in store._LOCAL_FILESYSTEMS
+    if not _LOCAL_DEVICES[info.st_dev]:
+        return None
+    return (info.st_dev, info.st_ino), (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _file_sha256(path: pathlib.Path, rel: str) -> bytes:
+    """The file's SHA-256, the review-freshness authority (P3), reused while its change key stays.
+
+    On a local POSIX filesystem every change of a file's bytes or times (write, truncate, ``utime``, rename)
+    sets its change time to the kernel's clock, which no unprivileged call sets back, so an unchanged
+    (device, inode, size, mtime, ctime) key names the bytes hashed under it. A digest is kept only when that
+    change time lies ``_RACY_NS`` before the hash began, so a later write in the same coarse clock tick (one
+    second on HFS+ or ext3) cannot leave the key unchanged."""
     from ouroboros.skill_loader import SkillPayloadUnreadable
 
     file_digest = hashlib.sha256()
     try:
+        key, started = _change_key(path), time.time_ns()
+        if key is not None and (kept := _DIGESTS.get(key[0])) is not None and kept[0] == key[1]:
+            return kept[1]
         with path.open("rb") as fh:
             for chunk in iter(lambda: fh.read(64 * 1024), b""):
                 file_digest.update(chunk)
     except OSError as exc:
         log.warning("Failed to read skill payload file %s", path, exc_info=True)
         raise SkillPayloadUnreadable(rel, exc) from exc
+    if key is not None and key[1][2] < started - _RACY_NS:
+        _DIGESTS[key[0]] = (key[1], file_digest.digest())
+        if len(_DIGESTS) > _DIGESTS_KEPT:
+            _DIGESTS.popitem(last=False)
     return file_digest.digest()
 
 

@@ -3,8 +3,7 @@
 Driven through the real consumers: ``admit_continuation`` on an installed queue,
 the successor's startup authority materialization
 (``validate_task_authority_sources``) and ``build_llm_messages`` in Max. The
-predecessor's compact brief (conditions, owner words, answer whole-or-pointer,
-omitted fields with sizes) is in that first request beside the exact reader of
+predecessor's compact brief (status and cause, owner words, omitted fields with sizes) is in that first request beside the exact reader of
 the complete record, so the work order points to it instead of ordering it read;
 the request names no actor (a nonce proves the action, not who pressed it); the
 predecessor's stored self-body handbook choice survives admission, its restored
@@ -23,7 +22,7 @@ import pytest
 
 from ouroboros.task_store import delete_document
 from tests._budget_pause_exact_helpers import _install_queue
-from tests.test_doc_context import _make_env_and_memory
+from tests.test_doc_context import _make_env_and_memory, foreign_tree
 from tests.test_owner_continue import NONCE, _interrupted
 
 FIELD = "context_requires_self_body_docs"
@@ -90,8 +89,7 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
     (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
     env = Env(repo_dir=books.repo_dir, drive_root=tmp_path, budget_drive_root=tmp_path)
     memory = Memory(tmp_path, repo_dir=books.repo_dir)
-    workspace = tmp_path / "working-copy"
-    workspace.mkdir()
+    workspace = foreign_tree(tmp_path / "working-copy")  # proven foreign: only the flag restores the handbook
     contract = {"context": "PREDECESSOR-CONTRACT-SENTINEL", **({FIELD: flag} if flag is not None else {})}
     _interrupted(tmp_path, workspace_root=str(workspace), workspace_mode="external",
                  task_contract=contract, mutation_evidence=_mutation_evidence())
@@ -149,11 +147,12 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
         handbooks.append(sum(block["text"].startswith("## DEVELOPMENT.md\n") for block in system))
         system_text = "\n".join(block["text"] for block in system)
         rendered = json.dumps(messages, ensure_ascii=False)
-        assert '"predecessor_authority"' in system_text and "PREDECESSOR-CONTRACT-SENTINEL" in rendered
+        assert '"predecessor_authority"' in system_text and "PREDECESSOR-CONTRACT-SENTINEL" not in rendered
         brief = task["predecessor_authority"]
-        # The brief carries the conditions and the exact reader; the mutation handoff reads
-        # only that pointer, so the evidence body is an omitted field with its size.
-        assert brief["task_contract"]["context"] == "PREDECESSOR-CONTRACT-SENTINEL"
+        # The brief carries status and the exact reader; the predecessor contract and
+        # mutation evidence remain at that source, with their omission sizes named.
+        assert "task_contract" not in brief and brief["omitted_fields"]["task_contract"] > 0
+        assert load_task_result(tmp_path, "pred-1")["task_contract"]["context"] == "PREDECESSOR-CONTRACT-SENTINEL"
         assert brief["source"]["arguments"] == {"task_id": "pred-1", "include_authority": True}
         assert "mutation_evidence" not in brief and brief["omitted_fields"]["mutation_evidence"] > 0
         assert json.dumps(before["mutation_evidence"]) not in rendered
@@ -203,7 +202,9 @@ def test_successor_first_request_carries_the_predecessor_once_with_its_flag_and_
         handbooks = [block for block in messages[0]["content"]
                      if block["text"].startswith("## DEVELOPMENT.md\n")]
         assert len(handbooks) == int(flag is True), "second Continue must carry the stored handbook choice"
-        assert task["predecessor_authority"]["task_contract"] == stopped["metadata"]["task_contract"]
+        assert "task_contract" not in task["predecessor_authority"]
+        assert task["predecessor_authority"]["omitted_fields"]["task_contract"] > 0
+        assert load_task_result(tmp_path, successor)["metadata"]["task_contract"] == stopped["metadata"]["task_contract"]
         assert task["predecessor_authority_source"]["arguments"] == {
             "task_id": successor, "include_authority": True}
         users = json.dumps([m for m in messages if m.get("role") == "user"], ensure_ascii=False)
@@ -258,7 +259,7 @@ def test_admission_copies_only_stored_booleans_with_canonical_field_precedence(
 
 @pytest.mark.parametrize("damage", ["missing", "quarantined"])
 def test_a_named_predecessor_that_reads_back_empty_refuses_the_start(tmp_path, monkeypatch, damage):
-    """The work order says the saved result is already in context. A record gone
+    """The work order says the saved brief is already in context. A record gone
     (or quarantined as unreadable) by the successor's start is the typed startup
     refusal, never an empty envelope standing in for it."""
     from ouroboros.agent_startup_checks import validate_task_authority_sources
@@ -384,7 +385,7 @@ def test_continue_carries_the_stored_model_role_never_the_resolved_route(tmp_pat
     assert load_task_result(tmp_path, successor)["metadata"].get("model_role", "") == carried
     # The dispatcher resolves the carried role against the CURRENT slot setting at start.
     slot = {MODEL_ROLE_SETTINGS["consciousness"]: "provider/current-slot-model"}
-    monkeypatch.setattr("ouroboros.agent_dispatch.runtime_setting", lambda key, default="": slot.get(key, default))
+    monkeypatch.setattr("ouroboros.route_choice.runtime_setting", lambda key, default="": slot.get(key, default))
     assert model_role_slot_override(row["metadata"]) == (("provider/current-slot-model", False) if carried else None)
 
 

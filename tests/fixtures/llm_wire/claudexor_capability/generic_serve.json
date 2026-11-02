@@ -1,0 +1,293 @@
+{
+  "engine_tree": "94eaa9ef8cb232b3d3a4b31628c9e1a9c1b5c666",
+  "scenario": "generic_serve",
+  "provider": "offline Codex HTTP fixture",
+  "uploads": [
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      }
+    },
+    {
+      "source": "codex",
+      "model": "gpt-6.1-sol",
+      "account": {
+        "mode": "auto"
+      },
+      "messages": [
+        {
+          "role": "user",
+          "content": "hello"
+        }
+      ],
+      "tools": [],
+      "toolChoice": "auto",
+      "options": {
+        "reasoningEffort": "medium"
+      },
+      "retryOfOperationId": "job-f41f55ab03fd"
+    }
+  ],
+  "idempotency_keys": [
+    "61611685f6114bb495da045c17b48e08",
+    "f67c0d9f91bb41cba44931feead828e2"
+  ],
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-2f8ed3a0a890\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-2f8ed3a0a890",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-2f8ed3a0a890\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":183}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-2f8ed3a0a890/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-2f8ed3a0a890\",\"state\":\"uploaded\",\"receivedBytes\":183,\"expectedBytes\":183}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-2f8ed3a0a890/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-52e725a74b88\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6.json\",\"sha256\":\"sha256:37f5e95bb1122d7b6bc700ae122719024f896cd46645e01eca39a690f4a317d6\",\"sizeBytes\":183,\"createdAt\":\"2026-10-21T06:10:05.225Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-d60cda606ae312d6.json",
+      "body_sha256": "d60cda606ae312d6c40a661cabc5dd86ddbfb183183b1dbefac3e58a90d0eb39"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-f41f55ab03fd",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-d60cda606ae312d6.json",
+      "body_sha256": "d60cda606ae312d6c40a661cabc5dd86ddbfb183183b1dbefac3e58a90d0eb39",
+      "repeat": 15
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-f41f55ab03fd",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-f41f55ab03fd\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:10:05.421Z\",\"startedAt\":\"2026-10-21T06:10:05.427Z\",\"finishedAt\":\"2026-10-21T06:10:05.941Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:05.440Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-b2ed1702a933\",\"sha256\":\"sha256:07c48709f0e88e9d0dc1dc5f7462d37451edb1ce3b23d6fab4bc08c977551371\",\"sizeBytes\":2208},\"readyAt\":\"2026-10-21T06:10:05.940Z\",\"expiresAt\":\"2026-11-20T06:10:05.940Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"invalid_request\",\"message\":\"Codex model request was refused (HTTP 400).\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"vendorCode\":\"invalid_request_error\",\"stage\":\"json\",\"receivedBytes\":91,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.06516600000031758,\"silenceMs\":2.7044999999998254,\"lastChunkAfterResponseMs\":0.06516600000031758,\"largestSilenceMs\":2.7044999999998254,\"source\":\"codex\",\"operationId\":\"job-f41f55ab03fd\",\"requestedModel\":\"gpt-6.1-sol\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"generationStarted\":false,\"capabilityKind\":\"unclassified\",\"retryOnOtherAccount\":true,\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"Codex model request was refused (HTTP 400). (invalid_request_error)\",\"capabilityKind\":\"unclassified\"}],\"nextStep\":\"Re-send the same generation input once in auto mode with retryOfOperationId set to this operation id.\",\"alternativeRemains\":true,\"modelMarks\":[]}}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-f41f55ab03fd/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"failed\",\"message\":null,\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":{\"code\":\"invalid_request\",\"message\":\"Codex model request was refused (HTTP 400).\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"vendorCode\":\"invalid_request_error\",\"stage\":\"json\",\"receivedBytes\":91,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.06516600000031758,\"silenceMs\":2.7044999999998254,\"lastChunkAfterResponseMs\":0.06516600000031758,\"largestSilenceMs\":2.7044999999998254,\"source\":\"codex\",\"operationId\":\"job-f41f55ab03fd\",\"requestedModel\":\"gpt-6.1-sol\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"generationStarted\":false,\"capabilityKind\":\"unclassified\",\"retryOnOtherAccount\":true,\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"Codex model request was refused (HTTP 400). (invalid_request_error)\",\"capabilityKind\":\"unclassified\"}],\"nextStep\":\"Re-send the same generation input once in auto mode with retryOfOperationId set to this operation id.\",\"alternativeRemains\":true,\"modelMarks\":[]}},\"failureEvidence\":{\"bodyBase64\":\"eyJlcnJvciI6eyJtZXNzYWdlIjoiVGhlIHJlcXVlc3Qgd2FzIHJlZnVzZWQuIiwidHlwZSI6ImludmFsaWRfcmVxdWVzdF9lcnJvciIsImNvZGUiOm51bGx9fQ==\",\"receivedBytes\":91,\"bodyComplete\":true,\"stage\":\"json\",\"errors\":[],\"causeCycle\":false}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-f41f55ab03fd/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-f41f55ab03fd\",\"state\":\"failed\",\"createdAt\":\"2026-10-21T06:10:05.421Z\",\"startedAt\":\"2026-10-21T06:10:05.427Z\",\"finishedAt\":\"2026-10-21T06:10:05.941Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:05.440Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"model\":null}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-b2ed1702a933\",\"sha256\":\"sha256:07c48709f0e88e9d0dc1dc5f7462d37451edb1ce3b23d6fab4bc08c977551371\",\"sizeBytes\":2208},\"releasedAt\":\"2026-10-21T06:10:06.095Z\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":{\"code\":\"invalid_request\",\"message\":\"Codex model request was refused (HTTP 400).\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"httpStatus\":400,\"vendorCode\":\"invalid_request_error\",\"stage\":\"json\",\"receivedBytes\":91,\"eventCount\":0,\"lastEventType\":null,\"terminalStatus\":null,\"timeToFirstChunkMs\":0.06516600000031758,\"silenceMs\":2.7044999999998254,\"lastChunkAfterResponseMs\":0.06516600000031758,\"largestSilenceMs\":2.7044999999998254,\"source\":\"codex\",\"operationId\":\"job-f41f55ab03fd\",\"requestedModel\":\"gpt-6.1-sol\",\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"accountMode\":\"auto\",\"generationStarted\":false,\"capabilityKind\":\"unclassified\",\"retryOnOtherAccount\":true,\"accountsTried\":[{\"credentialProfileId\":\"a\",\"accountFingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"providerReason\":\"Codex model request was refused (HTTP 400). (invalid_request_error)\",\"capabilityKind\":\"unclassified\"}],\"nextStep\":\"Re-send the same generation input once in auto mode with retryOfOperationId set to this operation id.\",\"alternativeRemains\":true,\"modelMarks\":[]}}}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads",
+      "status": 201,
+      "body_utf8": "{\"uploadId\":\"upl-c96706398830\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":223}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/uploads/upl-c96706398830",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-c96706398830\",\"state\":\"open\",\"receivedBytes\":0,\"expectedBytes\":223}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v2/uploads/upl-c96706398830/bytes",
+      "status": 200,
+      "body_utf8": "{\"uploadId\":\"upl-c96706398830\",\"state\":\"uploaded\",\"receivedBytes\":223,\"expectedBytes\":223}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/uploads/upl-c96706398830/finalize",
+      "status": 201,
+      "body_utf8": "{\"resourceId\":\"res-d516dafabd3d\",\"purpose\":\"model\",\"kind\":\"file\",\"mime\":\"application/json\",\"name\":\"model-request-fea3f525ddb52a39a39e97ffab3271e95d61faefe5d82bb32644b68bc61cf1b3.json\",\"sha256\":\"sha256:fea3f525ddb52a39a39e97ffab3271e95d61faefe5d82bb32644b68bc61cf1b3\",\"sizeBytes\":223,\"createdAt\":\"2026-10-21T06:10:06.428Z\",\"deduplicated\":false}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations?captureFailureEvidence=true&captureEffortEvidence=true",
+      "status": 202,
+      "body_ref": "body-94eaa9ef-19535268e2f251ba.json",
+      "body_sha256": "19535268e2f251ba98871bad7e2ff31751983a171862d49622856338a3d82497"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-e7ba6f73278e",
+      "status": 200,
+      "body_ref": "body-94eaa9ef-19535268e2f251ba.json",
+      "body_sha256": "19535268e2f251ba98871bad7e2ff31751983a171862d49622856338a3d82497",
+      "repeat": 98
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-e7ba6f73278e",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-e7ba6f73278e\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:10:06.674Z\",\"startedAt\":\"2026-10-21T06:10:06.700Z\",\"finishedAt\":\"2026-10-21T06:10:09.037Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:06.704Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"ready\",\"ref\":{\"resourceId\":\"res-7c369e181852\",\"sha256\":\"sha256:789dacd81f61b8345cc562ec1a792ff7410e508c3c061f4f70e9afd021bb1ea2\",\"sizeBytes\":1153},\"readyAt\":\"2026-10-21T06:10:09.037Z\",\"expiresAt\":\"2026-11-20T06:10:09.037Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/model-operations/job-e7ba6f73278e/result",
+      "status": 200,
+      "body_utf8": "{\"outcome\":\"completed\",\"message\":{\"role\":\"assistant\",\"content\":\"served by b\",\"nativeContinuation\":{\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"},\"format\":\"codex.responses.v1\",\"payload\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"served by b\"}]}]}},\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"appliedOptions\":{},\"effortResolution\":{\"requested\":\"medium\",\"submitted\":null,\"resolution\":\"unverifiable\",\"source\":\"account_catalog\",\"parameter\":\"reasoning.effort\",\"observed\":null,\"observedSource\":null},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/model-operations/job-e7ba6f73278e/ack",
+      "status": 200,
+      "body_utf8": "{\"id\":\"job-e7ba6f73278e\",\"state\":\"succeeded\",\"createdAt\":\"2026-10-21T06:10:06.674Z\",\"startedAt\":\"2026-10-21T06:10:06.700Z\",\"finishedAt\":\"2026-10-21T06:10:09.037Z\",\"dispatch\":{\"state\":\"response_received\",\"startedAt\":\"2026-10-21T06:10:06.704Z\",\"route\":{\"source\":\"codex\",\"credentialProfileId\":\"b\",\"accountFingerprint\":\"17e5ae951344f6eee3e80d99937799319907bd75cc086b026d35975f7d658571\",\"model\":\"gpt-6.1-sol\"}},\"response\":{\"state\":\"acknowledged\",\"ref\":{\"resourceId\":\"res-7c369e181852\",\"sha256\":\"sha256:789dacd81f61b8345cc562ec1a792ff7410e508c3c061f4f70e9afd021bb1ea2\",\"sizeBytes\":1153},\"releasedAt\":\"2026-10-21T06:10:09.255Z\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"cached_input_tokens\":null,\"cache_write_tokens\":null,\"reasoning_tokens\":null},\"cost\":{\"knowledge\":\"unknown\",\"billing\":\"unknown\",\"source\":\"codex.responses\",\"provenance\":[\"Codex Responses does not report incremental cash or token valuation.\"],\"estimatedUsd\":null,\"cashUsd\":null,\"valuationUsd\":null,\"valuationKnowledge\":\"unknown\"},\"problem\":null}"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/handshake",
+      "status": 200,
+      "body_utf8": "{\"protocolMajor\":3,\"compatible\":true,\"operationsPath\":\"/v2/operations\",\"engine\":{\"version\":\"4.5.0\",\"sha\":\"f9ea707a5488074fa562c9ba3bb6b5254256f4cd\",\"entry\":\"/tmp/cx-capability/engine.mjs\"},\"servingMode\":\"normal\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/operations",
+      "status": 200,
+      "body_ref": "operations-94eaa9ef.json",
+      "body_sha256": "9cea8c72f290cfafc912459b0f3ced62047f5a285591fb11d442e25492b02775"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/agent-capabilities",
+      "status": 501,
+      "body_utf8": "{\"code\":\"service_not_configured\",\"message\":\"agentCapabilities service is not configured\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/harnesses",
+      "status": 501,
+      "body_utf8": "{\"code\":\"service_not_configured\",\"message\":\"harnesses service is not configured\",\"retryable\":false,\"fieldErrors\":{},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/credential-profiles",
+      "status": 200,
+      "body_utf8": "{\"profiles\":[{\"profile\":{\"profile_id\":\"a\",\"harness_id\":\"codex\",\"display_name\":\"a\",\"credential_kind\":\"config_dir_login\",\"isolation_locator\":\"/tmp/cx-capability/generic_serve/a\",\"secret_ref\":null,\"enabled\":true,\"created_at\":null},\"status\":{\"profile_id\":\"a\",\"harness_id\":\"codex\",\"availability\":\"available\",\"verification\":\"passed\",\"verification_source\":\"local_store\",\"detail\":\"Offline fixture account\",\"last_verified_at\":null},\"identity\":null},{\"profile\":{\"profile_id\":\"b\",\"harness_id\":\"codex\",\"display_name\":\"b\",\"credential_kind\":\"config_dir_login\",\"isolation_locator\":\"/tmp/cx-capability/generic_serve/b\",\"secret_ref\":null,\"enabled\":true,\"created_at\":null},\"status\":{\"profile_id\":\"b\",\"harness_id\":\"codex\",\"availability\":\"available\",\"verification\":\"passed\",\"verification_source\":\"local_store\",\"detail\":\"Offline fixture account\",\"last_verified_at\":null},\"identity\":null}],\"harnessAccounts\":[],\"accountPools\":[]}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/accounts/routing-evidence?includeCapabilities=true",
+      "status": 200,
+      "body_utf8": "{\"capabilities\":[{\"harness_id\":\"codex\",\"profile_id\":\"a\",\"requested_model\":\"gpt-6.1-sol\",\"account_fingerprint\":\"e92b1cd13765890f560343fdcab8ec750ca3caf1499e4f9a5cd495dbd63b8f77\",\"provider_reason\":\"Codex model request was refused (HTTP 400). (invalid_request_error)\",\"observed_at\":\"2026-10-21T06:10:08.387Z\",\"expires_at\":\"2026-10-21T10:10:08.387Z\",\"state\":\"confirmed\"}],\"refusals\":[{\"harness_id\":\"codex\",\"profile_id\":\"a\",\"requested_model\":\"gpt-6.1-sol\",\"observed_at\":\"2026-10-21T06:10:05.816Z\",\"expires_at\":\"2026-10-21T07:10:05.816Z\"}],\"lastService\":[]}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/quota?view=resources_freshness&requestKind=text",
+      "status": 400,
+      "body_utf8": "{\"code\":\"invalid_request\",\"message\":\"Request validation failed for 4 fields.\",\"retryable\":false,\"fieldErrors\":{\"/snapshots/0/constraints/0/freshness\":[\"Expected 'fresh' | 'stale' | 'unknown', received undefined.\"],\"/snapshots/1/constraints/0/freshness\":[\"Expected 'fresh' | 'stale' | 'unknown', received undefined.\"],\"/resources\":[\"Expected array, received undefined.\"],\"/availability_scope\":[\"Expected object, received undefined.\"]},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"issueCount\":4,\"omittedIssueCount\":0}}"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/quota?view=resources",
+      "status": 400,
+      "body_utf8": "{\"code\":\"invalid_request\",\"message\":\"Request validation failed for 1 field.\",\"retryable\":false,\"fieldErrors\":{\"/resources\":[\"Expected array, received undefined.\"]},\"requiredActions\":[],\"evidenceRefs\":[],\"context\":{\"issueCount\":1,\"omittedIssueCount\":0}}"
+    }
+  ],
+  "provider_posts": [
+    {
+      "account": "a",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    },
+    {
+      "account": "b",
+      "body": {
+        "model": "gpt-6.1-sol",
+        "instructions": "",
+        "input": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "hello"
+              }
+            ]
+          }
+        ],
+        "tools": [],
+        "tool_choice": "auto",
+        "store": false,
+        "stream": true,
+        "include": [
+          "reasoning.encrypted_content"
+        ]
+      }
+    }
+  ]
+}

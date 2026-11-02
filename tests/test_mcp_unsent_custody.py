@@ -107,3 +107,9 @@ def test_real_manager_keeps_only_unresolved_mcp_duty(tmp_path, monkeypatch, boun
         if phase in {"open", "sdk_error"}:
             assert result.meta["mcp_is_error"] is (phase == "sdk_error")
             assert "remote answer" in result.text
+
+
+@pytest.fixture(autouse=True)
+def _private_mcp_catalog_root(tmp_path, monkeypatch):
+    from ouroboros import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)

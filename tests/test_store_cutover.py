@@ -205,8 +205,9 @@ def test_the_runtime_reads_are_answered_from_an_index_never_the_table(populated,
 def test_the_captured_plan_guard_catches_a_broken_where_and_a_dropped_index(populated, monkeypatch, tmp_path):
     """The control: the lineage statement the runtime really issues, with its WHERE made
     unindexable, and unchanged over a copy of the store whose lineage indexes are dropped."""
-    [(sql, params)] = [row for row in captured_statements(
-        monkeypatch, lambda: task_store.select_lineage(populated, "t5", "t0")) if "task_bodies" in row[0]]
+    [(sql, params)] = [row for row in captured_statements(  # the statement that carries the lineage WHERE
+        monkeypatch, lambda: task_store.select_lineage(populated, "t5", "t0"))
+        if "task_bodies" in row[0] and "parent_task_id" in row[0]]
     assert "parent_task_id" in sql and not _scans(_plan(populated, sql, params))
     assert _scans(_plan(populated, sql.replace("parent_task_id=?", "parent_task_id||''=?"), params))
     copy = tmp_path / "copy"

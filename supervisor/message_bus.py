@@ -171,14 +171,6 @@ def refresh_budget_limit(new_limit: Optional[float]) -> None:
         pass
 
 
-def _secret_question(task_id: str, quiz_id: str) -> bool:
-    """A secret request's lifecycle stays off the extension bus (its form is the web dialog).
-    An unreadable block reads as ordinary: ``send_quiz`` never offered a listener its card."""
-    from ouroboros.owner_quiz import quiz_states
-
-    return bool((quiz_states(DATA_DIR, task_id).get(quiz_id) or {}).get("secret_request"))
-
-
 class LocalChatBridge:
     """Local Queue-backed message bus."""
 
@@ -512,12 +504,15 @@ class LocalChatBridge:
         routing_token: str = "",
         cause: str = "", reasoning_effort: str = "",
         project_name: str = "", target_task_ids=None, target_titles=None,
+        routing_notice_carrier: str = "", reply_to: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Emit a typed routing receipt without creating an assistant bubble.
 
         Web consumes the WS annotation; non-Web skills receive the same additive typed envelope on
         their existing outbound subscription.  ``text`` stays empty and ``suppress_bubble`` is
         explicit, so legacy transports do not invent a human-visible mirror message.
+        ``routing_notice_carrier`` names this ACK the selected carrier of the act's owner notice
+        (never delivery proof); ``reply_to`` is the owner message that notice answers.
         """
         payload = {
             "type": "message_annotation",
@@ -544,6 +539,10 @@ class LocalChatBridge:
             payload["cause"] = str(cause)
         if str(reasoning_effort or ""):  # #1539: the start a New task picked from this card requests
             payload["reasoning_effort"] = str(reasoning_effort)
+        if routing_notice_carrier in {"routing_ack", "system"}:
+            payload["routing_notice_carrier"] = routing_notice_carrier
+        if isinstance(reply_to, dict) and reply_to:
+            payload["reply_to"] = dict(reply_to)
         if options is not None:
             payload["options"] = [dict(row) for row in options if isinstance(row, dict)]
         if attachment_manifest is not None:
@@ -923,14 +922,18 @@ class LocalChatBridge:
             # "quiz:{task_id}:{quiz_id}"): an anonymous quiz would render
             # buttons that cannot deliver anywhere.
             return False, "task_id is required"
-        try:
-            payload = validate_quiz_payload(question, options, stake, assumption, wait_for_answer=wait_for_answer)
-        except QuizValidationError as exc:
-            return False, str(exc)
         from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection, quiz_states, record_publication
         from supervisor.log_addressing import resolve_quiz_publication
 
         prior = quiz_states(DATA_DIR, str(task_id)).get(qid) or {}
+        # Validation concerns the original ask, not its still-active wait. Both
+        # timeout and terminal reconciliation retain wait_ended_at as evidence
+        # that this required question was valid without an optional assumption.
+        required_ask = bool(prior.get("wait_for_answer") or prior.get("wait_ended_at")) if prior else wait_for_answer
+        try:
+            payload = validate_quiz_payload(question, options, stake, assumption, wait_for_answer=required_ask)
+        except QuizValidationError as exc:
+            return False, str(exc)
         chat_id = resolve_quiz_publication(DATA_DIR, str(task_id), prior, chat_id)
         block = record_publication(DATA_DIR, str(task_id), qid, chat_id)
         if not block or "publication_chat_id" not in block:
@@ -950,13 +953,14 @@ class LocalChatBridge:
         }
         wait_for_answer = bool(block.get("wait_for_answer"))
         host_facts = str(block.get("host_facts") or host_facts or "")
-        lifecycle = {key: block[key] for key in ("answered_index", "comment", *CLOSURE_FIELDS) if key in block}
+        lifecycle = {key: block[key] for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS) if key in block}
         if delivery := question_delivery_projection(block):
             lifecycle["question_delivery"] = delivery
         materials = list(block.get("materials") or [])
-        # An integration-secret request's typed metadata (no value ever exists here); its form is
-        # the web dialog alone, so transport skills are not offered a card they could answer.
-        secret = {"secret_request": dict(block["secret_request"])} if isinstance(block.get("secret_request"), dict) else {}
+        if block.get("presence_contact"):
+            lifecycle["presence_contact"] = block["presence_contact"]
+        if isinstance(block.get("secret_request"), dict):  # metadata only: its form is the app's own
+            lifecycle["secret_request"] = dict(block["secret_request"])
         ts = utc_now_iso()
         msg = {
             "type": "quiz",
@@ -972,7 +976,7 @@ class LocalChatBridge:
             "chat_id": int(chat_id or 0),
             "task_id": str(task_id or ""),
         }
-        msg.update(lifecycle, **secret)
+        msg.update(lifecycle)
         if materials:
             msg["materials"] = materials
         if host_facts:
@@ -1001,17 +1005,15 @@ class LocalChatBridge:
                 **lifecycle,
                 **({"materials": materials} if materials else {}),
                 "wait_for_answer": bool(wait_for_answer),
-                "options": payload["options"],
-                "stake": payload["stake"],
-                "assumption": payload["assumption"],
+                **{key: payload[key] for key in ("options", "stake", "assumption")},
                 "state": str(state or "open"),
                 **({"host_facts": str(host_facts)} if host_facts else {}),
-                **secret,
             },
         )
         if stored:
             from ouroboros.chat_references import projection_fields
-            msg.update(projection_fields(stored))
+            from ouroboros.room_appearances import frame_rooms  # a private contact's question: its Project's too
+            msg.update(projection_fields(stored), **frame_rooms(DATA_DIR, stored))
             from ouroboros.owner_quiz import mark_published
             mark_published(DATA_DIR, str(task_id), qid)
             # The durable ask now exists. Expose its settled delivery fact, not
@@ -1022,24 +1024,26 @@ class LocalChatBridge:
         if self._broadcast_fn:
             self._broadcast_fn(msg)
         quiz_transport = self.chat_transport(chat_id)
-        if not secret:
-            publish_event(CHAT_QUIZ, {
-                "chat_id": int(chat_id or 0),
-                "transport": quiz_transport,
-                "wait_for_answer": bool(wait_for_answer),
-                "quiz_id": qid,
-                "task_id": str(task_id or ""),
-                "question": payload["question"],
-                "options": payload["options"],
-                "stake": payload["stake"],
-                "assumption": payload["assumption"],
-                "state": str(state or "open"),
-                "ts": ts,
-                **lifecycle,
-                **({"materials": materials} if materials else {}),
-                **({"host_facts": str(host_facts)} if host_facts else {}),
-                **({"project_name": str(project["name"])} if project and project.get("name") else {}),
-            })
+        from ouroboros.secret_requests import transport_hint
+
+        publish_event(CHAT_QUIZ, {
+            "chat_id": int(chat_id or 0),
+            "transport": quiz_transport,
+            "wait_for_answer": bool(wait_for_answer),
+            "quiz_id": qid,
+            "task_id": str(task_id or ""),
+            # A secret request reaches a transport as where to enter it, never as a card it could answer.
+            "question": transport_hint(lifecycle["secret_request"]) if "secret_request" in lifecycle else payload["question"],
+            "options": payload["options"],
+            "stake": payload["stake"],
+            "assumption": payload["assumption"],
+            "state": str(state or "open"),
+            "ts": ts,
+            **lifecycle,
+            **({"materials": materials} if materials else {}),
+            **({"host_facts": str(host_facts)} if host_facts else {}),
+            **({"project_name": str(project["name"])} if project and project.get("name") else {}),
+        })
         if self._broadcast_fn and msg.get("project_thread"):
             try:
                 from ouroboros.owner_quiz import quiz_states
@@ -1119,7 +1123,7 @@ class LocalChatBridge:
         if question_delivery:
             msg["question_delivery"] = dict(question_delivery)
         if isinstance(secret_outcome, dict) and secret_outcome:
-            msg["secret_outcome"] = dict(secret_outcome)  # metadata only: event, plugin, fields, keys
+            msg["secret_outcome"] = dict(secret_outcome)  # metadata only: no value exists here
         if answered_index is not None:
             msg["answered_index"] = int(answered_index)
         if str(comment or ""):
@@ -1136,10 +1140,7 @@ class LocalChatBridge:
             except Exception:
                 log.debug("quiz_state broadcast failed", exc_info=True)
         # The WebSocket reaches only the SPA. Transport skills need the same
-        # lifecycle fact to edit an already delivered card without a reload —
-        # except a secret request's, which no extension listener ever received.
-        if secret_outcome or _secret_question(str(task_id or ""), str(quiz_id or "")):
-            return
+        # lifecycle fact to edit an already delivered card without a reload.
         quiz_transport = self.chat_transport(chat_id)
         publish_event(CHAT_QUIZ_STATE, {**msg, "transport": quiz_transport})
 
@@ -1297,7 +1298,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                      role: str = "", system_type: str = "",
                      narration: Optional[bool] = None,
                      require_write: bool = False,
-                     ensure_record_boundary: bool = False) -> None:
+                     ensure_record_boundary: bool = False,
+                     replay_delivery_id: str = "") -> Dict[str, Any] | bool:
     """Send an owner-visible row with one voice and timestamp for history and live.
 
     Narration True means model speech, False host speech; absent legacy rows keep
@@ -1307,6 +1309,10 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
     in the existing outbox and also requires a positive transport receipt. A
     required notice without one has one owner, its producer, which retries or
     records a failed write: it keeps the caller's wait and raises when unwritten.
+    Return the selected destination so delivery receipts and mailbox handoffs
+    retain this send's room even if task placement changes around the send.
+    Replay records dispatch only after those writes, before transport; False
+    means its outbox debt no longer permits sending. First live sends are unchanged.
     """
     producer_owned = require_write and not (progress_meta or {}).get("delivery_id")
     with (contextlib.nullcontext() if producer_owned
@@ -1381,13 +1387,19 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
             )
 
         if not is_progress and stored:
-            meta.update(projection_fields(stored))
+            from ouroboros.room_appearances import frame_rooms
+            meta.update(projection_fields(stored), **frame_rooms(DATA_DIR, stored))
         if _text.strip() in ("", "\u200b"):
-            return
+            return {"chat_id": chat_id}
         # Budget footers belong in dashboard/status flows, not every chat reply.
         full = _text
 
         transport = dict(ts=msg_ts, is_progress=is_progress, task_id=task_id, progress_meta=progress_meta)
+        if replay_delivery_id:
+            from supervisor.terminal_delivery import record_replay_dispatch
+
+            if not record_replay_dispatch(DATA_DIR, replay_delivery_id):
+                return False
         try:
             if fmt == "markdown":
                 receipt = _send_markdown(chat_id, full, **transport, role=role, system_type=system_type)
@@ -1399,3 +1411,4 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
                     raise MessageTransportError(f"message transport refused: {err}")
         except Exception as exc:
             raise MessageTransportError(str(exc)) from exc
+        return {"chat_id": chat_id}

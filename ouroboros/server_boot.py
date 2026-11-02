@@ -40,6 +40,18 @@ def reconcile_projects(root: pathlib.Path) -> None:
     reconcile(root)
 
 
+def remember_log_listings(root: pathlib.Path) -> threading.Thread:
+    """The archive listing a process's first owner turn would make for its task's recent tools and
+    events, made once off the turn, so that turn starts from it (``Memory.remember_log_listings``).
+    It grows with the archive, so a daemon thread makes it, off the steps readiness waits for, as the
+    catalogue is observed; a turn that comes first lists for itself."""
+    from ouroboros.memory import Memory
+
+    thread = threading.Thread(target=Memory(root).remember_log_listings, daemon=True, name="log-listings")
+    thread.start()
+    return thread
+
+
 def start_background_services(settings: dict, *, local_model: bool, boot_managed_update: Callable[[], Any],
                               warm_daemon: bool) -> None:
     """P2: finalize a pending managed merge update (post-boot smoke / boot-loop rollback) and run a
@@ -47,8 +59,11 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
     availability; both fail-soft. Local autostart goes FIRST: a local-only install's boot check
     may write its update letter through the local model, and the git fetch ahead of that call is
     the head start the model server gets (no readiness wait — a letter that still finds the model
-    loading fails typed and is rewritten by the next check). The owned daemon is warmed for
-    provisioned homes only: one background ensure, off the startup path."""
+    loading fails typed and is rewritten by the next check). The owned daemon is warmed, and an
+    OpenRouter install's model catalogue observed unless a process recorded a current one, for
+    provisioned homes only (``warm_daemon``): background work off the startup path, so a request
+    reads the catalogue and never waits for it. A sign-in entry naming a copy of the app that is
+    gone is re-pointed at this one (``desktop_autostart.follow_moved_app``, fail-soft)."""
     if local_model and settings.get("LOCAL_MODEL_SOURCE"):
         from ouroboros.local_model_autostart import auto_start_local_model
 
@@ -58,6 +73,15 @@ def start_background_services(settings: dict, *, local_model: bool, boot_managed
         from ouroboros.claudexor_daemon import warm_owned_daemon
 
         warm_owned_daemon()
+    from ouroboros.provider_models import configured_kinds
+
+    if warm_daemon and "openrouter" in configured_kinds(settings):  # any OpenRouter key, built-in or added, that serves
+        from ouroboros.llm import LLMClient
+
+        threading.Thread(target=LLMClient.prefetch_openrouter_catalog, daemon=True, name="openrouter-catalog").start()
+    from ouroboros.desktop_autostart import follow_moved_app
+
+    follow_moved_app()
 
 
 async def serve_host_service(root: pathlib.Path, boot: Any) -> None:
@@ -95,11 +119,14 @@ def reconcile_review_jobs(root: pathlib.Path) -> None:
     reconcile_stale_review_jobs(root)
 
 
-def mcp_startup(settings: dict) -> None:
-    from ouroboros.mcp_client import reconfigure_from_settings, refresh_all_background
+def mcp_startup() -> None:
+    from ouroboros.config import load_settings
+    from ouroboros.mcp_client import get_manager, configuration_changed
 
-    reconfigure_from_settings(settings)
-    refresh_all_background(reason="startup")
+    get_manager().become_lister()
+    # Read the saved document when the step runs, never the early boot snapshot,
+    # and without waiting for a Save: one that changes MCP applies its own event.
+    configuration_changed(load_settings(), reason="startup")
 
 
 def wait_store_published(root: pathlib.Path, stop: threading.Event, document: BootDocument = BOOT) -> None:

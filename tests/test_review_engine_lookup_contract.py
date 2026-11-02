@@ -9,7 +9,7 @@ import pytest
 from ouroboros import delegate_custody as custody
 from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 from ouroboros.tools.review_response import parse_model_response
-from ouroboros.triad_review import parse_model_review_results
+from ouroboros.triad_review import parse_seat_answers
 from tests._review_session_route_shared import (
     _owned_gateway_uses_each_test_transport as _transport_fixture,
     _run_session_directly,
@@ -38,7 +38,7 @@ def test_engine_wire_problem_reaches_the_review_actor_without_reclassification(r
         "error": str(error), "failure_code": error.code, "http_status": error.status_code,
         "reported_cause": error.reported_cause, "usage": {},
     }, {})
-    record = parse_model_review_results({"results": [envelope]}).actor_records[0].to_dict()
+    record = parse_seat_answers({"results": [envelope]}, {}).actor_records[0].to_dict()
     assert record["failure_code"] == error.code and record["http_status"] == error.status_code
     context = row["problem"]["context"]
     if isinstance(context.get("cause"), dict):

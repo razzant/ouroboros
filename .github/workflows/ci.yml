@@ -1,15 +1,26 @@
 # Ouroboros CI — Five-tier cross-platform testing and release pipeline
 #
-# Tier 1 (Quick):       Manual                                                        → Ubuntu-only tests
-# Tier 2 (Full):        Manual / tag                                                   → Full 3-OS matrix
+# Lint:                 Manual / tag                                                   → ruff F, ESLint no-undef, generated Pages output
+# Tier 1 (Quick):       Manual                                                        → Ubuntu PERSIST battery, three duration shards
+# Tier 2 (Full):        Manual / tag                                                   → Full 3-OS matrix, duration shards on every OS
 # Tier 1.5 (SQLite floor): Manual                                                      → store modules on ubuntu-22.04's system SQLite 3.37.2
 # Tier 2.5 (Integration): Manual / tag                                                 → Real-provider tests, reusable provider-canary.yml
 # Tier 2.6 (Skill smoke): Manual / tag                                                 → LIVE OuroborosHub install smoke + review/grant/enable checks (paid)
-# Tier 3 (Build+Release): Tag v*                                                       → PyInstaller + GitHub Release (~15 min)
+# Tier 3 (Build+Release): Tag v*                                                       → PyInstaller builds start WITH the tests; the release job joins both
 # Opt-in (System E2E):    Manual / tag (no schedule)                                     → KEYLESS tests/system_e2e/ scenario lane (Ubuntu, ≤60 min)
 # Manual (Live E2E):      Dispatch input e2e_live=true only (no schedule)                → PAID devtools/e2e_live stand, $30 cap, OUROBOROS_E2E_LIVE_OPENROUTER_KEY (skipped honestly without it)
 #
-# Tier 2.5 requires OPENROUTER_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY.
+# Test lanes (owner decision 1A, 2026-10-21): every test pass runs under scripts/ci_retry.py. A
+# test that fails and then passes on its ONE retry in the same job is recorded as FLAKY by name
+# and does not block; a test that fails again, or never runs, blocks. A failure listed in
+# tests/accepted_failures.json whose issue is open and carries the owner's `not-a-product-bug`
+# label is ACCEPTED: reported in the summary and the release notes, not blocking. A stopped
+# session (dead worker) is CONTINUED for the tests it never ran. The retry never applies to the
+# live skill-review legs (a second verdict is a new opinion) or to the provider canaries.
+# Every OS and the UI lane split their tests by the durations the previous run recorded
+# (`shard-plan`); every split is reconciled against an unsharded manifest.
+#
+# Tier 2.5 requires OPENROUTER_API_KEY / OPENROUTER_PROVIDER_ROUTES_API_KEY (its Google, Anthropic, OpenAI routes) / OPENAI_API_KEY / ANTHROPIC_API_KEY.
 # Optional MiniMax / DeepSeek / Cloud.ru / GigaChat rows run when their
 # repository secrets exist. The job runs the `integration` pytest marker; locally these tests are
 # excluded by `addopts = -m 'not integration'` in pyproject.toml.
@@ -47,25 +58,131 @@ permissions:
   contents: read
 
 # Each manual/tag run and re-run has its own group, so it cannot displace another
-# qualification. The dormant PR branch is retained alongside the job predicates;
-# it does not enable a PR trigger.
+# qualification.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-run-{0}-{1}', github.run_id, github.run_attempt) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
+  group: ${{ format('ci-run-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: false
 
 jobs:
   # ──────────────────────────────────────────────────────────────────
-  # Tier 1: Quick tests on Ubuntu (manual dispatch)
+  # The run's one weight table. Every sharded leg and every manifest of this run
+  # reads the same copy, so their deterministic packing agrees; the newest
+  # `ci-durations` artifact of this repository is fetched once here. Without one
+  # (first run, expired artifacts, unreadable API) the legs pack by node count,
+  # as before. Weights steer only the split: reconciliation proves completeness.
+  # ──────────────────────────────────────────────────────────────────
+  shard-plan:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # A re-run keeps the plan its first attempt published: legs of different
+      # attempts of one run must pack with the same table.
+      - name: Reuse this run's plan on a re-run
+        id: existing
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shard-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/existing-plan
+      - name: Fetch the newest recorded test durations
+        if: ${{ steps.existing.outcome != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PLAN: ${{ runner.temp }}/shard-plan
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p "$PLAN"
+          echo '{"format": 1, "durations": null}' > "$PLAN/plan.json"
+          id="$(gh api "repos/$REPO/actions/artifacts?name=ci-durations&per_page=30" \
+                --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty' 2>/dev/null)"
+          if [[ -n "$id" ]] && gh api "repos/$REPO/actions/artifacts/$id/zip" > "$RUNNER_TEMP/durations.zip" 2>/dev/null \
+             && unzip -o -q "$RUNNER_TEMP/durations.zip" ci-durations.json -d "$PLAN" \
+             && python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$PLAN/ci-durations.json"; then
+            printf '{"format": 1, "durations": "ci-durations.json", "artifact": %s}\n' "$id" > "$PLAN/plan.json"
+            echo "Shards weigh files by the durations of artifact $id." >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f "$PLAN/ci-durations.json"
+            echo "No readable duration table; shards weigh files by node count." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the plan of this run
+        if: ${{ steps.existing.outcome != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: shard-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/shard-plan/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────
+  # Lint: deterministic source checks, on manual runs and release tags (a
+  # release requires it). Moved out of quick-test, which tags never ran.
+  # ──────────────────────────────────────────────────────────────────
+  lint:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        if: ${{ !cancelled() }}
+        id: setup_pnpm
+        with:
+          version: 11.9.0
+          run_install: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
+        with:
+          node-version: '22'
+      # Independent checks keep running after a red sibling; setup outcomes suppress cascaded noise.
+      - name: Verify generated Pages output
+        if: ${{ !cancelled() && steps.setup_pnpm.outcome == 'success' && steps.setup_node.outcome == 'success' }}
+        run: |
+          pnpm --dir site install --frozen-lockfile
+          pnpm --dir site build
+          test -z "$(git status --porcelain --untracked-files=all -- docs/)"
+          git diff --exit-code -- docs/
+      - name: Lint (deterministic F-rule gate — catches the NameError-under-except class)
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        run: python -m ruff check . --select F
+      # ESLint `no-undef` is the second, independent layer of the browser no-undef
+      # gate (owner decision D-13): the hermetic commit gate keeps the dependency-free
+      # acorn walker in the Node lane; this layer is CI-only, lockfile-frozen
+      # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
+      - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
+        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' }}
+        shell: bash
+        run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
+
+  # ──────────────────────────────────────────────────────────────────
+  # Tier 1: Quick tests on Ubuntu (manual dispatch). The PERSIST battery in
+  # three duration shards; a diagnostic of manual runs, not part of the tag bar.
   # ──────────────────────────────────────────────────────────────────
   quick-test:
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
-      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
-      || github.event_name == 'workflow_dispatch'
-    # The growth-mode step reads the pull request's label events.
+    if: github.event_name == 'workflow_dispatch'
+    needs: shard-plan
+    # The growth-mode step reads the pull request's label events; the accepted-failure
+    # check reads issue label events.
     permissions:
       contents: read
       pull-requests: read
+      issues: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-latest
     env:
       # This job installs pytest-xdist/pytest-timeout below, so the preflight
@@ -89,72 +206,55 @@ jobs:
       - name: The stores run PERSIST here
         shell: bash
         run: python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); sys.exit(mode != sys.argv[1])" PERSIST
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        if: ${{ !cancelled() }}
-        id: setup_pnpm
-        with:
-          version: 11.9.0
-          run_install: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: ${{ !cancelled() }}
         id: setup_node
         with:
           node-version: '22'
-      # Independent checks keep running after a red sibling; setup outcomes suppress cascaded noise.
-      - name: Verify generated Pages output
-        if: ${{ !cancelled() && steps.setup_pnpm.outcome == 'success' && steps.setup_node.outcome == 'success' }}
+      - name: Download this run's shard plan
+        id: plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shard-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/shard-plan
+      - name: Weigh the shards by the recorded durations
+        shell: bash
         run: |
-          pnpm --dir site install --frozen-lockfile
-          pnpm --dir site build
-          test -z "$(git status --porcelain --untracked-files=all -- docs/)"
-          git diff --exit-code -- docs/
-      - name: Lint (deterministic F-rule gate — catches the NameError-under-except class)
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        run: python -m ruff check . --select F
+          if [[ -f "$RUNNER_TEMP/shard-plan/ci-durations.json" ]]; then
+            echo "OUROBOROS_CI_DURATIONS=$RUNNER_TEMP/shard-plan/ci-durations.json" >> "$GITHUB_ENV"
+          fi
       # The hermetic commit gate runs this exact suite (ouroboros/preflight_node.py);
       # keeping the step here keeps gate and CI mirrored in both directions.
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && github.event_name != 'pull_request' }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && matrix.shard == 1 }}
         run: python scripts/run_tests.py --node
-      # ESLint `no-undef` is the second, independent layer of the browser no-undef
-      # gate (owner decision D-13): the hermetic commit gate keeps the dependency-free
-      # acorn walker in the suite above; this layer is CI-only, lockfile-frozen
-      # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
-      - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
-        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' }}
-        shell: bash
-        run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
       # NOTE: a command-line `-m` REPLACES the pyproject `addopts` markexpr, so the default
       # `not integration and not browser ...` exclusions must be repeated here, then ANDed with
-      # the serial split. --timeout guards against a hung test blocking the whole job.
-      # Each producer step also carries a wall-clock ceiling well above its slowest
-      # observed platform: the serial pass has no per-test timeout (the commit gate's
-      # serial pass has none either), so the ceiling is what bounds a hang there. Its
-      # expiry fails that step, and with it the job, without cancelling the job: the
-      # evidence step below still names the test. `scripts/run_tests.py` owns each pass
-      # (lifeline guardian, overload stop), so a killed step leaves no tree behind.
+      # the serial split. Both passes carry the gate's per-test timeout with pytest-timeout's
+      # default method: SIGALRM fails only the hung test on POSIX; on Windows the thread method
+      # stops the worker, and scripts/ci_retry.py continues the tests the stopped session never
+      # ran. Each producer step keeps a wall-clock ceiling well above its slowest observed shard;
+      # its expiry fails that step without cancelling the job, so the evidence step below still
+      # names the test. `scripts/run_tests.py` owns each pass (lifeline guardian, overload stop).
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
         id: tests_parallel
-        timeout-minutes: 120
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && github.event_name != 'pull_request' }}
-        run: python scripts/run_tests.py tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel"
+        timeout-minutes: 90
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" --default-suite-shard=${{ matrix.shard }}/3
       - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
         id: tests_serial
-        timeout-minutes: 120
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && github.event_name != 'pull_request' }}
-        run: python scripts/run_tests.py tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial"
-      - name: Run PR tests (contract floor + affected modules and complete Node lane)
-        id: tests_selected
-        timeout-minutes: 150
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && github.event_name == 'pull_request' }}
+        timeout-minutes: 90
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' }}
         env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-        run: python scripts/run_tests.py --selected --base "$PR_BASE" --sequential --evidence-dir="${{ runner.temp }}/ci-evidence"
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" --default-suite-shard=${{ matrix.shard }}/3
       # Whom the reference-book rule binds (scripts/book_growth_mode.py): the size
       # lane below blocks, warns or passes a grown book by this mode.
       - name: Decide the reference-book growth mode
         id: book_mode
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && matrix.shard == 1 }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -178,81 +278,23 @@ jobs:
       - name: Run tests (size-ratchet lane — blocking here, warning-only locally)
         id: tests_size
         timeout-minutes: 20
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && matrix.shard == 1 }}
         env:
           OURO_SIZE_RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           OURO_BOOK_GROWTH_MODE: ${{ steps.book_mode.outputs.mode }}
         run: python -m pytest tests/ -m size_ratchet -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/size"
       - name: Guard extracted transport imports stay out of core
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && matrix.shard == 1 }}
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
-      # Names the failed, crashed and in-flight tests in the job summary and as
+      # Names the failed, flaky, crashed and in-flight tests in the job summary and as
       # annotations; a killed step still reports through its incremental journal.
       - name: Publish test evidence
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         continue-on-error: true
         uses: ./.github/actions/test-evidence
         with:
-          name: quick-test
-          passes: parallel=${{ github.event_name == 'pull_request' && (steps.tests_selected.outputs.parallel_outcome || steps.tests_selected.outcome) || steps.tests_parallel.outcome }} serial=${{ github.event_name == 'pull_request' && (steps.tests_selected.outputs.serial_outcome || steps.tests_selected.outcome) || steps.tests_serial.outcome }} size=${{ steps.tests_size.outcome }}
-
-  # ──────────────────────────────────────────────────────────────────
-  # Pull requests on Windows and macOS: the same selected scope as quick-test
-  # (contract floor, affected modules, complete Node lane), so a platform break
-  # in the changed area shows before the merge. The full matrix runs after it;
-  # on Windows a full escalation runs the floor and leaves the rest to its eight landed shards (--defer-full).
-  # ──────────────────────────────────────────────────────────────────
-  pr-selected-os:
-    if: ${{ github.event_name == 'pull_request' && github.base_ref == 'ouroboros' }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: "1"
-      OUROBOROS_PREFLIGHT_REQUIRE_NODE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-python-env
-        id: setup_python
-        with:
-          interpreter: shipped  # the SQLite and journal mode fresh installs run
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        if: ${{ !cancelled() }}
-        id: setup_node
-        with:
-          node-version: '22'
-      - name: Set up Windows POSIX test utilities
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        id: posix_tools
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
-        with:
-          msystem: MSYS
-          release: false
-          update: true
-          install: rsync
-      - name: Select Windows POSIX test utilities
-        id: select_posix_tools
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
-        shell: pwsh
-        run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
-      - name: Run PR tests (contract floor + affected modules and complete Node lane)
-        id: tests_selected
-        timeout-minutes: 150
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
-        run: python scripts/run_tests.py --selected --base ${{ github.event.pull_request.base.sha }} --sequential --evidence-dir="${{ runner.temp }}/ci-evidence" ${{ runner.os == 'Windows' && '--defer-full' || '' }}
-      - name: Publish test evidence
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        continue-on-error: true
-        uses: ./.github/actions/test-evidence
-        with:
-          name: pr-selected-${{ matrix.os }}
-          passes: parallel=${{ steps.tests_selected.outputs.parallel_outcome || steps.tests_selected.outcome }} serial=${{ steps.tests_selected.outputs.serial_outcome || steps.tests_selected.outcome }}
+          name: quick-test-${{ matrix.shard }}
+          passes: parallel=${{ steps.tests_parallel.outcome }} serial=${{ steps.tests_serial.outcome }} size=${{ steps.tests_size.outcome }}
 
   # ──────────────────────────────────────────────────────────────────
   # Benchmark methodology tests (owner decision R42). The devtools/benchmarks
@@ -268,12 +310,7 @@ jobs:
   # and its suites have never run on the Windows/macOS matrix.
   # ──────────────────────────────────────────────────────────────────
   benchmark-methodology:
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
-      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
-      || github.event_name == 'workflow_dispatch'
-      || github.ref == 'refs/heads/ouroboros-stable'
-      || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -287,7 +324,7 @@ jobs:
           OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-benchmark-methodology
           OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-benchmark-methodology/data
           OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-benchmark-methodology/data/settings.json
-        run: python -m pytest tests/test_devtools_benchmarks.py devtools/benchmarks -m "not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 --timeout-method=thread -q --tb=short
+        run: python -m pytest tests/test_devtools_benchmarks.py devtools/benchmarks -m "not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 1.5: the SQLite floor. A store file written by the bundled engine must
@@ -297,10 +334,7 @@ jobs:
   # runs the store modules there through the stdlib boundary launcher.
   # ──────────────────────────────────────────────────────────────────
   sqlite-floor:
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
-      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
-      || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -314,36 +348,45 @@ jobs:
           uv sync --locked --extra browser --group dev --no-install-project --python /usr/bin/python3
           .venv/bin/python -c "import sqlite3, sys; print(sys.version, sqlite3.sqlite_version); assert sqlite3.sqlite_version == '3.37.2'"
       - name: Run the store modules on SQLite 3.37.2
-        run: /usr/bin/python3 -I -S scripts/safe_test.py --temp-parent "${{ runner.temp }}" -- .venv/bin/python -m pytest tests/test_store.py tests/test_store_import.py tests/test_store_switch.py tests/test_custody_store_rows.py tests/test_store_cutover.py tests/test_store_activation.py -q --tb=short --timeout=300 --timeout-method=thread
+        run: /usr/bin/python3 -I -S scripts/safe_test.py --temp-parent "${{ runner.temp }}" -- .venv/bin/python -m pytest tests/test_store.py tests/test_store_import.py tests/test_store_switch.py tests/test_custody_store_rows.py tests/test_store_cutover.py tests/test_store_activation.py -q --tb=short --timeout=300
 
   # ──────────────────────────────────────────────────────────────────
-  # Tier 2: Full 3-OS matrix on manual runs and release tags. Branch/PR cases
-  # in the predicates below remain dormant without a corresponding trigger.
+  # Tier 2: Full 3-OS matrix on manual runs and release tags. Every OS runs the
+  # default suite in whole-file shards packed by the durations the previous run
+  # recorded (`shard-plan`); shard 1 of each OS also collects the two unsharded
+  # manifests that `full-test` reconciles every shard of that OS against.
   # ──────────────────────────────────────────────────────────────────
   full-test-runs:
-    if: |
-      github.ref == 'refs/heads/ouroboros-stable'
-      || github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
-      || (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros' && github.repository == 'razzant/ouroboros')
-    # The growth-mode step reads the pull request's label events.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: shard-plan
+    # The growth-mode step reads the pull request's label events; the accepted-failure
+    # check reads issue label events.
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name == 'push' && github.ref == 'refs/heads/ouroboros') && '["macos-latest"]' || '["ubuntu-latest","macos-latest"]') }}
-        shard: [0]  # Unsharded macOS/Ubuntu; Windows alone is split by whole file, eight ways.
+        # macOS stays at four: the free plan runs five macOS jobs at once, shared with
+        # the dmg build, the PERSIST leg and the skill install leg.
         include:
-          - {os: windows-latest, shard: 1}
-          - {os: windows-latest, shard: 2}
-          - {os: windows-latest, shard: 3}
-          - {os: windows-latest, shard: 4}
-          - {os: windows-latest, shard: 5}
-          - {os: windows-latest, shard: 6}
-          - {os: windows-latest, shard: 7}
-          - {os: windows-latest, shard: 8}
+          - {os: ubuntu-latest, shard: 1, shards: 4}
+          - {os: ubuntu-latest, shard: 2, shards: 4}
+          - {os: ubuntu-latest, shard: 3, shards: 4}
+          - {os: ubuntu-latest, shard: 4, shards: 4}
+          - {os: macos-latest, shard: 1, shards: 4}
+          - {os: macos-latest, shard: 2, shards: 4}
+          - {os: macos-latest, shard: 3, shards: 4}
+          - {os: macos-latest, shard: 4, shards: 4}
+          - {os: windows-latest, shard: 1, shards: 8}
+          - {os: windows-latest, shard: 2, shards: 8}
+          - {os: windows-latest, shard: 3, shards: 8}
+          - {os: windows-latest, shard: 4, shards: 8}
+          - {os: windows-latest, shard: 5, shards: 8}
+          - {os: windows-latest, shard: 6, shards: 8}
+          - {os: windows-latest, shard: 7, shards: 8}
+          - {os: windows-latest, shard: 8, shards: 8}
     runs-on: ${{ matrix.os }}
     env:
       # Same contract as quick-test: this job provisions the parallel-pass
@@ -393,55 +436,67 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
         shell: pwsh
         run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      - name: Download this run's shard plan
+        id: plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: shard-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/shard-plan
+      - name: Weigh the shards by the recorded durations
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/shard-plan/ci-durations.json" ]]; then
+            echo "OUROBOROS_CI_DURATIONS=$RUNNER_TEMP/shard-plan/ci-durations.json" >> "$GITHUB_ENV"
+          fi
       # Independent checks keep running after a red sibling; setup outcomes suppress cascaded noise.
       # The hermetic commit gate runs this exact suite (ouroboros/preflight_node.py).
       - name: Run browser-module tests (node --test — mirrored by the hermetic commit gate)
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard == 1 }}
         run: python scripts/run_tests.py --node
-      # ESLint `no-undef` is the second, independent layer of the browser no-undef
-      # gate (owner decision D-13): the hermetic commit gate keeps the dependency-free
-      # acorn walker in the suite above; this layer is CI-only, lockfile-frozen
-      # (`npm ci` on web/package-lock.json) and exact-pinned in web/package.json.
-      - name: Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)
-        if: ${{ !cancelled() && steps.setup_node.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard <= 1 }}
-        shell: bash
-        run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
-      # Independent unsharded witnesses, in fresh processes on Windows shard 1.
-      # These and the two executed passes have identical marker expressions.
-      - name: Collect the Windows parallel manifest
+      # Independent unsharded witnesses, in fresh processes on shard 1 of each OS.
+      # These and the two executed passes have identical marker expressions and read
+      # the same weight table.
+      - name: Collect the parallel manifest
         id: manifest_parallel
         timeout-minutes: 20
-        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 1 && steps.setup_python.outcome == 'success' && steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.shard == 1 && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: >-
           python -m pytest tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet"
           --collect-only -q --default-suite-manifest
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/default-manifest/parallel"
-      - name: Collect the Windows serial manifest
+      - name: Collect the serial manifest
         id: manifest_serial
         timeout-minutes: 20
-        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 1 && steps.setup_python.outcome == 'success' && steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success' }}
+        if: ${{ !cancelled() && matrix.shard == 1 && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
         run: >-
           python -m pytest tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet"
           --collect-only -q --default-suite-manifest
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/default-manifest/serial"
       # A command-line `-m` REPLACES the pyproject addopts markexpr, so repeat the default
-      # marker-lane exclusions and AND them with the serial split. --timeout guards hangs;
-      # `scripts/run_tests.py` passes the arguments through and owns the process tree.
+      # marker-lane exclusions and AND them with the serial split. Both passes carry the
+      # gate's per-test timeout with pytest-timeout's default method (SIGALRM on POSIX fails
+      # only the hung test; Windows' thread method stops the worker and scripts/ci_retry.py
+      # continues what the stopped session never ran). The wrapper also retries each failed
+      # test once and writes verdict.json; `scripts/run_tests.py` owns the process tree.
       - name: Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)
         id: tests_parallel
-        timeout-minutes: 120
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
-        run: python scripts/run_tests.py tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" ${{ runner.os == 'Windows' && format('--default-suite-shard={0}/8', matrix.shard) || '' }}
+        timeout-minutes: 90
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -n auto --dist loadscope --max-worker-restart=0 --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel" --default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}
       - name: Run tests (serial — real subprocess/port/global-state suites that flake under -n)
         id: tests_serial
-        timeout-minutes: 120
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
-        run: python scripts/run_tests.py tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" ${{ runner.os == 'Windows' && format('--default-suite-shard={0}/8', matrix.shard) || '' }}
+        timeout-minutes: 90
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && steps.plan.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial" --default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}
       # Whom the reference-book rule binds (scripts/book_growth_mode.py): the size
       # lane below blocks, warns or passes a grown book by this mode.
       - name: Decide the reference-book growth mode
         id: book_mode
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && matrix.shard == 1 }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -460,13 +515,13 @@ jobs:
       - name: Run tests (size-ratchet lane — blocking here, warning-only locally)
         id: tests_size
         timeout-minutes: 20
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard == 1 }}
         env:
           OURO_SIZE_RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           OURO_BOOK_GROWTH_MODE: ${{ steps.book_mode.outputs.mode }}
         run: python -m pytest tests/ -m size_ratchet -q --tb=short --ci-evidence-dir="${{ runner.temp }}/ci-evidence/size"
       - name: Guard extracted transport imports stay out of core
-        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' && (runner.os != 'Windows' || (steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success')) && matrix.shard == 1 }}
         run: python -m pytest tests/test_no_core_a2a_telegram_imports.py -q
       # The owner-attachment path on real Windows (confined handle reads behind
       # `/api/files/download?upload=`): this one module's Chromium cases on the Windows
@@ -482,7 +537,7 @@ jobs:
       - name: Install the dependency-only env and Chromium for the Windows owner-attachment browser test
         id: attachment_browser_install
         timeout-minutes: 20
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.setup_python.outcome == 'success' && steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success' && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.setup_python.outcome == 'success' && steps.posix_tools.outcome == 'success' && steps.select_posix_tools.outcome == 'success' && matrix.shard == 1 }}
         shell: bash
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/attachment-browsers
@@ -494,7 +549,7 @@ jobs:
       - name: Run the owner-attachment browser test on Windows (Chromium)
         id: attachment_browser
         timeout-minutes: 30
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard == 1 }}
         shell: bash
         env:
           OUROBOROS_RUN_UI_SMOKE: "1"
@@ -510,7 +565,7 @@ jobs:
       - name: Run the message-field sizing browser test on Windows (Chromium)
         id: composer_browser
         timeout-minutes: 20
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard == 1 }}
         shell: bash
         env:
           OUROBOROS_RUN_UI_SMOKE: "1"
@@ -522,7 +577,7 @@ jobs:
           python -c "import sys, xml.etree.ElementTree as E; s = next(E.parse(sys.argv[1]).getroot().iter('testsuite')); n, k = int(s.get('tests')), int(s.get('skipped')); print(f'{n} ran, {k} skipped'); sys.exit(n == 0 or k > 0)" "$RUNNER_TEMP/ci-private/composer-browser.xml"
           python -c "import os, sys; sys.exit(os.path.getsize(sys.argv[1]) == 0)" "$OUROBOROS_UI_EVIDENCE_DIR/composer-sizing-chromium.json"
       - name: Upload the Windows message-field sizing evidence (geometry, screenshots)
-        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard <= 1 }}
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.attachment_browser_install.outcome == 'success' && matrix.shard == 1 }}
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -531,45 +586,51 @@ jobs:
           path: ${{ runner.temp }}/ci-evidence/composer/
           if-no-files-found: warn
           retention-days: 30
-      # Mandatory Windows proof; the ordinary diagnostic upload below remains advisory.
-      - name: Require both Windows shard projections
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
+      # Mandatory shard proof on every OS; the ordinary diagnostic upload below remains advisory.
+      # A session stopped before its export (Windows' thread-method timeout ends the whole
+      # serial process) proves itself through its journal plus the wrapper's verdict.
+      - name: Require both shard projections
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
-          test -s "${{ runner.temp }}/ci-evidence/parallel/results.json"
-          test -s "${{ runner.temp }}/ci-evidence/serial/results.json"
-      - name: Upload the Windows shard proof
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
+          for pass in parallel serial; do
+            dir="${{ runner.temp }}/ci-evidence/$pass"
+            # `|| exit 1`: bash -e ignores a failure inside an `&&` group, so the loop would
+            # otherwise return only its last pass's status.
+            test -s "$dir/results.json" || { test -s "$dir/events.jsonl" && test -s "$dir/verdict.json"; } || exit 1
+          done
+      - name: Upload the shard proof
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: default-ci-shard-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: default-ci-shard-${{ runner.os }}-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ci-evidence/parallel/
             ${{ runner.temp }}/ci-evidence/serial/
           retention-days: 30
           if-no-files-found: error
-      - name: Require both Windows manifest projections
-        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 1 }}
+      - name: Require both manifest projections
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         shell: bash
         run: |
           test -s "${{ runner.temp }}/ci-evidence/default-manifest/parallel/results.json"
           test -s "${{ runner.temp }}/ci-evidence/default-manifest/serial/results.json"
-      - name: Upload the Windows manifests
-        if: ${{ !cancelled() && runner.os == 'Windows' && matrix.shard == 1 }}
+      - name: Upload the manifests
+        if: ${{ !cancelled() && matrix.shard == 1 }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: default-ci-manifest-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: default-ci-manifest-${{ runner.os }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-evidence/default-manifest/
           retention-days: 30
           if-no-files-found: error
-      # Names the failed, crashed and in-flight tests in the job summary and as
+      # Names the failed, flaky, crashed and in-flight tests in the job summary and as
       # annotations; a killed step still reports through its incremental journal.
       - name: Publish test evidence
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         continue-on-error: true
         uses: ./.github/actions/test-evidence
         with:
-          name: full-test-${{ matrix.os }}${{ runner.os == 'Windows' && format('-shard-{0}', matrix.shard) || '' }}
+          name: full-test-${{ matrix.os }}-shard-${{ matrix.shard }}
           passes: parallel=${{ steps.tests_parallel.outcome }} serial=${{ steps.tests_serial.outcome }} size=${{ steps.tests_size.outcome }}
 
   # The matrix above runs the shipped interpreter, whose SQLite puts the stores in WAL, as on a fresh install.
@@ -577,13 +638,11 @@ jobs:
   # modules, the ones a WAL-only battery singled out, and every test that holds a store through
   # tests/_store_journal_shared.py run again here in PERSIST, on all three systems.
   journal-persist:
-    if: |
-      github.ref == 'refs/heads/ouroboros-stable'
-      || github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
-      || (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros' && github.repository == 'razzant/ouroboros')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # The accepted-failure check reads issue label events.
     permissions:
       contents: read
+      issues: read
     strategy:
       fail-fast: false
       matrix:
@@ -617,23 +676,30 @@ jobs:
           path.as_posix() for path in pathlib.Path('tests').glob('test_*.py') if path.name in core
           or held.search(path.read_text(encoding='utf-8')))), end='')" > "$RUNNER_TEMP/journal_modules.txt"
           && count=$(wc -w < "$RUNNER_TEMP/journal_modules.txt") && echo "$count modules" && test "$count" -ge 8
+      # Same wrapper as the full matrix: one retry per failed test, FLAKY recorded.
       - name: Run them (parallel)
         id: tests_parallel
         shell: bash
         timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: >-
+          python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/parallel" --accepted tests/accepted_failures.json --
           python scripts/run_tests.py $(cat "$RUNNER_TEMP/journal_modules.txt")
           -m "not serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet"
-          -n auto --dist loadscope --max-worker-restart=0 --timeout=300 --timeout-method=thread -q --tb=short
+          -n auto --dist loadscope --max-worker-restart=0 --timeout=300 -q --tb=short
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/parallel"
       - name: Run them (serial)
         id: tests_serial
         if: ${{ !cancelled() && steps.select.outcome == 'success' }}
         shell: bash
         timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: >-
+          python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/serial" --accepted tests/accepted_failures.json --
           python scripts/run_tests.py $(cat "$RUNNER_TEMP/journal_modules.txt")
-          -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" -q --tb=short
+          -m "serial and not integration and not browser and not ui_browser and not ui_browser_docker and not portable_detail and not skill_smoke and not size_ratchet" --timeout=300 -q --tb=short
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/serial"
       - name: Publish test evidence
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
@@ -644,12 +710,15 @@ jobs:
           passes: parallel=${{ steps.tests_parallel.outcome }} serial=${{ steps.tests_serial.outcome }}
 
   # Preserve the release contract: full-test is green only after every OS/shard
-  # succeeded AND the two Windows passes reconcile against independent collections.
+  # succeeded AND both passes of every OS reconcile against that OS's independent
+  # manifests. A shard whose first session went red counts only through its
+  # verdict.json (FLAKY or ACCEPTED, never a hidden red); a missing, foreign or
+  # red verdict is a gap.
   full-test:
     needs: [full-test-runs, journal-persist]
     if: ${{ !cancelled() && needs.full-test-runs.result != 'skipped' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Require every full-test matrix leg
         env:
@@ -667,44 +736,123 @@ jobs:
           fi
       - uses: actions/checkout@v4
         if: ${{ !cancelled() }}
-      - name: Download the Windows manifests
+      - name: Download every manifest
         if: ${{ !cancelled() }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: default-ci-manifest-${{ github.sha }}-${{ github.run_id }}-*
+          pattern: default-ci-manifest-*-${{ github.sha }}-${{ github.run_id }}-*
           path: ${{ runner.temp }}/default-proof/manifest
-      - name: Download every Windows shard proof
+      - name: Download every shard proof
         if: ${{ !cancelled() }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: default-ci-shard-*-${{ github.sha }}-${{ github.run_id }}-*
           path: ${{ runner.temp }}/default-proof/shards
-      - name: Reconcile the Windows parallel pass
+      # One reconciliation per OS and pass; the shard counts are the matrix's.
+      - name: Reconcile both passes of every OS
         if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          PROOF: ${{ runner.temp }}/default-proof
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          failed=0
+          for spec in Linux:4 macOS:4 Windows:8; do
+            os="${spec%%:*}"; count="${spec##*:}"
+            mkdir -p "$PROOF/by-os/$os/manifest" "$PROOF/by-os/$os/shards"
+            for dir in "$PROOF"/manifest/default-ci-manifest-"$os"-*; do
+              [[ -d "$dir" ]] && mv "$dir" "$PROOF/by-os/$os/manifest/"
+            done
+            for dir in "$PROOF"/shards/default-ci-shard-"$os"-*; do
+              [[ -d "$dir" ]] && mv "$dir" "$PROOF/by-os/$os/shards/"
+            done
+            for lane in default_parallel default_serial; do
+              python3 -I -S tests/ci_evidence.py reconcile-shards --lane "$lane" \
+                --manifest "$PROOF/by-os/$os/manifest" --shards "$PROOF/by-os/$os/shards" \
+                --count "$count" --sha "$SHA" --run-id "$RUN_ID" --summary "$GITHUB_STEP_SUMMARY" || failed=1
+            done
+          done
+          exit "$failed"
+
+  # The next run's shard weights: every default-lane and UI shard's recorded
+  # durations, per OS. Written even after a red run (a red test still took its
+  # time); a run without proofs writes nothing and the next run packs by count.
+  ci-durations:
+    needs: [full-test, ui-smoke]
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the shard proofs of this run
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: default-ci-shard-*-${{ github.sha }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/durations/default
+      - name: Download the UI shard evidence of this run
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ui-ci-full-shard-*-${{ github.sha }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/durations/ui
+      - name: Record the durations
+        id: record
         run: >-
-          python3 -I -S tests/ci_evidence.py reconcile-shards --lane default_parallel
-          --manifest "${{ runner.temp }}/default-proof/manifest"
-          --shards "${{ runner.temp }}/default-proof/shards"
-          --count 8 --sha "${{ github.sha }}" --run-id "${{ github.run_id }}"
-          --summary "$GITHUB_STEP_SUMMARY"
-      - name: Reconcile the Windows serial pass
-        if: ${{ !cancelled() }}
+          python3 -I -S tests/ci_evidence.py durations --evidence-root "${{ runner.temp }}/durations"
+          --run-id "${{ github.run_id }}" --sha "${{ github.sha }}" --out "${{ runner.temp }}/ci-durations/ci-durations.json"
+      - name: Publish them for the next run's shard plan
+        if: ${{ steps.record.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-durations
+          path: ${{ runner.temp }}/ci-durations/ci-durations.json
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: error
+
+  # One table of the run's FLAKY, ACCEPTED, FAILED and never-run tests over every
+  # wrapped lane, complete (not the ten annotations a step may show). The release
+  # notes carry its FLAKY and ACCEPTED rows. Diagnostic: the lanes decide.
+  test-verdict:
+    needs: [full-test, ui-smoke, quick-test, system-e2e-mock]
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the test evidence of this run
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ci-evidence-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/verdict/evidence
+      - name: Download the UI shard evidence of this run
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ui-ci-full-shard-*-${{ github.sha }}-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/verdict/evidence
+      - name: Summarize every verdict
         run: >-
-          python3 -I -S tests/ci_evidence.py reconcile-shards --lane default_serial
-          --manifest "${{ runner.temp }}/default-proof/manifest"
-          --shards "${{ runner.temp }}/default-proof/shards"
-          --count 8 --sha "${{ github.sha }}" --run-id "${{ github.run_id }}"
-          --summary "$GITHUB_STEP_SUMMARY"
+          python3 -I -S tests/ci_evidence.py run-verdict --evidence-root "${{ runner.temp }}/verdict/evidence"
+          --summary "$GITHUB_STEP_SUMMARY" --out "${{ runner.temp }}/verdict/test-verdict.json"
+      - name: Upload the verdict table
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-verdict-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/verdict/test-verdict.json
+          retention-days: 90
+          if-no-files-found: error
 
   # Manual proof for the one native secret-scanner dependency. This job
   # carries no provider or repository secret: it exercises the explicit pinned
   # installer, managed resolver, license/version checks, and redaction-safe real
   # scanner smoke on each supported desktop OS family.
   betterleaks-platform-smoke:
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
-      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
-      || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -758,6 +906,7 @@ jobs:
       scope: required
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_PROVIDER_ROUTES_API_KEY: ${{ secrets.OPENROUTER_PROVIDER_ROUTES_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
@@ -780,6 +929,7 @@ jobs:
       scope: optional
     secrets:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_PROVIDER_ROUTES_API_KEY: ${{ secrets.OPENROUTER_PROVIDER_ROUTES_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
@@ -820,21 +970,17 @@ jobs:
   # a runner with executed payload code at all (it used to run first on the
   # ubuntu leg, before that leg's install smoke).
   # A review leg runs Ouroboros's own skill review on ONE cheap stochastic
-  # reviewer slot (google/gemini-3.5-flash, low effort — the test pins env;
-  # production reviewer defaults stay strong and untouched), ubuntu-only (an
+  # reviewer slot (deepseek/deepseek-v4.1-flash, low effort, isolated settings;
+  # production reviewer defaults stay untouched), ubuntu-only (an
   # LLM verdict is OS-independent), one leg per review skill so the three
   # live reviews run in parallel under the product's own review window.
-  # Paid lane: about $11 per native review, measured 2026-10-17/18 (~$33 per
-  # run for the three skills; a retry, settled or after a provider outage,
-  # adds at most two more waves each, ~$99 per run at worst). A
-  # missing secret is a hard red by owner directive — forks/mirrors without
-  # it stay red.
+  # Paid lane: one author plus up to two paid reviews per skill; the shared
+  # per-skill admission cap is in author_settings. Calls already in flight
+  # may exceed it. This is not a fixed-price run or a retry-to-green loop.
+  # A missing secret is a hard red — forks/mirrors without it stay red.
   # ──────────────────────────────────────────────────────────────────
   skill-smoke:
-    if: |
-      github.ref == 'refs/heads/ouroboros-stable'
-      || github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -846,11 +992,8 @@ jobs:
           - {lane: review, os: ubuntu-latest, skill: duckduckgo}
           - {lane: review, os: ubuntu-latest, skill: perplexity}
     runs-on: ${{ matrix.os }}
-    # A review leg's bound sits above the test's own timeout
-    # (tests/test_skill_smoke_official.py _REVIEW_TEST_TIMEOUT_SEC: four product
-    # review windows of 2700 s, three waves and a late worker's drain, plus
-    # 900 s = 195 min) plus setup, so the test's named timeout fires first
-    # (pinned by tests/test_skill_smoke_ci_lane.py).
+    # Above the ordinary author's two paid review cycles, reasoning and tree
+    # drain (_REVIEW_TEST_TIMEOUT_SEC); the test's own bound fires before CI.
     timeout-minutes: ${{ matrix.lane == 'review' && 205 || 45 }}
     env:
       # Windows runners default stdout/subprocess decoding to cp1252; live
@@ -866,18 +1009,24 @@ jobs:
       - uses: ./.github/actions/setup-python-env
         with:
           interpreter: shipped  # the SQLite and journal mode fresh installs run
-      # Tier 6 (review flow), one review skill per leg; the only step that
-      # names the secret, in a leg that runs nothing else. The test's own
-      # timeout marker covers up to three review waves under the product's
-      # window (one settled retry, provider outages waited out), a late
-      # worker's drain and the post-review COLD a2a dependency install (this
-      # process has its own temp data dir, so the venv is never warm here;
-      # production review→deps order).
+          install-project: ${{ matrix.lane != 'review' && 'true' || 'false' }}
+      # Tier 6: ordinary author + initial review + at most one substantive
+      # rebuttal. No retry after ambiguity. Only this step holds the key; the
+      # contained tree is reaped before enable. Cold dependencies follow review.
       - name: Run official-skill review flow smoke (LLM review, one skill)
         if: matrix.lane == 'review'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OUROBOROS_TEST_EVIDENCE_ROOT: ${{ runner.temp }}/skill-smoke-evidence
         run: python -m pytest "tests/test_skill_smoke_official.py::test_review_grants_and_enable[${{ matrix.skill }}]" -m skill_smoke --timeout-method=thread -q -s --tb=long
+      - name: Upload skill author and reviewer judgments
+        if: ${{ always() && matrix.lane == 'review' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: skill-review-${{ matrix.skill }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/skill-smoke-evidence/skill-smoke-author/*/author-evidence.json
+          if-no-files-found: error
+          retention-days: 30
       # -s (no capture): the lane logs provenance (catalog digest, skill
       # versions, resolved pip sets) that must reach the CI log on green AND
       # red runs — under default capture, session-fixture prints surface only
@@ -949,14 +1098,15 @@ jobs:
 
   # The complete reusable lane serves manual/tag qualification. The separate
   # manual wrapper offers diagnostics without narrowing this release dependency.
+  # Its shards and manifest read this run's shard plan (node durations).
   ui-smoke:
-    if: |
-      github.event_name == 'pull_request'
-      || github.event_name == 'workflow_dispatch'
-      || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: shard-plan
     uses: ./.github/workflows/ui-browser.yml
     permissions:
       contents: read
+      actions: read
+      issues: read
 
   docker-ui-smoke:
     if: |
@@ -1031,7 +1181,12 @@ jobs:
     # scenario still reports. Healthy: the first 107 of the 109 tests/system_e2e/ items took
     # 47 min on CI run 39170380060 (S37 then hung); S37, S38 and the E-suite took about 21
     # min together on a heavily loaded developer Mac that ran the first 72 items 2.8x slower.
-    timeout-minutes: 100
+    # Plus room for one retry of a scenario that failed once (scripts/ci_retry.py).
+    timeout-minutes: 130
+    # The accepted-failure check reads issue label events.
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python-env
@@ -1042,28 +1197,39 @@ jobs:
       # -o addopts="" replaces the pyproject default markexpr wholesale: the
       # lane's own `integration` marker is exactly what that default excludes.
       - name: Run the keyless system E2E scenario lane (real isolated servers)
+        id: tests_scenarios
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           PYTHONUNBUFFERED: "1"
           OUROBOROS_E2E_DEEP: mock
           OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-system-e2e/app
           OUROBOROS_REPO_DIR: ${{ runner.temp }}/ouroboros-system-e2e/repo
           OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-system-e2e/data
           OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-system-e2e/data/settings.json
-        run: python -m pytest tests/system_e2e/ -o addopts="" -o faulthandler_timeout=540 -q
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/scenarios" --accepted tests/accepted_failures.json -- python -m pytest tests/system_e2e/ -o addopts="" -o faulthandler_timeout=540 -q --ci-evidence-dir="${{ runner.temp }}/ci-evidence/scenarios"
       # The cancellation E-suite mock lane (18 scenarios + 4 mock-only) ran only on
       # operator hosts before 7.0; on the same isolated roots it is keyless too
       # (owner decision, batch №13 item 16, 2026-09-02).
       - name: Run the cancellation E-suite mock lane
+        id: tests_cancellation
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           PYTHONUNBUFFERED: "1"
           OUROBOROS_E2E_CANCEL: mock
           OUROBOROS_APP_ROOT: ${{ runner.temp }}/ouroboros-e2e-cancel/app
           OUROBOROS_REPO_DIR: ${{ runner.temp }}/ouroboros-e2e-cancel/repo
           OUROBOROS_DATA_DIR: ${{ runner.temp }}/ouroboros-e2e-cancel/data
           OUROBOROS_SETTINGS_PATH: ${{ runner.temp }}/ouroboros-e2e-cancel/data/settings.json
-        run: python -m pytest tests/test_e2e_cancellation_scenarios.py -o addopts="" -o faulthandler_timeout=540 -q
+        run: python scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/cancellation" --accepted tests/accepted_failures.json -- python -m pytest tests/test_e2e_cancellation_scenarios.py -o addopts="" -o faulthandler_timeout=540 -q --ci-evidence-dir="${{ runner.temp }}/ci-evidence/cancellation"
+      - name: Publish test evidence
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        continue-on-error: true
+        uses: ./.github/actions/test-evidence
+        with:
+          name: system-e2e-mock
+          passes: scenarios=${{ steps.tests_scenarios.outcome }} cancellation=${{ steps.tests_cancellation.outcome }}
       # The scenario servers' journals are this lane's traces: without them a red
       # scenario names an assertion and nothing of what its server did (owner,
       # 2026-10-04). The servers' data roots are pytest tmp_path trees, not the
@@ -1659,10 +1825,10 @@ jobs:
           retention-days: 30
 
   release-preflight:
-    # Keep the job alive after failed needs so tag identity and diagnostic build state remain observable.
-    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
-    # system-e2e-mock joined the release bar with the v7 campaign (batch №13 item 4).
-    needs: [full-test, integration-test, system-e2e-mock]
+    # Tag identity only, at once: the builds start with the tests, and the release
+    # job itself requires every test lane (system-e2e-mock joined that bar with the
+    # v7 campaign, batch №13 item 4).
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
       is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
@@ -1700,35 +1866,14 @@ jobs:
               fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")
               fh.write("tag_valid=true\n")
           PY
-      # Owner decision 2026-10-17: only the official v7.7.0 tag may continue after
-      # full-test or system E2E concluded red (failed or timed out); integration
-      # stays required. The release proof records every actual result.
-      - name: Require test prerequisites for publication
-        if: ${{ !cancelled() }}
-        env:
-          FULL_TEST_RESULT: ${{ needs.full-test.result }}
-          INTEGRATION_RESULT: ${{ needs.integration-test.result }}
-          SYSTEM_E2E_RESULT: ${{ needs.system-e2e-mock.result }}
-          V7_7_0_OWNER_EXCEPTION: ${{ github.ref == 'refs/tags/v7.7.0' && github.repository == 'razzant/ouroboros' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          RESULTS="full-test=$FULL_TEST_RESULT integration-test=$INTEGRATION_RESULT system-e2e-mock=$SYSTEM_E2E_RESULT"
-          if [[ "$FULL_TEST_RESULT" != success || "$INTEGRATION_RESULT" != success || "$SYSTEM_E2E_RESULT" != success ]]; then
-            if [[ "${V7_7_0_OWNER_EXCEPTION:-}" == true && "$INTEGRATION_RESULT" == success &&
-                  "$FULL_TEST_RESULT" =~ ^(success|failure|cancelled)$ && "$SYSTEM_E2E_RESULT" =~ ^(success|failure|cancelled)$ ]]; then
-              echo "::warning::v7.7.0 owner exception: continuing with $RESULTS; the release proof discloses them."
-            else
-              echo "Required release prerequisites did not all succeed: $RESULTS" >&2
-              exit 1
-            fi
-          fi
 
 
-  # A valid tag may rehearse desktop artifacts after a red test bar; release still requires preflight success.
+  # Builds start once the tag is valid, in parallel with the tests (they used to wait
+  # about two hours for the slowest test leg); the release job publishes exactly
+  # these builds and only after every required test lane succeeded.
   build:
-    if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.release-preflight.outputs.tag_valid == 'true' }}
-    needs: [full-test, release-preflight]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && needs.release-preflight.outputs.tag_valid == 'true' }}
+    needs: [release-preflight]
     permissions:
       contents: read
       id-token: write
@@ -1745,6 +1890,8 @@ jobs:
             syft_sha256: e32fdb9d47823fa633748a1efca2528fd77c37469ea93c9e40ab835da44e4cce
             syft_binary: syft
           - os: ubuntu-latest
+            # Keep the artifact/matrix label; the shipped GTK closure has a Jammy ABI floor.
+            build_runner: ubuntu-22.04
             artifact: tar.gz
             proof_id: linux-x86_64
             syft_archive: syft_1.50.0_linux_amd64.tar.gz
@@ -1756,7 +1903,7 @@ jobs:
             syft_archive: syft_1.50.0_windows_amd64.zip
             syft_sha256: 815ee6973ec5dff6a671d7f41b0e78835a8c45b91d5a39f4743ea1cee833d3be
             syft_binary: syft.exe
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.build_runner || matrix.os }}
     # Build workers have no signing Environment. Signing uses a separate
     # fresh Windows runner after this worker has exited. The runner drops
     # empty outputs, so only the Windows leg sets this one.
@@ -1938,9 +2085,41 @@ jobs:
           security delete-keychain "$KEYCHAIN_PATH" || true
 
       # —— Linux build ——
+      - name: Install Linux GTK closure build inputs (Ubuntu 22.04)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # Source retrieval is exact-version and fails closed. Do not substitute
+          # current source for a superseded binary still installed on the runner.
+          sed -n 's/^deb /deb-src /p' /etc/apt/sources.list | sudo tee /etc/apt/sources.list.d/ouroboros-native-sources.list
+          test -s /etc/apt/sources.list.d/ouroboros-native-sources.list
+          sudo apt-get update
+          # Match native qualification: superseded runner binaries may no longer
+          # have their exact source version in the authenticated archive.
+          sudo apt-get -y --no-install-recommends dist-upgrade
+          # Jammy's libwebkit2gtk-4.1-dev does not depend on the WebKit2 typelib package.
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config \
+            libgirepository1.0-dev libcairo2-dev libwebkit2gtk-4.1-dev gir1.2-webkit2-4.1 \
+            libgtk-3-bin librsvg2-common glib-networking gsettings-desktop-schemas \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good bubblewrap xdg-dbus-proxy \
+            adwaita-icon-theme hicolor-icon-theme shared-mime-info
+
       - name: Build Linux binary
         if: matrix.os == 'ubuntu-latest'
+        env:
+          OUROBOROS_BUNDLE_LINUX_GTK: '1'
         run: bash build_linux.sh
+
+      - name: Retain Linux native corresponding-source inputs
+        if: always() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-native-sources-${{ github.sha }}
+          path: |
+            dist/linux-native-sources/
+            dist/native-sources-linux-*.tar.gz
+            dist/native-sources-linux-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
 
       # —— Windows build ——
       - name: Build Windows executable
@@ -2154,7 +2333,7 @@ jobs:
             echo "AppImage launcher has unresolved shared libraries" >&2
             exit 1
           fi
-          APPIMAGE_RUNTIME_ROOT="${LAUNCHER_EXE%/usr/lib/ouroboros/Ouroboros}"
+          APPIMAGE_RUNTIME_ROOT="${LAUNCHER_EXE%/usr/lib/ouroboros/Ouroboros.bin}"
           APPIMAGE_PRIVATE_BASE="${APPIMAGE_RUNTIME_ROOT%/*}"
           APPIMAGE_CUSTODIAN_PID="$(ps -o ppid= -p "$LAUNCHER_PID" | tr -d '[:space:]')"
           if [ -z "$APPIMAGE_CUSTODIAN_PID" ] || ! kill -0 "$APPIMAGE_CUSTODIAN_PID" 2>/dev/null; then
@@ -2438,6 +2617,8 @@ jobs:
             dist/release-smoke-${{ matrix.proof_id }}.json
             dist/sbom-${{ matrix.proof_id }}.cdx.json
             dist/*.AppImage
+            dist/native-sources-linux-*.tar.gz
+            dist/native-sources-linux-*.tar.gz.sha256
             dist/release-smoke-linux-appimage-x86_64.json
             dist/sbom-linux-appimage-x86_64.cdx.json
             dist/ouroboros_*_amd64.deb
@@ -2470,6 +2651,7 @@ jobs:
       artifact-metadata: write
     outputs:
       archive_sha256: ${{ steps.release_asset.outputs.sha256 }}
+      signed_files: ${{ steps.sign.outputs.signed_files }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -2489,7 +2671,8 @@ jobs:
         env:
           EXPECTED_SHA256: ${{ needs.build.outputs.windows_archive_sha256 }}
         run: python scripts/release_proof.py locate --directory unsigned --expect-sha256 "$EXPECTED_SHA256" --github-output "$GITHUB_OUTPUT"
-      - name: Sign, verify and package Windows executable
+      - name: Sign, verify and package Windows executables
+        id: sign
         shell: pwsh
         env:
           ESIGNER_USERNAME: ${{ secrets.ESIGNER_USERNAME }}
@@ -2514,8 +2697,9 @@ jobs:
 
   # No eSigner secrets on this fresh runner, in either mode: it checks the
   # final ZIP against its producer's job-output digest before extracting,
-  # verifies the signature when signing is configured, smokes the packaged
-  # app, then records the proof, SBOM and attestations for the release asset.
+  # verifies every catalogued signature when signing is configured, smokes
+  # the packaged app, then records the proof, SBOM and attestations for the
+  # release asset.
   windows-proof:
     if: ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && (vars.ESIGNER_CERT_SHA1 == '' || needs.windows-sign.result == 'success') }}
     needs: [build, windows-sign]
@@ -2555,7 +2739,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $SmokeRoot, $HomeDir | Out-Null
           Expand-Archive -Path "${{ steps.release_asset.outputs.path }}" -DestinationPath $SmokeRoot
           if ($env:WINDOWS_SIGNER_THUMBPRINT) {
-              $Signer = & .\scripts\verify_windows_signature.ps1 -Executable "$SmokeRoot\Ouroboros\Ouroboros.exe" -ExpectedThumbprint $env:WINDOWS_SIGNER_THUMBPRINT
+              # Every catalogued executable; the record step binds their hashes to this ZIP.
+              $Signer = @(& .\scripts\verify_windows_signature.ps1 -ExtractedRoot $SmokeRoot -ExpectedThumbprint $env:WINDOWS_SIGNER_THUMBPRINT)[0]
               Add-Content -Path $env:GITHUB_OUTPUT -Value "signer_thumbprint=$($Signer.Thumbprint)", "signer_publisher=$($Signer.Publisher)"
           }
           # PyInstaller 6 onedir puts datas under _internal\ (the runtime resolves
@@ -2574,6 +2759,16 @@ jobs:
           # Source handoff uses this interpreter, not the launcher's frozen imports.
           & "$SmokeRoot\Ouroboros\_internal\python-standalone\python.exe" -I -B -c "import clr_loader, pythonnet, webview"
           if ($LASTEXITCODE -ne 0) { throw "packaged source-handoff desktop imports failed: $LASTEXITCODE" }
+          # The windowless interpreter reports through a file, within a bounded wait.
+          $Probe = Join-Path $env:RUNNER_TEMP "pythonw-probe-$env:GITHUB_RUN_ATTEMPT.txt"
+          $Start = [Diagnostics.ProcessStartInfo]::new("$SmokeRoot\Ouroboros\_internal\python-standalone\pythonw.exe",
+              "-I -B -c `"import sys;open(sys.argv[1],'w').write('ok')`" `"$Probe`"")
+          $Start.UseShellExecute = $false
+          $Process = [Diagnostics.Process]::Start($Start)
+          if (-not $Process.WaitForExit(60000)) { $Process.Kill(); throw "packaged pythonw.exe did not exit within 60 s" }
+          if ($Process.ExitCode -ne 0 -or (Get-Content -Raw -LiteralPath $Probe) -ne 'ok') {
+              throw "packaged pythonw.exe probe failed: $($Process.ExitCode)"
+          }
           & "$SmokeRoot\Ouroboros\bin\ouroboros.cmd" --help | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "packaged CLI smoke failed: $LASTEXITCODE" }
           $env:OUROBOROS_DATA_DIR = Join-Path $env:RUNNER_TEMP "ouroboros-claudexor-smoke"
@@ -2589,10 +2784,12 @@ jobs:
         env:
           SIGNER_THUMBPRINT: ${{ steps.smoke_windows.outputs.signer_thumbprint }}
           SIGNER_PUBLISHER: ${{ steps.smoke_windows.outputs.signer_publisher }}
+          SIGNED_FILES: ${{ needs.windows-sign.outputs.signed_files }}
         run: |
           SIGNED=()
           if [ -n "$WINDOWS_SIGNER_THUMBPRINT" ]; then
             SIGNED=(--authenticode-thumbprint "$SIGNER_THUMBPRINT" --authenticode-publisher "$SIGNER_PUBLISHER"
+                    --authenticode-files "$SIGNED_FILES"
                     --check authenticode_signer --check timestamp --check signed_payload_archive_match)
           fi
           python scripts/release_proof.py record-smoke \
@@ -2707,19 +2904,17 @@ jobs:
   # Release: Create GitHub Release with all artifacts
   # ──────────────────────────────────────────────────────────────────
   release:
-    # Owner decision 2026-10-17: only the official v7.7.0 tag may continue after
-    # full-test, system E2E or the UI lane concluded (not skipped) red; every
-    # other job and tag stays strict. That tag stops at a verified draft.
+    # Every required lane must succeed; nothing is waived in code (owner decision
+    # 1A, 2026-10-21: FLAKY and ACCEPTED tests are already green inside their lanes
+    # and are listed in the notes from `test-verdict`).
     if: >-
       ${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
           needs.build.result == 'success' && needs.windows-proof.result == 'success' && needs.release-preflight.result == 'success' &&
-          needs.integration-test.result == 'success' && needs.marker-guards.result == 'success' &&
+          needs.lint.result == 'success' && needs.full-test.result == 'success' && needs.system-e2e-mock.result == 'success' &&
+          needs.ui-smoke.result == 'success' && needs.integration-test.result == 'success' && needs.marker-guards.result == 'success' &&
           needs.docker-ui-smoke.result == 'success' && needs.docker-portable-test.result == 'success' &&
-          needs.skill-smoke.result == 'success' &&
-          ((needs.full-test.result == 'success' && needs.system-e2e-mock.result == 'success' && needs.ui-smoke.result == 'success') ||
-           (github.ref == 'refs/tags/v7.7.0' && github.repository == 'razzant/ouroboros' &&
-            needs.full-test.result != 'skipped' && needs.system-e2e-mock.result != 'skipped' && needs.ui-smoke.result != 'skipped')) }}
-    needs: [build, windows-proof, android-build, release-preflight, full-test, integration-test, system-e2e-mock, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke]
+          needs.skill-smoke.result == 'success' && needs.test-verdict.result == 'success' }}
+    needs: [build, windows-proof, android-build, release-preflight, lint, full-test, integration-test, system-e2e-mock, marker-guards, ui-smoke, docker-ui-smoke, docker-portable-test, skill-smoke, test-verdict]
     runs-on: ubuntu-latest
     concurrency:
       group: release-${{ github.ref }}
@@ -2786,6 +2981,21 @@ jobs:
           done < "$RUNNER_TEMP/attestation-targets.tsv"
           echo "android_result=$ANDROID_RESULT" >> "$GITHUB_OUTPUT"
 
+      # The run's FLAKY and ACCEPTED tests, for the notes. Every attempt that re-ran
+      # `test-verdict` uploaded its own table; the newest describes the lanes released.
+      - name: Download the run's test verdicts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: test-verdict-${{ github.run_id }}-*
+          path: release-verdict/attempts/
+      - name: Keep the newest attempt's verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          newest="$(for dir in release-verdict/attempts/test-verdict-*; do printf '%s\t%s\n' "${dir##*-}" "$dir"; done \
+                    | sort -n | tail -n 1 | cut -f2-)"
+          cp "$newest/test-verdict.json" release-verdict/test-verdict.json
+
       - name: Assemble release proof capsule and notes
         id: release_proof
         env:
@@ -2807,6 +3017,8 @@ jobs:
             docker-ui-smoke=${{ needs.docker-ui-smoke.result }}
             docker-portable-test=${{ needs.docker-portable-test.result }}
             skill-smoke=${{ needs.skill-smoke.result }}
+            lint=${{ needs.lint.result }}
+            test-verdict=${{ needs.test-verdict.result }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2825,6 +3037,7 @@ jobs:
             --windows-signer-thumbprint "$WINDOWS_SIGNER_THUMBPRINT" \
             --github-output "$GITHUB_OUTPUT" \
             --notes-output release-notes.md \
+            --test-verdict release-verdict/test-verdict.json \
             "${ARGS[@]}"
 
       - name: Require an unpublished release slot
@@ -2925,13 +3138,7 @@ jobs:
             exit 1
           fi
 
-      - name: Hold the v7.7.0 owner-exception release at its verified draft
-        if: ${{ github.ref == 'refs/tags/v7.7.0' && github.repository == 'razzant/ouroboros' }}
-        shell: bash
-        run: echo "v7.7.0 remains a verified draft; the owner publishes it explicitly." >> "$GITHUB_STEP_SUMMARY"
-
       - name: Publish verified GitHub Release
-        if: ${{ !(github.ref == 'refs/tags/v7.7.0' && github.repository == 'razzant/ouroboros') }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

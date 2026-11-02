@@ -1,0 +1,60 @@
+{
+  "what": "Claudexor run events (GET /v2/runs/:id/events lines), timeline rows and answer assembly of four recorded Claude CLI streams, normalized by the engine itself; the host's speech consumers read them unchanged.",
+  "source": "Controlled-loopback unmodified Claude CLI2.1.311 recorded frames, sanitized product fixtures; scripted endpoint, NOT generated model output.",
+  "namespace": "Opaque per-parser random namespace. Compare keys only within their run/attempt/actor; rerendering retained journal preserves keys, reparsing native input creates new keys.",
+  "engine_base": "ebe9d276758cd4ddcdabebf03f7ae4f48f48a6f7",
+  "engine_base_tree": "3b290a833fab5f7cea2c87edc4f8fefe550d5e5a",
+  "engine_patch_sha256": "e3122a75691c2fe192955899d80a4fd7fb23eedc4d5cdcddb74315ec58a283d5",
+  "export": "createClaudeParser -> redactHarnessEvent -> harnessEventPayload -> EventLog -> readRunEventsWithIntegrity -> timelineEvents + AnswerAssembly (engine export.mjs); no model or CLI call",
+  "export_manifest_sha256": "1c9e0cd724b26d3be4cbcd11a06018df42ad7cd55293fef456ce92797bcada7d",
+  "scenarios": [
+    {
+      "scenario": "messages",
+      "native_fixture": "packages/harness-claude/fixtures/recorded-partial-messages.jsonl",
+      "native_sha256": "bcd3c2b881d76371fe420c1389d7b94b8cfc735d17b4c07f0da56727826e69e4",
+      "event_count": 13,
+      "normalized_jsonl_sha256": "51c7f50211f1057c6ba0ea85b5c763ce25b38d062614c9ad7fd1fe112da2a4b1",
+      "files": {
+        "events.ndjson": "ad990b1d3bbe6f96e31075a76286c4bd609093723b2be6423908a96c69972b49",
+        "timeline.json": "a123957ab0eb1d73abc28d8b4d45fca39927d9ddb3448a849ee7bff681ea360c",
+        "answer.json": "70df8a8b65138dd5b94960185ff0f7aec401dba8bea6fff39b9f30540c094bc3"
+      }
+    },
+    {
+      "scenario": "multiblock",
+      "native_fixture": "packages/harness-claude/fixtures/recorded-partial-multiblock.jsonl",
+      "native_sha256": "bd189d6f0a9b056ea7f78d6b4c372ccb8853260e23c576386c4f5671133999cb",
+      "event_count": 16,
+      "normalized_jsonl_sha256": "3e743f606c9c5178b7c3065d59038885754ef3670b7f30e9cab432a0f21c22d1",
+      "files": {
+        "events.ndjson": "699b2411cccc2fa9934ee2ac1e9edacc661142fbe4b2d2c283861dd25f9c0470",
+        "timeline.json": "763c88c51bc06a2cd9e30c335359489da61f3c9643f212e44d68f11711ec9898",
+        "answer.json": "d702ff1ebb840f62adff9124ba716fdb097044060dca5496cf8165ab5c07d124"
+      }
+    },
+    {
+      "scenario": "replay",
+      "native_fixture": "packages/harness-claude/fixtures/recorded-partial-replay.jsonl",
+      "native_sha256": "1c1e786d07bca3d916d8955f4bb2489f28d862e79c35ae3bbf5f729a59b85910",
+      "event_count": 16,
+      "normalized_jsonl_sha256": "b3912e8ae604e40b19d9aadfe4157ffa8b6047cf9d1384ba1f1ea7cb929a91b8",
+      "files": {
+        "events.ndjson": "f364e4e9b48c27be9787f318156b490ef4a016b465352f73be998bccfab93edf",
+        "timeline.json": "ee3684bbb69afe79a13b0813589f5a291fd1beee2f8bbb2d0b8b66bb68b6dd7e",
+        "answer.json": "70df8a8b65138dd5b94960185ff0f7aec401dba8bea6fff39b9f30540c094bc3"
+      }
+    },
+    {
+      "scenario": "joined",
+      "native_fixture": "packages/harness-claude/fixtures/recorded-partial-joined.jsonl",
+      "native_sha256": "c555407000e394d18868bbe782bf4096d9950d2a0eef9e2a4f2d57c0bde887fb",
+      "event_count": 11,
+      "normalized_jsonl_sha256": "0f2e0b1b8958b941cad9e6b25c40d32c0189f84077d0f04a8dcad88df637d5d2",
+      "files": {
+        "events.ndjson": "35195e91ac6c5b8ee85c45a67a6324d62fc8c05a63ca9f0bb95545ec398a9a86",
+        "timeline.json": "a207f79eebb8a55ef4d21fa93e1d134709ee9b49dd837521786411fd263595fe",
+        "answer.json": "ce86e9f4888f3ffed8088a7d0da91224d7fbca86e2097c09a67d6ad9f7d03773"
+      }
+    }
+  ]
+}

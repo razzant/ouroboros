@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import json
 
-from ouroboros.claudexor_observations import default_subject_aliases, quota_availability, resource_rows, subject_rows
+from ouroboros.claudexor_observations import quota_availability, resource_rows, subject_rows
 from ouroboros.configured_subagents import roster_handles
 from ouroboros.subagent_runtime import (
     SubagentSelectionError, effective_runtime_subagent_settings, offered_subagents, resolve_configured_row,
 )
 
 
-def inspect_subagent(subagent_id: str, *, request_kind: str = "text") -> dict:
+def inspect_subagent(subagent_id: str, *, request_kind: str = "text", drive_root=None) -> dict:
     """Saved row intent and independently dated observations, never selection policy."""
     from ouroboros.config import runtime_settings
     from ouroboros.gateway.claudexor_passive import _quota_payload
@@ -41,6 +41,9 @@ def inspect_subagent(subagent_id: str, *, request_kind: str = "text") -> dict:
     result = {"configured": actor, "inspected_at": utc_now_iso(), "request_kind": request_kind,
               "availability": {"state": "unknown", "reason": "provider_observations_unavailable"},
               "execution_guaranteed": False}
+    from ouroboros.config import DATA_DIR
+    from ouroboros.subagent_metrics import read
+    result["measurements"] = read(drive_root or DATA_DIR, row.subagent_id)
     if route.is_session:
         harness, _, model = route.target_id.partition("=")
     elif provider_for_model(route.target_id) == "claudexor":
@@ -55,19 +58,15 @@ def inspect_subagent(subagent_id: str, *, request_kind: str = "text") -> dict:
     if "availability_scope" in payload:
         result["engine"]["availability_scope"] = payload["availability_scope"]
     roster = payload.get("profiles", {})
-    aliases = default_subject_aliases(roster, harness, profile)
     for source, target in (("quota", "snapshots"), ("quota_absences", "absences")):
-        result["engine"][target] = subject_rows(payload.get(source), harness, profile, aliases=aliases)
+        result["engine"][target] = subject_rows(payload.get(source), harness, profile)
     result["engine"]["resources"] = resource_rows(payload.get("resources"), harness, profile)
-    result["engine"]["subject_aliases"] = list(aliases)
     result["engine"]["profiles"] = [wrapper for wrapper in roster.get("profiles", [])
         if wrapper.get("profile", {}).get("harness_id") == harness
         and (not profile or wrapper["profile"].get("profile_id") == profile)]
-    result["engine"]["native_accounts"] = [row for row in roster.get("harnessAccounts", [])
-        if row.get("harness_id") == harness and (not profile or aliases)]
     envelope = {**result["engine"], "availability_scope": payload.get("availability_scope")}
     result["availability"] = quota_availability(
-        envelope, harness, model=model, profile=profile, request_kind=request_kind, aliases=aliases)
+        envelope, harness, model=model, profile=profile, request_kind=request_kind)
     result["availability"]["scope"] = "quota_only"
     return result
 
@@ -76,7 +75,8 @@ def inspect_subagent_tool(ctx, subagent_id: str, request_kind: str = "text") -> 
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
     try:
-        body = inspect_subagent(subagent_id, request_kind=request_kind)
+        body = inspect_subagent(subagent_id, request_kind=request_kind,
+                                drive_root=getattr(ctx, "budget_drive_root", None) or ctx.drive_root)
         result = ToolResult(status="ok", code="OK", text=json.dumps(body, ensure_ascii=False))
     except (ValueError, SubagentSelectionError) as exc:
         result = ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc))

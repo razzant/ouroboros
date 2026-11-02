@@ -142,7 +142,7 @@ def test_ledger_preserves_verification_receipt_criterion_id():
     assert entry["criterion_id"] == "claim_1"
 
 
-def test_acceptance_summary_surfaces_and_redacts_missing_after():
+def test_acceptance_summary_surfaces_missing_after():
     from ouroboros.review_evidence import _accept_verification_summary
 
     summary = _accept_verification_summary([

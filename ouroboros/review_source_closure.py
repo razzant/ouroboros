@@ -67,8 +67,12 @@ def source_carrier(value: dict, key: str, carrier: str) -> str:
                 'completion_observations': 'metadata', 'owner_wait': 'metadata',
                 'verification_ledger': 'metadata', 'root_phase_checkpoint': 'metadata'}.get(key, '')
     if carrier == 'trace':
+        if key == 'timeout_repeat':
+            return 'timeout_repeat'
         return 'response_ref' if key == 'response' else (
             'metadata' if key in {'request', 'llm_call_refs', 'tool_call_refs', 'log_finalization'} else '')
+    if carrier == 'timeout_repeat':
+        return 'metadata' if key in {'first', 'repeat'} else ''
     if carrier == 'call_response':
         return 'metadata' if key in {'usage', 'producer_outcome'} else ''
     if carrier == 'call_request' and key in {'kwargs', 'messages', 'send_messages'}:
@@ -227,8 +231,10 @@ def promote_source_payload(raw: bytes, *, source_id: str, extension: str, catego
     return raw
 
 
-def source_owner(key: str, value: Any, task_id: str) -> str:
-    """Only an attested predecessor carrier changes a nested source's owner."""
+def source_owner(key: str, value: Any, task_id: str, *, carrier: str = '', root: Any = None) -> str:
+    """Only an attested predecessor carrier changes a nested source's owner: a helper's
+    ``predecessor_authority``, or a timeout row a new-ID recovery kept (#1886) whose owner
+    the reaper's reciprocal retry links name; any other claim stays the walked task's."""
     if key == 'predecessor_authority' and isinstance(value, dict) and value.get('task_id'):
         from ouroboros.agent_startup_checks import valid_task_result_authority_source
         from ouroboros.artifacts import validate_task_id
@@ -237,4 +243,9 @@ def source_owner(key: str, value: Any, task_id: str) -> str:
         if not valid_task_result_authority_source(value.get('source'), owner):
             raise ValueError('predecessor source has no task-bound authority')
         return owner
+    if carrier == 'timeout_repeat' and isinstance(value, dict) and value.get('task_id') not in (None, '', task_id):
+        from ouroboros.source_retention import retry_lineage_owns
+
+        if root is not None and retry_lineage_owns(root, task_id, str(value['task_id'])):
+            return str(value['task_id'])
     return task_id

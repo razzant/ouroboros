@@ -365,7 +365,11 @@ def test_rows_whose_only_task_identifier_is_subagent_task_id_are_found_by_the_ta
     with traced(monkeypatch) as counts:
         assert [row.seq for row in ds.probe_rows(tmp_path, "progress", [("subagent_task_id", "selected")])] == [alias.seq]
     details = plans(tmp_path, counts["statements"])
-    assert any("dialogue_subagent" in detail for detail in details) and not any(detail.startswith("SCAN") for detail in details), details
+    # The only scans allowed are over the probe's own value list (``json_each``) and the coordinates it selected (a
+    # one-step page's subquery), never the dialogue table.
+    assert any("dialogue_subagent" in detail for detail in details) and not any(
+        detail.startswith("SCAN") and "json_each" not in detail and not detail.startswith("SCAN (subquery")
+        for detail in details), details
 
 
 # ---- fact 5: room revision continuity ------------------------------------------------------------
@@ -521,3 +525,50 @@ def test_a_segment_that_sorts_before_imported_ones_is_stored_after_them_never_lo
     assert sorted(texts) == sorted([f"A-{index}" for index in range(5)] + [f"B-{index}" for index in range(5)])
     assert ds.range_coverage(tmp_path, "chat") == {"imported": True, "pending": 0, "mismatch": 0, "gaps": 0}
 
+
+
+def test_a_steady_boot_lists_the_archive_only_after_its_stamp_moved(tmp_path, monkeypatch):
+    """Both directions. The cutover records the archive directory's stamp beside the tails it saw; a
+    steady boot stats the directory and lists nothing while the stamp holds. A file of another stream
+    landing in the archive moves the stamp: that boot lists once, finds the same tails, records the
+    stamp and plans nothing, and the next boot lists nothing again. A chain segment an older body
+    rotated in moves it too: that boot lists once and plans again."""
+    import os
+
+    seed(tmp_path, archives={f"chat_2026100{i}T000000.jsonl": [_row(f"archived {i}")] for i in range(1, 3)},
+         live={"chat": [_row("live")]})
+    archive, listings, planned = tmp_path / "archive", [], []
+    scandir, real_plan = os.scandir, di.segment_plan
+
+    def counted(path=".", *args, **kwargs):
+        if pathlib.Path(path) == archive:
+            listings.append(1)
+        return scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(di.os, "scandir", counted)
+    monkeypatch.setattr(di, "segment_plan", lambda root, stream: planned.append(stream) or real_plan(root, stream))
+    assert di.cutover(tmp_path)["first"] is True
+    assert ds.meta(tmp_path, "archive_stamp") == [archive.stat().st_ino, archive.stat().st_mtime_ns]
+    listings.clear(), planned.clear()
+    for _ in range(2):
+        assert di.cutover(tmp_path)["replanned"] is False
+    assert (listings, planned) == ([], []), "a steady boot listed the archive"
+
+    def moved(write):
+        recorded = ds.meta(tmp_path, "archive_stamp")
+        write()
+        if archive.stat().st_mtime_ns == recorded[1]:  # a coarse clock: the entry still moved the directory
+            os.utime(archive, ns=(recorded[1] + 1, recorded[1] + 1))
+
+    moved(lambda: (archive / "events_20261023T000000.jsonl").write_text('{"kind":"rotated"}\n', encoding="utf-8"))
+    report = di.cutover(tmp_path)
+    assert report["replanned"] is False and (listings, planned) == ([1], []), "another stream's segment planned the chains"
+    assert ds.meta(tmp_path, "archive_stamp") == [archive.stat().st_ino, archive.stat().st_mtime_ns]
+    listings.clear()
+    assert di.cutover(tmp_path)["replanned"] is False and listings == [], "the moved stamp was not recorded"
+
+    moved(lambda: seed(tmp_path, archives={"chat_20261020T000000.jsonl": [_row("rotated by an older body")]}))
+    assert "chat" in di.cutover(tmp_path) and listings and planned, "a segment the last plan did not see"
+    assert di.coverage(tmp_path, "chat")["pending"] >= 1  # the plan itself lists as it must: the segment is planned
+    listings.clear(), planned.clear()
+    assert di.cutover(tmp_path)["replanned"] is False and (listings, planned) == ([], [])

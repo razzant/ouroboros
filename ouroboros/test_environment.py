@@ -14,9 +14,21 @@ from pathlib import Path
 
 
 def default_temp_parent() -> Path:
-    """A short macOS root keeps nested multiprocessing sockets inside AF_UNIX's path limit.
-    Other platforms retain their normal temporary-directory selection."""
-    return Path("/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
+    """A short root keeps nested multiprocessing sockets inside AF_UNIX's path limit (104 bytes
+    on macOS, 108 on Linux): rooted in an inherited, already nested TMPDIR, a nested forkserver
+    or manager address outgrew it (#2110). Other platforms keep their temporary directory."""
+    short = sys.platform == "darwin" or sys.platform.startswith("linux")
+    return Path("/tmp") if short else Path(tempfile.gettempdir())
+
+
+def git_ancestor(path: Path):
+    """The nearest directory at or above ``path`` that Git would treat as a checkout.
+
+    safe_test refuses a disposable parent with one; delegated-session facts name the same refusal."""
+    for directory in (path, *path.parents):
+        if (directory / ".git").exists():
+            return directory
+    return None
 
 
 def settings_keys() -> set[str]:
@@ -78,12 +90,14 @@ DIAGNOSTIC_OUTPUT_KEYS = (
 OUTPUT_LOCATION_KEYS = ("OUROBOROS_TEST_TEMP_ROOT", "OUROBOROS_TEST_EVIDENCE_ROOT", *DIAGNOSTIC_OUTPUT_KEYS)
 
 
-def declare_scratch(root, role: str) -> None:
-    """A fresh producer declares reproducibility, never liveness or deletion authority."""
+def declare_scratch(root, role: str, *, owner: str = "") -> None:
+    """A fresh producer declares its tree disposable state it made: purpose, never liveness, deletion
+    authority or a promise that the contents come back byte for byte.
+    ``owner``: a one-line fact naming what it was made for (``copy_environments`` reads it)."""
     if role not in {"pytest-session", "pytest-basetemp", "body-process"}:
         raise ValueError(f"unknown test scratch role: {role}")
     with (Path(root) / SCRATCH_MARKER).open("x", encoding="utf-8") as stream:
-        stream.write(role + "\n")
+        stream.write(role + "\n" + (owner.strip() + "\n" if owner else ""))
 
 
 def retain_tree(root, reason: str) -> bool:
@@ -128,7 +142,7 @@ def _retention_identity(path):
 def scratch_retention(root, *, previous=None, classify=False) -> dict:
     """One walk per quiescent tree; later checks read only its recorded witness.
 
-    A declaration proves reproducibility, not absence of nested retained readers.
+    A declaration states purpose, not absence of nested retained readers.
     Unclassified/changed trees stay retained until an unlocked classification;
     undeclared legacy trees and unreadable subtrees never certify deletion.
     """
@@ -184,7 +198,7 @@ def isolated_environment(root: Path, repo: Path, *, source=None, keep=(), create
         "OUROBOROS_SUBAGENT_WORKTREE_ROOT": root / "worktrees",
         "OUROBOROS_DELIVERABLES_ROOT": root / "Deliverables",
         "OUROBOROS_BENCH_RUNS_ROOT": root / "bench_runs",
-        "PYTHONPYCACHEPREFIX": root / "pycache", "PYTHONUSERBASE": root / "userbase",
+        "PYTHONPYCACHEPREFIX": root / "pycache.noindex", "PYTHONUSERBASE": root / "userbase",
         "XDG_CACHE_HOME": root / "cache", "XDG_CONFIG_HOME": root / "config",
         "XDG_DATA_HOME": root / "xdg-data", "XDG_STATE_HOME": root / "xdg-state",
         "APPDATA": root / "config", "LOCALAPPDATA": root / "cache",

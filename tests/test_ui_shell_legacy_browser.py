@@ -36,7 +36,9 @@ def test_retained_divider_cannot_take_the_main_grid_track():
             {'<div id="divider"></div>' if legacy else ''}
             <main id="content">Main transcript</main>
             <div id="project-panel-backdrop" class="project-panel-backdrop" hidden></div>
-            <aside id="project-panel" class="project-panel" hidden></aside></div></body></html>"""
+            <aside id="project-panel" class="project-panel" hidden></aside></div>
+            {'<div id="reconnect-overlay"><div class="spinner"></div>Reconnecting to Ouroboros...</div>' if legacy else ''}
+            </body></html>"""
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             try:
@@ -46,16 +48,21 @@ def test_retained_divider_cannot_take_the_main_grid_track():
                     const sidebar = document.querySelector('#primary-sidebar').getBoundingClientRect();
                     const main = document.querySelector('#content').getBoundingClientRect();
                     const divider = document.querySelector('#divider');
+                    const veil = document.querySelector('#reconnect-overlay');
                     return {left: main.left, right: main.right, width: main.width,
                         sidebarRight: sidebar.right,
                         dividerDisplay: divider && getComputedStyle(divider).display,
+                        veilDisplay: veil && getComputedStyle(veil).display,
+                        rootOverflow: document.documentElement.scrollHeight - innerHeight,
                         tracks: getComputedStyle(document.querySelector('#app')).gridTemplateColumns};
                 }""")
                 assert abs(measured["left"] - measured["sidebarRight"]) <= 1, measured
                 assert measured["width"] >= 1000 and measured["right"] <= 1537, measured
                 assert len(measured["tracks"].split()) == 2, measured
+                assert measured["rootOverflow"] <= 0, ("nothing below the shell scrolls the page", measured)
                 if legacy:
                     assert measured["dividerDisplay"] == "none", measured
+                    assert measured["veilDisplay"] == "none", ("the old reconnect veil is never shown", measured)
 
                 page.evaluate("""() => {
                     for (const id of ['project-panel-backdrop', 'project-panel']) {

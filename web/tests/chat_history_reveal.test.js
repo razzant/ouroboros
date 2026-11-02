@@ -213,3 +213,22 @@ test('an exact reference that could not be read passes the typed failure on, nev
         assert.deepEqual(await reveal.reference('task:work-1', () => true), { state: 'moved', task_id: 'work-1' });
     } finally { env.restore(); }
 });
+
+
+test('an exact tucked relay remains a target for its deck owner; other hidden rows remain unavailable', () => {
+    const env = installDomDouble();
+    try {
+        const feed = env.el('div');
+        env.doc.body.append(feed);
+        const relay = env.el('div', { dataset: { rowAddress: 'row:42@a#1', deckTucked: '1' } });
+        relay.getClientRects = () => [];
+        feed.append(relay);
+        const reveal = createHistoryReveal({ pager: {}, reading: {}, feed, records: new Map(), present: () => true });
+        assert.equal(reveal.exact('row:42@a#1'), relay, 'the caller can surface this deck before jumping');
+        delete relay.dataset.deckTucked;
+        assert.equal(reveal.exact('row:42@a#1'), null);
+        relay.dataset.deckTucked = '1';
+        relay.hidden = true;
+        assert.equal(reveal.exact('row:42@a#1'), null, 'an explicitly hidden row stays unavailable');
+    } finally { env.restore(); }
+});

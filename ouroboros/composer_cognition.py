@@ -1,4 +1,4 @@
-"""Saved Context and Effort of Main and each registered Project room.
+"""Saved Context, Effort and Subagents of Main and each registered Project room.
 
 Projects copy Main once, at creation or migration. Reads stay read-only; every
 settings writer freezes legacy rooms before changing Main. Registry writers take
@@ -13,20 +13,22 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ouroboros.context_mode_compat import normalize_context_mode, owner_declared_low
-from ouroboros.settings_scales import EFFORT_RANGE_KEYS, effort_range
+from ouroboros.settings_scales import EFFORT_RANGE_KEYS, effort_range, normalize_subagents_mode
 
-COGNITION_KEYS = ("OUROBOROS_CONTEXT_MODE", *EFFORT_RANGE_KEYS)
+COGNITION_KEYS = ("OUROBOROS_CONTEXT_MODE", *EFFORT_RANGE_KEYS, "OUROBOROS_SUBAGENTS_MODE")
 
 
 def cognition_from_settings(settings: Mapping[str, Any]) -> dict:
     return {"context_mode": normalize_context_mode(settings.get("OUROBOROS_CONTEXT_MODE", "max")),
-            "effort_range": effort_range(settings)}
+            "effort_range": effort_range(settings),
+            "subagents_mode": normalize_subagents_mode(settings.get("OUROBOROS_SUBAGENTS_MODE"))}
 
 
 def cognition_overrides(cognition: Mapping[str, Any]) -> dict:
-    """The four non-secret values an actor privately overlays on its settings."""
+    """The non-secret room values; snapshot callers retain only Context/Effort."""
     effort = cognition["effort_range"]
     return {"OUROBOROS_CONTEXT_MODE": cognition["context_mode"],
+            "OUROBOROS_SUBAGENTS_MODE": normalize_subagents_mode(cognition.get("subagents_mode")),
             **{key: effort[field] for key, field in zip(EFFORT_RANGE_KEYS, ("min", "recommended", "max"))}}
 
 
@@ -49,7 +51,7 @@ def project_cognition(project: Mapping[str, Any], baseline: Mapping[str, Any]) -
     """Legacy rows use the pre-migration baseline; saved choices never follow Main."""
     saved = project.get("cognition")
     return (cognition_from_settings(cognition_overrides(saved)) if isinstance(saved, Mapping)
-            else copy.deepcopy(dict(baseline)))
+            else {**copy.deepcopy(dict(baseline)), "subagents_mode": "auto"})
 
 
 def read_cognition(drive_root: Any, project_id: str = "", *, settings: Mapping[str, Any] | None = None) -> dict:
@@ -68,7 +70,7 @@ def _seed_rows(data: dict, baseline: Mapping[str, Any]) -> bool:
     changed = False
     for row in data["projects"]:
         if "cognition" not in row:
-            row["cognition"] = copy.deepcopy(dict(baseline))
+            row["cognition"] = {**copy.deepcopy(dict(baseline)), "subagents_mode": "auto"}
             changed = True
     return changed
 
@@ -99,7 +101,8 @@ def preserve_project_cognition(settings: Mapping[str, Any], settings_path: Path)
 
 
 def update_project_cognition(drive_root: Any, project_id: str, *, context_mode: str | None = None,
-                             effort_range: Mapping[str, str] | None = None) -> tuple[dict, dict]:
+                             effort_range: Mapping[str, str] | None = None,
+                             subagents_mode: str | None = None) -> tuple[dict, dict]:
     """Update just this room's decision under the registry's existing write lock."""
     from ouroboros import projects_registry as registry
 
@@ -116,6 +119,8 @@ def update_project_cognition(drive_root: Any, project_id: str, *, context_mode: 
             current["context_mode"] = context_mode
         if effort_range is not None:
             current["effort_range"] = dict(effort_range)
+        if subagents_mode is not None:
+            current["subagents_mode"] = subagents_mode
         project["cognition"] = current
         registry._save(drive_root, data)
     return previous, current

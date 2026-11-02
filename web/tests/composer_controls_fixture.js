@@ -69,17 +69,18 @@ export function mount({ hover = false, save, win } = {}) {
     };
 }
 
-/* Both capsules in one composer row, as chat.js builds it: the pills, then the context anchor. */
-export function mountPair({ hover = false, reply, win, withBox = false, projectId = '' } = {}) {
+/* The composer row as chat.js builds it: the Subagents anchor, then the context anchor; Effort mounts after Context.
+   `subagents` mounts the Subagents capsule on its anchor too (its writer answers `subagentAnswer`). */
+export function mountPair({ hover = false, reply, win, withBox = false, projectId = '', subagents = false } = {}) {
     const doc = stubDocument();
     const box = doc.createElement('section');
     const row = doc.createElement('div');
     box.appendChild(row);
     row.className = 'chat-toolbar-row';
     row.getBoundingClientRect = () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 });  // not laid out: no fit
-    const pills = doc.createElement('div');
-    pills.className = 'chat-composer-pills';
-    row.appendChild(pills);
+    const subagentsEl = doc.createElement('div');
+    subagentsEl.className = 'chat-subagents-mode';
+    row.appendChild(subagentsEl);
     const contextEl = doc.createElement('div');
     contextEl.className = 'chat-context-mode';
     contextEl.dataset.contextMode = 'max';
@@ -89,8 +90,20 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     const refreshes = [];
     const answer = { value: reply || { ok: true } };
     const effortAnswer = { value: null };
+    const subagentAnswer = { value: null };
+    const settingsOpened = [];
+    const subagentsWriter = subagents ? {
+        saveSubagentsMode: async (body) => {
+            posts.push(['/api/owner/subagents-mode', body]);
+            const reply = await subagentAnswer.value;
+            return reply || { ok: true, project_id: projectId, subagents_mode: body.mode, cognition: { subagents_mode: body.mode } };
+        },
+        openSettings: () => settingsOpened.push('agents'),
+    } : {};
     const controls = createComposerOwnerControls({
-        projectId, row, box: withBox ? box : null, doc, win: win || hoverWindow(hover), byId: (suffix) => (suffix === 'context-mode' ? contextEl : null),
+        ...subagentsWriter,
+        projectId, row, box: withBox ? box : null, doc, win: win || hoverWindow(hover),
+        byId: (suffix) => (suffix === 'context-mode' ? contextEl : suffix === 'subagents-mode' ? subagentsEl : null),
         apiFetch: async (url, init) => {
             const body = JSON.parse(init.body); posts.push([url, body]);
             const response = await answer.value;
@@ -103,8 +116,23 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     const fire = (node, type, event) => Promise.all((node.listeners.get(type) || []).map((fn) => fn(event)));
     const effortEl = controls.effort.el;
     const seg = (mode) => contextEl.querySelectorAll('.chat-seg').find((node) => node.dataset.mode === mode);
+    const subSeg = (mode) => row.querySelectorAll('.chat-subagents-strip')[0]?.querySelectorAll('.chat-seg').find((node) => node.dataset.mode === mode);
+    const subStrip = () => subagentsEl.querySelector('.chat-subagents-strip');
+    const onSeg = (mode) => ({ closest: (selector) => (selector === '.chat-seg' ? subSeg(mode) : null) });
     return {
         controls, row, box, doc, contextEl, effortEl, posts, toasts, refreshes, answer, effortAnswer, seg,
+        subagentsEl, subagentAnswer, settingsOpened, subSeg, subHead: subagentsEl.querySelector('.chat-subagents-head'),
+        subHint: subagentsEl.querySelector('.ui-hint'),
+        contextHint: contextEl.querySelector('.ui-hint'), effortHint: effortEl.querySelector('.ui-hint'),
+        preview: (node, mode) => fire(node, 'pointerover', { pointerType: 'mouse', target: { closest: (selector) => (selector === '.chat-seg'
+            ? node.querySelectorAll('.chat-seg').find((seg) => seg.dataset.mode === mode) : null) } }),
+        previewEnd: (node) => fire(node, 'pointerleave', { pointerType: 'mouse' }),
+        chooseSub: (mode) => fire(subStrip(), 'click', { target: onSeg(mode) }),
+        subKey: (mode, key) => {
+            const event = { key, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, target: onSeg(mode) };
+            fire(subStrip(), 'keydown', event);
+            return event;
+        },
         contextHead: contextEl.querySelector('.chat-context-head'), effortHead: effortEl.querySelector('.chat-effort-head'),
         press: (head, detail = 1) => fire(head, 'click', { detail }),
         choose: (mode) => fire(contextEl, 'click', { target: { closest: (selector) => (selector === '.chat-seg' ? seg(mode) : null) } }),

@@ -66,12 +66,17 @@ def test_continue_button_and_tool_capture_then_claim_once(host, monkeypatch, win
     assert [task["id"] for task in host.pending] == [successor] and not host.running
     stored = load_task_result(host.root, "pred-1")["continued_by"]
     assert stored["state"] == "admitted" and stored["successor_task_id"] == successor
-    assert stored.get("actor", "owner") == winner
+    assert stored["by"].get("actor", "owner") == ("ouroboros" if winner == "mind" else "owner")
+    if winner == "mind":
+        assert stored["by"]["task_id"] == event["actor_task_id"]
+        assert stored["by"]["text"] == event["reason"]
+    assert "actor" not in stored
     # Re-delivery through both doors cannot replace the winning episode.
     monkeypatch.setattr(owner_continue, "claim_on_predecessor", real_claim)
     assert json.loads(owner().body)["successor_task_id"] == successor
     assert _apply(event)["successor_task_id"] == successor
     assert [task["id"] for task in host.pending] == [successor]
+    assert load_task_result(host.root, "pred-1")["continued_by"]["by"] == stored["by"]
 
 
 @pytest.mark.parametrize("pause_first", [False, True])

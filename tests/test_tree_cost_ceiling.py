@@ -150,7 +150,7 @@ class TestCacheAwareReservation:
         )
         assert usage_accounting._reservation_cost(request) < cold
 
-        assert "registered late" in registry.execute("enable_tools", {"tools": "read_file"})
+        assert "Call schemas loaded" in registry.execute("enable_tools", {"tools": "read_file"})
         assert usage_accounting._reservation_cost(request) == cold
 
     def test_direct_route_and_ledger_identity_share_a_split(self):

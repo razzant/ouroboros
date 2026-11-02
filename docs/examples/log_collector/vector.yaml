@@ -13,8 +13,9 @@ sources:
       - /data/archive/events_*.jsonl
       - /data/archive/tools_*.jsonl
       - /data/archive/supervisor_*.jsonl
-      # Worker rows of subagents and forked-memory tasks; deleted with the task drive after retention.
-      # Their tools.jsonl is not read: the canonical tools.jsonl holds the same rows.
+      # Worker rows of subagents and forked-memory tasks; deleted with the task drive (retention or the owner's storage run).
+      # Their tools.jsonl is not read: the canonical tools.jsonl holds the same rows. Their llm_api_error
+      # rows reach the canonical events.jsonl too; ouroboros_api_error_once keeps one of each.
       - /data/state/headless_tasks/*/data/logs/events.jsonl
     read_from: beginning
     ignore_older_secs: 86400       # older archive generations and finished drives: a one-time backfill, not this tail
@@ -40,16 +41,27 @@ transforms:
                  "waited_ms", "exit_code", "timed_out", "round", "attempt", "model", "provider",
                  "reasoning_effort", "prompt_tokens", "completion_tokens", "cached_tokens",
                  "cache_write_tokens", "duration_ms", "duration_sec", "tool_calls", "tool_errors", "error_kind",
-                 "status_code", "retry_same_request", "phase", "exitcode", "busy_task_id", "signal",
-                 "stalled_sec", "session_id", "review_wave_id", "review_slot_id"]
+                 "status_code", "retry_same_request", "provider_code", "provider_error_type", "phase", "exitcode",
+                 "busy_task_id", "signal",
+                 "stalled_sec", "session_id", "review_wave_id", "review_slot_id", "input_token_usage"]
       . = filter(row) -> |key, _value| { includes(allowed, key) }
       if row.type == "task_received" && !exists(row.task_id) { .task_id = row.task.id }  # legacy nested id only
       .log = replace(replace(replace(path, r'^.*/', ""), r'\.jsonl$', ""), r'_.*$', "")  # archive/<log>_<stamp>
       .child_drive = contains(path, "/state/headless_tasks/")  # a subagent's or forked-memory task's own drive
+  ouroboros_api_errors:        # REPLICA_RULE: a drive's llm_api_error row is also in the canonical file
+    type: route
+    inputs: [ouroboros_metadata]
+    route:
+      api_error: '.type == "llm_api_error"'
+  ouroboros_api_error_once:    # the first copy passes; an older row only its drive holds is never a duplicate
+    type: dedupe
+    inputs: [ouroboros_api_errors.api_error]
+    fields:
+      match: [type, llm_call_id, ts]
 sinks:
   ouroboros_metadata_file:     # replace with your destination (Loki, Elasticsearch, an OTLP endpoint, ...)
     type: file
-    inputs: [ouroboros_metadata]
+    inputs: [ouroboros_api_errors._unmatched, ouroboros_api_error_once]
     path: /var/lib/vector/ouroboros-metadata.jsonl
     encoding:
       codec: json
@@ -126,6 +138,21 @@ tests:  # one input per test: a condition passes when any output event meets it
               assert!(!exists(.accounted_upper_bound_usd))
               assert_eq!(.log, "events")
               assert_eq!(.child_drive, true)
+  - name: a model error keeps the provider's code and own type, never its text
+    inputs:
+      - insert_at: ouroboros_metadata
+        type: log
+        log_fields:
+          file: /srv/ouroboros/data/logs/events.jsonl
+          message: '{"ts":"2026-10-26T00:00:00+00:00","type":"llm_api_error","task_id":"t5","llm_call_id":"c1","round":3,"attempt":1,"error":"provider_error_type=server_is_overloaded; the owner prompt","error_kind":"provider_transient","status_code":null,"provider_code":"provider_failed","provider_error_type":"server_is_overloaded","provider_message":"private body"}'
+    outputs:
+      - extract_from: ouroboros_metadata
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.provider_code, "provider_failed")
+              assert_eq!(.provider_error_type, "server_is_overloaded")
+              assert!(!exists(.error) && !exists(.provider_message))
   - name: a task start keeps only its task id
     inputs:
       - insert_at: ouroboros_metadata

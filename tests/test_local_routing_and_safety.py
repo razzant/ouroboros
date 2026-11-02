@@ -41,18 +41,6 @@ def test_build_openrouter_kwargs_for_non_anthropic_has_no_provider_block():
 
 
 
-def test_format_messages_for_safety_marks_omission():
-    from ouroboros.safety import _format_messages_for_safety
-
-    text = "X" * 700
-    output = _format_messages_for_safety([
-        {"role": "user", "content": text},
-    ])
-
-    assert "chars omitted" in output
-
-
-
 def test_repo_commit_policy_is_skip():
     """Trusted reviewed-mutative built-ins must be marked skip, not recheck."""
     from ouroboros.safety import TOOL_POLICY, POLICY_SKIP

@@ -211,7 +211,10 @@ def test_exact_cross_room_quote_and_return_preserve_drafts_unread_and_history(di
             assert page.locator('#chat-input').input_value() == "Keep this unsent draft"
             assert "draft.txt" in page.locator('#chat-attachment-preview').inner_text()
             # Reply in the composer survives reload, and its quote retries from an evicted window.
-            page.locator('#chat-messages .is-quote-target .chat-message-reply').click()
+            # Evidence capture may outlast the landing highlight; Reply must still address that saved row.
+            page.locator('#chat-messages .is-quote-target').wait_for(state='detached')
+            page.locator(f'#chat-messages [data-row-address={json.dumps(main)}] .chat-message-reply').click()
+            assert page.evaluate("() => JSON.parse(sessionStorage.getItem('ouro_chat_reply')).address") == main
             page.locator('#chat-scroll-bottom').click()
             assert not page.evaluate("() => window.__quoteSends.some(x => JSON.parse(x).type === 'chat')")
             page.reload(wait_until="domcontentloaded")

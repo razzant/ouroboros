@@ -9,8 +9,9 @@ from ouroboros import delegate_recovery, owner_wait, projects_registry, store, t
 from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
 from ouroboros.gateway.state import _chat_activities_snapshot_safe
 from supervisor import queue, state, workers
-from supervisor.events_budget import explicit_resume_required
+from ouroboros.gateway.state import _pending_resume_available
 from supervisor.queue_transitions import pending_member_replay_safe
+from ouroboros.work_stop import continuation_refusal
 from tests._store_shared import read_result, seed_result, unreadable_result
 from tests.test_owner_wait_restart import (
     acknowledge, first_cleanup, restart_case as restart_case, restore_project_wait, restore_stale_snapshot,
@@ -57,8 +58,8 @@ def _held(case, monkeypatch, *, stage="early", project=False):
         assert queue.restore_pending_from_snapshot() == len(expected_ids)
     assert {row["id"] for row in workers.PENDING} == expected_ids
     [kept] = [row for row in workers.PENDING if row["id"] == case.task_id]
-    assert kept["_budget_pause_hold"]["reason"] == (EARLY if stage == "early" else LATE)
-    assert kept["_owner_wait_resume"] == carrier and kept["_attempt"] == case.attempt
+    assert continuation_refusal(kept)["reason"] == (EARLY if stage == "early" else LATE)
+    assert {k: v for k, v in kept["_owner_wait_resume"].items() if k != "refusal"} == carrier and kept["_attempt"] == case.attempt
     assert not kept.get("_terminalization_retry")
     assert task_results.load_task_result(case.root, case.task_id)["status"] != "failed"
     assert stage == "early" or reads
@@ -94,13 +95,13 @@ def test_recovered_native_wait_needs_explicit_resume_then_dispatches_once(restar
     env = _held(restart_case, monkeypatch, stage=stage, project=project)
     workers.assign_tasks()
     workers.assign_tasks()
-    assert not env.sent and env.task["_budget_pause_hold"]["selected"] is False
+    assert not env.sent and continuation_refusal(env.task) and not env.task.get("_resume_selection")
     assert not env.task.get("_project_admission_restore_hold")
-    assert explicit_resume_required(queue, env.task, owner_paused=False)
+    assert _pending_resume_available(queue, env.task, owner_paused=False)
     assert _activity(env)["can_resume"] is True
     resumed = queue.resume_budget_paused_task(env.case.task_id)
     assert resumed["ok"] and resumed["same_generation"], resumed
-    assert "_budget_pause_hold" not in env.task and not env.task.get("_budget_pause_resume")
+    assert not continuation_refusal(env.task) and not env.task.get("_budget_pause_resume")
     released = copy.deepcopy(env.task)
     again = queue.resume_budget_paused_task(env.case.task_id)
     assert not again["ok"] and env.task == released
@@ -109,7 +110,7 @@ def test_recovered_native_wait_needs_explicit_resume_then_dispatches_once(restar
 
 
 @pytest.mark.parametrize("fault", ["result", "source", "transaction", "unacknowledged", "spent",
-                                   "terminal", "cancel", "panic", "deadline"])
+                                   "terminal", "cancel", "owner_restart", "deadline"])
 def test_explicit_resume_keeps_current_native_authority_refusals(restart_case, monkeypatch, fault):
     from ouroboros.cancel_intents import request_cancel
 
@@ -131,15 +132,16 @@ def test_explicit_resume_keeps_current_native_authority_refusals(restart_case, m
         task_results.write_task_result(case.root, case.task_id, "completed", result="Already finished")
     elif fault == "cancel":
         request_cancel(case.root, case.task_id, reason="owner Stop")
-    elif fault == "panic":
-        (case.root / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
+    elif fault == "owner_restart":
+        from tests._work_stop_helpers import live_restart
+        live_restart(case.root, monkeypatch)
     else:
         task["deadline_at"] = "2000-01-01T00:00:00+00:00"
     before = copy.deepcopy(task)
     refused = queue.resume_budget_paused_task(case.task_id)
     assert not refused["ok"], refused
     assert workers.PENDING == [before] and not env.sent
-    assert task["_owner_wait_resume"] == env.carrier and not task["_budget_pause_hold"]["selected"]
+    assert {k: v for k, v in task["_owner_wait_resume"].items() if k != "refusal"} == env.carrier and continuation_refusal(task) and not task.get("_resume_selection")
 
 
 @pytest.mark.parametrize("carrier,fallback", [(None, "working"), ({}, "zero"),
@@ -172,12 +174,12 @@ def test_read_gap_without_valid_native_authority_never_falls_back(restart_case, 
         task.update(_attempt=1, admitted_dispatch="none")
     no_native = {key: value for key, value in task.items() if key != "_owner_wait_resume"}
     assert pending_member_replay_safe(queue, no_native)[0], "the unrelated fallback must actually be valid"
-    if carrier is None:
-        task.pop("_owner_wait_resume")
-    else:
-        task["_owner_wait_resume"] = copy.deepcopy(carrier)
+    # The malformed locator retains its refusal, on that same source kind.
+    refusal = continuation_refusal(task)
+    task["_owner_wait_resume"] = {**(copy.deepcopy(carrier) if isinstance(carrier, dict) else
+                                    {"source_ref": carrier}), "refusal": refusal}
     refused = queue.resume_budget_paused_task(env.case.task_id)
-    assert not refused["ok"] and not task["_budget_pause_hold"]["selected"]
+    assert not refused["ok"] and continuation_refusal(task) and not task.get("_resume_selection")
     assert not env.sent and workers.PENDING == [task]
 
 
@@ -190,7 +192,7 @@ def test_native_selection_does_not_release_the_project_verification_hold(restart
     hold = copy.deepcopy(env.task["_project_admission_restore_hold"])
     resumed = queue.resume_budget_paused_task(env.case.task_id)
     assert resumed["ok"], resumed  # Intent does not certify the Project or dispatch a worker.
-    assert "_budget_pause_hold" not in env.task
+    assert not continuation_refusal(env.task)
     assert env.task["_project_admission_restore_hold"] == hold
     workers.assign_tasks()
     assert not env.sent and env.task["_project_admission_restore_hold"]
@@ -207,26 +209,23 @@ def test_failed_selection_publication_keeps_the_native_wait_unselected(restart_c
         fault.setattr(queue, "persist_queue_snapshot", lambda reason="":
                       False if reason == "budget_hold_selected" else persist(reason=reason))
         refused = queue.resume_budget_paused_task(env.case.task_id)
-    assert refused == {"ok": False, "error": "snapshot_not_persisted"}
-    # The existing selector removes the snapshot's null exact-pause slot.
-    if before.get("_budget_pause") is None:
-        before.pop("_budget_pause", None)
+    assert refused["ok"] is False and refused["error"] == "snapshot_not_persisted"
     assert env.task == before and not env.sent
     workers.assign_tasks()
-    assert not env.sent and not env.task["_budget_pause_hold"]["selected"]
+    assert not env.sent and continuation_refusal(env.task) and not env.task.get("_resume_selection")
     assert queue.resume_budget_paused_task(env.case.task_id)["ok"]
-    assert "_budget_pause_hold" not in env.task
+    assert not continuation_refusal(env.task)
     _assert_original_dispatch(env)
 
 
-def test_unrelated_restore_hold_has_no_new_resume_button_or_release(restart_case, monkeypatch):
+def test_technical_refusal_text_does_not_override_the_native_source_kind(restart_case, monkeypatch):
     env = _held(restart_case, monkeypatch)
-    reason = "restore_refused:invalid_acceptance_fence_snapshot"
-    env.task["_budget_pause_hold"]["reason"] = reason
-    assert not explicit_resume_required(queue, env.task, owner_paused=False)
-    assert _activity(env)["can_resume"] is False
-    assert queue.resume_budget_paused_task(env.case.task_id) == {"ok": False, "error": reason}
-    assert not env.sent and env.task["_budget_pause_hold"]["selected"] is False
+    continuation_refusal(env.task)["reason"] = "restore_refused:invalid_acceptance_fence_snapshot"
+    assert _pending_resume_available(queue, env.task, owner_paused=False)
+    assert _activity(env)["can_resume"] is True
+    assert queue.resume_budget_paused_task(env.case.task_id)["ok"]
+    assert not continuation_refusal(env.task) and not env.task.get("_resume_selection")
+    _assert_original_dispatch(env)
 
 
 @pytest.mark.parametrize("stage", ["early", "late"])
@@ -255,7 +254,7 @@ def test_technical_resume_rejoins_native_work_without_monetary_selection(restart
     assert [row["id"] for row in siblings] == [sibling["id"]]
     monkeypatch.setattr(state, "budget_remaining", lambda *_args, **_kwargs: 100.0)
     workers.assign_tasks()
-    assert not env.sent and not env.task["_budget_pause_hold"]["selected"]
+    assert not env.sent and continuation_refusal(env.task) and not env.task.get("_resume_selection")
     # Assignment independently rechecks the sibling before Resume touches the root.
     [revalidated] = [row for row in workers.PENDING if row["id"] != case.task_id]
     assert siblings[0]["_project_admission_restore_hold"]["reason"] == "project_routing_fence_lookup_failed"
@@ -264,7 +263,7 @@ def test_technical_resume_rejoins_native_work_without_monetary_selection(restart
                            "_project_admission_restore_hold": revalidated["_project_admission_restore_hold"]}
     siblings = copy.deepcopy([revalidated])
     assert queue.resume_budget_paused_task(case.task_id)["ok"]
-    assert "_budget_pause_hold" not in env.task and not env.task.get("_budget_pause_resume")
+    assert not continuation_refusal(env.task) and not env.task.get("_budget_pause_resume")
     assert env.task["_owner_wait_resume"] == env.carrier
     assert events_budget.live_root_resume_grant(queue, case.task_id, case.root) == {}
     released = copy.deepcopy(env.task)
@@ -303,7 +302,7 @@ def test_owner_pause_after_technical_release_cannot_resume_native_work_as_unstar
     assert not queue.enqueue_task(sibling).get("_admission_blocked")
     env = _held(case, monkeypatch)
     assert queue.resume_budget_paused_task(case.task_id)["ok"]
-    assert "_budget_pause_hold" not in env.task and not env.sent
+    assert not continuation_refusal(env.task) and not env.sent
     assert env.task["_owner_wait_resume"] == env.carrier
     paused = request_owner_pause(case.task_id, request_id="pause-native-pending")
     assert paused["ok"], paused

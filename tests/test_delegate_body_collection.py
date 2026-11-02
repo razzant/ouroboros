@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._delegate_capture_child import capture_child  # noqa: F401
+
 from ouroboros import delegate_collection as body
 from ouroboros import delegate_custody as custody
 from ouroboros import delegate_custody_current as current
@@ -165,6 +167,22 @@ def test_foreground_supervision_joins_collection_without_a_model_wake(tmp_path, 
     assert json.loads(result.text)["status"] == "terminal" and len(money) == 1
 
 
+def test_foreground_supervision_wakes_on_terminal_custody_without_a_collector(tmp_path, monkeypatch):
+    from ouroboros import delegate_supervision
+    from ouroboros.tools.registry import ToolContext
+
+    entry = started(tmp_path)
+    assert body.observe_run(tmp_path, entry, terminal())
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
+    monkeypatch.setattr(delegate_supervision, "_leaf_live_input", lambda *args: "unknown")
+    result = delegate_supervision.supervised_wait(ctx, entry.run_id, wait_once=lambda *_a, **_k:
+        json.dumps({"status": "no_progress", "run_id": entry.run_id}))
+    payload = json.loads(result.text)
+    assert payload["status"] == "terminal_custody"
+    assert payload["terminal_facts"] == [{"id": "run:" + entry.run_id,
+                                          "reason": "run:" + entry.run_id, "state": "succeeded"}]
+
+
 def test_collector_does_not_take_over_review_panel(tmp_path, money):
     entry = started(tmp_path, source="review_substrate_commit")
     assert entry.review_owned
@@ -288,7 +306,7 @@ def _until(check):
     raise AssertionError("physical work did not reach the expected barrier")
 
 
-def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monkeypatch, money):
+def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monkeypatch, money, capture_child):  # noqa: F811
     from ouroboros.tools import delegate_integration
     a = started(tmp_path, "run-a", execution_root=str(tmp_path / "copy-a"), snapshot_id="snap-a")
     b = started(tmp_path, "run-b")
@@ -323,13 +341,13 @@ def test_slow_capture_does_not_block_another_terminal_observation(tmp_path, monk
         available = collect_and_deliver_terminal(ctx, a.run_id, terminal(a.run_id), body._shape(a), a, None)
         assert available["status"] == "terminal" and available["output_delivery"]["complete"]
         assert available["workspace_capture"]["status"] == "pending"
-        assert not available["settlement"]["settled"] and not release.is_set()
-        runtime.request(b.run_id)
+        assert available["settlement"]["settled"] and not release.is_set()
+        assert runtime.ensure_runs([(b.run_id, b.invocation_id)])
         _until(lambda: current.run(tmp_path, b.run_id).terminal_state)
         assert not release.is_set()
         body.stop_body_runtime(tmp_path, wait=False)
         assert not runtime.ensure_runs([(b.run_id, b.invocation_id)])
-        assert body.start_body_runtime(tmp_path, gateway_factory=Gateway) is runtime
+        assert any(thread.is_alive() for thread in capture_child.threads.values()), "the maintenance child still owns physical capture"
     finally:
         release.set()
         runtime.close(wait=True)
@@ -527,5 +545,5 @@ def test_a_typed_capture_failure_stays_owed(tmp_path, monkeypatch, money):
     first = body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), failures=failures)
     assert "capture:RuntimeError" in first["errors"] and "capture" in failures
     assert first["workspace_capture"]["status"] == "failed"
-    second = body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), failures=failures)
+    second = body.collect_terminal(tmp_path, entry.run_id, detail=terminal(), failures=failures, recapture=True)
     assert not any(error.startswith("capture:") for error in second["errors"]) and "capture" not in failures

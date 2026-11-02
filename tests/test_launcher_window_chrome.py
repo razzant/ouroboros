@@ -6,7 +6,8 @@ so this runs on every CI OS. What it pins is the contract of
 its own world; the window starts integrated, only a document that declares keeps it, and only what is
 applied and measured is written into that document; an undeclared, script-less or older document
 cannot leave the window integrated; full screen hides the toolbar band and reserves nothing; a failed
-switch restores the ordinary bar; drag, double-click and appearance use the window's own facts.
+switch restores the ordinary bar; drag, double-click and appearance use the window's own facts; every
+window opens in the room colour of its own appearance.
 Where the native qualification (macOS 26.4) saw AppKit behave otherwise than assumed, the stand-ins
 do what it saw. None of this is a native macOS run: pixels, gestures and AppKit's real geometry
 belong to that qualification (ARCHITECTURE §3 "Navigation and shared UI contracts").
@@ -119,7 +120,7 @@ class NSWindow:
         self._frame = Rect(100, 100, 1100, 750)
         self.transparent, self.title_visibility, self._toolbar = False, 0, None
         self.toolbar_style, self.separator, self.tabbing = 0, 0, 0
-        self.appearances, self.calls = [], []
+        self.appearances, self.calls, self.backgrounds = [], [], []
         self.exiting_full_screen = False
         self.fill = View()
         self.content = View(lambda: Rect(0, 0, self._frame.size.width, self.content_height()))
@@ -203,6 +204,9 @@ class NSWindow:
 
     def setAppearance_(self, appearance):
         self.appearances.append(appearance)
+
+    def setBackgroundColor_(self, color):
+        self.backgrounds.append(color)
 
     def performWindowDragWithEvent_(self, event):
         self.calls.append(("drag", event))
@@ -289,7 +293,11 @@ def mac(monkeypatch):
 
     center = Center()
     appkit = types.ModuleType("AppKit")
-    appkit.NSColor = types.SimpleNamespace(clearColor=lambda: "clear", windowBackgroundColor=lambda: "window-background")
+    appkit.NSColor = types.SimpleNamespace(
+        clearColor=lambda: "clear", windowBackgroundColor=lambda: "window-background",
+        colorWithSRGBRed_green_blue_alpha_=lambda red, green, blue, alpha: (
+            "srgb", round(red * 255), round(green * 255), round(blue * 255), alpha),
+        colorWithName_dynamicProvider_=lambda name, provider: ("dynamic", name, provider))
     appkit.NSToolbar = types.SimpleNamespace(alloc=lambda: types.SimpleNamespace(initWithIdentifier_=Toolbar))
     appkit.NSNotificationCenter = types.SimpleNamespace(defaultCenter=lambda: center)
     # A value no hand-typed number equals: the style must be the binding's own name.
@@ -630,6 +638,70 @@ def test_the_window_appearance_follows_the_painted_choice_and_system_inherits(ma
                                   ("appearance", "Aqua"), None]
 
 
+class Appearance:
+    """An NSAppearance as the room colour's provider meets it: AppKit's own best match among the names."""
+
+    def __init__(self, best):
+        self.best, self.asked = best, []
+
+    def bestMatchFromAppearancesWithNames_(self, names):
+        self.asked.append(list(names))
+        return self.best
+
+
+LIGHT_ROOM, DARK_ROOM = ("srgb", 255, 255, 255, 1.0), ("srgb", 15, 15, 17, 1.0)
+
+
+def room(native):
+    """The one dynamic colour the window opened with: its provider, as AppKit calls it at each draw."""
+    (kind, name, provider), = native.backgrounds
+    assert (kind, name) == ("dynamic", None)
+    return provider
+
+
+def test_the_window_opens_in_the_room_colour_of_its_own_appearance(mac):
+    """Before the window is shown, pywebview's fixed colour becomes one dynamic colour AppKit resolves for the
+    appearance it draws in: the Mac's until a page forces Light or Dark (owner decision on #1111: A)."""
+    _chrome, _window, native = shown()
+    provider = room(native)
+    aqua, dark_aqua = Appearance("Aqua"), Appearance("DarkAqua")
+    assert provider(aqua) == LIGHT_ROOM and provider(dark_aqua) == DARK_ROOM
+    assert aqua.asked == [["Aqua", "DarkAqua"]]  # AppKit's names: a High Contrast variant matches its base
+    assert provider(Appearance(None)) == DARK_ROOM  # nothing matched: the room this window always had
+
+
+def test_a_window_shown_before_the_server_gets_the_room_and_keeps_its_ordinary_bar(mac):
+    window = Window(NSWindow())
+    wc.paint_room(window)
+    assert len(window.events.before_show.handlers) == 1 and window.events.before_load.handlers == []
+    window.events.before_show.fire()
+    assert room(window.native)(Appearance("Aqua")) == LIGHT_ROOM
+    assert_ordinary(window.native)
+    assert window.native.appearances == [], "the Mac's appearance: no page can say otherwise"
+
+
+def test_the_room_is_inert_off_macos_and_without_a_native_window(mac, monkeypatch):
+    pending = Window(None)
+    wc.paint_room(pending)
+    pending.events.before_show.fire()  # no NSWindow to paint, and nothing raised into pywebview
+    monkeypatch.setattr(wc, "_MACOS", False)
+    other = Window(NSWindow())
+    wc.paint_room(other)
+    wc.paint_room(None)
+    assert other.events.before_show.handlers == []
+
+
+def test_a_refused_room_colour_keeps_pywebviews_and_the_title_bar_still_integrates(mac, caplog):
+    def refuse(name, provider):
+        raise RuntimeError("no dynamic colours here")
+
+    mac.appkit.NSColor.colorWithName_dynamicProvider_ = refuse
+    chrome, _window, native = shown()
+    assert native.backgrounds == [] and "keeps its fixed background colour" in caplog.text
+    declare(chrome, DOC_A)
+    assert native.mask & wc._FULL_SIZE_CONTENT
+
+
 def test_close_releases_the_full_screen_observers(mac):
     chrome, window, native = shown()
     names = sorted(mac.observers)
@@ -654,7 +726,8 @@ def test_without_its_webview_the_window_stays_ordinary(mac, monkeypatch):
 
 
 def test_only_the_main_window_gets_the_integrated_bar(mac, monkeypatch):
-    """``Background`` owns the main window; the first-run setup window keeps its ordinary bar."""
+    """``Background`` owns the main window; the first-run setup window keeps its ordinary bar and, like every
+    window, opens in the room colour of the Mac's appearance (its page then paints the saved choice)."""
     from ouroboros import launcher_background as lb
     from ouroboros import launcher_onboarding
 
@@ -682,7 +755,13 @@ def test_only_the_main_window_gets_the_integrated_bar(mac, monkeypatch):
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setitem(sys.modules, "webview.menu", menu)
     launcher_onboarding.present_first_run_onboarding({}, 1, open_external_url=lambda url: {"ok": False})
-    assert created["window"].events.before_load.handlers == []
+    setup = created["window"]
+    assert setup.events.before_load.handlers == []
+    setup.events.before_show.fire()
+    assert room(setup.native)(Appearance("DarkAqua")) == DARK_ROOM
+    assert room(setup.native)(Appearance("Aqua")) == LIGHT_ROOM
+    assert_ordinary(setup.native)
+    assert setup.native.appearances == [], "no page can force the setup window's appearance"
 
 
 def _read(rel: str) -> str:
@@ -698,16 +777,56 @@ def test_the_spa_declares_after_its_theme_script_and_only_the_spa_declares():
     assert "ouroboros-window-chrome" not in _read("web/onboarding_template.html")
 
 
-def test_the_page_reserves_room_only_under_the_measured_state():
-    """No phantom spacer: every rule reading the shell's geometry is scoped to the attribute the shell
-    writes after measuring, so a browser, another OS or an older shell lays out exactly as before."""
-    css = re.sub(r"/\*.*?\*/", "", _read("web/style.css"), flags=re.S)
+def _selector_list(text):
+    """Split selector lists, keeping commas in :is/:where, attributes and strings."""
+    start, depth, quote, escaped = 0, 0, "", False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            yield text[start:index].strip()
+            start = index + 1
+    yield text[start:].strip()
+
+
+def _assert_measured_geometry_is_scoped(css):
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
     readers = [m for m in re.finditer(r"([^{}]*)\{([^{}]*var\(--window-chrome-[^{}]*)\}", css)]
     assert readers, "style.css consumes the measured title bar geometry"
     for rule in readers:
-        for selector in rule.group(1).split(","):
-            assert ':root[data-window-chrome="integrated"]' in selector, selector.strip()
+        for selector in _selector_list(rule.group(1)):
+            assert selector.startswith(':root[data-window-chrome="integrated"]'), selector
+
+
+def test_the_page_reserves_room_only_under_the_measured_state():
+    """No phantom spacer: every rule reading the shell's geometry is scoped to the attribute the shell
+    writes after measuring, so a browser, another OS or an older shell lays out exactly as before."""
+    css = _read("web/style.css")
+    _assert_measured_geometry_is_scoped(css)
+    with pytest.raises(AssertionError):
+        _assert_measured_geometry_is_scoped(css.replace(':root[data-window-chrome="integrated"]', ':root'))
     assert "window-chrome" not in re.sub(r"/\*.*?\*/", "", _read("web/ui.css"), flags=re.S)
+
+
+@pytest.mark.parametrize("selector", [
+    ':root[data-window-chrome="integrated"] :is(.chat, .project), .unguarded',
+    '.unguarded, :root[data-window-chrome="integrated"] :where(.chat, .project)',
+    ':is(:root[data-window-chrome="integrated"] .chat, .unguarded)',
+])
+def test_a_functional_selector_does_not_hide_an_unguarded_geometry_reader(selector):
+    with pytest.raises(AssertionError):
+        _assert_measured_geometry_is_scoped(selector + ' { height: var(--window-chrome-top); }')
 
 
 def test_the_shell_writes_exactly_the_names_the_page_reads():

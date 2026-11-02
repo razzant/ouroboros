@@ -217,3 +217,41 @@ def test_changed_route_reprepare_refreshes_money_without_rereading_unchanged_fac
     assert len(reads) == 2
     assert not append_context_facts(context)
     assert len(reads) == 2
+
+
+def test_an_owner_turn_names_its_own_wait_so_far_and_a_wake_has_none(monkeypatch):
+    """The round line reads the turn's own execution from the process-local registry: accepted at T,
+    this request N s later so far with the slowest phase; after the first observed dispatch, when it
+    went out and on which basis. A wake (nobody awaits it) carries no such segment."""
+    from collections import deque
+
+    from supervisor import active_activity
+    from supervisor.active_activity import get_direct_activity_registry
+
+    monkeypatch.setattr(active_activity, "_DIRECT_TURNS", deque(maxlen=100))
+    monkeypatch.setattr("supervisor.state.append_jsonl", lambda path, row, *a, **k: True)
+    registry = get_direct_activity_registry()
+    registry.clear()
+    accepted = _iso(T - 20)
+    try:
+        owner = registry.register("owner-turn", 1, reply_expected=True, origin_message_ref={
+            "chat_id": 1, "client_message_id": "m-1", "ts": accepted, "text_sha256": "0" * 64})
+        owner.execution.entered_at = T  # the handler's thread began twenty seconds after acceptance
+        owner.execution.advance("started")
+        fact = round_clock_fact(SimpleNamespace(task_id="owner-turn", task_metadata={}), now=T + 600)
+        segment = fact.split("no execution limit; ", 1)[1]
+        assert segment.startswith(f"my human's message accepted at {accepted}; this request ")
+        assert " s later; slowest phase so far " in segment and "went out" not in segment
+        assert float(segment.split("this request ")[1].split(" s later")[0]) >= 20.0
+        owner.execution.observe("main_llm_call_state", {"llm_call_id": "c", "phase": "started"})
+        owner.execution.observe("main_llm_call_state", {"llm_call_id": "c", "phase": "observed",
+                                                        "model_activity": {"phase": "dispatching"}})
+        fact = round_clock_fact(SimpleNamespace(task_id="owner-turn", task_metadata={}), now=T + 600)
+        assert "; my first request went out " in fact and " s later (observed_send); slowest phase so far " in fact
+
+        registry.register("wake", 1, reply_expected=False)
+        fact = round_clock_fact(SimpleNamespace(task_id="wake", task_metadata={}), now=T + 600)
+        assert "my human" not in fact and "went out" not in fact and fact.endswith("no execution limit")
+        assert "my human" not in round_clock_fact(SimpleNamespace(task_id="pooled", task_metadata={}), now=T)
+    finally:
+        registry.clear()

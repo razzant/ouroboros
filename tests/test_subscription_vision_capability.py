@@ -50,12 +50,17 @@ def image_messages():
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
 
 
-def install_preset(monkeypatch, model=MODEL, modalities=("text", "image")):
-    """The settings the onboarding preset writes from a catalog of this one row."""
+def install_preset(monkeypatch, model=MODEL, modalities=("text", "image"), root=None):
+    """The settings the onboarding preset writes from a catalog of this one row (saved: route keys read the
+    document as it is now, so a blank Vision/Light/Fallbacks is a blank, never a proposal)."""
+    from tests._shared import saved_settings
+
     proposed = compile_model_settings([{"value": model, "is_default": True,
                                         "input_modalities": list(modalities)}], {})
     for key, value in proposed.items():
         monkeypatch.setenv(key, value)
+    if root is not None:
+        saved_settings(monkeypatch, root, **proposed)
     assert proposed["OUROBOROS_MODEL"] == model
     assert proposed["OUROBOROS_MODEL_VISION"] == (model if "image" in modalities else "")
     return proposed
@@ -173,7 +178,7 @@ def test_text_only_catalog_places_the_placeholder_in_the_real_payload(subscripti
     root, gateway, client = subscription_transport
     state, _ = catalog
     state["modalities"] = ["text"]
-    install_preset(monkeypatch, modalities=("text",))
+    install_preset(monkeypatch, modalities=("text",), root=root)
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
     messages = image_messages()
     original = deepcopy(messages)
@@ -244,7 +249,7 @@ def test_owner_image_reaches_the_prepared_claudexor_payload(subscription_transpo
     root, gateway, client = subscription_transport
     state, _ = catalog
     state["modalities"] = modalities
-    install_preset(monkeypatch, modalities=modalities)
+    install_preset(monkeypatch, modalities=modalities, root=root)
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
     source = tmp_path / "owner.png"
     source.write_bytes(pixels())
@@ -294,7 +299,7 @@ def test_text_only_and_image_off_do_not_query_catalog(catalog, monkeypatch):
     assert calls == []
 
 
-def test_confirmed_nonvision_is_still_called_when_named_and_sent_inline(catalog, monkeypatch):
+def test_confirmed_nonvision_is_still_called_when_named_and_sent_inline(catalog, monkeypatch, tmp_path):
     """Owner decision (Inline = always send): a model named explicitly, and an Inline
     send, carry the image even though this account's catalog says text only; the
     route's own refusal is what the agent then sees. Auto withholds on that "no"."""
@@ -306,9 +311,9 @@ def test_confirmed_nonvision_is_still_called_when_named_and_sent_inline(catalog,
     assert prepare_messages_for_send(messages, routing=VisionRoutingContext(MODEL, object(), {})) is messages
     assert calls == [], "neither an explicit model nor Inline asks the catalog for permission"
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "auto")
-    for key, value in (("OUROBOROS_MODEL", MODEL), ("OUROBOROS_MODEL_VISION", ""),
-                       ("OUROBOROS_MODEL_LIGHT", ""), ("OUROBOROS_MODEL_FALLBACKS", "")):
-        monkeypatch.setenv(key, value)  # every caption candidate is this text-only route
+    from tests._shared import saved_settings
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=MODEL, OUROBOROS_MODEL_VISION="", OUROBOROS_MODEL_LIGHT="",
+                   OUROBOROS_MODEL_FALLBACKS="")  # every caption candidate is this text-only route (saved blanks)
     prepared = prepare_messages_for_send(image_messages(), routing=VisionRoutingContext(MODEL, object(), {}))
     assert "image omitted" in prepared[1]["content"][1]["text"]
     assert "Claudexor model catalog" in prepared[1]["content"][1]["text"]

@@ -2,13 +2,12 @@
 
 Main measures every candidate on the conversation it belongs to. The last request a model
 accepted in this task gives the provider-reported input U and the host's raw estimate B of
-that same candidate; the next candidate is ``U + (B' - B) * U / B``. Another task's request
-says nothing reliable about this one: its composition and size differ (17.10.2026: a 97k
-helper request's density, borrowed by a 900k release task, hid a full window). The largest
-input a model accepted here is a floor under its window: a stated window below it is no
-window. The smallest estimate a model refused here bounds it from above and clears the
-free room the facts state. All live in the task's usage, so a working checkpoint keeps
-them and a new execution starts cold. Data and arithmetic only; the loop records them.
+that same candidate; the next candidate is ``U + (B' - B) * U / B``. Before this task has an
+anchor, ``context_fit`` uses fresh exact-route/model/view evidence only at comparable raw input size;
+otherwise it stays cold (a 97k helper must not calibrate a 900k task). The largest
+input a route accepted here is a lower bound for planning, never evidence of reply room. A size refusal clears predicted free room; only room below an accepted input
+remains a lower bound. All live in the task's usage, so a working checkpoint keeps
+them; a new execution has no task anchor. Data and arithmetic only; the loop records them.
 """
 
 from __future__ import annotations
@@ -46,9 +45,11 @@ class InputAnchor:
 
 def _anchor_model_key(plan: Any) -> str:
     from ouroboros.provider_models import normalize_model_identity
+    from ouroboros.context_window import observation_scope
 
     return (f"{str(getattr(plan, 'provider', '') or '').strip().lower()}|"
-            f"{normalize_model_identity(str(getattr(plan, 'model', '') or '').strip())}")
+            f"{normalize_model_identity(str(getattr(plan, 'model', '') or '').strip())}|"
+            f"{observation_scope(plan)}")
 
 
 def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rewrite_epoch: int = 0) -> None:
@@ -64,6 +65,10 @@ def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rew
 
     if plan is None or usage.get("_model_substitutions"):
         return
+    from ouroboros.context_window import observed_plan
+    plan = observed_plan(plan, usage)
+    if plan is None or not getattr(plan, "window_witness_bound", True):
+        return
     last = usage.get("_last_round_cache_usage") or {}
     real, estimate = last.get("prompt_tokens"), usage.get("_context_raw_input_tokens")
     if not isinstance(real, int) or not isinstance(estimate, int) or real <= 0 or estimate <= 0:
@@ -72,7 +77,7 @@ def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rew
         return  # an order of magnitude off the same bytes is no input total of this request (a delta, a stub)
     provider = str(last.get("provider") or getattr(plan, "provider", "") or "").strip().lower()
     cache_bearing = bool(last.get("cached_tokens") or last.get("cache_write_tokens"))
-    if cache_bearing and provider not in _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS | {"claudexor"}:
+    if cache_bearing and provider not in _CACHE_INCLUSIVE_PROMPT_TOKEN_PROVIDERS:
         return
     if gateway_double_counted_cache(real, int(last.get("cached_tokens") or 0)):
         return  # twice the real input would double every estimate and lift the floor above the window for good
@@ -84,17 +89,28 @@ def record_input_anchor(usage: Dict[str, Any], plan: Any, *, round_idx: int, rew
     usage[INPUT_ANCHOR_KEY] = anchors
     floors = usage.setdefault(ACCEPTED_INPUTS_KEY, {})
     floors[key] = max(int(floors.get(key) or 0), real)
+    if getattr(plan, "route_fp", "") and getattr(plan, "window_witness_bound", True):
+        from ouroboros.capability_evidence import canonical_evidence_root, record_token_density, MAIN_DENSITY_BASIS
+        from ouroboros.context_window import observation_scope, record_observation
+        from ouroboros.provider_models import normalize_model_identity
+        root = canonical_evidence_root()
+        record_observation(root, observation_scope(plan), accepted=real, kind="input",
+                           reserve=int(usage.get("_context_response_reserve_tokens", plan.output_reserve_tokens) or 0),
+                           transmitted=int(usage.get("_context_reply_allowance_tokens") or 0))
+        record_token_density(root, normalize_model_identity(plan.model), prompt_chars=estimate * 4,
+                             prompt_tokens=real, route_fp=plan.route_fp, basis=MAIN_DENSITY_BASIS,
+                             view_kind=getattr(plan, "view_kind", ""))
 
 
 def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
                       rewrite_epoch: Optional[int] = None) -> Tuple[Optional[InputAnchor], Optional[int]]:
     """``(anchor, accepted floor)`` of ``plan``'s model in this conversation, or ``(None, None)``.
 
-    A different model or provider (a fallback, an owner switch) has no anchor here; a Codex account
-    rotation keeps the model and therefore the anchor. ``rewrite_epoch`` is the slot's current count of
+    A different model or provider (a fallback, an owner switch) has no anchor here; an account or server
+    rotation has its own route fingerprint and inherits neither anchor nor floor. ``rewrite_epoch`` is the slot's current count of
     sanctioned rewrites (``transcript_prefix.rewrite_epoch``); None treats the view as rewritten.
     """
-    if not isinstance(usage, Mapping) or plan is None:
+    if not isinstance(usage, Mapping) or plan is None or not getattr(plan, "window_witness_bound", True):
         return None, None
     key = _anchor_model_key(plan)
     floor = (usage.get(ACCEPTED_INPUTS_KEY) or {}).get(key)
@@ -108,20 +124,13 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
     return anchor, (int(floor) if floor else None)
 
 
-def floored_window(window_tokens: Optional[int], known: bool, accepted: Optional[int]) -> Tuple[int, bool]:
-    """``(window, known)`` with this conversation's floor applied: a stated window below an input this model
-    already accepted here is no window (``known`` False; the number stays, so the facts can name the reading
-    the floor disproved), whatever reads it — the Main fit, a route rebind, the books step of a refusal
-    pass. Otherwise the reading passes unchanged."""
-    if accepted and window_tokens and int(accepted) > int(window_tokens):
-        return int(window_tokens), False
-    return int(window_tokens or 0), bool(known)
-
-
 def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int) -> None:
     """Remember the smallest input estimate ``plan``'s model refused by size in this task."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
+    from ouroboros.context_window import record_refusal
+
+    record_refusal(usage, plan)
     refused = usage.setdefault(REFUSED_INPUTS_KEY, {})
     key = _anchor_model_key(plan)
     refused[key] = min(int(refused.get(key) or estimate_tokens), int(estimate_tokens))

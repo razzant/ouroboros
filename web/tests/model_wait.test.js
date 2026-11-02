@@ -83,6 +83,15 @@ test('an engine-dated unavailable pool is its own actionable reason, not quota o
     const pool = row({ reason: 'unavailable', credential_profile_id: '', reset_at: '2099-01-01T00:00:00Z' });
     assert.deepEqual(activeModelWaits(mergeModelWaits({}, { [pool.wait_id]: pool })), [pool]);
     assert.ok(MODEL_WAIT_REASONS.includes('unavailable') && !MODEL_WAIT_REASONS.includes('transport'));
+    // A route whose connection the owner disabled or removed waits on its own typed reason ($0, no observer).
+    const gone = row({ reason: 'connection_unavailable', credential_profile_id: '', availability_observation: 'unavailable' });
+    assert.deepEqual(activeModelWaits(mergeModelWaits({}, { [gone.wait_id]: gone })), [gone]);
+});
+
+test('a route whose API key was turned off or removed waits on its card instead of dropping out', () => {
+    const keyOff = row({ reason: 'connection_unavailable', model: 'openrouter@claude-credits::anthropic/claude-opus-5.5',
+        credential_profile_id: '' });
+    assert.deepEqual(activeModelWaits(mergeModelWaits({}, { [keyOff.wait_id]: keyOff })), [keyOff]);
 });
 
 test('switch payload binds the exact wait revision and defaults to temporary role change', () => {
@@ -111,7 +120,8 @@ test('auto-continue and explicit retry are distinct text-free actions', () => {
 });
 
 test('role labels distinguish human-facing roles without model-name inference', () => {
-    assert.equal(modelWaitRoleLabel('consciousness'), 'Background consciousness');
+    assert.equal(modelWaitRoleLabel('consciousness'), 'Consciousness');
+    assert.equal(modelWaitRoleLabel('safety'), 'Safety Supervisor');
     assert.equal(modelWaitRoleLabel('fallback:2'), 'Fallback 3');
     assert.equal(modelWaitRoleLabel('reviewer:scope-a'), 'Reviewer · scope-a');
     assert.equal(modelWaitRoleLabel('subagent:writer'), 'Subagent · writer');

@@ -173,12 +173,13 @@ def test_running_direct_turn_converts_to_project_and_its_answer_follows(
                     assert payload["handoff_id"].startswith("project-handoff:"), payload
 
                     # The SAME Main card became the work's portal (one work, one card): it keeps
-                    # its Stop, names its Project in its footer, and offers no second conversion.
+                    # its Stop, names its Project at the start of its action row, and offers no second conversion.
                     converted = page.locator(
                         f'.chat-live-card[data-task-id="{task_id}"][data-portal="1"]')
                     converted.wait_for(timeout=30000)
                     page.wait_for_selector(
-                        f'.chat-live-card[data-task-id="{task_id}"] > .chat-live-bound-pointer', timeout=30000)
+                        f'.chat-live-card[data-task-id="{task_id}"] > .chat-live-foot > .chat-live-foot-end'
+                        ' > .chat-live-bound-pointer', timeout=30000)
                     assert converted.get_attribute("data-project-id") == project["id"]
                     assert converted.get_attribute("data-receipt") is None, "a durable receipt is not marked as a gap"
                     assert converted.locator(".chat-live-project-name").inner_text().strip()

@@ -48,7 +48,7 @@ test('the census-only Activity row offers Resume only while deferred late work w
         started_at: 1_700_000_000 }, now);
     assert.match(paused, /data-act="task-control" data-id="late-root" data-root="1" data-budget-paused="1"/);
     // The row says its state in the chip's words, never the census code.
-    assert.match(paused, /<span data-i18n-skip>Paused<\/span> · 100s/);
+    assert.match(paused, /<span data-i18n-skip>Paused<\/span> · 2 min/, 'a running time reads in words, never as 100s');
     assert.doesNotMatch(paused, /budget_paused ·/);
     const pausing = liveActivityRowHtml({ activity_id: 'late-root', kind: 'managed_task', phase: 'budget_pausing' }, now);
     assert.doesNotMatch(pausing, /data-budget-paused/, 'the Pause is still ending sent work: Stop only, no Resume');

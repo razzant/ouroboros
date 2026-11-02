@@ -74,7 +74,7 @@ def test_native_boot_preserves_panic_but_owner_can_start(
     monkeypatch.setattr(launcher, "bootstrap_repo", bootstrap)
     if intent == "systemd":
         unit = (Path(__file__).resolve().parents[1] / "packaging" / "systemd"
-                / "ouroboros.service").read_text(encoding="utf-8")
+                / "ouroboros.service.in").read_text(encoding="utf-8")
         command = next(line.removeprefix("ExecStart=") for line in unit.splitlines()
                        if line.startswith("ExecStart="))
         argv = shlex.split(command)[1:]
@@ -494,7 +494,7 @@ def test_headless_teardown_sweeps_no_port_and_names_the_published_one():
     abort_at = src.index("Shutdown requested during startup")
     fail_at = src.index("failed to become healthy")
     for section_start, reason in ((abort_at, "startup_abort"), (fail_at, "startup_failure")):
-        assert f'_kill_orphaned_children(reason="{reason}")' in src[section_start:section_start + 700]
+        assert f'_cleanup_recorded_server_process("{reason}")' in src[section_start:section_start + 700]
     assert "kill_process_on_port(" not in inspect.getsource(launcher._kill_orphaned_children).split(
         "for companion_port")[0], "only the disclosed companion ports remain"
 

@@ -30,7 +30,6 @@ _SKILL_PAYLOAD_EDIT_TOOLS = frozenset({
 _SKILL_PAYLOAD_SELECTOR_KEYS = {
     "run_command": "cwd", "run_script": "cwd", "delegate_start": "root",
 }
-_ROOT_TASK_PROJECTION_MAX_BYTES = 1024 * 1024
 _ROOT_TASK_PROJECTION_MAX_RECORDS = 512
 
 
@@ -163,85 +162,38 @@ def acceptance_skill_lifecycle(
 def _skill_names_from_review_history(
     drive_root: pathlib.Path, root_task_id: str, *, task_started_at: str = "",
 ) -> Dict[str, Any]:
-    """Skills named by the compact root-task projection, never full histories."""
-    from ouroboros.skill_review_history import (
-        ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH, ROOT_TASK_PROJECTION_RELATIVE_PATH,
-        root_task_projection_gaps_path, root_task_projection_path,
-    )
-    from ouroboros.utils import iter_jsonl_objects
+    """The skills this root task reviewed, named by the review ledger's bounded hot index (one row per
+    ``surface="skill"`` record, its skill in ``subject.skill``), never by full records or histories."""
+    from ouroboros import review_ledger as ledger
 
-    path = root_task_projection_path(drive_root)
-    gap_path = root_task_projection_gaps_path(drive_root)
-    source_ref = {
-        "kind": "canonical_jsonl", "path": ROOT_TASK_PROJECTION_RELATIVE_PATH,
-        "reader": "read_file",
-    }
+    source_ref = {"kind": "review_ledger_index", "path": f"state/{ledger.LEDGER_SUBDIR}/{ledger.INDEX_NAME}",
+                  "reader": "read_file"}
     gaps: set[str] = set()
-    try:
-        byte_truncated = path.stat().st_size > _ROOT_TASK_PROJECTION_MAX_BYTES
-    except FileNotFoundError:
-        byte_truncated = False
-    except OSError:
-        byte_truncated = False
-        gaps.add("projection_unreadable")
     names: List[str] = []
-    try:
-        rows = list(iter_jsonl_objects(
-            path,
-            max_entries=_ROOT_TASK_PROJECTION_MAX_RECORDS,
-            tail_bytes=_ROOT_TASK_PROJECTION_MAX_BYTES,
-            gap_reasons=gaps,
-        ))
-    except OSError:
-        rows = []
-        gaps.add("projection_unreadable")
-    if byte_truncated:
-        gaps.add("tail_bytes_truncated")
-    try:
-        gap_byte_truncated = gap_path.stat().st_size > _ROOT_TASK_PROJECTION_MAX_BYTES
-    except FileNotFoundError:
-        gap_byte_truncated = False
-    except OSError:
-        gap_byte_truncated = False
-        gaps.add("projection_gap_log_unreadable")
-    try:
-        gap_rows = list(iter_jsonl_objects(
-            gap_path,
-            max_entries=_ROOT_TASK_PROJECTION_MAX_RECORDS,
-            tail_bytes=_ROOT_TASK_PROJECTION_MAX_BYTES,
-            gap_reasons=gaps,
-        ))
-    except OSError:
-        gap_rows = []
-        gaps.add("projection_gap_log_unreadable")
-    if gap_byte_truncated:
-        gaps.add("projection_gap_tail_bytes_truncated")
+    rows: List[Dict[str, Any]] = []
     cutoff = str(task_started_at or "").replace("Z", "+00:00")
     if root_task_id:
-        for row in reversed(rows):
-            row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
-            if cutoff and row_ts and row_ts < cutoff:
-                break
-            if not isinstance(row, dict) or str(row.get("root_task_id") or "") != root_task_id:
-                continue
-            name = str(row.get("skill") or "").strip()
-            if name and name not in names:
-                names.append(name)
-        for row in reversed(gap_rows):
-            row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
-            if cutoff and row_ts and row_ts < cutoff:
-                break
-            if isinstance(row, dict) and str(row.get("root_task_id") or "") == root_task_id:
-                gaps.add(str(row.get("reason") or "root_task_projection_gap"))
-    coverage = {
-        "rows_scanned": len(rows), "gap_rows_scanned": len(gap_rows),
-        "truncated": bool(byte_truncated or gap_byte_truncated or "max_entries_truncated" in gaps),
-        "complete": not gaps, "gap_reasons": sorted(gaps), "source_ref": source_ref,
-        "gap_source_ref": {
-            "kind": "canonical_jsonl", "path": ROOT_TASK_PROJECTION_GAPS_RELATIVE_PATH,
-            "reader": "read_file",
-        },
-    }
+        try:
+            rows = ledger.recent_records(drive_root, root_task_id, limit=_ROOT_TASK_PROJECTION_MAX_RECORDS,
+                                         hot_only=True, surface="skill")
+        except OSError:
+            gaps.add("projection_unreadable")
+        if ledger.archived_segments_exist(drive_root):
+            # Older records live in archived segments the hot read never opens: a cut only when this task
+            # could have rows there — it started before the index last rotated, or no start is known; a task
+            # that started after the newest rotation has every row of its own in the hot index.
+            rotated = ledger.newest_rotation_ts(drive_root)
+            if not cutoff or not rotated or cutoff <= rotated:
+                gaps.add("tail_bytes_truncated")
+    for row in rows:
+        row_ts = str(row.get("ts") or "").replace("Z", "+00:00")
+        if cutoff and row_ts and row_ts < cutoff:
+            continue
+        name = str((row.get("subject") or {}).get("skill") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    coverage = {"rows_scanned": len(rows), "gap_rows_scanned": 0, "truncated": "tail_bytes_truncated" in gaps,
+                "complete": not gaps, "gap_reasons": sorted(gaps), "source_ref": source_ref}
     return {"names": names, "coverage": coverage}
 
 

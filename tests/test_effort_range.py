@@ -799,7 +799,7 @@ def test_the_owner_endpoint_writes_the_triple_atomically_projects_it_and_audits(
     assert ok.status_code == 200, ok.text
     assert ok.json() == {"ok": True, "project_id": "",
                         "effort_range": {"min": "none", "recommended": "medium", "max": "ultra"},
-                        "cognition": {"context_mode": "max", "effort_range": {
+                        "cognition": {"context_mode": "max", "subagents_mode": "auto", "effort_range": {
                             "min": "none", "recommended": "medium", "max": "ultra"}}}
     stored = json.loads(settings_path.read_text(encoding="utf-8"))
     assert (stored["OUROBOROS_EFFORT_MIN"], stored["OUROBOROS_EFFORT_TASK"], stored["OUROBOROS_EFFORT_MAX"]) == ("none", "medium", "ultra")

@@ -1,4 +1,4 @@
-"""DESIGN reaches actual external inputs without changing work-order source bytes."""
+"""DESIGN and the BIBLE path reach actual external inputs without changing work-order source bytes."""
 
 import json
 from hashlib import sha256
@@ -19,10 +19,12 @@ def _doc(root, heading):
     path = root / "docs/DESIGN.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"# Design\n\n## {heading}\nOriginal rule text, not navigation.\n", encoding="utf-8")
+    (root / "BIBLE.md").write_text(f"# BIBLE.md\n\n## Principle 1: Continuity\n{heading} constitution text.\n",
+                                   encoding="utf-8")
     return path
 
 
-def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=False,
+def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=False, missing_bible=False,
            input_sources="declared", prepare=None):
     from ouroboros import claudexor_daemon, subagent_runtime
     from ouroboros.contracts.task_constraint import TaskConstraint
@@ -39,6 +41,8 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
     prepared_path = _doc(prepared, "Prepared copy heading")
     if missing:
         prepared_path.unlink()
+    if missing_bible:
+        (prepared / "BIBLE.md").unlink()
     metadata = ({"workspace_copy": {
         "source_root": str(system), "execution_root": str(target),
         "source_is_system_repo": kind != "foreign_copy",
@@ -128,6 +132,31 @@ def test_foreign_and_unidentified_workspaces_get_no_body_design(tmp_path, monkey
     assert "DESIGN NAVIGATION DELIVERY" not in request["instructions"]
     assert "heading" not in request["instructions"]
     assert row["request"] == request
+
+
+@pytest.mark.parametrize("kind", ["system", "body_copy"])
+def test_own_body_session_gets_the_constitution_path_not_its_text(tmp_path, monkeypatch, kind):
+    request, _row, task, _ctx, _live, prepared = _start(tmp_path, monkeypatch, kind=kind)
+    instructions, bible = request["instructions"], prepared.parent.parent / "BIBLE.md"
+    assert "CONSTITUTION DELIVERY" in instructions and f"which {bible} governs" in instructions
+    assert "Principle 1" in instructions and sha256(bible.read_bytes()).hexdigest() in instructions
+    assert "constitution text" not in instructions  # a path and digest, never the text
+    assert "CONSTITUTION DELIVERY" not in compile_external_work_order(task)
+
+
+@pytest.mark.parametrize("kind", ["foreign_copy", "unknown"])
+def test_foreign_and_unidentified_sessions_get_no_constitution(tmp_path, monkeypatch, kind):
+    request, *_rest = _start(tmp_path, monkeypatch, kind=kind)
+    instructions = request["instructions"]
+    assert "CONSTITUTION DELIVERY" not in instructions and "This work concerns the body of Ouroboros" not in instructions
+
+
+def test_missing_copy_constitution_is_named_without_live_fallback(tmp_path, monkeypatch):
+    request, _row, _task, _ctx, live, prepared = _start(tmp_path, monkeypatch, missing_bible=True)
+    instructions = request["instructions"]
+    assert f"BIBLE.md source unavailable at {prepared.parent.parent / 'BIBLE.md'}" in instructions
+    assert str(live.parent.parent / "BIBLE.md") not in instructions
+    assert "This work concerns the body of Ouroboros" not in instructions
 
 
 def test_missing_copy_source_is_explicit_and_never_falls_back_to_live_body(tmp_path, monkeypatch):

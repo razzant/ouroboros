@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 _CONTINUE_PREFIX = "Continue: "
 # The census's execution facts for a member (gateway/state.py), never a work's identity.
-_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm"})
+_EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait", "cancel_pending"})
 
 
 def _strip_continue(name: str) -> str:
@@ -48,6 +48,7 @@ class _Observations:
         self.fences: Dict[str, dict] = {}
         self.stops: Dict[str, frozenset] = {}
         self.reviews: Dict[str, bool] = {}
+        self.models: Dict[str, list] = {}
         self.gaps: List[Dict[str, Any]] = []
 
     def result(self, task_id: str) -> Optional[dict]:
@@ -84,6 +85,12 @@ class _Observations:
                 log.debug("Work projection could not read the review of %s", task_id, exc_info=True)
                 self.reviews[task_id] = False  # an unreadable operation proves no review
         return self.reviews[task_id]
+
+    def model_handoffs(self, root_id: str, drive_root: Any = None) -> list:
+        if root_id not in self.models:
+            from supervisor.continuation_admission import model_handoffs
+            self.models[root_id] = model_handoffs(drive_root or self.drive_root, root_id)
+        return self.models[root_id]
 
     def stop_unknown(self, task_id: str, drive_root: Any = None, owner: Optional[Mapping[str, Any]] = None
                      ) -> frozenset:
@@ -183,17 +190,20 @@ def _member_raw(row: Mapping[str, Any], raw: Mapping[str, Any], obs: _Observatio
     hold = raw.get("_budget_pause_hold") if isinstance(raw.get("_budget_pause_hold"), dict) else {}
     pause = raw.get("_budget_pause") if isinstance(raw.get("_budget_pause"), dict) else {}
     facts: Dict[str, Any] = {"hold": hold, "paused_at": pause.get("paused_at") or pause.get("requested_at"),
-                             "running": bool(raw.get("running"))}
-    if row.get("phase") == "budget_pausing" and (raw.get("owner_pause_warm") or row.get("kind") == "direct_chat"):
+                             "running": bool(raw.get("running", row.get("live"))), **dict(raw)}
+    facts["execution_transport"] = (raw.get("metadata") or {}).get("execution_transport")
+    if row.get("phase") in {"budget_pausing", "budget_paused"} and (raw.get("owner_pause_warm") or row.get("kind") == "direct_chat"):
         # Parked warm under a Pause still settling: the review it already sent still runs beside it.
         facts["sent_review"] = obs.sent_review(str(row.get("activity_id") or ""))
-    if row.get("pause_cause") == "owner" and row.get("phase") in {"budget_paused", "budget_pausing"}:
+    if row.get("phase") in {"budget_paused", "budget_pausing"}:
         from ouroboros.control_actor import pause_author
 
         fence = obs.fence(root_id, raw.get("budget_drive_root"))
         # The Pause is dated from its press: a settling fence restamps ``paused_at``.
         facts["paused_at"] = fence.get("requested_at") or fence.get("paused_at") or facts["paused_at"]
         facts["pause_by"] = pause_author(fence)
+        facts["fences"] = {"owner": fence}
+        facts["model_handoffs"] = obs.model_handoffs(root_id, raw.get("budget_drive_root"))
         facts["parked"] = [str(task) for task in fence.get("parked_members") or () if task]
     return facts
 
@@ -251,18 +261,37 @@ def _since(row: Mapping[str, Any]) -> Optional[float]:
 
 
 def works_snapshot(drive_root: Any, owners: Iterable[Mapping[str, Any]], raw_facts: Mapping[str, Mapping[str, Any]],
-                   *, complete: bool = True) -> Dict[str, Any]:
-    """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``. Never raises."""
+                   *, complete: bool = True, bindings: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``;
+    ``bindings`` is the census's task-to-Project map (``_bound_room``). Never raises."""
     try:
-        return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete)
+        return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete, dict(bindings or {}))
     except Exception:
         log.debug("Work projection unavailable for /api/state", exc_info=True)
         return {"works": [], "rooms": {}, "work_summary": ws.roll_up_summary({}, [], complete=False),
                 "works_complete": False, "works_gaps": [{"reason": "work_projection_unavailable"}]}
 
 
+def durable_binding(row: Mapping[str, Any], task_id: Any, bindings: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """The binding that places a task: its own, then its parent's or root's durable one (the census's one rule; an
+    origin-bound row is a convert-gate fact only and re-homes nothing)."""
+    for key in (task_id, row.get("parent_task_id"), row.get("root_task_id")):
+        binding = bindings.get(str(key)) if key else None
+        if isinstance(binding, dict) and not binding.get("origin_bound"):
+            return binding
+    return None
+
+
+def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A stored row's room by ``durable_binding``. Unbound, the row's own room stands."""
+    binding = durable_binding(row, task_id, bindings)
+    if binding is None or not binding.get("chat_id"):
+        return row
+    return {**row, "chat_id": binding["chat_id"], "project_id": str(binding.get("project_id") or "")}
+
+
 def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
-              complete: bool) -> Dict[str, Any]:
+              complete: bool, bindings: Mapping[str, Any]) -> Dict[str, Any]:
     obs = _Observations(drive_root)
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
@@ -272,7 +301,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
     try:
         for row in _inflight_upkeep(drive_root, set(rows)):
             facts = obs.result(row["activity_id"]) or {}
-            row.update({key: facts[key] for key in ("chat_id", "project_id") if facts.get(key)})
+            room = _bound_room(facts, row["activity_id"], bindings)  # a moved task's upkeep runs in its Project
+            row.update({key: room[key] for key in ("chat_id", "project_id") if room.get(key)})
             row["kind"] = "direct_chat" if facts.get("_is_direct_chat", True) else "managed_task"
             rows[row["activity_id"]] = row
     except Exception:
@@ -317,14 +347,15 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
         if live_roots:
             row, facts, member, current_root = max(live_roots, key=lambda item: float(item[0].get("started_at") or 0.0))
             episode = {"task_id": row["activity_id"], "state": member}
-            outcome = ws._outcome(row) if row.get("phase") == "finalizing" else ""
+            outcome = ws.shown_outcome(row) if row.get("phase") == "finalizing" else ""
             room_row, current_row, current_state = row, row, member
         else:
             episode_id = sorted(entry["roots"])[-1] if entry["roots"] else work_id
             stored = obs.result(episode_id) or {}
             episode = {"task_id": episode_id}
-            outcome = ws._outcome(stored)
-            room_row = next((item[0] for item in entry["rows"]), stored)
+            outcome = ws.shown_outcome(stored)
+            # A tail-only work (open runs, review or upkeep, no member row) lives where its binding puts it.
+            room_row = next((item[0] for item in entry["rows"]), None) or _bound_room(stored, episode_id, bindings)
             facts = raw.get(episode_id) or stored
         if not members and not entry["runs"]:
             continue
@@ -342,6 +373,14 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
         logical = [current_root] if current_root and current_root != current_id else []
         ended = [] if current_state is not None else [current_id]
         controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier)
+        if current_state is None and members and any(m["activity"] in {"working", "queued", "waiting"} for m in members):
+            controls.insert(0, {"action": "pause", "target": current_id})
+        if current_state is None:
+            # An ended author is never run again. Each held helper has its own
+            # addressed Resume in Activity; a work-level press selects none.
+            controls.extend({"action": "resume", "target": member["task_id"], "scope": "single"}
+                            for member in members if member["activity"] == "paused" and member.get("resumable")
+                            and member.get("stop", {}).get("scope") != "tree")
         work.update(kind="direct" if str(room_row.get("kind") or "") == "direct_chat" else "task",
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
         cmid = str(room_row.get("client_message_id") or "")

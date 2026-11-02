@@ -58,9 +58,13 @@ export function questionPresentation(row = {}) {
             return { status: tr('question.status.closure_pending', 'Question closed · update pending') };
         }
         // An accepted late answer whose dispatch witness ended with its process: no retry knows more.
-        return { status: row.question_delivery.reason_code === 'late_answer_delivery_unknown'
+        // An answer in its task's mailbox waits for that task to read it, also through a pause.
+        const reason = row.question_delivery.reason_code;
+        return { status: reason === 'late_answer_delivery_unknown'
             ? tr('question.status.answer_unknown', 'Answer recorded · delivery unknown')
-            : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
+            : reason === 'awaiting_recipient_read'
+                ? tr('question.status.answer_saved', 'Answer saved · the task reads it when it continues')
+                : tr('question.status.answer_pending', 'Answer recorded · delivery pending') };
     }
     const key = lifecycleKey(row);
     // The English words stay the source (and the Python twin's); the install language reads
@@ -101,8 +105,6 @@ export function normalizeQuiz(msg) {
         optionsKnown,
         stake: String(src.stake || ''),
         assumption: String(src.assumption || ''),
-        // The host's sentence (asking task, run start, the owner's last message): plain text.
-        hostFacts: String(src.host_facts || ''),
         closedReason: String(src.closed_reason || ''),
         materials: Array.isArray(src.materials) ? src.materials : [],
         // The wait facts the header and the signature line read (waitFacts): the
@@ -127,13 +129,6 @@ export function normalizeQuiz(msg) {
     };
 }
 
-export function hostFactsLine(text) {
-    const line = document.createElement('div');
-    line.className = 'chat-quiz-host-facts';
-    line.textContent = text;  // ids, times and counts of one question: a sentence, not a translation key
-    return line;
-}
-
 export function appendRecommendedBadge(button) {
     // The asker's recommendation (the "A" option) is a badge on that option, every surface alike.
     if (button.querySelector('.chat-quiz-option-recommended')) return;
@@ -141,6 +136,33 @@ export function appendRecommendedBadge(button) {
     badge.className = 'chat-quiz-option-recommended';
     badge.textContent = tr('quiz.recommended', 'recommended');
     button.append(badge);
+}
+
+const CHOSEN_PARTS = ['chat-quiz-option-chosen-name', 'chat-quiz-option-chosen-cue'];
+
+/**
+ * The owner's recorded answer names itself (docs/DESIGN.md "Quiz card"): after the option's label, `Your choice` joins
+ * its accessible name in every theme, and a decorative copy shows where the theme draws it (ui.css
+ * --chosen-answer-cue-display). Only the canonical selection carries them: a pending choice, a comment-only answer or
+ * another option never does. Idempotent; true when it wrote.
+ */
+export function paintChosenAnswer(button, chosen) {
+    const parts = CHOSEN_PARTS.map((name) => button.querySelector(`.${name}`));
+    if (chosen && parts.every(Boolean)) return false;
+    if (!chosen && !parts.some(Boolean)) return false;
+    parts.forEach((part) => part?.remove());
+    if (!chosen) return true;
+    const words = tr('quiz.your_choice', 'Your choice');
+    const [spoken, shown] = CHOSEN_PARTS.map((name) => {
+        const part = document.createElement('span');
+        part.className = name;
+        part.textContent = words;
+        return part;
+    });
+    shown.setAttribute('aria-hidden', 'true');
+    const label = button.querySelector('.chat-quiz-option-label');
+    if (label) { label.after(shown); label.after(spoken); } else button.append(spoken, shown);
+    return true;
 }
 
 
@@ -174,17 +196,20 @@ const CLOSE_GLYPH = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
 // The same answer and explicit no-answer closure controls serve Main and Project. Closing is one
 // quiet × at the end of the card's head (a tall card's foot can be screens away), one tap with no
 // reason to type; it waits while an answer is typed, so a mis-tap never discards the owner's words.
+// The answer is one frame holding its words and its Send, as the composer holds its own.
 export function appendQuestionReplyControls(card, quiz, { submit, close, showToast, onDomWrite }) {
     const box = document.createElement('div');
     box.className = 'chat-quiz-comment-box';
     const field = document.createElement('textarea');
     field.className = 'chat-quiz-comment'; field.rows = 2; field.maxLength = MAX_DECISION_COMMENT;
+    // The placeholder is an example, never the field's only name (DESIGN §3).
+    field.setAttribute('aria-label', tr('quiz.answer_label', 'Your answer'));
     field.placeholder = tr('quiz.answer_placeholder', 'Your answer or comment…');
     const send = document.createElement('button');
-    send.type = 'button'; send.className = 'chat-quiz-send';
+    send.type = 'button'; send.className = 'chat-quiz-send ui-hit-area';
     send.textContent = tr('quiz.send_answer', 'Send my answer'); send.disabled = true;
     const closeButton = document.createElement('button');
-    closeButton.type = 'button'; closeButton.className = 'chat-quiz-close';
+    closeButton.type = 'button'; closeButton.className = 'chat-quiz-close ui-hit-area';
     const closeLabel = tr('quiz.close_question', 'Close question without answering');
     closeButton.setAttribute('aria-label', closeLabel); closeButton.title = closeLabel;
     closeButton.innerHTML = CLOSE_GLYPH;

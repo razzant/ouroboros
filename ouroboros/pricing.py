@@ -302,6 +302,48 @@ def infer_model_category(model: str) -> str:
     return "other"
 
 
+def normalize_usage_cost(usage: Dict[str, Any], *, model: str, use_local: bool,
+                         provider: str = "openrouter") -> tuple[Optional[float], str, str, bool]:
+    """Project reported cash, estimating only absent prices; mutate the usage facts together.
+
+    Callers pass normalized usage, including the host's ``cost_invalid`` marker.
+    Local execution is the explicit free exception; subscription absence is unknown.
+    """
+    from ouroboros._usage_response import observed_processing_mode, provider_cost_value
+
+    raw_cost = usage.get("cost")
+    cost = provider_cost_value(raw_cost)
+    display_model = str(usage.get("resolved_model") or model)
+    provider = "local" if use_local else str(usage.get("provider") or provider)
+    estimated = bool(usage.get("cost_estimated"))
+    if use_local:
+        cost, estimated = 0.0, False
+        display_model = f"{model} (local)"
+        usage.update(cost_invalid=False, cost_final=True)
+    elif cost is None and (raw_cost is not None or usage.get("cost_invalid")):
+        log.warning("Provider reported an invalid cost (type=%s) for %s; keeping unknown, skipping estimation",
+                    type(raw_cost).__name__, display_model)
+        usage["cost_invalid"] = True
+    elif cost is None and provider != "claudexor":
+        processing_mode = observed_processing_mode(provider, usage)
+        cost = estimate_cost_optional(
+            display_model, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0),
+            cache_usage={
+                "cached_tokens": int(usage.get("cached_tokens") or 0),
+                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                "prompt_cache_ttl": usage.get("prompt_cache_ttl"),
+                "cache_write_tokens_by_ttl": usage.get("cache_write_tokens_by_ttl")
+                    if isinstance(usage.get("cache_write_tokens_by_ttl"), dict) else None,
+            },
+            provider=provider, **({"processing_mode": processing_mode} if processing_mode else {}),
+        )
+        estimated = cost is not None
+    usage.update(cost=cost, cost_estimated=estimated)
+    if cost is None or estimated:
+        usage["cost_final"] = False
+    return cost, display_model, provider, estimated
+
+
 def emit_llm_usage_event(
     event_queue: Optional[queue.Queue],
     task_id: str,

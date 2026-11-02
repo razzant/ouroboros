@@ -457,16 +457,19 @@ _ESLINT_STEP = "run: cd web && npm ci --no-audit --no-fund && npm run lint:undef
 _NODE_STEP = "run: python scripts/run_tests.py --node"
 
 
-@pytest.mark.parametrize("job", ["quick-test", "full-test-runs"])
-def test_each_ci_job_runs_the_eslint_second_layer_after_the_node_suite(job):
-    block = _ci_job_block(job)
-    assert block.count(_ESLINT_STEP) == 1, f"{job} does not run the ESLint no-undef layer exactly once"
-    # A second layer is only a second opinion when the first still runs.
-    assert block.index(_NODE_STEP) < block.index(_ESLINT_STEP), (
-        f"{job} runs ESLint before (or instead of) the gate's node suite"
-    )
-    # Windows runner in full-test: bash for the `cd web && ...` chain, same as the node step.
-    assert "shell: bash" in block.split(_ESLINT_STEP)[0].rsplit("- name:", 1)[-1]
+def test_the_eslint_second_layer_runs_wherever_the_node_suite_gates():
+    import yaml
+
+    lint = _ci_job_block("lint")
+    assert lint.count(_ESLINT_STEP) == 1, "the lint job does not run the ESLint no-undef layer exactly once"
+    for job in ("quick-test", "full-test-runs"):
+        assert _ESLINT_STEP not in _ci_job_block(job), f"{job} duplicates the lint job's ESLint layer"
+    # A second layer is only a second opinion when the first still runs: the lint job is admitted
+    # on every event that admits the Node suite, and a release requires both.
+    jobs = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    assert jobs["lint"]["if"] == jobs["full-test-runs"]["if"]
+    assert {"lint", "full-test"} <= set(jobs["release"]["needs"])
+    assert "shell: bash" in lint.split(_ESLINT_STEP)[0].rsplit("- name:", 1)[-1]
 
 
 def test_the_eslint_layer_is_exact_pinned_and_lockfile_frozen():
@@ -479,7 +482,7 @@ def test_the_eslint_layer_is_exact_pinned_and_lockfile_frozen():
     assert set(dev) == {"eslint", "globals"}, "the layer needs eslint and its globals tables, nothing else"
     for name, version in dev.items():
         assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"{name} is not exact-pinned: {version!r}"
-    assert package["scripts"]["lint:undef"] == "eslint --max-warnings=0 app.js modules tests"
+    assert package["scripts"]["lint:undef"] == "eslint --max-warnings=0 app.js theme.js modules tests"
     lock = json.loads((web / "package-lock.json").read_text(encoding="utf-8"))
     assert lock["lockfileVersion"] >= 3
     for name, version in dev.items():
@@ -500,6 +503,8 @@ def test_the_eslint_config_carries_only_no_undef_over_the_gate_scope():
     for body in rules:
         assert re.findall(r"'([a-z-]+)'\s*:", body) == ["no-undef"], body
     assert "files: ['app.js', 'modules/**/*.js']" in config
+    # The classic script every page runs before CSS is linted as the script it is, like the walker reads it.
+    assert re.search(r"files: \['theme\.js'\],\s*languageOptions: \{[^}]*sourceType: 'script'", config)
     assert "globals.browser" in config and "globals.es2022" in config
     for name in ("Chart", "marked", "DOMPurify", "mermaid", "hljs"):
         assert f"{name}: 'readonly'" in config, f"vendored <script> global {name} missing from the ESLint layer"

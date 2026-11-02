@@ -8,8 +8,10 @@ A row's Retention cell starts with its class:
   and the production function that retires it.
 
 A disposable plane that nothing retires yet says ``[disposable: none]`` and is listed in
-``DISPOSABLE_WITHOUT_RETIRER``, which may only shrink: a new plane that grows with work names
-what ends it. Retirers are resolved by reading the source (AST), never by importing it.
+``DISPOSABLE_WITHOUT_RETIRER``, which may only shrink except for the owner-approved shared
+package-download cache (2026-10-21, quiz 44dd72): no homemade background cleaner; maintenance
+uses package-manager commands, with no indefinite-retention or economy promise. Other new
+growing planes name what ends them. Retirers resolve through source AST, never imports.
 """
 from __future__ import annotations
 
@@ -21,14 +23,15 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 DOC = REPO / "docs" / "PERSISTENCE.md"
 _LIFETIME_RE = re.compile(r"^\[(record|bounded|disposable: ([\w.]+))\]")
 
-# Disposable planes nothing retires yet: each entry is the row's first path pattern. Only removals.
+# Disposable planes nothing retires yet: only removals, except the cache decision named above.
 DISPOSABLE_WITHOUT_RETIRER = frozenset({
-    "state/evolution_metrics_cache.json",
     "state/presence_turn_gate/last-<sha256>.json",
     "state/betterleaks/",
-    "state/pycache/",
     "state/skills/<name>/jobs/<job>/",
     "playwright-browsers/",
+    # Owner choice A (quiz 44dd72, 2026-10-21): one shared download cache, no bespoke cleaner; it is
+    # pruned only explicitly, with the package manager (uv cache prune, pip cache purge, npm cache clean).
+    "package-downloads/<manager>/",
 })
 
 
@@ -130,3 +133,11 @@ def test_a_fabricated_row_is_caught_and_a_real_retirer_resolves():
     assert resolves("ouroboros.review_checking.CheckingAreaUnavailable")
     assert not resolves("ouroboros.no_such_module.prune")
     assert lifetime("[record] chat history") == ("record", None)
+
+
+def test_exact_cut_and_room_reader_have_size_and_retention_rows():
+    text = DOC.read_text()
+    for token in ('<digest>-<sha256>.json` (physical cut', 'room-<digest>-<sha256>.json'):
+        row = next(line for line in text.splitlines() if token in line)
+        assert '[record]' in row and 'pack' in row and 'MB' in row
+        assert 'no independent remover' in row

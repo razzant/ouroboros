@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 
 from ouroboros.model_wait import budget_paused_seconds, native_sleep_started_at, settle_execution_carry
 from supervisor.events_budget import budget_fence_selected, budget_hold_fact
+from ouroboros.work_stop import continuation_refusal
 from supervisor.queue import _queue_lock
 
 
@@ -492,9 +493,23 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
     from supervisor.followup_policy import scheduled_start
     from supervisor.queue_schedules import automatic_acquisitions
     from supervisor.queue_timeouts import _pending_continuation, _deadline_launch_claim, pending_deadline_expirable
+    from ouroboros.work_diagnostics import control_reason
 
     witness = _unsent(candidate)
     with automatic_acquisitions():
+        diagnostic_stop = control_reason(candidate, _pool().DRIVE_ROOT, before_handoff=True)
+        if diagnostic_stop:
+            with queue._queue_lock:
+                held = (_launch_claim_held(queue, candidate, worker, token) if lane
+                        else any(row is candidate for row in _pool().PENDING))
+            if held and diagnostic_stop == "cancelled" and (candidate.get("admitted_dispatch") == "none" or witness is not None):
+                # This launch owner proves it never entered the put. A recovered
+                # source may have published while we held its diagnostic claim.
+                from ouroboros.cancel_intents import request_cancel
+
+                request_cancel(_pool().DRIVE_ROOT, candidate["id"], reason="Diagnostic source authority ended before dispatch",
+                               source="silence_resolved", requested_by="supervisor", scope="single")
+            return False
         # The schedule owner's control (origin Stop, hold, binding) is read before any durable
         # step, under its own short table hold; the put re-reads it inside that hold below.
         with scheduled_start(queue.DRIVE_ROOT, candidate) as allowed:
@@ -533,7 +548,17 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
                                           candidate["id"], strict=True) or {}
                 unsubmitted = copy.deepcopy({"task_id": candidate["id"], "task_attempt": candidate["_attempt"],
                     "source": candidate["_working_recovery"], "claim": _deadline_launch_claim(stored)})
-            projections = _commit_launch(queue, candidate, unsubmitted)
+            from ouroboros.server_restart import agent_restart_boundary, agent_restart_holds
+
+            if not agent_restart_boundary.acquire(blocking=False):
+                return None  # the inline caller may own Q: never wait behind an off-lane commit
+            try:
+                with queue._queue_lock:
+                    if witness is None and agent_restart_holds(candidate):
+                        return False
+                projections = _commit_launch(queue, candidate, unsubmitted)
+            finally:
+                agent_restart_boundary.release()
             if projections is None or projections is False:
                 return projections  # unresolved (None) or refused (False): the same row stays queued
             from ouroboros.obligations import drive_started
@@ -628,6 +653,7 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     from supervisor.events_budget import budget_resume_dispatch_allowed
     from supervisor.state import EVOLUTION_BUDGET_RESERVE
     from supervisor.task_lifecycle import root_cancellation_fenced
+    from supervisor.consciousness_carriers import autonomous_work_enabled
 
     task_id = str(candidate.get("id") or "")
     root_task_id = str(candidate.get("root_task_id") or "").strip()
@@ -637,13 +663,16 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         return True
     if _foreign_roots_refused(candidate):
         return True
+    if not autonomous_work_enabled(candidate, _pool().DRIVE_ROOT):
+        return True
     if remaining <= 0 and not candidate.get("_owner_wait_resume"):
         return True
     if _pool()._invalid_depth_deferred(candidate, set(unresolved_invalid_id_set)):
         return True
     if not _pool().repo_writer_task_allowed(candidate):
         return True
-    if isinstance(candidate.get("_budget_pause"), dict) or budget_hold_fact(candidate) is not None:
+    if (isinstance(candidate.get("_budget_pause"), dict) or budget_hold_fact(candidate) is not None
+            or continuation_refusal(candidate)):
         # Durable #1196 hold: sibling unselected after root release, unrestorable
         # continuation or failed grant revocation. Selection must be recorded before assignment.
         return True
@@ -691,31 +720,38 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
         cold_holders = cold_project_holders(_pool().PENDING)
         chosen_idx = None
         for i, candidate in enumerate(_pool().PENDING):
+            from ouroboros.server_restart import agent_restart_holds
             from supervisor.events_budget import budget_resume_dispatch_allowed
 
+            if _unsent(candidate) is None and agent_restart_holds(candidate):
+                continue
+
             resume_allowed = budget_resume_dispatch_allowed(queue, candidate)
+            # A row its own exact pause or hold keeps queued is not repaired: the selection a paused
+            # row still carries from its earlier dispatch is no stale zero-dispatch choice, and
+            # re-holding it would replace the Pause's projected reason with that old hold's.
             if (resume_allowed is False and not candidate.get("_owner_hold")
-                    and not candidate.get("_project_admission_restore_hold") and not candidate.get(_LAUNCH_CLAIM)):
+                    and not candidate.get("_project_admission_restore_hold") and not candidate.get(_LAUNCH_CLAIM)
+                    and not isinstance(candidate.get("_budget_pause"), dict) and budget_hold_fact(candidate) is None):
                 if isinstance(candidate.get("_budget_pause_resume"), dict):
                     from supervisor.budget_resume import revoke_exact_budget_resume
 
                     revoke_exact_budget_resume(candidate, "root_resume_generation_stale")
                 else:
-                    # Stale zero-dispatch selection returns to UNSELECTED
-                    # (#1196, Q9), retaining hold ID but dropping dead grant.
-                    # The next selection must record a live root grant.
-                    from supervisor.events_budget import (
-                        BUDGET_HOLD_KEY, HOLD_ROOT_FENCE_LIFTED, hold_budget_row,
-                    )
+                    from supervisor.events_budget import HOLD_ROOT_FENCE_LIFTED, hold_budget_row
+                    from ouroboros.task_results import resolve_task_lineage
 
-                    stale = candidate.get(BUDGET_HOLD_KEY) or {}
-                    hold_budget_row(
-                        candidate, reason=str(stale.get("reason") or HOLD_ROOT_FENCE_LIFTED),
-                        detail="root_resume_generation_stale",
-                        extra={**{key: stale[key] for key in ("root_task_id", "fence_id")
-                                  if key in stale},
-                               "stale_root_grant_id": str(stale.get("root_grant_id") or "")},
-                        result_root=pathlib.Path(candidate.get("budget_drive_root") or _pool().DRIVE_ROOT))
+                    candidate.pop("_resume_selection", None)
+                    lineage = resolve_task_lineage(candidate.get("id"), **{key: candidate.get(key) for key in (
+                        "metadata", "root_task_id", "parent_task_id", "delegation_role",
+                        "original_task_id", "timeout_retry_from")})
+                    if not lineage["is_root_task"]:
+                        root_id = lineage["root_task_id"]
+                        latch = queue.BUDGET_ROOT_FENCES.get(root_id) or {}
+                        hold_budget_row(candidate, reason=HOLD_ROOT_FENCE_LIFTED,
+                            detail="root_resume_generation_stale",
+                            extra={"root_task_id": root_id, "fence_id": str(latch.get("fence_id") or "")},
+                            result_root=pathlib.Path(candidate.get("budget_drive_root") or _pool().DRIVE_ROOT))
                 queue.persist_queue_snapshot(reason="stale_child_resume_held")
                 continue
             if _candidate_ineligible(queue, candidate, remaining, running, selected=selected,
@@ -811,7 +847,7 @@ def assign_tasks() -> None:
                     continue
                 if isinstance(task.get("_budget_pause"), dict):
                     continue
-                if budget_hold_fact(task) is not None:
+                if budget_hold_fact(task) is not None or continuation_refusal(task):
                     continue  # Held, not paused: no second pause row over the hold.
                 if task.get("_owner_wait_resume"):
                     continue  # Restore the checkpoint; the loop still owns its budget stop.

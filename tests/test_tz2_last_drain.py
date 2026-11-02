@@ -5,6 +5,15 @@ import pytest
 from tests.test_project_routing_v664 import _ctx
 
 
+def _sole_reader(monkeypatch, task, project, chat_id):
+    """The message's one root snapshot names TASK as the room's sole reader."""
+    from ouroboros.server_routing_context import RootSnapshot
+
+    row = {"task_id": task["id"], "project_id": project["id"], "room_reader": True}
+    monkeypatch.setattr("ouroboros.server_owner_routing.addressable_roots",
+                        lambda *_: RootSnapshot(((row, frozenset({chat_id})),)))
+
+
 @pytest.mark.parametrize("split", [False, True])
 def test_settled_project_root_does_not_accept_unread_owner_mail(tmp_path, monkeypatch, split):
     from ouroboros.owner_mailbox import drain_owner_entries, _mailbox_path
@@ -24,8 +33,7 @@ def test_settled_project_root_does_not_accept_unread_owner_mail(tmp_path, monkey
     write_task_result(actor_root, task["id"], "completed", result="answer",
                       root_phase_checkpoint={"post_task_synthesis": "running"})
     ctx = _ctx(tmp_path, running={task["id"]: {"task": task}})
-    monkeypatch.setattr("ouroboros.server_owner_routing._addressable_root_tasks",
-                        lambda *_: [{"task_id": task["id"], "project_id": project["id"], "room_reader": True}])
+    _sole_reader(monkeypatch, task, project, chat_id)
 
     routed = _route_project_chat_to_running_task(ctx, chat_id, "late owner clarification", "late-1")
     assert routed == ""  # fall through to a fresh decision turn; no false delivered receipt
@@ -49,8 +57,7 @@ def test_running_project_root_still_receives_owner_mail(tmp_path, monkeypatch):
             "delegation_role": "root", "drive_root": str(tmp_path)}
     write_task_result(tmp_path, task["id"], "running", result="")
     ctx = _ctx(tmp_path, running={task["id"]: {"task": task}})
-    monkeypatch.setattr("ouroboros.server_owner_routing._addressable_root_tasks",
-                        lambda *_: [{"task_id": task["id"], "project_id": project["id"], "room_reader": True}])
+    _sole_reader(monkeypatch, task, project, chat_id)
     assert _route_project_chat_to_running_task(ctx, chat_id, "continue", "live-1") == task["id"]
     assert [row["text"] for row in drain_owner_entries(tmp_path, task["id"])] == ["continue"]
 
@@ -70,8 +77,7 @@ def test_settled_project_followup_enters_new_decision_turn(tmp_path, monkeypatch
     calls = []
     ctx = _ctx(tmp_path, running={task["id"]: {"task": task}},
                direct=lambda *_a, **_k: calls.append("new_turn"))
-    monkeypatch.setattr("ouroboros.server_owner_routing._addressable_root_tasks",
-                        lambda *_: [{"task_id": task["id"], "project_id": project["id"], "room_reader": True}])
+    _sole_reader(monkeypatch, task, project, chat_id)
     monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *_a, **_k: None)
 
     class Bridge:

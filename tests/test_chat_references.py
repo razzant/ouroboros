@@ -129,3 +129,44 @@ def test_reply_to_other_rows_keeps_their_own_text_and_voice(tmp_path, monkeypatc
     # Only a Project lifecycle row speaks with its authored answer, as in Main.
     other = reference_from_row({**stored, "direction": "system", "type": "task_error", "completion_answer": "Hidden"})
     assert other["role"] == "system" and other["snippet"] == "Row text as stored"
+
+
+def test_an_outgoing_rows_own_name_travels_beside_the_owner_correlation(tmp_path, monkeypatch):
+    """A relay is saved under its own name; its live frame carries that name, never the owner's id."""
+    from types import SimpleNamespace
+
+    from ouroboros.chat_references import projection_fields
+    from ouroboros.owner_relay import publish_relay, write_relay
+    from ouroboros.task_finalization import host_operation_reply_kwargs
+    entry, _ = write_relay(tmp_path, "receiver", relay_id="r1", note="Same words", quotes=[], chat_id=1,
+                           teller_task_id="teller")
+    sent = []
+    publish_relay(tmp_path, "receiver", entry, SimpleNamespace(send_message=lambda chat_id, text, **kw: sent.append(kw)))
+    assert sent[0]["progress_meta"]["row_client_message_id"] == entry["msg_id"]
+    assert "client_message_id" not in sent[0]["progress_meta"], "the owner's correlation field stays unused"
+    stored = next(found.row for found in dialogue_store.rows_by_client_id(tmp_path, entry["msg_id"]))
+    assert projection_fields(stored)["row_client_message_id"] == entry["msg_id"], "history projects the same name"
+    # The owner's own row keeps its id in client_message_id alone; a row saved without a name gains nothing.
+    assert "row_client_message_id" not in projection_fields({**stored, "direction": "in"})
+    assert "row_client_message_id" not in projection_fields({**stored, "client_message_id": ""})
+    assert "row_client_message_id" not in projection_fields({**stored, "is_progress": True}), "progress merges meta"
+    # A host reply names the owner's submission on its live frame; its saved row has no name of its own.
+    bridge, echoes = _web_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
+    message_bus.send_with_budget(1, "Restarting", role="system", system_type="command_reply",
+                                 **host_operation_reply_kwargs("web", "", "owner-cmid"))
+    frame = next(echo for echo in echoes if echo.get("content") == "Restarting")
+    assert frame["client_message_id"] == "owner-cmid" and frame["row_address"]
+    assert "row_client_message_id" not in frame, "the owner's correlation never becomes the reply's own name"
+
+
+def test_a_call_opening_row_names_itself_on_its_live_echo():
+    """The call-open row is ingress the host wrote: its live echo must carry its own name, or the chat cannot fold
+    it into the call card and the owner sees the opening as a System bubble beside every call (27.10)."""
+    from ouroboros.chat_references import projection_fields
+    opening = {"direction": "in", "role": "system", "system_type": "call_open", "chat_id": 1, "ts": "t",
+               "client_message_id": "call:c1:open", "host_fact": {"kind": "call_open", "call_id": "c1"}, "text": "Cue"}
+    assert projection_fields(opening)["row_client_message_id"] == "call:c1:open"
+    owner = {**opening, "role": "user", "system_type": ""}
+    owner.pop("host_fact")
+    assert "row_client_message_id" not in projection_fields(owner), "the owner's own row keeps its id alone"

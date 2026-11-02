@@ -349,11 +349,13 @@ def test_rescued_files_are_unknown_never_zero_when_the_listing_cannot_vouch(tmp_
     assert rescued_files_sentence(fact) == ("Files rescued: unknown — a task artifact store could not be "
                                             "listed; 1 listed before the failure (hashes not computed).")
 
-    def unreadable_tree(_root):
-        raise PermissionError("tree read denied")
-        yield  # pragma: no cover - a generator that fails on first read
+    from ouroboros import confined_files
 
-    monkeypatch.setattr(artifacts, "iter_artifact_tree", unreadable_tree)
+    def unreadable_tree(_directory, **_kwargs):
+        raise PermissionError("tree read denied")
+
+    # The listing's real walk: every directory is enumerated through its held handle.
+    monkeypatch.setattr(confined_files.ConfinedDirectory, "entries", unreadable_tree)
     assert rescued_files_fact("unk-2", [good])["state"] == "unknown"
     monkeypatch.undo()
 
@@ -391,13 +393,14 @@ def test_rescued_files_count_physical_files_per_distinct_store_without_deduplica
     assert artifact_store_roots(tmp_path, "dup-1", child_root=tmp_path) == [task_artifacts_dir(tmp_path, "dup-1", create=False)]
 
 
-def test_rescued_files_fact_hashes_copies_registers_and_opens_nothing_but_the_registration(tmp_path, monkeypatch):
+def test_rescued_files_fact_hashes_copies_registers_and_reads_nothing_but_the_registration(tmp_path, monkeypatch):
     """Pure: no hash, no copy, no registration write, and the only file whose content is
-    read is the store's shared registration metadata."""
+    read is the store's shared registration metadata. The confined walk opens each
+    deliverable by its held parent for kind and size; no path is opened at all."""
     import hashlib
     import io
 
-    from ouroboros import artifacts
+    from ouroboros import artifacts, confined_files
     from ouroboros.headless import task_artifacts_dir
     from ouroboros.task_finalization import rescued_files_fact
 
@@ -414,17 +417,62 @@ def test_rescued_files_fact_hashes_copies_registers_and_opens_nothing_but_the_re
                       for p in tmp_path.rglob("*"))
 
     before = snapshot()
-    opened = []
-    real_open = io.open
+    path_opens, held_opens, content_reads = [], [], []
+    real_open, real_held_open = io.open, confined_files.ConfinedDirectory.open
 
     def spying_open(file, *args, **kwargs):
-        opened.append(str(file))
+        if not isinstance(file, int):  # a descriptor the walk already holds is not a path open
+            path_opens.append(str(file))
         return real_open(file, *args, **kwargs)
+
+    class Watched:
+        """The walk's own handle; every content read is recorded by its name."""
+
+        def __init__(self, name, handle):
+            self.name, self.handle = name, handle
+
+        def _read(self, method, *args):
+            content_reads.append(self.name)
+            return getattr(self.handle, method)(*args)
+
+        def read(self, *args):
+            return self._read("read", *args)
+
+        def read1(self, *args):
+            return self._read("read1", *args)
+
+        def readinto(self, *args):
+            return self._read("readinto", *args)
+
+        def readline(self, *args):
+            return self._read("readline", *args)
+
+        def readlines(self, *args):
+            return self._read("readlines", *args)
+
+        def __iter__(self):
+            content_reads.append(self.name)
+            return iter(self.handle)
+
+        def close(self):
+            self.handle.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self.handle.close()
+
+    def held_open(directory, name):
+        handle, observed = real_held_open(directory, name)
+        held_opens.append(name)
+        return Watched(name, handle), observed
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("the rescued-files fact hashes, measures, copies or registers nothing")
 
     monkeypatch.setattr(io, "open", spying_open)
+    monkeypatch.setattr(confined_files.ConfinedDirectory, "open", held_open)
     monkeypatch.setattr(artifacts, "sha256", forbidden)
     monkeypatch.setattr(hashlib, "sha256", forbidden)
     for name in ("artifact_record", "stream_artifact_file", "_register_task_artifact_records",
@@ -434,5 +482,7 @@ def test_rescued_files_fact_hashes_copies_registers_and_opens_nothing_but_the_re
     monkeypatch.undo()
 
     assert (fact["count"], fact["state"], fact["hash_computed"]) == (2, "positive", False)
-    assert set(opened) <= {str(store / artifacts._ARTIFACT_MANIFEST)}, opened
+    assert path_opens == [], path_opens
+    assert set(held_opens) <= {artifacts._ARTIFACT_MANIFEST, "a.bin", "b.bin"}, held_opens
+    assert set(content_reads) == {artifacts._ARTIFACT_MANIFEST}, content_reads
     assert snapshot() == before

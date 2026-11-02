@@ -9,7 +9,8 @@ admission hold.
 from __future__ import annotations
 
 
-def is_reading(root, task_id: str, task: dict, *, running: bool, fences=None) -> bool:
+def is_reading(root, task_id: str, task: dict, *, running: bool, fences=None, drain_ended=None) -> bool:
+    """``drain_ended``: the caller's own read of the actor's settlement, else read here."""
     if not running or task.get("_owner_hold") or task.get("_project_admission_hold"):
         return False
     from ouroboros.owner_mailbox import mailbox_drain_ended
@@ -19,7 +20,7 @@ def is_reading(root, task_id: str, task: dict, *, running: bool, fences=None) ->
         return False
     if fence_closed(read_fence(root, str(task.get("root_task_id") or task_id))):
         return False
-    return not mailbox_drain_ended(root, task_id)
+    return not (mailbox_drain_ended(root, task_id) if drain_ended is None else drain_ended)
 
 
 def unheld_cold_sleep(root, task_id: str, task: dict, *, fences=None) -> bool:

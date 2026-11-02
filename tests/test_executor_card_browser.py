@@ -8,6 +8,13 @@ from tests.test_delegated_activity_browser import engine_ui as engine_ui  # chro
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 
+def executor_sentence(card):
+    # The chip's detail sentence (#360 A) is the first row of the card's own details (refined A, 21.10).
+    row = card.locator(':scope > .chat-live-details > [data-live-facts] > div').first
+    assert row.locator('dt').text_content() == 'Executor'
+    return row.locator('dd')
+
+
 def progress(task, text, **extra):
     return dict(role='assistant', direction='out', is_progress=True, task_id=task,
                 text=text, content=text, ts='2026-09-09T10:00:00Z', **extra)
@@ -53,7 +60,10 @@ def test_observed_executor_role_activity_and_project_pointer_live_replay(subscri
     card.wait_for()
     root_card = page.locator('#executor-proof [data-task-id="root"]')
     root_meta = root_card.locator(':scope > .chat-live-foot > .chat-live-meta')
-    assert 'Agent model: gpt-6-astra' in root_meta.inner_text()
+    root_facts = root_card.locator(':scope > .chat-live-details > [data-live-facts]')
+    # A root runs no executor: its compact line names its own model; the labelled row is in its details.
+    assert 'gpt-6-astra' in root_meta.inner_text()
+    assert 'Agent model' in root_facts.text_content() and 'gpt-6-astra' in root_facts.text_content()
     # A helper's usage shares the task id but must not replace its coordinator.
     page.evaluate('''async () => {
         for (const fn of executorProof.handlers.get('log') || []) fn({chat_id:101, data:{
@@ -61,15 +71,21 @@ def test_observed_executor_role_activity_and_project_pointer_live_replay(subscri
             ts:'2026-09-09T10:00:30Z'}});
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     }''')
-    assert 'Agent model: gpt-6-astra' in root_meta.inner_text()
-    assert 'helper-model' not in root_meta.inner_text()
+    assert 'gpt-6-astra' in root_meta.inner_text() and 'gpt-6-astra' in root_facts.text_content()
+    assert 'helper-model' not in root_meta.inner_text() + root_facts.text_content()
     assert card.locator('.chat-live-title').first.inner_text() == 'UI reviewer'
-    assert 'Coordinator: gpt-6-astra' in card.inner_text()
-    # #360 A: the chip keeps the observation word; the requested model is detail text
-    # on the expanded card, so the collapsed child stays one quiet identity row.
+    # The child's compact line names its executor and the executor's own (requested) model; the coordinating
+    # model is a labelled row of its details, so it never reads as the executor's.
+    child_meta = card.locator(':scope > .chat-live-foot > .chat-live-meta')
+    child_facts = card.locator(':scope > .chat-live-details > [data-live-facts]').text_content()
+    assert 'requested cursor-grok-4.6-xhigh-fast' in child_meta.inner_text()
+    assert 'gpt-6-astra' not in child_meta.inner_text()
+    assert 'Coordinator' in child_facts and 'gpt-6-astra' in child_facts
+    # #360 A: the chip keeps the observation word; the detail sentence is a row of the
+    # expanded card's details, so the collapsed child stays one quiet identity row.
     assert card.locator('.chat-live-executor-chip').inner_text().strip() == 'Cursor · last update'
-    detail = card.locator(':scope > .chat-live-foot .chat-live-executor-detail')
-    assert '(requested)' in detail.text_content() and not detail.locator('.chat-live-meta-text').is_visible()
+    detail = executor_sentence(card)
+    assert '(requested)' in detail.text_content() and not detail.is_visible()
     activity=card.locator('.chat-live-activity').first
     assert activity.is_visible() and activity.inner_text().startswith('Checking every')
     assert activity.evaluate('e=>getComputedStyle(e).webkitLineClamp') == '1'
@@ -82,34 +98,35 @@ def test_observed_executor_role_activity_and_project_pointer_live_replay(subscri
             #executor-proof .rw-trigger .status-badge { min-width: 81px; }
         ''')
     assert trigger.bounding_box()['height'] <= 40
-    # The common history disclosure has its own readable, wrapping row below the control.
+    # The common history gap disclosure stays at the in-feed Load-older edge, not in the header bar.
     bar = page.locator('#executor-proof .chat-panel-statusbar')
-    note = bar.locator('.chat-history-status')
+    assert bar.locator('.chat-history-status').count() == 0
+    note = page.locator('#executor-proof .chat-load-older .chat-load-older-note')
     assert note.inner_text() == 'Some saved history is not loaded. Shown messages may have gaps.'
     assert page.locator('#executor-proof .chat-load-older-note').count() == 1
-    geometry = bar.evaluate('''bar => {
-        const box = selector => bar.querySelector(selector).getBoundingClientRect();
-        const control = box('.rw-trigger'), note = box('.chat-history-status');
-        const css = getComputedStyle(bar), rect = bar.getBoundingClientRect();
-        return {control, note, bar:rect,
-            spacing:parseFloat(css.paddingTop)+parseFloat(css.paddingBottom)+parseFloat(css.rowGap || 0)};
+    geometry = page.locator('#executor-proof').evaluate('''panel => {
+        const box = selector => panel.querySelector(selector).getBoundingClientRect();
+        return {control: box('.rw-trigger'), note: box('.chat-load-older-note'), bar: box('.chat-panel-statusbar')};
     }''')
     assert geometry['note']['y'] >= geometry['control']['bottom']
     assert geometry['note']['x'] >= geometry['bar']['x']
     assert geometry['note']['right'] <= geometry['bar']['right'] + 1
-    assert geometry['bar']['height'] <= geometry['control']['height'] + geometry['note']['height'] + geometry['spacing'] + 3
     input_box=page.locator('#proof-input')
     input_box.fill('Message stays in this Project')
     trigger.click()
     page.locator('#executor-proof .rw-shade .rw-main', has_text='UI coherence').click()
     assert input_box.input_value() == 'Message stays in this Project'
-    assert page.locator('#executor-proof .rw-shade').is_hidden()
+    page.locator('#executor-proof .rw-shade').wait_for(state='hidden')  # it folds away, then hides
     terminal={**child,'is_progress':True,'subagent_event':'completed','status':'completed','result':'Checks complete',
               'ts':'2026-09-09T10:01:00Z','execution_evidence':{'delegated_runs_started':1,'delegated_runs_settled':1,
               'delegated_runs_failed':0,'harness_models':['Cursor Grok 4.6 Extra High Fast']}}
     page.evaluate('''frame=>{for(const fn of executorProof.handlers.get('chat')||[])fn({...frame,chat_id:101})}''',terminal)
-    page.wait_for_function("document.querySelector('#executor-proof [data-task-id=child]').textContent.includes('Observed: Cursor Grok 4.6')")
-    assert 'Coordinator: gpt-6-astra' in card.inner_text()
+    # The settled observed model replaces the progress report's requested one on the compact line.
+    page.wait_for_function("document.querySelector('#executor-proof [data-task-id=child] > .chat-live-foot > .chat-live-meta')"
+                           ".textContent.includes('Cursor Grok 4.6 Extra High Fast')")
+    assert 'requested cursor-grok' not in child_meta.inner_text() and 'gpt-6-astra' not in child_meta.inner_text()
+    child_facts = card.locator(':scope > .chat-live-details > [data-live-facts]').text_content()
+    assert 'Coordinator' in child_facts and 'gpt-6-astra' in child_facts
     capture(page,f'executor-card-{width}-{"linux-metrics" if linux_metrics else "native-font"}')
     page.evaluate('executorProof.instance.destroy()')
     assert page.locator('#executor-proof .rw-trigger').count()==0
@@ -213,10 +230,10 @@ def test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch(engin
         card = cards[task]
         assert card.get_attribute('data-expanded') == '0', task
         assert part(card, '.chat-live-executor-chip').inner_text().strip() == label, task
-        detail = part(card, '.chat-live-executor-detail')
+        detail = executor_sentence(card)
         assert fragment in detail.text_content(), task
         # Collapsed: the sentence is out of sight and out of the copied line, with no dangling dot.
-        assert not detail.locator('.chat-live-meta-text').is_visible(), task
+        assert not detail.is_visible(), task
         copied = ' '.join(card.locator(':scope > .chat-live-foot [data-live-meta]').evaluate(COPY).split())
         assert copied.startswith(label) and fragment not in copied and '· ·' not in copied, (task, copied)
         meta = part(card, '[data-live-meta]')
@@ -225,23 +242,28 @@ def test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch(engin
     # The rendered markup equals its own serialization (quotes included), so the
     # meta line's no-op check holds and a reader's selection is never rebuilt away.
     unreadable = next(frame for task, frame, *_ in MATRIX if task == 'm-unreadable')
+    # The detail sentence (quotes included) is the Executor row of the details, which round-trips the same way.
     assert page.evaluate('''async frame => {
         const {executorChip} = await import('/static/modules/log_events.js');
         const {executorIdentityMarkup} = await import('/static/modules/harness_presentation.js');
-        const html = executorIdentityMarkup(executorChip(frame), {agentModel: 'gpt-6-astra'});
+        const html = executorIdentityMarkup(executorChip(frame), {model: 'gpt-6-astra'});
         const probe = document.createElement('div'); probe.innerHTML = html;
-        return html.includes('"none"') && probe.innerHTML === html;
+        const facts = document.querySelector('#executor-matrix [data-task-id="m-unreadable"] > .chat-live-details > [data-live-facts]');
+        const again = document.createElement('dl'); again.innerHTML = facts.innerHTML;
+        return probe.innerHTML === html && facts.innerHTML.includes('"none"') && again.innerHTML === facts.innerHTML;
     }''', unreadable)
-    # Pointer: the card's Show details button opens the sentence as ordinary meta text.
+    # Pointer: the card's Details button opens the sentence as the details' Executor row; the compact line stays as it was.
     mixed = cards['m-mixed']
     part(mixed, '[data-live-disclosure]').click()
     assert mixed.get_attribute('data-expanded') == '1'
-    detail_text = part(mixed, '.chat-live-executor-detail .chat-live-meta-text')
+    detail_text = executor_sentence(mixed)
     assert detail_text.is_visible()
     sentence = detail_text.inner_text().strip()
     assert sentence == part(mixed, '.chat-live-executor-chip').get_attribute('title')
     copied = ' '.join(part(mixed, '[data-live-meta]').evaluate(COPY).split())
-    assert f'Codex · 1 of 2 runs failed · {sentence}' in copied, copied
+    assert copied.startswith('Codex · 1 of 2 runs failed') and sentence not in copied, copied
+    facts_copy = ' '.join(mixed.locator(':scope > .chat-live-details > [data-live-facts]').evaluate(COPY).split())
+    assert f'Executor {sentence}' in facts_copy, facts_copy
     assert part(mixed, '.chat-live-executor-chip').inner_text().strip() == 'Codex · 1 of 2 runs failed'
     # The phase chip stays the work indicator: the quiet name is not a running proof.
     assert cards['m-assigned'].locator(':scope > .chat-live-summary-button [data-live-phase]').inner_text() == 'Working'
@@ -273,7 +295,7 @@ def test_quiet_executor_label_matrix_and_details_by_pointer_keyboard_touch(engin
     unverified = touch.locator('#executor-matrix [data-task-id="m-unverified"]')
     unverified.locator(':scope > .chat-live-summary-button [data-live-disclosure]').tap()
     assert unverified.get_attribute('data-expanded') == '1'
-    assert part(unverified, '.chat-live-executor-detail .chat-live-meta-text').is_visible()
+    assert executor_sentence(unverified).is_visible()
     capture(touch, f'{shot}-touch-expanded')
     page.evaluate('executorMatrix.instance.destroy()')
     touch.evaluate('executorMatrix.instance.destroy()')

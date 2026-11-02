@@ -7,6 +7,8 @@ and disclosures survive late answers, and Browse keeps an earlier catalog when a
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from tests._skills_page_harness import (
@@ -33,54 +35,13 @@ for _row in CONFIRMED_SOURCES["sources"]:
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1440), ("webkit", 390)])
-def test_presence_workspace_save_and_runtime_reset_keep_owner_folder(skills_browser, browser_name, width):
+def test_retired_presence_runtime_has_no_form(skills_browser, browser_name, width):
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
-        skills = open_skills(page)
-        runtime = {
-            "defaults": {"model_slot": "main", "inline_max_rounds": 10},
-            "overrides": {}, "workspace_root": "/work/current",
-            "state_fingerprint": "a" * 64,
-        }
-        row = {**WEATHER, "enabled": True, "review_status": "clean", "review_gate": {"executable_review": True}}
-        skills.answers["/api/extensions"] = lambda _request: {"skills": [{**row, "presence_runtime": runtime}], "live": {}}
-        writes = []
-
-        def save(request):
-            body = request.post_data_json
-            assert body["expected_state_fingerprint"] == runtime["state_fingerprint"]
-            writes.append(body)
-            runtime["overrides"] = body["runtime_overrides"]
-            if "workspace_root" in body:
-                runtime["workspace_root"] = body["workspace_root"]
-            runtime["state_fingerprint"] = str(len(writes)) * 64
-            return {"ok": True, "skill": "weather", "presence_runtime": runtime}
-
-        skills.answers["/api/owner/skills/weather/presence-runtime"] = save
+        open_skills(page, extensions=[{**WEATHER, "presence_runtime": {"workspace_root": "/old"}}])
         page.goto(URL, wait_until="networkidle")
-        card = page.locator('.skills-card[data-skill="weather"]')
-        card.locator('.skills-details > summary').click()
-        form = card.locator('[data-presence-runtime-form]')
-        folder = form.locator('[name="workspace_root"]')
-        assert folder.input_value() == "/work/current"
-        selected = "/work/shared documents/quarterly reports"
-        folder.fill(selected)
-        form.locator('[name="model_slot"]').select_option("light")
-        capture(page, browser_name, width, "presence-workspace-edit")
-        assert folder.bounding_box()["width"] > 200
-        form.locator('button[type="submit"]').click()
-        page.wait_for_function("document.querySelector('[data-presence-runtime-form]').dataset.stateFingerprint === '1'.repeat(64)")
-        assert writes[0]["workspace_root"] == selected
-        assert writes[0]["runtime_overrides"]["model_slot"] == "light"
-        assert folder.input_value() == selected
-        form.locator('[data-presence-runtime-reset]').click()
-        page.wait_for_function("document.querySelector('[data-presence-runtime-form]').dataset.stateFingerprint === '2'.repeat(64)")
-        assert "workspace_root" not in writes[1]
-        assert writes[1]["runtime_overrides"] == {"model_slot": None, "inline_max_rounds": None}
-        assert folder.input_value() == selected
-        capture(page, browser_name, width, "presence-workspace-saved")
-        assert no_overflow(page)
+        assert page.locator('[data-presence-runtime-form]').count() == 0
     finally:
         browser.close()
 
@@ -172,7 +133,7 @@ def test_skills_primary_paints_while_optional_requests_remain_pending(skills_bro
 
 
 @pytest.mark.parametrize("browser_name", ["chromium", "webkit"])
-def test_skills_late_enrichment_preserves_presence_and_portalled_menu(skills_browser, browser_name):
+def test_skills_late_enrichment_preserves_input_and_portalled_menu(skills_browser, browser_name):
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     skills = None
     try:
@@ -187,10 +148,11 @@ def test_skills_late_enrichment_preserves_presence_and_portalled_menu(skills_bro
         card = page.locator('.skills-card[data-skill="weather"]')
         card.wait_for()
         card.locator('.skills-details > summary').click()
+        card.locator('.skills-details').evaluate("node => node.insertAdjacentHTML('beforeend', '<form data-local-test-form><input name=inline_max_rounds></form>')")
         field = card.locator('[name="inline_max_rounds"]')
         field.fill("27")
         page.evaluate("""() => {
-            window.keptForm = document.querySelector('[data-presence-runtime-form]');
+            window.keptForm = document.querySelector('[data-local-test-form]');
             window.keptField = keptForm.elements.inline_max_rounds;
             keptField.focus();
             keptField.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true, data:'2'}));
@@ -200,7 +162,7 @@ def test_skills_late_enrichment_preserves_presence_and_portalled_menu(skills_bro
                  "source": "clawhub", "error": "Ghost install failed"}
         skills.release("/api/skills/lifecycle-queue", {"active": running, "events": [ghost]})
         page.wait_for_function("document.querySelector('.skills-card[data-skill=weather] .skills-card-status').textContent.includes('Turning off')")
-        assert page.evaluate("keptField === document.activeElement && keptField === document.querySelector('[name=inline_max_rounds]') && keptForm === document.querySelector('[data-presence-runtime-form]')")
+        assert page.evaluate("keptField === document.activeElement && keptField === document.querySelector('[name=inline_max_rounds]') && keptForm === document.querySelector('[data-local-test-form]')")
         assert field.input_value() == "27"
         assert card.locator('.skills-details').get_attribute('open') is not None
         assert card.locator('.skills-toggle').is_disabled()
@@ -212,13 +174,13 @@ def test_skills_late_enrichment_preserves_presence_and_portalled_menu(skills_bro
         page.evaluate("keptField.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true, data:'2'}))")
         trigger = card.locator('[data-skill-menu-trigger]')
         trigger.click()
-        page.evaluate("window.keptMenu=document.querySelector('body > .skills-card-menu-dialog');window.keptMenuFocus=document.activeElement")
-        publish = page.locator('body > .skills-card-menu-dialog .skills-submit-hub')
+        page.evaluate("window.keptMenu=document.querySelector('body > .skills-card-menu-dialog:not([data-leaving])');window.keptMenuFocus=document.activeElement")
+        publish = page.locator('body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub')
         assert publish.get_attribute('data-submit-disabled') == 'true'
         assert "status unavailable" in publish.get_attribute('data-submit-reason')
         skills.release("/api/state", {"github_token_configured": True})
-        page.wait_for_function("document.querySelector('body > .skills-card-menu-dialog .skills-submit-hub').dataset.submitDisabled === 'false'")
-        assert page.evaluate("keptMenu === document.querySelector('body > .skills-card-menu-dialog') && keptMenuFocus === document.activeElement && keptField === document.querySelector('[name=inline_max_rounds]')")
+        page.wait_for_function("document.querySelector('body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub').dataset.submitDisabled === 'false'")
+        assert page.evaluate("keptMenu === document.querySelector('body > .skills-card-menu-dialog:not([data-leaving])') && keptMenuFocus === document.activeElement && keptField === document.querySelector('[name=inline_max_rounds]')")
         assert field.input_value() == '27'
         page.keyboard.press('Escape')
         skills.hold.discard('/api/state')
@@ -270,9 +232,10 @@ def test_details_follow_the_listing_and_keep_what_the_owner_opened(skills_browse
         assert "Submitted v1.0 · PR #7" in publication.inner_text()
         card.locator('.skills-review-findings > summary').click()
         card.locator('.skills-review-findings li').first.wait_for()
+        card.locator('.skills-details').evaluate("node => node.insertAdjacentHTML('beforeend', '<form data-local-test-form><input name=inline_max_rounds></form>')")
         card.locator('[name="inline_max_rounds"]').fill("27")
         page.evaluate("""() => {
-            window.keptForm = document.querySelector('[data-presence-runtime-form]');
+            window.keptForm = document.querySelector('[data-local-test-form]');
             window.keptFindings = document.querySelector('.skills-review-findings');
         }""")
 
@@ -280,7 +243,7 @@ def test_details_follow_the_listing_and_keep_what_the_owner_opened(skills_browse
         refresh(page)
         assert publication.count() == 0, "the forgotten record is gone without a reload"
         assert card.locator('.skills-details').get_attribute('open') is not None
-        assert page.evaluate("keptForm === document.querySelector('[data-presence-runtime-form]')")
+        assert page.evaluate("keptForm === document.querySelector('[data-local-test-form]')")
         assert card.locator('[name="inline_max_rounds"]').input_value() == "27"
         assert page.evaluate("keptFindings === document.querySelector('.skills-review-findings') && keptFindings.open")
         assert card.locator('.skills-review-findings li').count() == 1
@@ -291,7 +254,7 @@ def test_details_follow_the_listing_and_keep_what_the_owner_opened(skills_browse
         refresh(page)
         assert card.locator('.skills-review-findings > summary').inner_text() == "2 review findings"
         assert card.locator('.skills-review-findings li').count() == 0, "the new block is built when opened"
-        assert page.evaluate("keptForm === document.querySelector('[data-presence-runtime-form]')")
+        assert page.evaluate("keptForm === document.querySelector('[data-local-test-form]')")
         capture(page, browser_name, 1280, "details-follow-listing")
     finally:
         browser.close()
@@ -315,9 +278,9 @@ def test_installed_never_waits_for_sources_or_catalogs(skills_browser, browser_n
         assert ("GET", "/api/skill-catalog") not in skills.requests, "Installed never reads a catalog"
         assert any(path == "/api/skill-sources" for _, path in skills.requests)
         card.locator('[data-official-mark]').click()
-        assert page.locator('.skills-mark-popup').count() == 0, 'the promise names its source: it waits for it'
+        assert page.locator('.skills-mark-popup:not([data-leaving])').count() == 0, 'the promise names its source: it waits for it'
         skills.release("/api/skill-sources")
-        popup = page.locator('.skills-mark-popup')
+        popup = page.locator('.skills-mark-popup:not([data-leaving])')
         popup.wait_for()
         assert "the maintainer of Ouroboros vouches for this exact version" in popup.inner_text()
         assert "github.com/razzant/OuroborosHub" in popup.inner_text()
@@ -350,8 +313,8 @@ def test_skills_late_enrichment_keeps_local_toggle_and_publish_pending(skills_br
         skills.release('/api/skills/lifecycle-queue', {'events': []})
         assert page.evaluate('keptToggle === document.querySelector(".skills-toggle") && keptToggle.disabled && !keptToggle.checked')
         card.locator('[data-skill-menu-trigger]').click()
-        page.evaluate('window.keptPublish=document.querySelector("body > .skills-card-menu-dialog .skills-submit-hub")')
-        page.locator('body > .skills-card-menu-dialog .skills-submit-hub').click()
+        page.evaluate('window.keptPublish=document.querySelector("body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub")')
+        page.locator('body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub').click()
         page.wait_for_function('keptPublish.disabled')
         skills.release('/api/state', {'github_token_configured': False})
         page.wait_for_timeout(100)
@@ -390,19 +353,19 @@ def test_a_menu_opened_during_a_reread_survives_it(skills_browser, browser_name)
         skills.hold = {'/api/extensions'}
         for failed in (True, False):
             page.locator('#skills-refresh').click()
-            if page.locator('body > .skills-card-menu-dialog[open]').count() == 0:
+            if page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]').count() == 0:
                 page.locator('[data-skill-menu-trigger]').click()
-            menu = page.locator('body > .skills-card-menu-dialog[open]')
+            menu = page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]')
             menu.wait_for()
-            page.evaluate("window.keptMenu = document.querySelector('body > .skills-card-menu-dialog[open]')")
+            page.evaluate("window.keptMenu = document.querySelector('body > .skills-card-menu-dialog:not([data-leaving])[open]')")
             if failed:
                 skills.release('/api/extensions', {'error': 'Primary offline'}, 503)
             else:
                 skills.release('/api/extensions', {'skills': [WEATHER], 'live': {}})
             page.wait_for_function("!document.querySelector('#skills-refresh').disabled")
-            assert page.evaluate("keptMenu === document.querySelector('body > .skills-card-menu-dialog[open]')")
+            assert page.evaluate("keptMenu === document.querySelector('body > .skills-card-menu-dialog:not([data-leaving])[open]')")
         page.keyboard.press('Escape')
-        assert page.locator('body > .skills-card-menu-dialog[open]').count() == 0
+        assert page.locator('body > .skills-card-menu-dialog:not([data-leaving])[open]').count() == 0
     finally:
         if skills:
             skills.close(browser)
@@ -468,7 +431,7 @@ def test_skills_tabs_and_bottom_edge_menu(skills_browser, browser_name, width):
         trigger.scroll_into_view_if_needed()
         trigger.focus()
         trigger.press("Enter")
-        menu = page.locator('.skills-card-menu-dialog[open]')
+        menu = page.locator('.skills-card-menu-dialog:not([data-leaving])[open]')
         menu.wait_for(state="visible")
         assert page.locator(':focus').get_attribute("role") == "menuitem"
         page.keyboard.press("End")
@@ -483,7 +446,7 @@ def test_skills_tabs_and_bottom_edge_menu(skills_browser, browser_name, width):
         }""")
         capture(page, browser_name, width, "bottom-edge-menu")
         page.keyboard.press("Escape")
-        assert page.locator('.skills-card-menu-dialog[open]').count() == 0
+        assert page.locator('.skills-card-menu-dialog:not([data-leaving])[open]').count() == 0
         assert trigger.evaluate("element => element === document.activeElement")
 
         trigger.press("Enter")
@@ -492,7 +455,7 @@ def test_skills_tabs_and_bottom_edge_menu(skills_browser, browser_name, width):
         dialog = page.locator(".confirm-dialog")
         dialog.wait_for(state="visible")
         assert "Delete" in dialog.inner_text()
-        assert page.locator('.skills-card-menu-dialog[open]').count() == 0
+        assert page.locator('.skills-card-menu-dialog:not([data-leaving])[open]').count() == 0
         page.keyboard.press("Escape")
         dialog.wait_for(state="detached")
         assert trigger.evaluate("element => element === document.activeElement")
@@ -558,7 +521,7 @@ def test_skills_review_reads_the_list_once_and_findings_render_on_open(skills_br
 
 
 def _failed_review_projection(tmp_path, monkeypatch, deps_reason):
-    """Two real failed runs of the review lifecycle, read back by the /api/extensions projection."""
+    """Real current failures, plus retained pre-ledger lifecycle rows read by /api/extensions."""
     from types import SimpleNamespace
 
     from ouroboros.skill_review import SkillReviewOutcome
@@ -594,9 +557,24 @@ def _failed_review_projection(tmp_path, monkeypatch, deps_reason):
         raise RuntimeError("reviewer transport closed")
 
     assert review(clean)["status"] == "clean"
+    dependency_failure = skill_review_ui_projection(drive_root, "weather")
+    first = dependency_failure["current"]
+    assert first["review_status"] == "clean" and first["lifecycle_status"] == "failed"
+    assert first["terminal_reason"] == deps_reason
     with pytest.raises(RuntimeError, match="reviewer transport closed"):
         review(broken)
-    return skill_review_ui_projection(drive_root, "weather")
+    second = skill_review_ui_projection(drive_root, "weather")["current"]
+    # Since #2123 only a real review wave writes the shared ledger. These stubs do
+    # not dispatch one. Seed the frozen legacy format explicitly to exercise its
+    # supported historical reader alongside the actual current failed job.
+    from ouroboros.skill_review_history import review_history_path
+    path = review_history_path(drive_root, "weather")
+    path.write_text("".join(json.dumps({**row, "job_status": row["status"],
+        "status": row["review_status"] or row["status"]}) + "\n" for row in (first, second)), encoding="utf-8")
+    before = path.read_bytes()
+    projection = skill_review_ui_projection(drive_root, "weather")
+    assert path.read_bytes() == before, "reading legacy failures must not rewrite them"
+    return dependency_failure, projection
 
 
 @pytest.mark.parametrize("browser_name,width", [("chromium", 1440), ("webkit", 390)])
@@ -605,14 +583,21 @@ def test_failed_review_runs_read_as_failures_with_their_recorded_reason(
     """PR #782: a failed run is not an open `pending`, and a clean verdict whose dependency
     install failed keeps both facts; a long recorded reason stays bounded on a narrow card and
     the full reason opens by touch or keyboard (no hover title)."""
-    projection = _failed_review_projection(tmp_path, monkeypatch, "pip install failed: " + "e" * 3000)
+    dependency_failure, projection = _failed_review_projection(tmp_path, monkeypatch, "pip install failed: " + "e" * 3000)
     browser = getattr(skills_browser, browser_name).launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": width, "height": 900})
-        open_skills(page, extensions=[{**WEATHER, "skill_review": projection}])
+        skills = open_skills(page, extensions=[{**WEATHER, "skill_review": dependency_failure}])
         page.goto(URL, wait_until="networkidle")
         card = page.locator('.skills-card[data-skill="weather"]')
         card.locator('.skills-details > summary').click()
+        current = card.locator(".skills-review-current").inner_text()
+        assert current.endswith(" · clean · lifecycle failed"), current
+        reason = card.locator(".skills-review-current + .skills-review-reason")
+        assert reason.inner_text().startswith("Reason: pip install failed: eee")
+        assert reason.bounding_box()["height"] < 200
+        skills.set_skills([{**WEATHER, "skill_review": projection}])
+        refresh(page)
         current = card.locator(".skills-review-current").inner_text()
         assert current.endswith(" · review verdict unavailable · lifecycle failed"), current
         assert "pending" not in current

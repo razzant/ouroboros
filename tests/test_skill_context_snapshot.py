@@ -80,7 +80,7 @@ def test_tail_prefix_real_round_and_final_serializers(publisher, monkeypatch):
     owner_corpus = deepcopy(ctx._owner_directives)
     owner_hash = owner_source_sha256(ctx)
     owner_words = directive_owner_rows(ctx)
-    recorder = SimpleNamespace()
+    recorder = ctx
     assert observe_send(recorder, messages, round_idx=1) is None
     round_ctx = _CompactionRoundContext(tools=SimpleNamespace(_ctx=ctx), drive_root=root,
         drive_logs=root / "logs", task_id="root", round_idx=2, event_queue=None, emit_progress=lambda x: None)
@@ -103,13 +103,25 @@ def test_tail_prefix_real_round_and_final_serializers(publisher, monkeypatch):
     assert messages[1] == before[1]
     assert ctx._owner_directives == owner_corpus
     assert owner_source_sha256(ctx) == owner_hash and directive_owner_rows(ctx) == owner_words
+    sent = deepcopy(messages)
     _write(path, "B")
     messages = _run_round_compaction(messages, round_ctx)
     assert observe_send(recorder, messages, round_idx=3) is None
-    assert messages[:len(before)] == before
+    assert messages[:-1] == sent
+    # The change is named, not copied: one outdated note says where the current text is read.
+    current = visible_snapshots(messages)[skill.name][1]
+    assert current["state"] == "outdated" and current["reason"] == "text_changed" and "text" not in current
+    from ouroboros.tools.query_data import _query_data
+    from ouroboros.tools.registry import ToolContext
+    read = json.loads(_query_data(ToolContext(repo_dir=root, drive_root=root, task_id="root"), op="json",
+                                  kind="skill_state", ids=[skill.name], state_file="context_snapshot"))
+    assert read["status"] == "ok" and '"B"' in json.dumps(read["data"]), read
+    _write(path, "C")
+    messages = _run_round_compaction(messages, round_ctx)
+    assert observe_send(recorder, messages, round_idx=4) is None and len(messages) == len(sent) + 1
 
 
-def test_material_change_renewal_reversion_and_compacted_cold_resume(publisher):
+def test_changes_mark_once_until_rebuild_and_cold_resume_needs_no_ledger(publisher):
     root, skill, ctx, path = publisher
     messages = []
     _write(path)
@@ -119,22 +131,57 @@ def test_material_change_renewal_reversion_and_compacted_cold_resume(publisher):
         _write(path)  # changing observation/validity times are not new material
         assert not maybe_append_skill_snapshots(ctx, messages, root)
     assert messages == first
-    _write(path, "B")
-    assert maybe_append_skill_snapshots(ctx, messages, root)
-    _write(path, "A")
-    assert maybe_append_skill_snapshots(ctx, messages, root) and len(messages) == 3
+    # How often the text changes cannot multiply rows: one outdated note covers every later change.
+    for text in ("B", "A", "C", "D"):
+        _write(path, text)
+        assert maybe_append_skill_snapshots(ctx, messages, root) is (text == "B")
+    assert len(messages) == 2 and visible_snapshots(messages)[skill.name][1]["reason"] == "text_changed"
     # Cold restoration uses visible messages, not a hidden process ledger.
     fresh_ctx = SimpleNamespace(task_id="root", task_metadata={}, budget_drive_root=str(root))
     assert not maybe_append_skill_snapshots(fresh_ctx, messages, root)
+    # A rebuilt conversation without the full text shows the current one in full again.
+    del messages[0]
+    assert maybe_append_skill_snapshots(fresh_ctx, messages, root)
+    assert visible_snapshots(messages)[skill.name][1]["text"] == "D"
     messages.clear()
     assert maybe_append_skill_snapshots(fresh_ctx, messages, root)
     parsed = visible_snapshots(messages)[skill.name][1]
     parsed["valid_until"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     from ouroboros.skill_context_snapshot import snapshot_note
     messages[-1] = snapshot_note(parsed)
-    assert maybe_append_skill_snapshots(fresh_ctx, messages, root)  # renewal, never timestamp patch
-    assert visible_snapshots(messages)[skill.name][1]["text"] == "A"
-    assert "text_ref" in json.loads(messages[-1]["content"].split("\n", 1)[1])
+    assert maybe_append_skill_snapshots(fresh_ctx, messages, root)  # its dates ran out: named, never patched
+    marked = visible_snapshots(messages)[skill.name][1]
+    assert (marked["state"], marked["reason"]) == ("outdated", "validity_ended")
+    assert not maybe_append_skill_snapshots(fresh_ctx, messages, root)
+
+
+def test_expiry_recovery_and_failures_add_one_note_until_rebuild(publisher):
+    root, skill, ctx, path = publisher
+    messages = []
+    _write(path)
+    assert maybe_append_skill_snapshots(ctx, messages, root)
+    expired = datetime.now(timezone.utc) - timedelta(seconds=1)
+    for cycle in range(6):  # a polling publisher whose upstream comes and goes
+        _write(path, valid=expired)
+        maybe_append_skill_snapshots(ctx, messages, root)
+        _write(path)
+        maybe_append_skill_snapshots(ctx, messages, root)
+        path.unlink()
+        maybe_append_skill_snapshots(ctx, messages, root)
+        _write(path, "B" if cycle % 2 else "A")
+        maybe_append_skill_snapshots(ctx, messages, root)
+    assert len(messages) == 2  # the full text and one note, however often it expires, recovers or fails
+    note = visible_snapshots(messages)[skill.name][1]
+    assert note["state"] == "stale" and "text" not in note and 'state_file="context_snapshot"' in note["current_text"]
+    # Without a full text in view, one unavailable note stands until a fresh one arrives in full.
+    messages.clear()
+    path.unlink()
+    assert maybe_append_skill_snapshots(ctx, messages, root)
+    _write(path, valid=expired)
+    assert not maybe_append_skill_snapshots(ctx, messages, root)
+    _write(path, "C")
+    assert maybe_append_skill_snapshots(ctx, messages, root)
+    assert len(messages) == 2 and visible_snapshots(messages)[skill.name][1]["text"] == "C"
 
 
 @pytest.mark.parametrize("mode", ["disabled", "ungranted", "unreviewed", "removed"])
@@ -146,7 +193,7 @@ def test_readiness_revocation_withdraws_once_without_rehashing(publisher, monkey
     assert maybe_append_skill_snapshots(ctx, messages, root)
     monkeypatch.setattr(skill_loader, "compute_content_hash", lambda *a, **k: pytest.fail("per-round payload hash"))
     monkeypatch.setattr(extension_liveness, "discover_skill_identity", lambda *a, **k: pytest.fail("per-round discovery"))
-    monkeypatch.setattr(extension_liveness, "discover_skill_peers", lambda *a, **k: pytest.fail("per-round peer scan"))
+    monkeypatch.setattr(extension_liveness, "discover_conflict_peers", lambda *a, **k: pytest.fail("per-round peer scan"))
     if mode == "disabled":
         save_enabled(root, skill.name, False)
     elif mode == "ungranted":
@@ -158,7 +205,30 @@ def test_readiness_revocation_withdraws_once_without_rehashing(publisher, monkey
     assert maybe_append_skill_snapshots(ctx, messages, root)
     current = visible_snapshots(messages)[skill.name][1]
     assert current["state"] == "unknown" and "text" not in current
+    assert "current_text" not in current  # a withdrawal names no reader that would refuse
     assert not maybe_append_skill_snapshots(ctx, messages, root)
+
+
+def test_an_older_bodys_withdrawal_yields_once_to_a_note_that_names_the_reader(publisher):
+    from ouroboros.context_budget import bound_host_row
+    from ouroboros.skill_context_snapshot import _RENEWAL_SNAPSHOT_HEADER
+
+    root, skill, ctx, path = publisher
+    messages = []
+    _write(path)
+    assert maybe_append_skill_snapshots(ctx, messages, root)
+    base = visible_snapshots(messages)[skill.name][1]
+    older = {"skill": skill.name, "revision": base["revision"], "state": "unknown", "reason": "snapshot_missing"}
+    messages.append(bound_host_row(SNAPSHOT_KIND, _RENEWAL_SNAPSHOT_HEADER + "\n" + json.dumps(older)))
+    assert maybe_append_skill_snapshots(ctx, messages, root)  # readable again: one note names where to read it
+    assert 'state_file="context_snapshot"' in visible_snapshots(messages)[skill.name][1]["current_text"]
+    expired = datetime.now(timezone.utc) - timedelta(seconds=1)
+    for text in ("B", "C", "D"):
+        _write(path, valid=expired)
+        maybe_append_skill_snapshots(ctx, messages, root)
+        _write(path, text)
+        maybe_append_skill_snapshots(ctx, messages, root)
+    assert len(messages) == 3
 
 
 @pytest.mark.parametrize("failure", ["expired", "future", "malformed", "oversized", "missing", "symlink"])
@@ -208,7 +278,58 @@ def test_superseded_notes_reclaim_only_after_latest_complete_note(publisher):
     for text in ("A", "B", "A"):
         _write(path, text)
         maybe_append_skill_snapshots(ctx, messages, root)
-    assert _obsolete_host_rows(messages) == {0, 1}
+    assert len(messages) == 2 and _obsolete_host_rows(messages) == {0}  # the full text is outdated, the note current
+
+
+def test_successor_appends_until_host_copy_recovery_and_retains_exact_source(publisher):
+    from ouroboros import context_compaction  # noqa: F401 — public import establishes its leaf facade
+    from ouroboros.artifacts import read_actor_source_bytes
+    from ouroboros.context_source_view import emergency_address_view
+    from ouroboros.tools.query_data import _query_data
+    from ouroboros.tools.registry import ToolContext
+    from tests.test_context_reclaim_materializer import _request
+
+    root, skill, ctx, path = publisher
+    prefix = [{"role": "user", "content": "Owner words remain exact"}]
+    messages = deepcopy(prefix)
+    first = _write(path, "A" * 12_000)
+    assert maybe_append_skill_snapshots(ctx, messages, root)
+    original = deepcopy(messages[1])
+    rebuilt, receipt = emergency_address_view(messages, _request(messages, 1), rung="host_copies",
+                                             drive_root=root, task_id="root")
+    assert rebuilt == messages and receipt.status == "no_eligible"
+    _write(path, "B" * 12_000)
+    assert maybe_append_skill_snapshots(ctx, messages, root)
+    assert messages[1] == original and "B" * 100 not in messages[-1]["content"]  # named, never copied
+    sha = json.loads(original["content"].split("\n", 1)[1])["source"]["retained"]["sha256"]
+    read = json.loads(_query_data(ToolContext(repo_dir=root, drive_root=root, task_id="root"),
+                                 op="blob", sha256=sha, blob_kind="txt"))
+    assert read["status"] == "ok" and json.loads(read["data"]) == first
+    assert messages[:1] == prefix
+    before = deepcopy(messages)
+    rebuilt, receipt = emergency_address_view(messages, _request(messages, 1), rung="host_copies",
+                                             drive_root=root, task_id="root")
+    assert receipt.status == "applied" and receipt.reclaimed_tokens > 0
+    assert messages == before and original not in rebuilt
+    assert all(row in rebuilt for row in [*prefix, before[-1]])
+    assert json.loads(read_actor_source_bytes(root, "root", receipt.checkpoint_ref))["messages"] == before
+    # With no full text left in view, the next preparation shows the current one in full.
+    assert maybe_append_skill_snapshots(ctx, rebuilt, root)
+    assert visible_snapshots(rebuilt)[skill.name][1]["text"] == "B" * 12_000
+
+
+def test_snapshot_without_retained_source_stays_whole_when_superseded(publisher, monkeypatch):
+    from ouroboros import observability
+    root, skill, ctx, path = publisher
+    monkeypatch.setattr(observability, "write_blob", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    messages = []
+    _write(path, "source that must survive")
+    maybe_append_skill_snapshots(ctx, messages, root)
+    first = deepcopy(messages[0])
+    _write(path, "successor")
+    maybe_append_skill_snapshots(ctx, messages, root)
+    assert messages[0] == first
+    assert visible_snapshots(messages)[skill.name][1]["state"] == "outdated"
 
 
 @pytest.mark.parametrize("path", ["../escape.json", "/tmp/escape.json", "C:\\escape.json", "folder/", ""])

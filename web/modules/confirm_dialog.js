@@ -31,6 +31,10 @@ export function openConfirmDialog({
     title,
     body,
     details = null,
+    // Caller-rendered rich content above the body: `mount(container)` fills the
+    // container (the caller's own sanitizing renderer) and may return a disposer,
+    // run when the dialog closes. `label` names the region for assistive tech.
+    content = null,
     input = false,
     initialValue = '',
     // [{value, label}] makes the input a <select>; the result shape is unchanged.
@@ -48,12 +52,13 @@ export function openConfirmDialog({
         const backdrop = document.createElement('div');
         backdrop.className = 'marketplace-modal-backdrop confirm-dialog-backdrop';
         backdrop.innerHTML = `
-            <div class="marketplace-modal confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+            <div class="marketplace-modal confirm-dialog${content?.mount ? ' has-content' : ''}" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
                 <div class="marketplace-modal-head">
                     <h3 id="confirm-dialog-title">${escapeHtml(title || 'Confirm action')}</h3>
                     <button type="button" class="btn btn-default btn-sm" data-confirm-cancel aria-label="Close">Close</button>
                 </div>
                 <div class="marketplace-modal-body">
+                    ${content?.mount ? `<section class="confirm-dialog-content" data-confirm-content tabindex="0" aria-label="${escapeHtml(String(content.label || 'Details'))}"></section>` : ''}
                     <p>${escapeHtml(body || 'Continue?')}</p>
                     ${renderConfirmDialogDetails(details)}
                     ${!input ? '' : Array.isArray(choices)
@@ -68,6 +73,7 @@ export function openConfirmDialog({
         `;
         let settled = false;
         let disposeFocus = null;
+        let disposeContent = null;
         const finish = (value) => {
             if (settled) return;
             settled = true;
@@ -75,6 +81,7 @@ export function openConfirmDialog({
             if (activeDialog === backdrop) activeDialog = null;
             if (activeClose === cancel) activeClose = null;
             disposeFocus?.();
+            try { disposeContent?.(); } catch { /* the dialog closes either way */ }
             backdrop.remove();
             resolve(value);
         };
@@ -104,6 +111,10 @@ export function openConfirmDialog({
         };
         document.addEventListener('keydown', onKey);
         document.body.appendChild(backdrop);
+        if (content?.mount) {
+            const disposer = content.mount(backdrop.querySelector('[data-confirm-content]'));
+            if (typeof disposer === 'function') disposeContent = disposer;
+        }
         activeDialog = backdrop;
         activeClose = cancel;
         disposeFocus = bindDialogFocus(backdrop.querySelector('[role="dialog"]'), {

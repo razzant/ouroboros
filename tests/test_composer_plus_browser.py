@@ -21,18 +21,20 @@ from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 
 PLUS = "#page-chat #chat-plus"
-MENU = ".chat-plus-menu"
+MENU = ".chat-plus-menu:not([data-leaving])"
 ATTACH = f"{MENU} [data-plus-item='attach']"
 FACTS = """() => {
     const box = (node) => { if (!node) return null; const r = node.getBoundingClientRect();
         return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
     const plus = document.querySelector('#page-chat #chat-plus');
-    const menu = document.querySelector('.chat-plus-menu');
+    const menu = document.querySelector('.chat-plus-menu:not([data-leaving])');
     const page = document.querySelector('#page-chat');
     const active = document.activeElement;
+    const input = page.querySelector('#chat-input'), words = getComputedStyle(input);
     return {
         plus: box(plus), row: box(plus.closest('.chat-text-row')), input: box(page.querySelector('#chat-input')),
         send: box(page.querySelector('.chat-send-group')), menu: box(menu),
+        lastLine: box(input).bottom - parseFloat(words.paddingBottom) - parseFloat(words.lineHeight) / 2,
         items: menu ? [...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent.trim()) : [],
         expanded: plus.getAttribute('aria-expanded'), name: plus.getAttribute('aria-label'),
         focus: active === plus ? 'plus' : active?.id === 'chat-input' ? 'input'
@@ -76,7 +78,8 @@ def _assert_plus_in_place(facts: dict, where: str) -> None:
     assert abs(plus["width"] - 36) <= 0.5 and abs(plus["height"] - 36) <= 0.5, (where, plus)
     # The finger-sized target keeps the paperclip's place: the row is no taller than its field needs.
     assert row["height"] <= field["height"] + 18.5, (where, row, field)
-    assert abs((plus["top"] + plus["bottom"]) / 2 - (row["top"] + row["bottom"]) / 2) <= 1, (where, plus, row)
+    # The field can wrap even its placeholder on a phone. The controls ride on its last line.
+    assert abs((plus["top"] + plus["bottom"]) / 2 - facts["lastLine"]) <= 1, (where, facts)
     assert plus["right"] <= field["left"] + 0.5, (where, plus, field)
     assert facts["name"] == "More actions" and facts["expanded"] == "false", (where, facts)
     assert all(slot == {"display": "none", "width": 0} for slot in facts["slots"]), (where, facts["slots"])
@@ -174,7 +177,7 @@ CHIPS = """(count) => {
     for (let i = 0; i < count; i += 1) {
         const chip = document.createElement('button');
         chip.type = 'button';
-        chip.className = 'chat-swarm';
+        chip.className = 'chat-composer-chip';
         chip.textContent = `Contributed chip ${i + 1}`;
         slot.append(chip);
     }
@@ -182,7 +185,7 @@ CHIPS = """(count) => {
     const voice = document.querySelector('#page-chat [data-composer-voice]');
     const mic = document.createElement('button');
     mic.type = 'button';
-    mic.className = 'chat-swarm';
+    mic.className = 'voice-btn voice-mic';
     mic.textContent = 'Mic';
     voice.append(mic);
     voice.hidden = false;
@@ -224,6 +227,9 @@ def test_filled_slots_keep_the_capsules_line_and_step_aside_with_the_capsules(di
                 for count in (1, 6):
                     where = f"{engine} {width}px {count} chip(s)"
                     _open_chat(page, url, width=width, height=800)
+                    if count == 6:
+                        page.locator('#chat-input').fill('one\ntwo\nthree')
+                        page.wait_for_function("document.querySelector('#chat-input').getBoundingClientRect().height > 60")
                     _assert_plus_in_place(_facts(page), where)
                     if count == 1:
                         # The menu fits the narrowest phone.
@@ -251,7 +257,7 @@ def test_filled_slots_keep_the_capsules_line_and_step_aside_with_the_capsules(di
                     assert after["overflow"] <= 0 and not after["outside"], (where, after)
                     page.screenshot(path=str(_evidence_dir(tmp_path) / f"composer-slots-{engine}-{width}-{count}.png"),
                                     animations="disabled")
-                    # An owner capsule open alone: the chips step aside with the pills.
+                    # An owner capsule open alone: the chips step aside with the other controls.
                     page.evaluate("() => { document.querySelector('#page-chat .chat-toolbar-row').dataset.ownerSolo = 'effort'; }")
                     assert page.evaluate(ROW)["slot"]["display"] == "none", where
         finally:

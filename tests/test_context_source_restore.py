@@ -174,7 +174,10 @@ def test_main_next_request_gets_exact_source_without_a_new_account(main_loop, mo
         restore, {"content": "done"}])
     assert answer == "done" and prior["receipt"]["status"] == "applied"
     after = f.inputs[-1]["messages"]
-    assert after[:len(prior["prefix"])] == prior["prefix"]
+    # Only the host-only rolling boundary moves; canonical content and shapes stay exact.
+    def unmarked_rows(rows):
+        return [{k: v for k, v in row.items() if k != "cache_control"} for row in rows]
+    assert unmarked_rows(after[:len(prior["prefix"])]) == unmarked_rows(prior["prefix"])
     assert f.inputs[-1]["tools"] == f.inputs[-2]["tools"]
     assert invalidations == ["authored-main"]  # the deliberate earlier fold only
     assert f.ctx._context_view_receipt["status"] == "applied"
@@ -196,11 +199,21 @@ def test_main_next_request_gets_exact_source_without_a_new_account(main_loop, mo
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", True, raising=False)
     monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})
     client, schemas = LLMClient(api_key="unused"), f.inputs[-1]["tools"]
+
+    def without_block_markers(rows):
+        return [{**row, "content": [{k: v for k, v in block.items() if k != "cache_control"}
+                                   for block in row["content"]]}
+                if isinstance(row.get("content"), list) else row for row in rows]
+
     for model, env in (("openai::gpt-6-sol", {"OPENAI_API_KEY": "unused"}),
                        ("openai/gpt-6-sol", {"OPENROUTER_API_KEY": "unused"})):
         first = _build(client, _target(monkeypatch, client, model, env), prior["prefix"], schemas)
         last = _build(client, _target(monkeypatch, client, model, env), after, schemas)
-        assert last["messages"][:len(first["messages"])] == first["messages"]
+        prefix = last["messages"][:len(first["messages"])]
+        if model == "openai/gpt-6-sol":  # this lane renders the moving block marker
+            assert without_block_markers(prefix) == without_block_markers(first["messages"])
+        else:
+            assert prefix == first["messages"]
         assert last["tools"] == first["tools"]
     native = {"type": "codex.turn.v1", "opaque": "caller-owned continuation"}
     first = _wire(monkeypatch, prior["prefix"], schemas, native=native)

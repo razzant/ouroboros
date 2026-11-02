@@ -1,6 +1,7 @@
 """Test runners spend a shared physical budget and preserve crash evidence."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -159,9 +160,10 @@ def _run_pytest(tmp_path, files, *, workers, extra=(), owned=True):
         # No launcher root either: its own evidence in tmp_path would otherwise retain the outer one.
         env = {key: value for key, value in os.environ.items() if key != "OUROBOROS_TEST_TEMP_ROOT"}
         with log.open("w", encoding="utf-8") as output:
+            # Its own session, as every owned child: the kill below then reaches this run, never ours (#2353).
             proc = subprocess.Popen([sys.executable, str(entry)], cwd=ROOT,
                                     env={**env, budget.NESTED_WORKERS_ENV: str(workers)},
-                                    stdout=output, stderr=subprocess.STDOUT)
+                                    stdout=output, stderr=subprocess.STDOUT, **pl.subprocess_new_group_kwargs())
         try:
             code = proc.wait(timeout=60)
         finally:
@@ -265,6 +267,9 @@ def test_worker_death_ends_pass_with_crash_and_unfinished_evidence(tmp_path, fau
     data = json.loads((evidence / "results.json").read_text(encoding="utf-8"))
     crash_reports = [row for row in data["reports"] if row["phase"] == "crash"]
     assert any(row["nodeid"] == "test_0_crash.py::test_dies" for row in crash_reports), output
+    # Only the timeout callback's own record names a cause; an os._exit leaves the crash unexplained.
+    assert [row.get("timeout_callback_seconds") for row in crash_reports] == [
+        3.0 if fault == "thread_timeout" else None], output
     assert not any(row["nodeid"] == "test_2_pending.py::test_pending" for row in data["reports"]), output
     assert data["session_exit_code"] != 0
     assert data["worker_crash"]["collection_available"] is True
@@ -277,6 +282,32 @@ def test_worker_death_ends_pass_with_crash_and_unfinished_evidence(tmp_path, fau
     while pl.process_start_time(pid) == born and not pl.pid_provably_gone(pid) and not pid_is_zombie(pid):
         assert time.monotonic() < deadline, output
         time.sleep(0.05)
+
+
+@pytest.mark.parametrize("name, change, seconds", [
+    ("gw0", {}, 300.0),
+    ("gw0", {"testrunuid": "an-earlier-run"}, None),
+    ("gw0", {"worker": "gw1"}, None),
+    ("gw1", {"worker": "gw1"}, None),  # another worker's own record stays with that worker
+    ("gw0", {"nodeid_sha256": hashlib.sha256(b"t.py::test_other").hexdigest()}, None),
+    ("gw0", {"timeout_seconds": "300"}, None),
+    ("gw0", "{torn", None),
+    ("gw0", None, None),
+], ids=["exact", "stale-run", "names-another-worker", "another-workers-file", "another-test", "malformed",
+        "torn", "absent"])
+def test_a_crash_names_a_timeout_callback_only_from_its_own_workers_record(tmp_path, name, change, seconds):
+    from tests.ci_evidence import _timeout_callback
+
+    report = SimpleNamespace(nodeid="t.py::test_dies", node=SimpleNamespace(
+        gateway=SimpleNamespace(id="gw0"), workerinput={"testrunuid": "this-run"}))
+    record = tmp_path / f".timeout-{name}.json"
+    if change is not None:
+        exact = {"worker": "gw0", "testrunuid": "this-run", "timeout_seconds": 300.0,
+                 "nodeid_sha256": hashlib.sha256(b"t.py::test_dies").hexdigest()}
+        record.write_text(change if isinstance(change, str) else json.dumps({**exact, **change}), encoding="utf-8")
+    assert _timeout_callback(tmp_path, report) == seconds
+    # The dead worker's record is read once; another worker's is left for its own crash.
+    assert record.exists() is (name != "gw0" and change is not None)
 
 
 def test_unowned_worker_death_lets_running_tests_finish(tmp_path, monkeypatch):

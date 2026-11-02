@@ -34,14 +34,13 @@ answers:
   bought a dispatched, verdict-answered wave). Exhaustion under blocking is a
   free typed refusal; under advisory the outcome returns with a typed
   disclosure for explicit author continuation, without another paid dispatch;
-* skill review — paid reviewer-panel dispatches per ceiling key (the root task
-  for task-driven review groups — shared across every skill that task reviews,
-  follow-ups start fresh — or, for the manual lane, the CURRENT content
-  snapshot: revised content restarts the manual count; a chunked oversized
-  wave is ONE cycle, not one per pack). A byte-identical skill snapshot with a
-  recorded substantive verdict under the same panel contract replays free
-  (``skill_review_cycles.py``) when the persisted review state still covers
-  it; exhaustion is the same typed event with ``surface="skill_review"``.
+* skill review (``skill_review`` → ``review_change(subject="skill")``) — paid skill waves per
+  root task for a task-driven review (shared across every skill that task reviews; a
+  follow-up starts fresh), counted apart from the task's change and result waves (its own
+  ``tool_name`` on the attempt rows); the manual lane (the Skills page, a Hub install) has
+  no task, so its ceiling is per CONTENT VERSION of the skill (owner Q23). A byte-identical
+  skill under the same rules and panel reuses its settled record at $0 (the ledger's reuse
+  key); exhaustion is the same typed event with ``surface="review_skill"``.
 
 Values are read from ``os.environ`` (``config.apply_settings_to_env`` projects
 saved settings there) falling back to ``SETTINGS_DEFAULTS`` — no second

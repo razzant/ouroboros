@@ -83,10 +83,10 @@ def dict_size_for(raw_total: int) -> int:
     return min(size, MAX_DICT_SIZE)
 
 
-def read_sidecar(path: pathlib.Path) -> Dict[str, Any]:
+def read_sidecar(path: pathlib.Path, *, raw: Optional[bytes] = None) -> Dict[str, Any]:
     """Read the publication authority; a torn or invalid sidecar is never absence."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8") if raw is None else raw)
         if (not isinstance(data, dict) or data.get("format_version") != FORMAT_VERSION or data.get("codec") != CODEC
                 or not isinstance(data.get("members"), list) or not data.get("task_id")
                 or any(type(data[key]) is not int for key in ("generation", "raw_total", "packed_total", "dict_size", "preset"))
@@ -122,6 +122,30 @@ def _sidecar_names(root: Any) -> set[str]:
                 if not name.startswith(".") and name.endswith(".members.json")}
     except FileNotFoundError:
         return set()
+
+
+def _own_sidecar(name: str, task_id: str) -> bool:
+    """A name one of this task's generations may carry: the exact spelling, including task IDs
+    containing dots/digits (``a.2`` is ``a`` generation 2 or ``a.2`` generation 1; the sidecar's
+    own ``task_id`` decides). A sidecar is valid only under its own name, so no other name holds
+    this task's members."""
+    prefix = name.removesuffix(".members.json")
+    return prefix == task_id or (prefix.startswith(task_id + ".") and prefix[len(task_id) + 1:].isdigit())
+
+
+def _task_sidecar_names(root: Any, task_id: str) -> set[str]:
+    """This task's sidecar names, found by their spelling instead of listing the directory. The
+    packer gives a task the first free generation after its newest and no published name is ever
+    removed, so the task's occupied generations run from 1 (a torn pack, or a homonym's sidecar
+    such as ``a.2`` generation 1 for ``a``, occupies one too) and the first free one ends them."""
+    directory, names, generation = packs_dir(root), set(), 1
+    while True:
+        name = sidecar_name(task_id, generation)
+        if (directory / name).exists():
+            names.add(name)
+        elif not (directory / pack_name(task_id, generation)).exists():
+            return names
+        generation += 1
 
 
 def list_sidecars(root: Any, *, errors: Optional[list] = None,
@@ -185,10 +209,20 @@ def _reader(path: pathlib.Path) -> _PackReader:
         return reader
 
 
-def member_bytes(pack_path: pathlib.Path, member: Dict[str, Any]) -> bytes:
+def member_bytes(pack_path: pathlib.Path, member: Dict[str, Any], *, anchor: Any = None) -> bytes:
     """One member's exact bytes, verified against the sidecar's size and sha256."""
     parts: List[bytes] = []
-    _reader(pack_path).read_at(int(member["offset"]), int(member["size"]), parts.append)
+    if anchor is None:
+        _reader(pack_path).read_at(int(member["offset"]), int(member["size"]), parts.append)
+    else:
+        from ouroboros.confined_files import open_confined_file
+        handle, _ = open_confined_file(anchor, pack_path.relative_to(anchor).parts)
+        try:
+            with handle, lzma.LZMAFile(handle, "rb") as stream:
+                stream.seek(int(member["offset"]))
+                parts.append(stream.read(int(member["size"])))
+        except (lzma.LZMAError, EOFError) as exc:
+            raise EvidenceCorrupt(f"evidence_corrupt: pack stream unreadable: {pack_path.name}") from exc
     raw = b"".join(parts)
     if len(raw) != int(member["size"]) or hashlib.sha256(raw).hexdigest() != member["sha256"]:
         raise EvidenceCorrupt(f"evidence_corrupt: member {member['sha256'][:12]} of {pack_path.name} failed verification")
@@ -223,14 +257,26 @@ def index_tier(root: pathlib.Path) -> str:
     return store.TIER_ENFORCED if kernel_file_locks_enforced(root / "state" / store.LOCK_NAME) else store.TIER_NAME
 
 
-def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> bool:
+def _index_stamp(path: pathlib.Path) -> Optional[tuple]:
     identity = store.file_identity(path)
     if identity is None:
-        return False
+        return None
     try:
         info = os.stat(path)
-        stamp = (*identity, info.st_size, info.st_mtime_ns)
     except OSError:
+        return None
+    return (*identity, info.st_size, info.st_mtime_ns)
+
+
+def _index_validated(path: pathlib.Path) -> bool:
+    """This process already validated these exact index bytes; nothing is checked here."""
+    stamp = _index_stamp(path)
+    return stamp is not None and _VALIDATED.get(str(path)) == stamp
+
+
+def _index_valid(path: pathlib.Path, tier: str, *, wait_sec: float = INDEX_WAIT_SEC) -> bool:
+    stamp = _index_stamp(path)
+    if stamp is None:
         return False
     if _VALIDATED.get(str(path)) == stamp:
         return True
@@ -353,22 +399,18 @@ def index_upsert(root: Any, pack_path: pathlib.Path, sidecar: Dict[str, Any]) ->
 
 def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id: str = "", rel_path: str = "",
                 ) -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
-    """All indexed placements, or healthy sidecar rows when the cache is unavailable."""
+    """All indexed placements, or healthy sidecar rows when the cache is unavailable; a task's
+    checkpoint handle is addressed by its task (``_task_handles``)."""
     if not packs_dir(root).is_dir():
         return []  # a root without packs is left untouched (no cache, no lock file)
+    if rel_path:
+        return _task_handles(root, task_id, rel_path)
     try:
         with open_index(root) as conn:
-            if rel_path:
-                rows = conn.execute(
-                    "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM handles h "
-                    "JOIN members m ON m.sha256=h.sha256 AND m.task_id=h.task_id AND m.generation=h.generation "
-                    "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation "
-                    "WHERE h.task_id=? AND h.rel_path=? AND m.kind=?", (task_id, rel_path, CHECKPOINT)).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
-                    "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
-                    "WHERE m.sha256=? AND m.kind=? ORDER BY p.task_id, p.generation", (sha256, kind)).fetchall()
+            rows = conn.execute(
+                "SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind FROM members m "
+                "JOIN packs p ON p.task_id=m.task_id AND p.generation=m.generation "
+                "WHERE m.sha256=? AND m.kind=? ORDER BY p.task_id, p.generation", (sha256, kind)).fetchall()
             if not rows:
                 error_row = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
                 if error_row and json.loads(error_row[0]):
@@ -379,12 +421,70 @@ def _placements(root: pathlib.Path, *, sha256: str = "", kind: str = "", task_id
     errors, found = [], []
     for sidecar_path, sidecar in list_sidecars(root, errors=errors):
         for member in sidecar["members"]:
-            if (rel_path and sidecar["task_id"] == task_id and member["kind"] == CHECKPOINT and member.get("path") == rel_path) or (
-                    not rel_path and member["sha256"] == sha256 and member["kind"] == kind):
+            if member["sha256"] == sha256 and member["kind"] == kind:
                 found.append((sidecar_path.with_name(pack_name(sidecar["task_id"], sidecar["generation"])), member))
     if errors and not found:
         raise errors[0]
     return found
+
+
+def _task_handles(root: pathlib.Path, task_id: str, rel_path: str = "") -> List[Tuple[pathlib.Path, Dict[str, Any]]]:
+    """This task's packed checkpoint handles (``rel_path``: that one), read as an addressed fact.
+
+    A handle is named by its task and the task's own sidecars are its authority, so no other
+    task's pack is read: the index answers while this process has validated its current bytes and
+    its lock is free now; otherwise, and for an absence it cannot prove (it recorded unreadable
+    sidecars), the task's own sidecars answer, found by name (``_task_sidecar_names``). Only when
+    one of them is unreadable does a valid index that still holds the placement keep it (checked,
+    never rebuilt). The ordinary read never lists the directory or waits for, re-validates or
+    rebuilds the shared cache: those whole-pack passes stay with the readers that need every pack
+    (``blob_bytes``) and with the packer."""
+    rows = _indexed_handles(root, task_id, rel_path, validated=True)
+    if rows is not None:
+        return rows
+    errors, found = [], []
+    for sidecar_path, sidecar in list_sidecars(root, errors=errors, names=_task_sidecar_names(root, task_id)):
+        for member in sidecar["members"]:
+            if sidecar["task_id"] == task_id and member["kind"] == CHECKPOINT and member.get("path") and (
+                    not rel_path or member["path"] == rel_path):
+                found.append((sidecar_path.with_name(pack_name(task_id, sidecar["generation"])), member))
+    if errors and not found:
+        kept = _indexed_handles(root, task_id, rel_path, validated=False)
+        if kept:
+            return kept
+        raise errors[0]
+    return found
+
+
+_HANDLES_SQL = ("SELECT p.path AS pack, m.sha256, m.offset, m.size, m.kind, h.rel_path AS path FROM handles h "
+                "JOIN members m ON m.sha256=h.sha256 AND m.task_id=h.task_id AND m.generation=h.generation "
+                "JOIN packs p ON p.task_id=h.task_id AND p.generation=h.generation WHERE h.task_id=? AND m.kind=?")
+
+
+def _indexed_handles(root: pathlib.Path, task_id: str, rel_path: str, *,
+                     validated: bool) -> Optional[List[Tuple[pathlib.Path, Dict[str, Any]]]]:
+    """The index's rows for this task's handles, or ``None`` when it cannot answer. ``validated``
+    reads only bytes this process already validated and never waits for the lock; otherwise
+    ``open_index`` checks the existing index under the caller's budget, never rebuilding it."""
+    path = packs_dir(root) / INDEX_NAME
+    try:
+        with contextlib.ExitStack() as held:
+            if not validated:
+                conn = held.enter_context(open_index(root, rebuild=False))
+            else:
+                held.enter_context(store.name_lock(root, INDEX_LOCK_NAME, timeout_sec=0))
+                if not _index_validated(path):
+                    return None
+                conn = held.enter_context(contextlib.closing(store.connect(path, index_tier(root), wait_sec=0)))
+                held.enter_context(store.transaction(conn, write=False))
+            rows = conn.execute(_HANDLES_SQL + (" AND h.rel_path=?" if rel_path else ""),
+                                (task_id, CHECKPOINT, *((rel_path,) if rel_path else ()))).fetchall()
+            recorded = conn.execute("SELECT value FROM meta WHERE key='sidecar_errors'").fetchone()
+            if not rows and recorded and json.loads(recorded[0]):
+                return None  # an unreadable sidecar may be this task's: the index proves no absence
+    except (store.StoreError, sqlite3.Error, OSError, ValueError):
+        return None
+    return [(packs_dir(root) / row["pack"], dict(row)) for row in rows]
 
 
 def _locate(root: pathlib.Path, **identity: str) -> Optional[Tuple[pathlib.Path, Dict[str, Any]]]:
@@ -441,43 +541,48 @@ def blob_bytes(root: Any, ref: Any, *, expected_kind: Optional[str] = None, max_
     if max_bytes is not None and size > max_bytes:
         raise ValueError("blob exceeds byte limit")
     failure: Optional[Exception] = None
-    for candidate in _blob_roots(root, ref, sha256, kind):
-        loose = candidate / "observability" / "blobs" / f"{sha256}.{kind}.gz"
-        if admit is not None:
-            admit(loose)
-        try:
-            raw = read_loose_gzip(loose, max_bytes)
-            if size in (-1, len(raw)) and hashlib.sha256(raw).hexdigest() == sha256:
-                return raw
-            failure = EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
-        except FileNotFoundError as exc:
-            failure = failure or exc
-        except ValueError as exc:
-            failure = exc
-        except (OSError, EOFError, zlib.error) as exc:
-            failure = exc  # retention repair distinguishes transient IO from damaged gzip
-        try:
-            placements = _placements(candidate, sha256=sha256, kind=kind)
-        except (OSError, EvidenceCorrupt) as exc:
-            failure = exc
-            continue
-        for located in placements:
+    try:
+        for candidate in _blob_roots(root, ref, sha256, kind):
+            loose = candidate / "observability" / "blobs" / f"{sha256}.{kind}.gz"
             if admit is not None:
-                admit(located[0])
+                admit(loose)
             try:
-                if max_bytes is not None and int(located[1]["size"]) > max_bytes:
-                    raise ValueError("blob exceeds byte limit")
-                raw = member_bytes(*located)
-                if size not in (-1, len(raw)):
-                    raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
-                return raw
+                raw = read_loose_gzip(loose, max_bytes)
+                if size in (-1, len(raw)) and hashlib.sha256(raw).hexdigest() == sha256:
+                    return raw
+                failure = EvidenceCorrupt("evidence_corrupt: observability blob ref failed size or sha256 verification")
             except FileNotFoundError as exc:
                 failure = failure or exc
             except ValueError as exc:
                 failure = exc
-            except OSError:
-                failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
-    raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
+            except (OSError, EOFError, zlib.error) as exc:
+                failure = exc  # retention repair distinguishes transient IO from damaged gzip
+            try:
+                placements = _placements(candidate, sha256=sha256, kind=kind)
+            except (OSError, EvidenceCorrupt) as exc:
+                failure = exc
+                continue
+            for located in placements:
+                if admit is not None:
+                    admit(located[0])
+                try:
+                    if max_bytes is not None and int(located[1]["size"]) > max_bytes:
+                        raise ValueError("blob exceeds byte limit")
+                    raw = member_bytes(*located)
+                    if size not in (-1, len(raw)):
+                        raise EvidenceCorrupt(f"evidence_corrupt: packed blob {sha256[:12]} size differs from its ref")
+                    return raw
+                except FileNotFoundError as exc:
+                    failure = failure or exc
+                except ValueError as exc:
+                    failure = exc
+                except OSError:
+                    failure = EvidenceCorrupt(f"evidence_corrupt: unreadable pack {located[0].name}")
+        raise failure or FileNotFoundError(str(root / "observability" / "blobs" / f"{sha256}.{kind}.gz"))
+    finally:
+        # The kept error's traceback holds this frame: kept past an exit, it is a cycle retaining the callers'
+        # frames and payloads until a GC pass. Every exit drops it; a raised error keeps its object and traceback.
+        failure = None
 
 
 def _handle_path(root: Any, task_id: str, rel_path: str) -> pathlib.Path:
@@ -486,8 +591,103 @@ def _handle_path(root: Any, task_id: str, rel_path: str) -> pathlib.Path:
     return task_artifact_dir_path(root, task_id, create=False).joinpath(*pathlib.PurePosixPath(rel_path).parts)
 
 
-def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
+def _confined_handle(root: Any, task_id: str, rel_path: str, anchor: Any, *, info_only: bool = False) -> Any:
+    """Preserve admitted roots' placement authority; confine their payload opens.
+
+    Physical scratch custody alone never admits a pathname-opened SQLite index.
+    Such retained sources use confined sidecars without granting store authority.
+    """
+    from ouroboros.confined_files import (
+        confined_directory,
+        open_confined_file,
+        physical_path,
+        relative_parts,
+        root_spellings,
+    )
+    from ouroboros.task_results import validate_task_id
+
+    task_id = validate_task_id(task_id)
+    if not relative_parts(rel_path):
+        raise ValueError("invalid checkpoint path")
+    spellings = root_spellings(anchor)  # ANCHOR as configured; its rows record that spelling
+    anchor, root = spellings[0], physical_path(spellings, pathlib.Path(root).absolute())
+    loose = _handle_path(root, task_id, rel_path)
+    digest, failure = pathlib.PurePosixPath(rel_path).stem.rsplit("-", 1)[-1], None
+    try:
+        handle, _ = open_confined_file(anchor, loose.relative_to(anchor).parts)
+        with handle:
+            raw = handle.read()
+        if hashlib.sha256(raw).hexdigest() == digest:
+            return {"size": len(raw), "sha256": digest, "loose": True} if info_only else raw
+        failure = EvidenceCorrupt("evidence_corrupt: loose handle failed sha256 verification")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if not info_only:
+            raise
+        failure = exc
+    if info_only and pathlib.PurePosixPath(rel_path).parts[:2] != CHECKPOINTS_REL.parts:
+        if failure is not None:
+            raise failure
+        return None
+    from ouroboros.task_custody import recorded_execution_drive
+    from ouroboros.task_store import read_document
+
+    if root == anchor or recorded_execution_drive(read_document(anchor, task_id) or {}, root, spellings):
+        located = _locate(root, task_id=task_id, rel_path=rel_path)
+        if located is not None:
+            return ({"size": int(located[1]["size"]), "sha256": located[1]["sha256"], "loose": False}
+                    if info_only else member_bytes(*located, anchor=anchor))
+        if failure is not None:
+            raise failure
+        if info_only:
+            return None
+        raise FileNotFoundError(str(loose))
+    try:
+        held = confined_directory(anchor, packs_dir(root).relative_to(anchor).parts)
+        directory = held.__enter__()
+    except FileNotFoundError:
+        directory = None
+    if directory is not None:
+        try:
+            names = sorted(name for name, _ in directory.entries(include_links=True)
+                           if not name.startswith(".") and name.endswith(".members.json"))
+            errors = []
+            for name in [*(name for name in names if _own_sidecar(name, task_id)),
+                         *(name for name in names if not _own_sidecar(name, task_id))]:
+                try:
+                    try:
+                        handle, _ = directory.open(name)
+                        with handle:
+                            sidecar = read_sidecar(packs_dir(root) / name, raw=handle.read())
+                    except OSError as exc:
+                        raise SidecarCorrupt(f"evidence_corrupt: unreadable sidecar {name}") from exc
+                    if sidecar["task_id"] != task_id:
+                        continue
+                    for member in sidecar["members"]:
+                        if member["kind"] != CHECKPOINT or member.get("path") != rel_path:
+                            continue
+                        if info_only:
+                            return {"size": int(member["size"]), "sha256": member["sha256"], "loose": False}
+                        return member_bytes(packs_dir(root) / pack_name(task_id, sidecar["generation"]),
+                                            member, anchor=anchor)
+                except SidecarCorrupt as exc:
+                    errors.append((name, exc))
+            if errors:
+                raise min(errors, key=lambda item: item[0])[1]
+        finally:
+            held.__exit__(None, None, None)
+    if failure is not None:
+        raise failure
+    if info_only:
+        return None
+    raise FileNotFoundError(str(loose))
+
+
+def handle_bytes(root: Any, task_id: str, rel_path: str, *, anchor: Any = None) -> bytes:
     """Verified loose handle bytes, falling back to the pack if the loose digest is wrong."""
+    if anchor is not None:
+        return _confined_handle(root, task_id, rel_path, anchor)
     rel = pathlib.PurePosixPath(str(rel_path))
     loose, failure = _handle_path(root, task_id, rel.as_posix()), None
     try:
@@ -505,8 +705,10 @@ def handle_bytes(root: Any, task_id: str, rel_path: str) -> bytes:
     return member_bytes(*located)
 
 
-def handle_info(root: Any, task_id: str, rel_path: str) -> Optional[Dict[str, Any]]:
+def handle_info(root: Any, task_id: str, rel_path: str, *, anchor: Any = None) -> Optional[Dict[str, Any]]:
     """Verified placement metadata; ``None`` only for absence, corruption stays explicit."""
+    if anchor is not None:
+        return _confined_handle(root, task_id, rel_path, anchor, info_only=True)
     rel = pathlib.PurePosixPath(str(rel_path))
     loose = _handle_path(root, task_id, rel.as_posix())
     failure = None
@@ -531,14 +733,8 @@ def packed_handle_names(root: Any, task_id: str) -> List[str]:
     """Names of this task's packed checkpoint handles (for directory listings)."""
     if not packs_dir(root).is_dir():
         return []
-    try:
-        with open_index(root) as conn:
-            rows = conn.execute("SELECT rel_path FROM handles WHERE task_id=?", (str(task_id),)).fetchall()
-        return sorted(pathlib.PurePosixPath(row["rel_path"]).name for row in rows)
-    except (store.StoreError, sqlite3.Error, OSError):
-        return sorted(pathlib.PurePosixPath(member["path"]).name for _, sidecar in list_sidecars(root)
-                      if sidecar["task_id"] == str(task_id) for member in sidecar["members"]
-                      if member["kind"] == CHECKPOINT and member.get("path"))
+    return sorted({pathlib.PurePosixPath(member["path"]).name
+                   for _, member in _task_handles(pathlib.Path(root), str(task_id))})
 
 
 def _checkpoint_path(path: pathlib.Path) -> Optional[tuple]:
@@ -686,7 +882,7 @@ def note_manifest_publication(root: Any, manifest: dict) -> None:
     """Called under the publication lock BEFORE the manifest write. Track new refs only
     while a sweep owns the scratch file; a stale file is reset at the next sweep."""
     try:
-        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND)
+        fd = os.open(packs_dir(root) / PUBLICATIONS_NAME, os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0))
     except FileNotFoundError:
         return
     with os.fdopen(fd, "ab") as journal:
@@ -745,8 +941,10 @@ def loose_members(root: Any, task_id: str, *, missing: Optional[list] = None) ->
 
 
 def published_generations(root: Any, task_id: str, listing: Optional[list] = None) -> List[Dict[str, Any]]:
-    """This task's published sidecars, oldest generation first (``listing``: one shared ``list_sidecars``)."""
-    found = [sidecar for _, sidecar in (list_sidecars(root) if listing is None else listing) if sidecar["task_id"] == str(task_id)]
+    """This task's published sidecars, oldest generation first: those its names spell (``_task_sidecar_names``),
+    or of one shared ``listing``; a homonym's (``a.2`` generation 1 beside ``a``) is told by its own ``task_id``."""
+    found = [sidecar for _, sidecar in (list_sidecars(root, names=_task_sidecar_names(root, task_id))
+                                        if listing is None else listing) if sidecar["task_id"] == str(task_id)]
     return sorted(found, key=lambda sidecar: int(sidecar["generation"]))
 
 
@@ -911,11 +1109,11 @@ def pack_task(root: Any, task_id: str, *, keep_shas: set, listing: Optional[list
     member whose loose file exists now (a busy retry); the rest stay closed. Referenced records that
     are neither loose nor packed are counted (``missing``), never invented."""
     root = pathlib.Path(root)
-    from ouroboros.evidence_packer import _loose_task_ids, pack_sweep, task_rows, task_stamps
+    from ouroboros.evidence_packer import keep_rows, pack_sweep, task_stamps
 
     if sweep is None:
         with pack_sweep(root) as sweep:
-            sweep.collect_keep(task_rows(root, _loose_task_ids(root)))
+            sweep.collect_keep(keep_rows(root))
             return pack_task(root, task_id, keep_shas=keep_shas, listing=listing, revision=revision, sweep=sweep)
     if revision is None:
         revision = task_stamps(root, task_id)

@@ -67,7 +67,7 @@ def test_ui_publish_stale_card_reaches_selected_preflight_and_task(
                 # preflight still knows the clicked leaf and can return needs_attention.
                 manifest_path.unlink()
                 card.locator("[data-skill-menu-trigger]").click()
-                page.locator(f'.skills-card-menu-dialog[open] .skills-submit-hub[data-skill="{skill_name}"]').click()
+                page.locator(f'.skills-card-menu-dialog:not([data-leaving])[open] .skills-submit-hub[data-skill="{skill_name}"]').click()
                 # Where it goes is the owner's choice; the preflight checks the files for that destination.
                 destinations = page.locator(".skills-dialog")
                 destinations.wait_for(state="visible", timeout=30_000)

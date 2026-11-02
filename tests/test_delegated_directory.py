@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from ouroboros import delegate_custody as custody
@@ -407,3 +408,170 @@ def test_an_unsuccessful_run_without_file_work_product_is_never_reported_as_no_c
     response = json.loads(integrate_directory_result(ctx, held, "reject", "nothing to take", engine))
     assert response["status"] == "rejected" and held.patch_disposed == "rejected" and not engine.applies
     assert engine.decisions == ([] if strategy == "direct" else [({"action": "discard"}, engine.decisions[0][1])])
+
+
+UNCHANGED, TWIN = (b"same bytes\n", 0o644), (b"same bytes\n", 0o755)
+OLD, NEW = (b"old\x00" * 64, 0o644), (b"new\xff" * 64, 0o644)
+# One unchanged file, its bytes again at another path and mode, distinct content, a shared preimage.
+FILES = [("a/unchanged.txt", UNCHANGED, UNCHANGED), ("b/twin.sh", None, TWIN),
+         ("c/edited.bin", OLD, NEW), ("d/removed.bin", OLD, None)]
+
+
+class _CutStream(httpx.SyncByteStream):
+    def __init__(self, head):
+        self.head = head
+
+    def __iter__(self):
+        yield self.head
+        raise httpx.ReadError("connection closed mid-body")
+
+
+class ContentEngine(DirectoryEngine):
+    """The engine's complete manifest shape with content objects at ``final/files/content/<hex>``.
+
+    Artifact bytes stream through the real gateway reader over an HTTP transport that
+    records every request; apply delivers the selected rows' postimages."""
+
+    def __init__(self, target, strategy, files):
+        from ouroboros.gateways.claudexor import ClaudexorGateway, DaemonEndpoint
+
+        super().__init__(target, strategy)
+        self.objects, self.requests, self.faults, self.delivered = {}, [], {}, set()
+        self.manifest["entries"] = [{"path": path, "before": self.state(before, strategy == "copy"),
+                                     "after": self.state(after, True)} for path, before, after in files]
+        self.raw = json.dumps(self.manifest).encode()
+        self.objects["final/files/manifest.json"] = self.raw
+        self.wire = ClaudexorGateway(DaemonEndpoint("127.0.0.1", 1, "offline"))
+        self.wire._client.close()
+        self.wire._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(self.serve))
+
+    def state(self, side, retained):
+        if side is None:
+            return None
+        digest = sha256(side[0]).hexdigest()
+        self.objects[f"final/files/content/{digest}"] = side[0]
+        return {"kind": "file", "sha256": "sha256:" + digest, "sizeBytes": len(side[0]), "mode": side[1],
+                **({"artifactPath": f"final/files/content/{digest}"} if retained else {})}
+
+    def serve(self, request):
+        path = request.url.path.split("/artifacts/", 1)[1]
+        self.requests.append(path)
+        body, fault = self.objects.get(path), self.faults.get(path)
+        if body is None or fault == "unavailable":
+            return httpx.Response(404, json={"code": "artifact_not_found", "message": "no such artifact"})
+        if fault == "corrupt":
+            return httpx.Response(200, content=body[:-1] + bytes([body[-1] ^ 1]))
+        if fault == "truncated":
+            return httpx.Response(200, stream=_CutStream(body[:len(body) // 2]))
+        return httpx.Response(200, content=body)
+
+    def stream_run_artifact(self, rid, path, sink, *, expected=None):
+        return self.wire.stream_run_artifact(rid, path, sink, expected=expected)
+
+    def get_run(self, rid):
+        detail = super().get_run(rid)
+        complete = self.delivered == {row["path"] for row in self.manifest["entries"]}
+        detail["summary"]["result"]["applyState"] = "applied" if complete else "not_applied"
+        return detail
+
+    def apply_run(self, rid, request, *, idempotency_key):
+        self.applies.append(idempotency_key)
+        chosen = request.get("paths") or [row["path"] for row in self.manifest["entries"]]
+        for row in self.manifest["entries"]:
+            if row["path"] in chosen:
+                destination = self.target / row["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if row["after"]:
+                    destination.write_bytes(self.objects[row["after"]["artifactPath"]])
+                else:
+                    destination.unlink(missing_ok=True)
+        self.delivered.update(chosen)
+        return {"applied": True, "refused": False, "appliedPaths": chosen, "treeMutated": True}
+
+
+def _retained(drive, held):
+    cap = custody.delegated_capture_dir(drive, held.task_id, held.run_id)
+    return cap, {path.name: (path.stat().st_ino, path.stat().st_mode, path.stat().st_mtime_ns, path.read_bytes())
+                 for path in cap.iterdir()}
+
+
+@pytest.mark.parametrize("strategy", ["direct", "copy"])
+def test_one_capture_fetches_and_keeps_each_content_identity_once(tmp_path, monkeypatch, strategy):
+    from ouroboros.artifacts import ArtifactIdentityError
+
+    ctx, target = context(tmp_path, monkeypatch)
+    engine, held = ContentEngine(target, strategy, FILES), entry(ctx, target, strategy)
+    captured = capture_directory_result(ctx.drive_root, held, engine)
+    cap, _ = _retained(ctx.drive_root, held)
+    sides = [(row["path"], side, row[side]) for row in engine.manifest["entries"] for side in ("before", "after")
+             if row[side] and "artifactPath" in row[side]]  # a live run's preimages have no engine bytes
+    outputs = captured["file_outputs"][1:]
+    assert [(row["source_path"], row["side"]) for row in outputs] == [(path, side) for path, side, _ in sides]
+    for row, (_, _, state) in zip(outputs, sides):
+        assert ("sha256:" + row["sha256"], row["size"]) == (state["sha256"], state["sizeBytes"]) and row["immutable"]
+        assert sha256((cap / row["name"]).read_bytes()).hexdigest() == row["sha256"]
+    objects = {state["artifactPath"] for _, _, state in sides}
+    assert sorted(engine.requests) == sorted(["final/files/manifest.json", *objects])
+    kept = {row["name"] for row in outputs}
+    assert len(kept) == len(objects) == (3 if strategy == "copy" else 2)
+    assert {path.name for path in cap.iterdir()} == {"engine-files-manifest.json", "workspace_patch.json", *kept}
+    assert (cap / "engine-files-manifest.json").read_bytes() == engine.raw  # every entry and mode, exactly
+    for name in kept:  # one plain file each: no link to another path, no mode from any row
+        assert (cap / name).stat().st_nlink == 1 and not (cap / name).stat().st_mode & 0o111
+    engine.requests.clear()
+    assert capture_directory_result(ctx.drive_root, held, engine) == captured and not engine.requests
+    (cap / outputs[0]["name"]).write_bytes(b"changed after capture\n")
+    with pytest.raises(ArtifactIdentityError):
+        capture_directory_result(ctx.drive_root, held, engine)
+
+
+def test_partial_apply_and_consumer_copies_leave_shared_content_unchanged(tmp_path, monkeypatch):
+    from ouroboros.artifacts import copy_artifact_file
+
+    ctx, target = context(tmp_path, monkeypatch)
+    engine, held = ContentEngine(target, "copy", FILES), entry(ctx, target, "copy")
+    shared = capture_directory_result(ctx.drive_root, held, engine)["file_outputs"][1]
+    cap, before = _retained(ctx.drive_root, held)
+    copy = tmp_path / "user" / "twin.sh"
+    copy_artifact_file(cap / shared["name"], copy, expected=shared)
+    copy.write_bytes(b"the owner's own edit\n")
+    partial = json.loads(integrate_directory_result(ctx, held, "apply", "twin only", engine, paths=["b/twin.sh"]))
+    assert partial["status"] == "partially_applied" and not held.patch_disposed
+    assert (target / "b/twin.sh").read_bytes() == TWIN[0] and not (target / "a/unchanged.txt").exists()
+    assert _retained(ctx.drive_root, held)[1] == before
+    rest = json.loads(integrate_directory_result(ctx, held, "apply", "the rest", engine))
+    assert rest["status"] == "applied" and held.patch_disposed == "applied"
+    assert (target / "a/unchanged.txt").read_bytes() == UNCHANGED[0]
+    assert (target / "c/edited.bin").read_bytes() == NEW[0] and not (target / "d/removed.bin").exists()
+    assert _retained(ctx.drive_root, held)[1] == before
+
+
+@pytest.mark.parametrize("fault,code", [("corrupt", "artifact_integrity_error"), ("size", "artifact_integrity_error"),
+                                        ("unavailable", "artifact_not_found"), ("truncated", "daemon_unreachable")])
+def test_failures_of_repeated_content_stay_failures_and_a_new_capture_refetches(tmp_path, monkeypatch, fault, code):
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    ctx, target = context(tmp_path, monkeypatch)
+    engine, held = ContentEngine(target, "copy", FILES), entry(ctx, target, "copy")
+    shared = engine.manifest["entries"][0]["after"]["artifactPath"]
+    if fault == "size":  # a later row names the same digest with another size: never reused
+        engine.manifest["entries"][1]["after"]["sizeBytes"] += 1
+        engine.raw = engine.objects["final/files/manifest.json"] = json.dumps(engine.manifest).encode()
+    else:
+        engine.faults[shared] = fault
+    with pytest.raises(ClaudexorUnavailable) as failed:
+        capture_directory_result(ctx.drive_root, held, engine)
+    assert failed.value.code == code
+    cap, _ = _retained(ctx.drive_root, held)
+    assert not held.patch_captured and not (cap / "workspace_patch.json").exists()
+    assert engine.requests.count(shared) == (2 if fault == "size" else 1)
+    assert not [path for path in cap.iterdir() if path.name.startswith(".")]
+    engine.faults.clear()
+    engine.requests.clear()
+    if fault == "size":  # the manifest itself contradicts its bytes: every new capture fails alike
+        with pytest.raises(ClaudexorUnavailable, match="differs from its captured manifest"):
+            capture_directory_result(ctx.drive_root, held, engine)
+        return
+    captured = capture_directory_result(ctx.drive_root, held, engine)
+    assert captured["status"] == "ready" and held.patch_captured
+    assert engine.requests.count(shared) == 1 and len(engine.requests) == 4

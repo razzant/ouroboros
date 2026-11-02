@@ -1,5 +1,5 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
-import { tr } from './i18n.js';
+import { tr, fmt } from './i18n.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 import { strokeIcon } from './page_icons.js';
 import { showToast } from './toast.js';
@@ -138,6 +138,26 @@ export function safeHttpUrl(value) {
     }
 }
 
+// Host-held source attribution belongs to the voice line, never the author's words.
+export function decorateContactSource(bubble, contact) {
+    const sender = bubble.querySelector('.sender');
+    if (!sender || !contact?.task_id || !contact.binding_id || !contact.source_event_id) return;
+    const href = safeHttpUrl(contact.url);
+    const source = document.createElement(href ? 'a' : 'span');
+    source.dataset.contactSource = contact.task_id;
+    source.textContent = String(contact.label || tr('Connected place'));
+    source.title = fmt('Source work: {task_id}', { task_id: contact.task_id });
+    if (href) {
+        source.className = 'md-link';
+        source.href = href;
+        source.target = '_blank';
+        source.rel = 'noopener noreferrer';
+    }
+    const separator = document.createElement('span');
+    separator.textContent = ' · ';
+    sender.append(separator, source);
+}
+
 export function bindComposerFileTargets({ page, inputArea, input, stagePendingFiles }) {
     // The two implicit routes a file takes into the composer beside
     // "+" → Attach file: an image pasted into the textarea, and a file dropped
@@ -271,6 +291,7 @@ export function createChatMedia({
             ${bodyHtml}
             ${timeHtml}
         `;
+        decorateContactSource(bubble, msg.presence_contact || msg.quiz?.presence_contact);
         stampNodeTimestamp(bubble, rawTs);
         // The row's address makes a delivered photo, file, link card or question a reply target (CONTRACTS K6).
         if (msg.row_address) bubble.dataset.rowAddress = String(msg.row_address);
@@ -282,10 +303,19 @@ export function createChatMedia({
         return bubble;
     }
 
-    function bubbleFrameNode(msg, node) {
+    // A Main question's Project reference joins `Ouroboros` on the voice line (DESIGN "Quiz card").
+    function bubbleFrameNode(msg, node, { voice = [] } = {}) {
         const bubble = bubbleFrame(msg, '');
+        // The frame's own sender and time, read before the node joins them.
+        const sender = bubble.querySelector('.sender');
         const time = bubble.querySelector('.msg-time');
-        if (time) bubble.insertBefore(node, time); else bubble.append(node);
+        if (time) time.before(node); else bubble.append(node);
+        if (voice.length) {
+            const wrap = document.createElement('div');
+            wrap.className = 'chat-bubble-voice';
+            if (sender) { sender.before(wrap); wrap.append(sender); } else bubble.append(wrap);
+            wrap.append(...voice);
+        }
         return bubble;
     }
 
@@ -507,14 +537,38 @@ export function createChatMedia({
             play.innerHTML = media.paused ? MEDIA_ICONS.play : MEDIA_ICONS.pause;
             play.setAttribute('aria-label', media.paused ? tr('media.play', 'Play') : tr('media.pause', 'Pause'));
         };
-        const toggle = async () => {
+        let playIntent = 0;
+        const isCurrentPlay = (intent) => intent === playIntent && playerRegistry.has(media);
+        const requestPlay = async (restart = false) => {
+            const intent = ++playIntent;
             try {
-                if (media.paused) await media.play();
-                else media.pause();
-                syncPlay();
+                if (media.error) {
+                    const position = restart ? 0 : media.currentTime;
+                    const rate = media.playbackRate;
+                    // A failed resource stays failed until explicitly reloaded. Keep
+                    // load and play in this user gesture, never in an error retry loop.
+                    media.load();
+                    media.playbackRate = rate;
+                    if (Number.isFinite(position) && position > 0) media.currentTime = position;
+                }
+                if (restart) media.currentTime = 0;
+                await media.play();
+                if (isCurrentPlay(intent)) syncPlay();
             } catch (error) {
-                showToast(`Could not play media: ${error?.message || error}`, 'error');
+                if (isCurrentPlay(intent)) {
+                    // WebKit can leave a rejected play unpaused; restore the
+                    // control without initiating another attempt.
+                    if (media.error) media.pause();
+                    syncPlay();
+                    showToast(`Could not play media: ${error?.message || error}`, 'error');
+                }
             }
+        };
+        const toggle = () => {
+            if (media.paused || media.error) return requestPlay();
+            playIntent += 1;
+            media.pause();
+            syncPlay();
         };
         listen(play, 'click', toggle);
         if (!audio) listen(media, 'click', toggle);
@@ -541,11 +595,7 @@ export function createChatMedia({
             media.playbackRate = Number(rates.value) || 1;
             speed.textContent = `×${media.playbackRate}`;
         });
-        if (repeat) listen(repeat, 'click', async () => {
-            media.currentTime = 0;
-            try { await media.play(); } catch {}
-            syncPlay();
-        });
+        if (repeat) listen(repeat, 'click', () => requestPlay(true));
         if (mute) listen(mute, 'click', () => {
             media.muted = !media.muted;
             mute.innerHTML = media.muted ? MEDIA_ICONS.muted : MEDIA_ICONS.volume;
@@ -578,29 +628,29 @@ export function createChatMedia({
             ? `<audio preload="metadata" src="${escapeHtmlAttr(src)}"></audio>`
             : `<video preload="metadata" src="${escapeHtmlAttr(src)}" playsinline></video>`;
         const videoControls = audio ? '' : `
-            <button type="button" data-media-action="speed" aria-label="${escapeHtmlAttr(tr('media.cycle_speed', 'Cycle playback speed'))}">×1</button>
+            <button type="button" class="btn btn-default btn-sm" data-media-action="speed" aria-label="${escapeHtmlAttr(tr('media.cycle_speed', 'Cycle playback speed'))}">×1</button>
             <select class="chat-media-rate-menu" aria-label="${escapeHtmlAttr(tr('media.playback_speed', 'Playback speed'))}">
                 ${SPEEDS.map((rate) => `<option value="${rate}">×${rate}</option>`).join('')}
             </select>
-            <button type="button" data-media-action="repeat" aria-label="${escapeHtmlAttr(tr('media.repeat', 'Repeat'))}">↻</button>
-            <button type="button" data-media-action="mute" aria-label="${escapeHtmlAttr(tr('media.mute', 'Mute'))}">${MEDIA_ICONS.volume}</button>
-            <button type="button" data-media-action="fullscreen" aria-label="${escapeHtmlAttr(tr('media.enter_fullscreen', 'Enter fullscreen'))}">${MEDIA_ICONS.fullscreen}</button>`;
+            <button type="button" class="btn btn-default btn-sm" data-media-action="repeat" aria-label="${escapeHtmlAttr(tr('media.repeat', 'Repeat'))}">↻</button>
+            <button type="button" class="btn btn-default btn-sm" data-media-action="mute" aria-label="${escapeHtmlAttr(tr('media.mute', 'Mute'))}">${MEDIA_ICONS.volume}</button>
+            <button type="button" class="btn btn-default btn-sm" data-media-action="fullscreen" aria-label="${escapeHtmlAttr(tr('media.enter_fullscreen', 'Enter fullscreen'))}">${MEDIA_ICONS.fullscreen}</button>`;
         return `<div class="chat-media-player${audio ? ' is-audio' : ''}">
             ${title ? `<div class="chat-media-title">${escapeHtml(title)}</div>` : ''}
             <div class="chat-media-stage">${media}</div>
             <div class="chat-media-controls">
-                <button type="button" data-media-action="play" aria-label="${escapeHtmlAttr(tr('media.play', 'Play'))}">${MEDIA_ICONS.play}</button>
+                <button type="button" class="btn btn-default btn-sm" data-media-action="play" aria-label="${escapeHtmlAttr(tr('media.play', 'Play'))}">${MEDIA_ICONS.play}</button>
                 <input class="chat-media-progress" type="range" min="0" max="100" value="0" step="0.1" aria-label="${escapeHtmlAttr(tr('media.progress', 'Media progress'))}">
                 <span class="chat-media-time">0:00 / 0:00</span>
                 ${videoControls}
-                <button type="button" data-media-action="download" aria-label="${escapeHtmlAttr(tr('media.download_media', 'Download media'))}">↓</button>
+                <button type="button" class="btn btn-default btn-sm" data-media-action="download" aria-label="${escapeHtmlAttr(tr('media.download_media', 'Download media'))}">↓</button>
             </div>
         </div>`;
     }
 
     function photoActionsHtml() {
         return `<details class="chat-photo-actions">
-            <summary aria-label="${escapeHtmlAttr(tr('media.photo_actions', 'Photo actions'))}" aria-haspopup="menu" aria-expanded="false">•••</summary>
+            <summary class="btn btn-float btn-sm" aria-label="${escapeHtmlAttr(tr('media.photo_actions', 'Photo actions'))}" aria-haspopup="menu" aria-expanded="false">•••</summary>
             <div class="chat-photo-menu ui-popup" role="menu" aria-label="${escapeHtmlAttr(tr('media.photo_actions', 'Photo actions'))}" hidden>
                 <button type="button" role="menuitem" data-photo-action="view">${escapeHtml(tr('media.view', 'View'))}</button>
                 <button type="button" role="menuitem" data-photo-action="open">${escapeHtml(tr('media.open_in_new_tab', 'Open in new tab'))}</button>
@@ -720,7 +770,7 @@ export function createChatMedia({
             const preview = mime.startsWith('image/') && source.src
                 ? `<img class="chat-file-thumb" src="${escapeHtmlAttr(source.src)}" alt="">`
                 : '<span class="chat-file-glyph" aria-hidden="true">▤</span>';
-            content = `<button type="button" class="chat-file-card" aria-haspopup="dialog" ${source.src ? '' : 'disabled'}>
+            content = `<button type="button" class="btn btn-default chat-file-card" aria-haspopup="dialog" ${source.src ? '' : 'disabled'}>
                 ${preview}
                 <span class="chat-file-copy">
                     <span class="chat-file-name">${escapeHtml(filename)}</span>
@@ -1111,6 +1161,7 @@ export function createChatMedia({
     }
 
     return {
+        openReview: openReader,
         buildMediaBubble,
         buildDocumentBubble,
         buildLinksMessage,

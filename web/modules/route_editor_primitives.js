@@ -3,7 +3,7 @@
 // `api_chat` + `profile_id`; task actors serialize `api_model` +
 // `credential_profile_id`.
 
-import { accountRows, accountName } from './claudexor_status_store.js';
+import { accountRows, accountName, accountModelUnsupported } from './claudexor_status_store.js';
 import { formatRelativeAge } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
@@ -69,8 +69,12 @@ export function parseModelSource(value) {
             model: split < 0 ? '' : target.slice(split + 1) };
     }
     const split = raw.indexOf('::');
-    return split < 0 ? { source: 'openrouter', model: raw }
-        : { source: raw.slice(0, split), model: raw.slice(split + 2) };
+    if (split < 0) return { source: 'openrouter', model: raw };
+    // A source is a provider kind, or `kind@name` for a key added under Accounts; `kind@default`
+    // is the built-in key's long spelling (provider_models.parse_model_route canonicalizes it too).
+    const source = raw.slice(0, split);
+    return { source: source.endsWith('@default') ? source.slice(0, -'@default'.length) : source,
+        model: raw.slice(split + 2) };
 }
 
 export function composeModelSource(source, model) {
@@ -115,21 +119,74 @@ export const API_PROVIDER_CREDENTIAL_KEYS = [...new Set(
     API_PROVIDER_ORDER.flatMap((id) => API_PROVIDER_CREDENTIALS[id].flat()),
 )];
 
-export function apiProviderLabel(id, providerProfiles = {}) {
+/** A source id is a provider kind, or `kind@name` for a key added under Accounts. */
+export function connectionParts(id) {
+    const raw = String(id || '');
+    const at = raw.indexOf('@');
+    return at < 0 ? { kind: raw, name: '' } : { kind: raw.slice(0, at), name: raw.slice(at + 1) };
+}
+
+/** A known connection's own label, else the provider's name (and an added key's stored name). */
+export function apiProviderLabel(id, providerProfiles = {}, connections = []) {
     const key = String(id || '');
-    return String(providerProfiles?.[key]?.label || API_PROVIDER_LABELS[key] || key);
+    const listed = (connections || []).find((entry) => entry?.id === key)?.label;
+    if (listed) return String(listed);
+    const { kind, name } = connectionParts(key);
+    const base = String(providerProfiles?.[kind]?.label || API_PROVIDER_LABELS[kind] || kind);
+    return name ? `${base} · ${name}` : base;
 }
 
 /**
- * Providers the owner can actually send to, in owner-facing order.
- * A masked placeholder such as `***set***` is a stored credential; only an
- * absent or blank value withdraws the provider from the list.
+ * Every API connection the settings document names, in owner-facing order: each provider's
+ * built-in key, then the keys added under Accounts (`_meta.connections`; `id` is the source the
+ * editor stores, `display` its label). A draft without that list (the first-run wizard's flat
+ * keys) names the built-in connections from the stored credential fields; a masked placeholder
+ * such as `***set***` is a stored credential, an absent or blank value is not.
+ * @returns {Array<{id:string, kind:string, name:string, label:string, builtin:boolean,
+ *   enabled:boolean, configured:boolean, source:string}>} `source`: where the credential comes from
+ *   (`settings`, `environment`, `none`; '' when the document does not say).
  */
-export function configuredApiProviders(settings = {}, providerProfiles = {}) {
+export function apiConnections(settings = {}, providerProfiles = {}) {
+    const listed = settings?._meta?.connections;
+    if (Array.isArray(listed)) {
+        return listed.filter((entry) => entry && entry.id).map((entry) => {
+            const id = String(entry.id);
+            const name = String(entry.name || '');
+            return { id, kind: String(entry.kind || connectionParts(id).kind), name,
+                builtin: entry.builtin === true || !name, enabled: entry.enabled !== false,
+                configured: entry.configured === true, source: String(entry.source || ''),
+                label: String(entry.display || '') || apiProviderLabel(id, providerProfiles) };
+        });
+    }
     const present = (key) => String(settings?.[key] ?? '').trim() !== '';
-    return API_PROVIDER_ORDER
-        .filter((id) => API_PROVIDER_CREDENTIALS[id].some((group) => group.every(present)))
-        .map((id) => ({ id, label: apiProviderLabel(id, providerProfiles) }));
+    let rows = settings.OUROBOROS_CONNECTIONS || [];
+    if (typeof rows === 'string') {
+        try { rows = JSON.parse(rows); } catch { rows = []; }
+    }
+    rows = Array.isArray(rows) ? rows : [];
+    return API_PROVIDER_ORDER.flatMap((id) => [{ id, kind: id, name: '', builtin: true,
+        enabled: !rows.some((row) => row?.kind === id && row.name === 'default' && row.enabled === false),
+        configured: API_PROVIDER_CREDENTIALS[id].some((group) => group.every(present)), source: '',
+        label: apiProviderLabel(id, providerProfiles) }, ...rows.filter((row) => row?.kind === id && row.name && row.name !== 'default')
+        .map((row) => ({ id: `${id}@${row.name}`, kind: id, name: row.name, builtin: false,
+            enabled: row.enabled !== false, configured: id === 'openai-compatible' ? Boolean(row.base_url?.trim())
+                : id === 'gigachat' ? Boolean(row.credentials?.trim() || (row.user?.trim() && row.password?.trim()))
+                    : Boolean(row.api_key?.trim()), source: '',
+            label: `${apiProviderLabel(id, providerProfiles)} · ${row.label || row.name}` }))]);
+}
+
+/** The sources the owner can send to: one per enabled connection that holds its credential. */
+export function configuredApiProviders(settings = {}, providerProfiles = {}) {
+    return apiConnections(settings, providerProfiles)
+        .filter((connection) => connection.enabled && connection.configured)
+        .map(({ id, label }) => ({ id, label }));
+}
+
+/** Why a saved API source is not offered: its key is turned off, was removed, or holds no credential. */
+export function unavailableConnectionState(id, connections = []) {
+    const known = (connections || []).find((entry) => entry?.id === id);
+    if (known) return known.enabled === false ? 'off' : 'no key';
+    return connectionParts(id).name ? 'removed' : 'no key';
 }
 
 /** Account binding is supported by agent sessions and subscription model routes. */
@@ -144,12 +201,13 @@ export function routeSupportsAccount(route) {
  * `modelSources` names subscription sources, the options object names API providers.
  * @param {object} route
  * @param {Array<{id:string,label?:string,credentialHarness?:string}>} [modelSources]
- * @param {{providerProfiles?: object}} [options] setup-contract provider profiles, for labels
+ * @param {{providerProfiles?: object, connections?: Array}} [options] setup-contract provider
+ *   profiles and `apiConnections()` output, for labels
  * @returns {{source:string, sourceLabel:string, subscription:boolean, model:string,
  *   harness:string, provider:string, providerLabel:string}} `model` is always the model
  *   part alone: the `openai::`/`claudexor::<source>=` prefix lives in `provider`/`source`.
  */
-export function routeModelFields(route, modelSources = [], { providerProfiles = {} } = {}) {
+export function routeModelFields(route, modelSources = [], { providerProfiles = {}, connections = [] } = {}) {
     if (route?.kind === ROUTE_KIND_AGENT_SESSION) {
         return { ...splitSessionTarget(route.target_id), subscription: false,
             provider: '', providerLabel: '' };
@@ -161,7 +219,7 @@ export function routeModelFields(route, modelSources = [], { providerProfiles = 
     const provider = subscription ? '' : (parsed.source || DEFAULT_API_PROVIDER);
     return { source, sourceLabel: descriptor?.label || source, subscription,
         model: parsed.model,
-        provider, providerLabel: provider ? apiProviderLabel(provider, providerProfiles) : '',
+        provider, providerLabel: provider ? apiProviderLabel(provider, providerProfiles, connections) : '',
         harness: subscription ? String(descriptor?.credentialHarness || '') : '' };
 }
 
@@ -357,14 +415,14 @@ export function decodeRouteChoice(value, { apiKind = ROUTE_KIND_API_MODEL } = {}
 
 /** The chip text for a route's source: who serves it, in the owner's words. */
 export function sourceIdentityLabel(route, {
-    modelSources = [], providerProfiles = {}, harnesses = [],
+    modelSources = [], providerProfiles = {}, harnesses = [], connections = [],
 } = {}) {
     if (route?.kind === ROUTE_KIND_AGENT_SESSION) {
         const { harness } = splitSessionTarget(route?.target_id);
         const descriptor = (harnesses || []).find((entry) => entry?.id === harness);
         return `${descriptor?.display_name || harness} · agent`;
     }
-    const fields = routeModelFields(route, modelSources, { providerProfiles });
+    const fields = routeModelFields(route, modelSources, { providerProfiles, connections });
     return fields.subscription ? `${fields.sourceLabel || fields.source} · model`
         : `API · ${fields.providerLabel}`;
 }
@@ -413,6 +471,7 @@ function undiscoveredLabel(value, known) {
  * @param {Array} [args.harnesses] discovered agent harnesses
  * @param {Array} [args.modelSources] discovered subscription model sources
  * @param {Array<{id:string,label?:string}>} [args.providers] configuredApiProviders() output
+ * @param {Array} [args.connections] apiConnections() output, naming a saved choice that cannot send
  * @param {string} [args.currentChoice] the saved choice, so it survives a read gap
  * @param {boolean} [args.catalogKnown] whether discovery actually answered
  * @param {boolean} [args.accountsKnown] whether the accounts store actually answered
@@ -421,7 +480,7 @@ function undiscoveredLabel(value, known) {
  * @param {object} [args.providerProfiles] setup-contract profiles, for a saved provider's label
  */
 export function routeChoiceGroups({
-    harnesses = [], modelSources = [], providers = [], currentChoice = '',
+    harnesses = [], modelSources = [], providers = [], connections = [], currentChoice = '',
     catalogKnown = true, accountsKnown = true, includeSessions = true,
     includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false,
 } = {}) {
@@ -447,16 +506,16 @@ export function routeChoiceGroups({
         && !modelValues.some((option) => option.value === savedChoice)) {
         modelValues.push({ value: savedChoice, label: `${savedChoice.slice(13)} (not checked)` });
     }
-    // Only providers whose credential is stored are offered. A saved choice
-    // whose key is gone stays selectable and says so, so a save cannot silently
-    // rewrite the assignment to the first listed provider.
+    // One entry per enabled connection that holds its key. A saved choice that
+    // cannot send stays selectable and says why, so a save cannot silently
+    // rewrite the assignment to another listed source.
     const apiValues = (providers || []).filter((provider) => provider && provider.id)
         .map((provider) => ({ value: `${API_CHOICE_PREFIX}${provider.id}`,
-            label: provider.label || apiProviderLabel(provider.id, providerProfiles) }));
-    if (savedChoice.length > API_CHOICE_PREFIX.length && savedChoice.startsWith(API_CHOICE_PREFIX)
-        && !apiValues.some((option) => option.value === savedChoice)) {
-        apiValues.push({ value: savedChoice,
-            label: `${apiProviderLabel(savedChoice.slice(API_CHOICE_PREFIX.length), providerProfiles)} (no key)` });
+            label: provider.label || apiProviderLabel(provider.id, providerProfiles, connections) }));
+    const savedApi = savedChoice.startsWith(API_CHOICE_PREFIX) ? savedChoice.slice(API_CHOICE_PREFIX.length) : '';
+    if (savedApi && !apiValues.some((option) => option.value === savedChoice)) {
+        apiValues.push({ value: savedChoice, label: `${apiProviderLabel(savedApi, providerProfiles, connections)}`
+            + ` (${unavailableConnectionState(savedApi, connections)})` });
     }
     apiValues.push({ value: '', disabled: true, label: 'Add a key in Accounts for more' });
     return [
@@ -485,8 +544,12 @@ export function routeChoiceGroups({
 // select that pins a route and the Accounts tab that lists the same account
 // call it one name. A second walk over `profiles.profiles` is how the pin
 // option came to say `codex-default` for the row Accounts calls by its email.
+// A refused pre-unified roster offers nothing: the rows beside that refusal are
+// the last unified read, served again, not this engine's accounts. A saved pin
+// still shows as a not-checked option (`profileOptionsFor`).
 export function indexProfilesByHarness(payload) {
     const byHarness = {};
+    if (accountModelUnsupported(payload)) return byHarness;
     for (const row of accountRows(payload)) {
         if (row.kind !== 'profile' || !row.profile_id) continue;
         (byHarness[row.harness] = byHarness[row.harness] || []).push({

@@ -461,13 +461,15 @@ def test_budget_paused_root_keeps_dated_focus_and_a_legacy_wait_stays_undated(tm
     paused = rows["paused"]
     assert paused["status"] == "pending" and paused["focus"]["text"] == "Paused mid-migration"
     assert paused["waiting"] == [{"kind": "budget", "state": "paused", "rail": "graceful_ceiling",
-                                  "since": "2026-09-26T08:00:00+00:00"}]
+                                  "since": "2026-09-26T08:00:00+00:00", "reason": "spending_limit",
+                                  "text": "Spending limit reached", "release": "resume"}]
     assert paused["started_at"] == "2026-09-26T07:00:00+00:00"  # the task start, not the pause
     legacy = rows["legacy"]
     assert legacy["waiting"] == [{"kind": "owner", "since": None, "quiz_id": "q0"}]
     note = render_roster_note(independent_roots(tmp_path))
     assert "owner answer (quiz_id=q0, since=unknown)" in note
-    assert "budget pause (state=paused, rail=graceful_ceiling, since=2026-09-26T08:00:00+00:00)" in note
+    assert ("budget pause (reason=spending_limit, text=Spending limit reached, release=resume, "
+            "state=paused, rail=graceful_ceiling, since=2026-09-26T08:00:00+00:00)") in note
 
 
 def test_model_wait_is_dated_by_itself_and_a_foreign_focus_is_never_live(tmp_path):

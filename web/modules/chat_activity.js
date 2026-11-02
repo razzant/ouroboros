@@ -1,21 +1,23 @@
 // Pure chat-activity helpers shared by chat.js and dependency-free node tests:
 // live-card presentation projections (moved verbatim from chat.js) plus the
 // census snapshot hydration. The room's status word is the server's (work_status.js).
-import { META_PART_SEPARATOR, executorIdentityMarkup } from './harness_presentation.js';
+import { META_PART_SEPARATOR, executorIdentityMarkup, executorModelText, formatCoordinatorProvenance, harnessPresentation } from './harness_presentation.js';
 import { effortChipMarkup } from './effort_chip.js';
 import { resultFilesItemHtml } from './result_files.js';
-import { taskSourceDownloadUrl, apiFetch } from './api_client.js';
-import { compactModel, formatLogDuration, modelExecutionLabel } from './log_events.js';
+import { taskSourceDownloadUrl, readState } from './api_client.js';
+import { compactModel, formatLogDuration, modelExecutionView } from './log_events.js';
+import { connectionLabel, routeConnectionId } from './connection_labels.js';
 import { fitText, fullText } from './text_fit.js';
 import { delegatedActivityBodyHtml, delegatedHeadline, delegatedLineView } from './delegated_activity.js';
 import { REUSABLE_TASK_IDS } from './task_control_menu.js';
-import { paintLiveDetail } from './task_phase_chip.js';
+import { ownLiveDetail, paintLiveDetail } from './task_phase_chip.js';
 import { fmt, tr, tx } from './i18n.js';
 import { formatMsgTime } from './utils.js';
+import { placeIngressNote } from './chat_attachments.js';
 import { hostRowDisplayText } from './host_notice_text.js';
 export { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
 import {
-    joinMarkdownHeadings, MARKDOWN_FENCED_CODE, accountedUpperBound,
+    projectMarkdownLines, MARKDOWN_FENCED_CODE, accountedUpperBound,
     accountedUpperBoundWithChildren,
     escapeHtmlAttr,
     escapeHtmlText as escapeHtml,
@@ -121,11 +123,13 @@ export function buildTimelineItemHtml(item, record) {
     // P3: when expanded, prefer the genuinely-full fetched output, then the capped
     // fullBody, then the preview body. A server-truncated line shows the fetched full
     // text in a bounded-scroll box so a huge research output never grows the chat.
-    const displayBody = expanded ? (item.fetchedFull || item.fullBody || item.body) : item.body;
+    const displayBody = expanded ? (item.fullReadError || item.fetchedFull || item.fullBody || item.body) : item.body;
     const showingFetched = expanded && Boolean(item.fetchedFull);
-    const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull);
+    const loadingFull = expanded && Boolean(item.truncated && item.fullRef && !item.fetchedFull && !item.fullReadError);
     // A late-review row offers its exact applied review record (`cardRowSummary`).
     const evidenceHtml = evidenceLinkHtml(item.evidenceRef);
+    const bodyHtml = !displayBody ? '' : item.bodyFormat === 'text'
+        ? escapeHtml(displayBody) : renderMarkdown(displayBody, { inlineHeadingBreaks: true });
     const isProgressLine = item.phase === 'working' || item.phase === 'thinking';
     const bodyId = `chat-live-line-body-${String(record.groupId || 'task').replace(/[^A-Za-z0-9_-]/g, '-')}-${String(item.lineKey || '').replace(/[^A-Za-z0-9_-]/g, '-')}`;
     const headContent = `
@@ -157,7 +161,7 @@ export function buildTimelineItemHtml(item, record) {
         >
             ${headHtml}
             ${delegated ? `<div class="chat-live-line-body chat-delegated-activity" id="${escapeHtmlAttr(bodyId)}">${delegatedActivityBodyHtml(delegated, { expanded })}</div>`
-        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}" id="${escapeHtmlAttr(bodyId)}">${displayBody ? renderMarkdown(displayBody, { inlineHeadingBreaks: true }) : ''}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
+        : displayBody || evidenceHtml ? `<div class="chat-live-line-body${showingFetched ? ' chat-live-line-body-full' : ''}"${item.bodyFormat === 'text' ? ' data-body-format="text"' : ''} id="${escapeHtmlAttr(bodyId)}">${bodyHtml}${evidenceHtml}${loadingFull ? '<div class="chat-live-line-loading">Loading full output…</div>' : ''}</div>` : ''}
         </div>
     `;
 }
@@ -209,7 +213,7 @@ export function noteToolCall(record, observation) {
 /**
  * The host's totals for the turn, merged FIELD-WISE onto what the host already
  * stated. An ABSENT field (null/undefined) stays absent and keeps the previous
- * known value: a partial snapshot that carries `tool_calls` alone must not read
+ * known value; invocation totals never decrease on replay. A partial snapshot carrying `tool_calls` must not read
  * as "no addressing calls" and turn a block that only addressed work into
  * content, and it must not erase an error or routing count a complete snapshot
  * already gave. `counts` is known only as a NON-EMPTY object, so an empty or
@@ -229,10 +233,10 @@ export function noteToolHostMetrics(record, host) {
     const counts = host?.counts && typeof host.counts === 'object' && Object.keys(host.counts).length > 0
         ? host.counts : (known.counts ?? null);
     fold.host = {
-        calls: carry(host?.calls, known.calls),
+        calls: host?.calls == null ? (known.calls ?? null) : Math.max(host.calls, known.calls ?? 0),
         errors: carry(host?.errors, known.errors),
-        routing: carry(host?.routing, known.routing),
-        completion: carry(host?.completion, known.completion),
+        routing: host?.routing == null ? (known.routing ?? null) : Math.max(host.routing, known.routing ?? 0),
+        completion: host?.completion == null ? (known.completion ?? null) : Math.max(host.completion, known.completion ?? 0),
         counts,
     };
     return toolEvidenceView(record.toolFold);
@@ -263,9 +267,12 @@ const perToolLine = (entries) => entries
     .filter(([name, n]) => name && n > 0)
     .map(([name, n]) => (n > 1 ? `${name} ×${n}` : name)).join(' · ');
 
+// A read that failed (a recorded gap, an unreadable live file), not one that stopped at a bound.
+const toolReadFailed = coverage => Boolean(coverage && (coverage.gaps?.length
+    || coverage.source && !Number.isFinite(coverage.live_size)));
+
 export function toolEvidenceIncomplete(coverage) {
-    return Boolean(coverage && (coverage.gaps?.length || coverage.matched > coverage.shown
-        || coverage.source && !Number.isFinite(coverage.live_size)));
+    return Boolean(coverage && (toolReadFailed(coverage) || coverage.matched > coverage.shown));
 }
 
 // One tool row combines host counts with invocation facts; names and read scope
@@ -275,11 +282,12 @@ export function toolEvidenceView(fold = null) {
     const host = fold?.host || null;
     const observed = live.length + (fold?.legacy?.calls || 0);
     const calls = Math.max(Number.isInteger(host?.calls) ? host.calls : 0, observed);
-    // Frozen totals count model wait errors. Canonical evidence reports operation
-    // outcomes; a bounded partial read discloses its gap instead of reviving waits.
-    const partial = toolEvidenceIncomplete(fold?.coverage) || Boolean(fold?.coverage) && observed < calls;
-    const bounded = fold?.coverage && (fold.coverage.archives_bounded || fold.coverage.archives_available > fold.coverage.archives
-        || fold.coverage.live_size > fold.coverage.live_window);
+    const coverage = fold?.coverage;
+    // Frozen totals count model wait errors. Canonical evidence reports operation outcomes; a read names
+    // its extent, never revives a wait: a counted call without a record is unread behind a bound, else missing.
+    const bounded = Boolean(coverage) && (coverage.archives_bounded || coverage.archives_available > coverage.archives
+        || coverage.live_size > coverage.live_window || coverage.matched > coverage.shown);
+    const partial = toolReadFailed(coverage) || Boolean(coverage) && observed < calls && !bounded;
     // Only settled, individually identified calls can supersede an aggregate
     // host error. Partial replay and legacy start-only rows have no such proof.
     const outcomesKnown = calls > 0 && live.length === calls && !(fold?.legacy?.calls)
@@ -296,19 +304,19 @@ export function toolEvidenceView(fold = null) {
             : ((!host && live.some((call) => call.status === 'calling')) ? 'calling' : 'result'),
         headline: headline + (errors > 0 ? ` · ${fmt(errors === 1 ? '{n} error' : '{n} errors', { n: errors })}` : '')
             + (live.some(call => call.waitEnded) || fold?.legacy?.wait_ended ? ` · ${tr('task.tools.wait_ended', 'wait ended')}` : '')
-            + (calls && (live.some(call => ['unknown', 'wait_ended'].includes(call.status)) || fold?.legacy?.unknown || fold?.coverage && observed < calls)
+            + (calls && (live.some(call => ['unknown', 'wait_ended'].includes(call.status)) || fold?.legacy?.unknown)
                 ? ` · ${tr('task.tools.outcome_unknown', 'outcome unknown')}` : ''),
         body: '',
         fullBody: (partial || bounded ? (partial ? tr('task.tools.incomplete', 'Invocation evidence is incomplete.')
             : tr('task.tools.bounded_window', 'Only recent tool history was read.'))
-            + (fold?.coverage?.source ? ` ${fmt('Source: {source}.', { source: fold.coverage.source })}` : '') + ' ' : '')
+            + (coverage?.source ? ` ${fmt('Source: {source}.', { source: coverage.source })}` : '') + ' ' : '')
             + perToolLine(host?.counts && typeof host.counts === 'object'
             ? Object.entries(host.counts) : [...liveCounts]),
         visible: true,
         // Host-stamped routing/completion acts are receipts, never work. Missing
         // aggregate fields do not erase complete per-invocation receipt evidence.
         receipt: calls > 0 && errors <= 0 && (Number(host?.routing || 0) + Number(host?.completion || 0) >= calls
-            || !partial && live.length >= calls && live.every((call) => call.receipt)),
+            || !toolEvidenceIncomplete(coverage) && live.length >= calls && live.every((call) => call.receipt)),
         calls,
         errors,
     };
@@ -383,28 +391,14 @@ export function isForegroundLiveCard(record) {
     );
 }
 
-export function shouldFirePanic(dialogResult) {
-    return dialogResult === true;
+export function sendPanic({ ws, frame = { type: 'command', cmd: '/panic' }, onAccepted }) {
+    const result = ws.send(frame, { onPanicAccepted: onAccepted });
+    // Send first, then stop the page's own work (skills' page modules).
+    globalThis.dispatchEvent?.(new CustomEvent('ouro:panic'));
+    return result;
 }
 
-export async function confirmAndSendPanic(deps) {
-    const decision = await deps.openConfirmDialog({
-        title: 'Panic — stop all workers',
-        body: 'Kill all workers immediately?',
-        confirmLabel: 'Kill all workers',
-        cancelLabel: 'Keep running',
-        danger: true,
-    });
-    if (shouldFirePanic(decision)) {
-        deps.ws.send({ type: 'command', cmd: '/panic' });
-        // Only after the stop is on its way: the page's own work (skills' page modules) stops with it.
-        globalThis.dispatchEvent?.(new CustomEvent('ouro:panic'));
-        return true;
-    }
-    return false;
-}
-
-// A root still settling its pause (the durable row says ``pausing``): its
+// A task still settling its pause (the durable row says ``pausing``): its
 // checkpoint may not be saved yet, so a Restart can interrupt it.
 const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
 
@@ -413,15 +407,17 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  * the server's owner Restart actually does to running, paused, queued and
  * still-pausing work (supervisor/restart_retention.py). ``activities`` is the
  * live census; ``null`` means it could not be read, and the body says so
- * instead of promising there is nothing still pausing.
- * @param {Array<{phase?: string}>|null} activities
+ * instead of promising there is nothing still pausing. A live inline Presence
+ * turn (`kind` presence) has no saved return: the restart ends its stack;
+ * a new event in its place can start another (architecture §12).
+ * @param {Array<{phase?: string, kind?: string}>|null} activities
  * @returns {string}
  */
 export function restartConfirmBody(activities) {
     const lines = [
         'Running tasks stop, then eligible saved work resumes after the restart. Tasks already paused stay paused.',
         'Runnable queued tasks return to the queue. Existing holds and limits still apply.',
-        'Saved settings apply after the restart.',
+        'Saved settings apply after the restart: work that follows a model setting resumes on the current setting; task-specific choices stay.',
     ];
     if (!Array.isArray(activities) || activities.some((row) => row?.phase === 'unknown')) {
         lines.push('Pause status could not be read: a task that is still pausing would be interrupted instead of staying paused.');
@@ -432,16 +428,30 @@ export function restartConfirmBody(activities) {
         lines.push(`${pausing} task${pausing === 1 ? ' is' : 's are'} still pausing: a pause not saved when the restart `
             + 'stops it is interrupted instead of staying paused.');
     }
+    const inline = activities.filter((row) => row?.kind === 'presence').length;
+    if (inline) {
+        lines.push(`${inline === 1 ? '1 place conversation is' : `${inline} place conversations are`} mid-turn: the restart `
+            + `interrupts ${inline === 1 ? 'it and it does not resume by itself' : 'them and they do not resume by themselves'}; `
+            + 'a new message can start another turn.');
+    }
     return lines.join('\n');
 }
 
 async function readLiveActivities() {
-    const resp = await apiFetch('/api/state', { cache: 'no-store' });
-    const data = resp?.ok ? await resp.json() : null;
-    if (!Array.isArray(data?.active_chat_activities) || data.active_chat_activities_complete !== true) {
-        throw new Error('census unavailable');
+    const { state: data } = await readState();  // a refusal, an unparsable body or no answer is unknown, never "none"
+    if (!Array.isArray(data?.active_chat_activities)) throw new Error('census unavailable');
+    // The frozen census lists roots. A parked root can still have a child
+    // saving its Pause: Restart must warn about that member too, once per id.
+    const activities = new Map(data.active_chat_activities.map((row) => [row.activity_id, row]));
+    for (const work of data.works || []) {
+        for (const [id, state] of Object.entries(work.members?.states || {})) {
+            if (state.confirmed === false) activities.set(id, { ...activities.get(id), phase: 'unknown' });
+            else if (state.transition === 'pausing') activities.set(id, { ...activities.get(id), phase: 'pausing' });
+        }
     }
-    return data.active_chat_activities;
+    // An incomplete body keeps what it did see, and says the rest is unread.
+    const whole = data.active_chat_activities_complete === true && data.works_complete !== false;
+    return whole ? [...activities.values()] : [...activities.values(), { phase: 'unknown' }];
 }
 
 /**
@@ -819,6 +829,8 @@ export function mergeStickyCostMeta(previous, next) {
 export function clearStickyCardState(record) {
     if (!record) return record;
     record.collapsedActivity = '';
+    record.collapsedActivityLead = '';
+    record.causeHeld = false;  // an outcome's cause owns the line from then on; equal narration words never take it
     record.costMeta = null;
     // The executor chip is cycle state like the cost projection: a recycled
     // slot must not claim the previous cycle's delegated route as its own.
@@ -835,14 +847,17 @@ export function clearStickyCardState(record) {
     if (record.activityEl) {
         fitText(record.activityEl, '', 0);  // also drops a portal line's word-cut fit
         record.activityEl.removeAttribute('title');
+        if (record.activityEl.dataset) delete record.activityEl.dataset.lead;
     }
     record.modelExecution = null;
     record.effort = null;
     record.toolCalls = null;
+    record.rounds = null;
     record.toolErrors = null;
     // The folded evidence is cycle state too: a recycled slot must not count
     // the previous cycle's invocations.
     record.toolFold = null;
+    record.waitFolds = null;
     record.durationSec = null;
     record.historicalUnavailable = false;
     record.historicalUnconfirmed = false;
@@ -858,8 +873,9 @@ export function clearStickyCardState(record) {
  * activity, so the line is suppressed to avoid duplication. Subagent titles
  * keep the role · model identity (the id only for twins), so their routed progress body always feeds
  * the line. A frame without new activity keeps `previous`, so finishing a card
- * never blanks its last activity. Geometry is owned by the two-line CSS clamp;
- * this character ceiling is only a defensive DOM/accessibility bound.
+ * never blanks its last activity. This character ceiling bounds a child's and a
+ * portal's line (their geometry is the fitted one or two lines); an ordinary
+ * root's title and line are whole (owner 30.10, B).
  */
 export const COLLAPSED_ACTIVITY_MAX = 240;
 
@@ -870,40 +886,64 @@ export const COLLAPSED_ACTIVITY_MAX = 240;
  * strikethrough, headings, bullets, links, table pipes. It strips line by line
  * without the renderer's block context, so a stray pipe row or list marker the
  * timeline would show literally is dropped here too: over-stripping is the
- * accepted side of that trade, a leaked marker is not. Headings follow the
- * renderer's own rule (`joinMarkdownHeadings`: markers off, ` — ` before the
- * text under a real heading). A headline that is nothing but markers keeps its
- * source text: an empty projection would flip the reserved activity band's
+ * accepted side of that trade, a leaked marker is not. The line-anchored markers
+ * (headings with ` — ` before the text under a real heading, bullets, table rows)
+ * go through `projectMarkdownLines`, the one projection `describeText` also runs
+ * before a preview loses its newlines. A headline that is nothing but markers keeps
+ * its source text: an empty projection would flip the reserved activity band's
  * `:empty` rules.
  */
 export function plainActivityText(text = '') {
     const source = String(text || '');
-    const plain = joinMarkdownHeadings(source)
+    const plain = projectMarkdownLines(source)
         .replace(MARKDOWN_FENCED_CODE, '$1')
         .replace(/(``|`)(.+?)\1/g, '$2')
         .replace(/\*\*(.+?)\*\*/g, '$1')
         .replace(/\*(.+?)\*/g, '$1')
         .replace(/~~(.+?)~~/g, '$1')
-        .replace(/^- (.+)$/gm, '$1')
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-        .replace(/^\|(.+)\|$/gm, (_, row) => row.split('|').map((cell) => cell.trim()).join(' '))
-        .replace(/^[\s\-:|]+$/gm, '');
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1');
     const trimmed = plain.trim();
     return trimmed || source;
 }
 
+/** An authored line's whole normalized text: the preview's own projection, never cut. */
+export function wholeActivityText(value = '') {
+    return plainActivityText(value).replace(/\s+/g, ' ').trim();
+}
+
 export function boundActivityPreview(value = '') {
-    const candidate = plainActivityText(value).replace(/\s+/g, ' ').trim();
+    const candidate = wholeActivityText(value);
     if (candidate.length <= COLLAPSED_ACTIVITY_MAX) return candidate;
     return candidate.slice(0, COLLAPSED_ACTIVITY_MAX - 1).trimEnd() + '…';
 }
 
+// An ordinary root card: neither a nested child nor a Main portal (both keep a bounded preview and a meta-line clock).
+const ordinaryRoot = (record) => Boolean(record) && !record.isSubagent && record.root?.dataset?.portal !== '1';
+
+/**
+ * The authored words a card keeps as its line (an unnamed root's title is the same words): an ordinary root's whole
+ * normalized text, from the frame's complete words (`fullHeadline`, which the host sends whole, live and on replay);
+ * a child's or a portal's bounded preview. A frame with no preview has no line.
+ */
+export function authoredLine(record, summary = {}) {
+    const preview = summary.activityPreview ?? summary.headline;
+    return ordinaryRoot(record) && preview ? wholeActivityText(summary.fullHeadline || preview) : boundActivityPreview(preview);
+}
+
+/** An unnamed card's title from its newest authored words: an ordinary root's whole line, else the bounded headline. */
+export function authoredTitle(record) {
+    return (ordinaryRoot(record) && record.lastHumanHeadlineSource?.preview) || record?.lastHumanHeadline || '';
+}
+
 export function projectCollapsedActivity({
-    isSubagent = false, suggestedName = '', headline = '', body = '', previous = '',
+    record = null, isSubagent = Boolean(record?.isSubagent), portal = record?.root?.dataset?.portal === '1',
+    suggestedName = '', headline = '', body = '', previous = '',
 } = {}) {
-    const current = boundActivityPreview(isSubagent ? body : headline);
-    const candidate = current || boundActivityPreview(previous);
-    if (!isSubagent && candidate === boundActivityPreview(suggestedName || headline)) return '';
+    // A child's and a portal's line is a bounded preview; an ordinary root's is its whole normalized text.
+    const shape = isSubagent || portal ? boundActivityPreview : wholeActivityText;
+    const current = shape(isSubagent ? body : headline);
+    const candidate = current || shape(previous);
+    if (!isSubagent && candidate === shape(suggestedName || headline)) return '';
     return candidate;
 }
 
@@ -915,78 +955,8 @@ export function isTerminalTaskPhase(phase = '', terminal = false) {
 
 // In-flight chat activity status (owner decisions 1A-5A; managed continuity).
 
-/**
- * One request/apply clock for every /api/state consumer on a page. Responses
- * may finish in either order; once generation N applies, an older generation
- * can no longer mutate any projection. requestedAt stays tied to request start
- * and is the barrier for the CARD scan (`lastLiveObservedAt`) only — activity
- * hydration is a plain projection of the census and has no barrier.
- *
- * `gate(force)` is the page-wide single-flight admission for the readers: it
- * resolves to a request when the caller may read now. A periodic tick that
- * lands while a read is in flight is never queued: it resolves to null once
- * that read settles, so a caller that only needs some fresh read to have
- * landed (the boot prefetch before the socket opens) may await it. A forced
- * caller that lands mid-flight is coalesced with every other forced caller
- * into ONE follow-up read that starts when the in-flight read settles — the
- * first forced caller receives that request, the others resolve to null once
- * the follow-up has applied or failed. Gated requests settle via `apply`/`fail` even if a callback throws.
- * Only `fail` fans out `onUnavailable`; socket changes and confirmed mutations `retire()` older bodies.
- */
-export function createStateSnapshotSequencer(onApply, now = () => Date.now(), onUnavailable = () => {}) {
-    let requestedGeneration = 0;
-    let appliedGeneration = 0;
-    // Newest applied body until a failed read or retire() clears it (late-mount seed).
-    let latest = null;
-    let inflight = null;
-    let settled = null;
-    let followUp = null;
-    const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
-    const begin = () => ({ generation: ++requestedGeneration, requestedAt: now() });
-    const open = () => { settled = deferred(); inflight = begin(); return inflight; };
-    const settle = (request) => {
-        if (!inflight || request !== inflight) return;
-        const done = settled;
-        const next = followUp;
-        inflight = settled = followUp = null;
-        if (next) next.resolve({ request: open(), done: settled.promise });
-        done.resolve();
-    };
-    return {
-        begin,
-        retire() { appliedGeneration = begin().generation; latest = null; },
-        gate(force = false) {
-            if (!inflight) return Promise.resolve(open());
-            if (!force) return settled.promise.then(() => null);
-            if (!followUp) { followUp = deferred(); return followUp.promise.then((f) => f.request); }
-            return followUp.promise.then((f) => f.done).then(() => null);
-        },
-        apply(request, data) {
-            try {
-                const generation = Number(request?.generation) || 0;
-                if (!generation || generation <= appliedGeneration) return false;
-                appliedGeneration = generation;
-                latest = data;
-                onApply(data, request.requestedAt, generation);
-                return true;
-            } finally { settle(request); }
-        },
-        isCurrent(request) {
-            return (Number(request?.generation) || 0) > appliedGeneration;
-        },
-        fail(request) {
-            try {
-                const generation = Number(request?.generation) || 0;
-                if (!generation || generation <= appliedGeneration) return false;
-                appliedGeneration = generation;
-                latest = null;
-                onUnavailable(request.requestedAt, generation);
-                return true;
-            } finally { settle(request); }
-        },
-        latest: () => latest,
-    };
-}
+// The page's single-flight state read lives in state_snapshots.js; its sequencer keeps this public name.
+export { createStateSnapshotSequencer } from './state_snapshots.js';
 
 /**
  * Main-thread fan-out gate for a live WS frame.
@@ -1028,7 +998,8 @@ export function mainLogFrameAccepts(msg, projectChatIds) {
 /** Route one ordinary Chat frame to the current Main or Project instance. */
 export function chatThreadAccepts(msg, isMain, chatId, projectChatIds) {
     if (isMain) return mainThreadAccepts(msg, projectChatIds);
-    return Number(msg?.chat_id ?? 1) === chatId;
+    // One row a Project also shows (its work's notice to Main, the owner's Reply to it): `also_rooms`.
+    return Number(msg?.chat_id ?? 1) === chatId || (Array.isArray(msg?.also_rooms) && msg.also_rooms.map(Number).includes(chatId));
 }
 
 /**
@@ -1130,10 +1101,9 @@ export function buildMessageKey(role, text, timestamp, opts = {}) {
     ].join('|');
 }
 
-export function reconnectBannerText(reason = '') {
-    if (reason === 'sha-change') return 'Restart complete';
-    if (reason) return 'Reconnected';
-    return '';
+// Only a reload onto changed code earns a feed notice; any other reload reason or reconnect is silent.
+export function restartNoticeText(reason = '') {
+    return reason === 'sha-change' ? 'Restart complete' : '';
 }
 
 // The message clock is the chat's one compact time format, shared with the terminal time line (utils.js).
@@ -1272,7 +1242,7 @@ export function unconfirmedForegroundCardIds(cards, activeIds) {
 }
 
 // В9: the host stamps a typed `ingress_accepted: true` on an owner echo only after the durable chat write, so that
-// client_message_id's bubble says `Input saved` — never that work began. `ingress_pending` keeps that note
+// client_message_id's bubble carries `Input saved` (a tick by its time) — never read or begun. `ingress_pending` keeps that note
 // provisional until dispatch is confirmed or the ended host's delivery becomes unknown.
 export function markIngressSaved(root, row) {
     const cmid = String(row?.client_message_id || ''), state = row?.ingress_pending === true ? 'pending' : '';
@@ -1283,18 +1253,18 @@ export function markIngressSaved(root, row) {
     const note = Object.assign(document.createElement('div'), { className: 'msg-pending', textContent: 'Input saved' });
     note.dataset.ingressSaved = state;
     for (const doubt of [prior, bubble.querySelector('[data-ingress-unconfirmed]')]) doubt?.remove();  // the saved row settles a "Send again" doubt
-    bubble.insertBefore(note, bubble.querySelector('.msg-time'));
+    placeIngressNote(bubble, note);  // the plain saved fact: a quiet tick before the time
     return true;
 }
 
 // Full narration stays in the timeline, not a mouse-only title.
 // How many lines a COLLAPSED card's activity line shows (the CSS clamps say the same: a child 1, a Main portal
-// 2, a root card 3); an expanded card shows the whole line.
+// 2); a root card and an expanded card show the whole line (0).
 export function collapsedActivityLines(record) {
     const root = record?.root;
     if (!root || root.dataset?.expanded === '1') return 0;
     if (record.isSubagent || root.dataset?.subagent === '1') return 1;
-    return root.dataset?.portal === '1' ? 2 : 3;
+    return root.dataset?.portal === '1' ? 2 : 0;
 }
 
 /** Re-fit the activity line after the card's form changed (expanded, collapsed, bound as a portal). */
@@ -1308,12 +1278,78 @@ export function refitCollapsedActivity(record) {
 export function renderCollapsedActivity(record, text) {
     if (!record?.activityEl) return false;
     const el = record.activityEl;
+    // A child's report names its reader before its words: the label is drawn by CSS from
+    // `data-lead`, so the fit below counts its room and a copy of the line keeps only the words.
+    const lead = text ? String(record.collapsedActivityLead || '') : '';
+    const leadChanged = (el.dataset?.lead || '') !== lead;
+    if (leadChanged && el.dataset) {
+        if (lead) el.dataset.lead = lead;
+        else delete el.dataset.lead;
+    }
     // A collapsed card's line is cut on a word with a clean ending (never `.…`; text_fit.js).
     const shown = fullText(el);
-    const changed = shown !== text || Boolean(el.hasAttribute?.('title'));
-    if (shown !== text) fitText(el, text, collapsedActivityLines(record));
+    const changed = shown !== text || leadChanged || Boolean(el.hasAttribute?.('title'));
+    if (shown !== text || leadChanged) fitText(el, text, collapsedActivityLines(record));
     if (el.hasAttribute?.('title')) el.removeAttribute('title');
     return Boolean(changed && el.isConnected);
+}
+
+// The terminal observation names only this task's loose files. Keep paths and
+// HEAD in the existing Details timeline; the compact line lives in taskReasonDetail.
+export function readCandidateRemainder(item, detail, ok = true) {
+    const body = ok ? candidateRemainderBody(detail, item.remainderFact) : null;
+    item.fullReadError = body !== null ? '' : ok
+        ? 'The saved file list is unavailable for this observation. Close and reopen this detail to retry.'
+        : 'The saved file list could not be loaded. Close and reopen this detail to retry.';
+    return body;
+}
+
+export function candidateRemainderBody(detail, fact) {
+    const snapshot = detail?.mutation_evidence?.terminal_candidate_snapshot;
+    const exact = fact?.snapshot_at && snapshot?.captured_at === fact.snapshot_at
+        && snapshot?.baseline_hash === fact.baseline_hash && Array.isArray(snapshot.surfaces);
+    // Older terminal rows carried the exact list inline. A newer observation
+    // never substitutes a different saved snapshot for the one the summary names.
+    const paths = exact ? snapshot.surfaces.filter(row => Array.isArray(row.uncommitted_paths)).map(row => ({
+        root: row.canonical_root, commit: row.base_commit, paths: row.uncommitted_paths,
+    })) : Array.isArray(fact?.surfaces) ? fact.surfaces : null;
+    if (!paths) return null;
+    return [fact.state === 'unknown' ? 'The uncommitted remainder could not be checked.' : '',
+        ...paths.filter(row => Array.isArray(row.paths) && row.paths.length).map(row =>
+            `Candidate: ${row.root || 'Saved candidate'}\nHEAD: ${row.commit || 'unknown'}\n\nFiles:\n${row.paths.join('\n')}`)]
+        .filter(Boolean).join('\n\n');
+}
+
+export function syncCandidateRemainderItem(record, detail) {
+    const fact = detail?.outcome_axes?.execution?.mutation_attribution?.uncommitted_remainder;
+    if (!record || !fact) return false;
+    const key = `candidate-remainder|${record.groupId}`;
+    const index = record.items.findIndex(item => item.dedupeKey === key);
+    const previous = record.items[index];
+    const same = previous && JSON.stringify(previous.remainderFact) === JSON.stringify(fact);
+    const full = candidateRemainderBody(detail, fact);
+    const fullRef = fact.snapshot_at ? String(fact.task_id || detail.task_id || record.groupId) : '';
+    const body = fact.state === 'known' && fact.count === 0 ? '' : full
+        ?? (same && !previous.truncated ? previous.body : null)
+        ?? [fact.state === 'unknown' ? 'The uncommitted remainder could not be checked.' : '',
+        fact.paths_omitted > 0 ? `${fact.paths_omitted} recorded file path${fact.paths_omitted === 1 ? ' is' : 's are'} not loaded.` : '',
+        fullRef ? 'Expand to read the saved file list.' : 'The saved file list is unavailable.']
+        .filter(Boolean).join('\n\n');
+    if (!body) {
+        if (index < 0) return false;
+        record.items.splice(index, 1);
+        return true;
+    }
+    if (same && previous.body === body) return false;
+    const item = { phase: 'info', headline: 'Uncommitted files', fullHeadline: 'Uncommitted files',
+        body, fullBody: body, bodyFormat: 'text', receipt: true, count: 1, ts: '', sourceTs: String(detail.ts || ''),
+        dedupeKey: key, lineKey: `candidate-remainder-${String(record.groupId).replace(/[^A-Za-z0-9_-]/g, '-')}`,
+        remainderFact: fact, fullField: 'candidate_remainder', fullRef,
+        truncated: full === null && Boolean(fullRef) && !(same && !previous.truncated),
+        fetchedFull: same ? previous.fetchedFull : '', fullReadError: same ? previous.fullReadError : '' };
+    if (index < 0) record.items.push(item);
+    else Object.assign(record.items[index], item);
+    return true;
 }
 
 // The 13 cost-meta keys shared by both subagent whitelists (the delegation
@@ -1331,7 +1367,7 @@ export function costMetaKeys(src) {
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
     'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'cancel_origin',
-    'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source',
+    'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning',
 ];
 export function cardMetaKeys(src) {
     return Object.fromEntries(CARD_META_KEYS.map((key) => [key, src?.[key]]));
@@ -1341,14 +1377,19 @@ export function cardMetaKeys(src) {
 // so a replay batch renders it exactly once per card.
 // "updated" names the turn's own last narration in the chat's one time format (formatMsgTime: the
 // same words as a bubble's clock), never the host locale's long date.
-function updatedLabel(record) {
+function updatedTime(record) {
     const time = record.latestActivityRaw ? formatMsgTime(record.latestActivityRaw) : null;
-    const text = time?.short || record.latestActivityTs || '';
+    return time?.short || record.latestActivityTs || '';
+}
+
+function updatedLabel(record) {
+    const text = updatedTime(record);
     return text ? `updated ${text}` : '';
 }
 
-// An unfinished card always carries a time on its meta line: its last narration's, else when the work
-// started (the census start, else the card's first row). The line is never empty beside a control.
+// An unfinished card always carries a time: its last narration's, else when the work started (the census
+// start, else the card's first row). A root card says it in its head beside the chip; a child and a Main
+// portal end their meta line with it.
 function clockLabel(record) {
     const updated = updatedLabel(record);
     if (updated || record.finished) return updated;
@@ -1378,14 +1419,53 @@ function metaLineHtml(parts) {
         ? withTrailingSeparator(part) : part}</span>`).join('');
 }
 
+// The card's facts beyond its compact line: labelled rows of its own details block (a nested child
+// carries its own), opened by the card's one disclosure. A row exists only for a known fact; the
+// markup equals its serialization, so an unchanged list is never rebuilt under a reader's selection.
+function paintLiveFacts(record, rows) {
+    const el = ownLiveDetail(record, 'liveFacts');
+    if (!el) return false;
+    if (record.wakeSummary) rows.unshift([tr('task.fact.wake_summary', 'In its words'), `<span data-i18n-authored>${escapeHtml(record.wakeSummary)}</span>`]);
+    const html = rows.filter(([, value]) => value).map(([label, value]) =>
+        `<div class="chat-live-fact"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`).join('');
+    if (el.innerHTML === html && el.hidden === !html) return false;
+    if (el.innerHTML !== html) el.innerHTML = html;
+    el.hidden = !html;
+    return true;
+}
+
 export function renderLiveCardMeta(record, { agentModel = record?.agentModel || '' } = {}) {
     if (!record?.metaEl) return false;
     const toolCalls = Number.isInteger(record.toolCalls) ? `${record.toolCalls} tool ${record.toolCalls === 1 ? "call" : "calls"}` : '';
+    const rounds = Number.isInteger(record.rounds) && record.rounds >= 0 ? `${record.rounds} round${record.rounds === 1 ? '' : 's'}` : '';
     const cost = (record.costMeta && Array.isArray(record.costMeta.meta)) ? record.costMeta.meta : [];
     // A Main portal is the collapsed form of a work that lives in its Project room: tool calls ·
     // cost · updated, plus the facts that change what the owner may trust. Executor, model and
     // effort details stay on the room's card.
     const portal = record.root?.dataset?.portal === '1';
+    const clock = record.finished ? '' : clockLabel(record);
+    // A root card's clock moves whole to its head; a portal and a child keep it last on this line.
+    const headClock = ordinaryRoot(record);
+    const text = (item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`;
+    // The compact line says who ran the work, on what, how long and for how much (DESIGN §5 "A task card's
+    // summary outranks its details"). A delegated child names its executor and only the executor's own model
+    // evidence; any other card the model a usable solve response observed, else its agent model, and an
+    // unobserved execution in its own words. Effort is the selected leaf's dispatch level, not the nanny's
+    // reasoning level or a provider echo (subagent_runtime.resolve_configured_actor_dispatch).
+    // Session counters belong to the supervising agent, never the foreign executor.
+    const chip = record.executorChip;
+    const supervision = chip && harnessPresentation(chip.harness).kind === 'harness';
+    const execution = modelExecutionView(record.modelExecution);
+    const coordinator = compactModel(agentModel);
+    const provenance = chip ? formatCoordinatorProvenance(
+        record?.coordinatorProvenance || chip?.coordinatorProvenance || chip?.snapshot || '',
+    ) : '';
+    const model = chip ? executorModelText(chip, compactModel)
+        : execution && !execution.observed ? execution.value : execution?.model || coordinator;
+    // A key added under Accounts follows its model ("claude-opus-5.5 · Claude credits"); the built-in key adds nothing.
+    const keyRoute = chip || (execution && !execution.observed) ? '' : execution ? record.modelExecution?.used_model : agentModel;
+    const key = connectionLabel(routeConnectionId(keyRoute));
+    const updated = record.finished ? updatedTime(record) : '';
     // The executor block is ONE part of this line, joined by the same text
     // separator as the rest: concatenating it left the chip and the first fact
     // touching in a copied line and running together for a screen reader,
@@ -1395,36 +1475,67 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         !record.finished && record.projectHoldDetail || '',
         // A settled portal needs no activity clock: its chip states how the work ended and the author's
         // final (with its own end time) arrives as a message.
-        toolCalls, ...cost, record.finished ? '' : clockLabel(record),
-    ].filter(Boolean).map((item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`)) : metaLineHtml([
-        executorIdentityMarkup(record.executorChip, { agentModel: compactModel(agentModel) }),
+        toolCalls, ...cost, clock,
+    ].filter(Boolean).map(text)) : metaLineHtml([
+        chip ? executorIdentityMarkup(chip, { model }) : (model ? text(key ? `${model} · ${key}` : model) : ''),
         effortChipMarkup(record.effort),
         ...[
-            record.initiator === 'consciousness' ? 'Consciousness' : '',
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
             !record.finished && record.projectHoldDetail || '',
             record.historyRetentionProblem || '',
-            modelExecutionLabel(record.modelExecution),
-            toolCalls,
             record.toolErrors > 0 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
             Number.isFinite(record.durationSec) ? formatLogDuration(record.durationSec) : '',
+            !supervision && record.toolCalls > 0 ? toolCalls : '',
             ...(Array.isArray(record._lastFrameMeta) ? record._lastFrameMeta : []),
             ...cost,
-            clockLabel(record),
-        ].filter(Boolean).map((item) => `<span class="chat-live-meta-text">${escapeHtml(item)}</span>`),
+            headClock ? '' : clock,
+        ].filter(Boolean).map(text),
+    ]);
+    const clockChanged = paintHeadClock(record, headClock ? clock : '');
+    const factsChanged = paintLiveFacts(record, portal ? [] : [
+        ['Executor', chip?.title ? escapeHtml(chip.title) : ''],
+        // Provenance is a recorded fact of the schedule (chosen_by / coordinator_provenance), never inferred here.
+        [chip ? 'Coordinator' : 'Agent model', coordinator ? escapeHtml(provenance ? `${coordinator} (${provenance})` : coordinator) : ''],
+        // An unobserved execution of a card without an executor is its compact model fact already.
+        [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
+        ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
+        ['Tool calls', !supervision && record.toolCalls === 0 ? '0' : ''],
+        ['Rounds', !supervision && rounds ? `${record.rounds} · usable solve response${record.rounds === 1 ? '' : 's'}` : ''],
+        ['Supervision', supervision && (rounds || toolCalls)
+            ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
+        ['Updated', escapeHtml(updated)],
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));
-    if (record.metaEl.innerHTML === html) return detailChanged && Boolean(record.metaEl.isConnected);
+    if (record.metaEl.innerHTML === html) return (detailChanged || factsChanged || clockChanged) && Boolean(record.metaEl.isConnected);
     record.metaEl.innerHTML = html;
     return Boolean(record.metaEl.isConnected);
+}
+
+// The head's clock (`data-live-when`, beside the chip): written only on change, hidden while it says nothing.
+function paintHeadClock(record, text) {
+    const el = record.summaryButtonEl?.querySelector?.('[data-live-when]');
+    if (!el || (el.textContent === text && el.hidden === !text)) return false;
+    el.textContent = text;
+    el.hidden = !text;
+    return true;
+}
+
+// The Reviews door stands in a root card's head beside Details; a child docks it in its own foot, before its
+// controls, the action row under its metadata (DESIGN "Reviews inside task cards"). The same node moves, never a copy.
+export function dockChildReviewDoor(record) {
+    const door = record?.reviewSummaryEl;
+    const end = ownFootEnd(record);
+    if (!record?.isSubagent || !door || !end || door.parentElement === end) return false;
+    end.prepend(door);
+    return true;
 }
 
 // Only host-attested cancelable queue roots receive this control.
 // A card's OWN actions row: a nested child card carries a row of its own, and a
 // descendant lookup would hand a root without one its child's.
-// The row lives at the end of the card's own foot, beside its meta line (right-docked, after the quiet
-// Reviews count): a single control never floats on an empty row of its own, and the summary above it
-// keeps its own inset. A nested child's foot is its own, so a descendant lookup is never used.
+// The row lives at the end of the card's own foot: a root's beside its meta line, right-docked, and under it
+// when the two do not fit; a child's and a portal's under the meta line, after the child's docked Reviews door
+// or the portal's Project reference. A nested child's foot is its own, so a descendant lookup is never used.
 function ownFootEnd(record) {
     const foot = record?.footEl;
     const end = record?.footEndEl;

@@ -49,9 +49,8 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     resource_capabilities: Dict[str, bool]
     resource_capabilities_read: ClaudexorReadState
     reads: ClaudexorStatusReads
-    # UNIFIED ACCOUNT MODEL feature fact (additive-optional): True only when the read /v2/operations catalog
-    # advertises `GET /v2/account-pools` (default CLI logins become named registry rows, `harnessAccounts`
-    # empties, routing rides `profiles.accountPools`); False or absent: legacy pseudo-rows (unreadable: False).
+    # True when this read's roster is the unified account model (named rows, routing in
+    # `profiles.accountPools`); a pre-unified roster fails `accounts` as `account_model_unsupported`.
     unified_accounts: bool
     # Per facet: `observed_at`, `stale`, `error`; a failed or unasked facet serves its last read (stale).
     facets: Dict[str, Dict[str, Any]]
@@ -70,5 +69,6 @@ class ClaudexorQuotaResponse(TypedDict):
     availability_scope: NotRequired[Dict[str, Any]]
     unified_accounts: bool
     reads: ClaudexorStatusReads
+    # A pre-unified roster: accounts `failed` with read_errors.accounts.code `account_model_unsupported`.
     read_errors: Dict[Literal["discovery", "accounts", "quota"], ClaudexorPassiveReadError]
     timings_ms: Dict[str, int]

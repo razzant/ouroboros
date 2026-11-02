@@ -7,7 +7,7 @@ until the state arrives (and nothing without a shell), keeps its controls clear 
 area from the drawer layout through the 800-981 px window widths (the desktop window's minimum is 800)
 and in the full-width project layout, turns empty band presses into drags while
 its header buttons keep theirs and the document reader's name stays selectable text, gives no band
-press to a transcript row scrolled under Main's header, and lets go
+press to a transcript row scrolled under either room's header, and lets go
 when the state goes. The numbers are a sample of a measured state; AppKit's real geometry and
 gestures are the native qualification's.
 """
@@ -42,7 +42,24 @@ def shell_page(ui, width, height=722):
 
 
 def apply(page, top=TOP, start=START):
-    page.evaluate("([top, start]) => window.__ouroWindowChrome({doc: performance.timeOrigin, top, start})", [top, start])
+    # Like the native shell, answer the document's latest declaration (including page-cache returns).
+    page.evaluate("""([top, start]) => {
+        const doc = window.__shellMessages.filter(message => message.type === 'declare').at(-1).doc;
+        window.__ouroWindowChrome({doc, top, start});
+    }""", [top, start])
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_shell_fixture_replies_to_the_restored_document(request, monkeypatch, engine):
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", engine)
+    ui = request.getfixturevalue("subscription_ui")
+    page = shell_page(ui, 1100)
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+    assert page.evaluate("window.__shellMessages.filter(m => m.type === 'declare').at(-1).doc !== performance.timeOrigin")
+    apply(page)
+    assert page.evaluate("document.documentElement.dataset.windowChrome") == INTEGRATED
+    apply(page, top=0, start=0)
+    assert page.evaluate("document.documentElement.dataset.windowChrome || null") is None
 
 
 def box(page, selector):
@@ -96,11 +113,11 @@ def drags(page):
     return [m["type"] for m in page.evaluate("window.__shellMessages || []") if m["type"] in ("drag", "double-click")]
 
 
-def seed_history(root, rows=40):
+def seed_history(root, rows=40, chat_id=1):
     """Ouroboros rows that each carry a link (and, like every row, a reply button): more than the column holds."""
     (root / "logs").mkdir(parents=True, exist_ok=True)
     (root / "logs" / "chat.jsonl").write_text("".join(json.dumps({
-        "ts": f"2026-10-17T09:00:{index:02d}Z", "chat_id": 1, "direction": "out",
+        "ts": f"2026-10-17T09:00:{index:02d}Z", "chat_id": chat_id, "direction": "out",
         "text": f"Note {index}: [the delivered report {index}](https://example.com/report-{index}) and a few words after it.",
     }) + "\n" for index in range(rows)), encoding="utf-8")
 
@@ -321,51 +338,76 @@ def test_from_the_minimum_window_width_every_top_control_clears_the_lights(subsc
 
 
 @pytest.mark.parametrize("width", [800, 1100, 1440])
-def test_band_presses_over_a_scrolled_transcript_are_the_title_bars(subscription_ui, tmp_path, width):
-    """Main opens at its newest message, so older rows lie under its header, which paints over them but lets a
+@pytest.mark.parametrize("room", ["main", "project"])
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_band_presses_over_a_scrolled_transcript_are_the_title_bars(request, monkeypatch, tmp_path, width, room, engine):
+    """A room opens at its newest message, so older rows lie under its header, which paints over them but lets a
     press between its groups through. In the band such a press must still be the title bar's: it drags and a
     double-click is the window's, and the link or button hidden under the header gets neither. The header's
     controls, the transcript below the band and the feed's scrollbar keep their presses; without the band
     (full screen, the ordinary bar) the header is as in a browser again."""
-    ui = subscription_ui
-    seed_history(tmp_path)
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", engine)
+    ui = request.getfixturevalue("subscription_ui")
+    seed_history(tmp_path, chat_id=101 if room == "project" else 1)
+    feed = "#project-panel .chat-messages" if room == "project" else "#chat-messages"
+    header = ".project-panel-bar" if room == "project" else ".chat-page-header"
+
+    def script(source):
+        if room == "main":
+            return source
+        return (source.replace("document.getElementById('chat-messages')", "document.querySelector('#project-panel .chat-messages')")
+                .replace("document.getElementById('chat-input-area')", "document.querySelector('#project-panel .chat-input-area')")
+                .replace("#chat-messages", "#project-panel .chat-messages").replace(".chat-page-header", ".project-panel-bar"))
+
+    name = f"window-chrome-{width}-{room}-{engine}"
     page = ui["new_page"](viewport={"width": width, "height": 722})
     serve_history(page, tmp_path)
     page.add_init_script(PORT)
     page.add_init_script(DOCUMENT_SCRIPT)
     page.goto(ui["url"])
-    page.wait_for_selector('#chat-messages a[href="https://example.com/report-39"]')
-    page.wait_for_function("() => { const f = document.getElementById('chat-messages');"
-                           " return f.scrollTop > 0 && f.scrollHeight - f.clientHeight - f.scrollTop < 2; }")
-    page.evaluate(TRANSCRIPT_CLICKS)
+    if room == "project":
+        page.wait_for_selector("#chat-input")
+        page.evaluate(OPEN_PANEL)
+        page.wait_for_selector("#project-panel.open .rw-trigger")
+        page.wait_for_timeout(400)
+    page.wait_for_selector(f'{feed} a[href="https://example.com/report-39"]')
+    page.wait_for_function(script("() => { const f = document.getElementById('chat-messages');"
+                                  " return f.scrollTop > 0 && f.scrollHeight - f.clientHeight - f.scrollTop < 2; }"))
+    page.evaluate(script(TRANSCRIPT_CLICKS))
     apply(page)
-    facts = {"reached": page.evaluate(BAND_REACH, [TOP, GUTTER]), "catcher": page.evaluate(CATCHER)}
-    hidden = page.evaluate(UNDER_BAND, 2)  # the band's top strip, above every header group
-    capture(page, f"window-chrome-{width}-row-under-the-band")
-    point = page.evaluate(POINT, hidden)
+    facts = {"reached": page.evaluate(script(BAND_REACH), [TOP, GUTTER]), "catcher": page.evaluate(script(CATCHER))}
+    hidden = page.evaluate(script(UNDER_BAND), 2)  # the band's top strip, above every header group
+    capture(page, f"{name}-row-under-the-band")
+    point = page.evaluate(script(POINT), hidden)
     page.mouse.click(point["x"], point["y"])
     facts["press"] = {"drags": drags(page), "clicks": page.evaluate("window.__transcriptClicks")}
     page.mouse.dblclick(point["x"], point["y"])
     facts["double"] = {"drags": drags(page), "clicks": page.evaluate("window.__transcriptClicks")}
-    facts["header"] = page.evaluate(HEADER_CONTROLS)
-    more = page.locator(".chat-header-more")
-    more.locator("summary").click()
-    facts["more_opened"] = more.evaluate("el => el.open")
-    more.locator("summary").click()
-    facts["gutter"] = page.evaluate(GUTTER_FACTS, TOP)
-    below = page.evaluate(BELOW_BAND)
-    target = page.evaluate(POINT, below)
+    facts["header"] = page.evaluate(script(HEADER_CONTROLS))
+    # Panic stands in every room's bar and takes a press there (a trial: nothing is stopped).
+    page.locator(f'{header} [data-chat-command="panic"]').click(trial=True)
+    if room == "project":
+        page.locator("#project-panel-close").click(trial=True)
+    facts["gutter"] = page.evaluate(script(GUTTER_FACTS), TOP)
+    below = page.evaluate(script(BELOW_BAND))
+    target = page.evaluate(script(POINT), below)
     page.mouse.click(target["x"], target["y"])
     facts["below"] = {"drags": drags(page), "clicks": page.evaluate("window.__transcriptClicks")}
+    if room == "project":
+        # Falsifier: removing only the new hit shield must expose a transcript target in the band.
+        unshield = page.add_style_tag(content='.project-panel-bar::after { content: none !important; }')
+        facts["unshielded"] = page.evaluate(script(BAND_REACH), [TOP, GUTTER])
+        unshield.evaluate("el => el.remove()")
+        assert facts["unshielded"], "the regression scene must contain transcript targets under the Project band"
     apply(page, top=0, start=0)
-    facts["released"] = page.evaluate(CATCHER)
-    record(f"window-chrome-{width}-band-over-transcript", {"hidden": hidden, "point": point, "below": below, **facts})
+    facts["released"] = page.evaluate(script(CATCHER))
+    record(f"{name}-band-over-transcript", {"hidden": hidden, "point": point, "below": below, **facts})
 
     reached = facts["reached"]
     assert not reached, f"{len(reached)} band points reach the transcript under the header, e.g. {reached[:4]}"
     assert facts["press"] == {"drags": ["drag"], "clicks": []}, f"a band press over the hidden {hidden}"
     assert facts["double"] == {"drags": ["drag", "drag", "double-click"], "clicks": []}
-    assert all(control["own"] for control in facts["header"]) and facts["more_opened"], facts["header"]
+    assert all(control["own"] for control in facts["header"]), facts["header"]
     assert facts["gutter"]["edge"] and facts["gutter"]["scrollbar"] <= GUTTER, facts["gutter"]
     assert facts["below"] == {"drags": ["drag", "drag", "double-click"], "clicks": [below]}
     assert facts["catcher"] not in ("none", "normal") and facts["released"] in ("none", "normal")

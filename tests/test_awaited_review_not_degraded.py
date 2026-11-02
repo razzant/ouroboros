@@ -51,7 +51,7 @@ def _finalize(tmp_path, monkeypatch, decision):
     _loop, tools, ctx, trace = _forced_test_context(tmp_path)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_kw: False)
-    monkeypatch.setattr(loop, "_force_plan_decision", lambda *_a, **_kw: dict(decision))
+    monkeypatch.setattr(loop, "_plan_gate_decision", lambda *_a, **_kw: dict(decision))
     loop._replace_delivery_candidate(tools, ctx, trace, ANSWER, control="candidate")
     text, usage, trace = loop._no_tool_final_answer(
         ANSWER, ctx, trace, tools, queue.Queue(), set(), lambda _t: None)
@@ -122,13 +122,13 @@ def test_a_clean_plan_leaves_no_notice_and_no_fact(tmp_path, monkeypatch):
 
 def test_the_typed_fact_never_rides_a_non_clean_execution():
     """A rail owns its own reason: a stale projected decision cannot mark a forced terminal."""
-    trace = {"force_plan_decision": _awaiting(), "tool_calls": [],
+    trace = {"plan_gate": _awaiting(), "tool_calls": [],
              "delivery_candidate": {"degraded": True, "degraded_reason": "round_limit"}}
     forced = derive_loop_outcome(ANSWER, {"execution_status": "failed", "reason_code": "round_limit",
                                           "_best_effort_extracted": True}, trace)
     assert forced["outcome_axes"]["execution"]["status"] == "best_effort"
     assert "plan_review" not in forced["outcome_axes"]["execution"]
-    clean = derive_loop_outcome(ANSWER, {}, {"force_plan_decision": _decision(), "tool_calls": []})
+    clean = derive_loop_outcome(ANSWER, {}, {"plan_gate": _decision(), "tool_calls": []})
     assert "plan_review" not in clean["outcome_axes"]["execution"]
 
 

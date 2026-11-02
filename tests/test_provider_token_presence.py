@@ -177,6 +177,71 @@ def test_anthropic_native_presence_reaches_round_and_usage_rows(tmp_path, monkey
     assert [usage[key] for key in COUNTERS] == [sum(parts), int(raw.get("output_tokens") or 0), parts[1], parts[2]]
 
 
+def _switch_facts(accumulated, model, round_idx):
+    """The real ``[ROUTE FACTS]`` renderer over the usage one real adapter round left behind."""
+    from ouroboros.primary_route_observation import route_facts_text
+
+    owner = SimpleNamespace(primary_route={"model": "claudexor::codex=gpt-test", "use_local": False, "role": "main"})
+    return route_facts_text(owner, model=model, use_local=False, role="fallback:0", failed_model="claudexor::codex=gpt-test",
+                            failure={"failure_code": "provider_outcome_unknown"}, waiter=None, usage=accumulated,
+                            round_idx=round_idx)
+
+
+@pytest.mark.parametrize("raw,shown", [
+    ({"input_tokens": 20, "output_tokens": 3}, "input unknown, cache read unknown, cache write unknown"),
+    ({"input_tokens": 100, "output_tokens": 6, "cache_read_input_tokens": 40, "cache_creation_input_tokens": 25},
+     "input 165, cache read 40, cache write 25"),
+], ids=["cache-fields-absent", "fully-reported"])
+def test_switch_facts_show_the_answering_calls_tokens_as_reported(tmp_path, monkeypatch, offline, raw, shown):
+    """#1580 r2: the real Anthropic adapter keeps billing-shaped 20/0/0 for cache routing; the switch facts
+    read that same call's reported counters, so an absent cache field stays unknown, never a 0."""
+    accumulated = {}
+    step = {"kind": "response", "status_code": 200, "json": {
+        "id": "msg_facts", "role": "assistant", "content": [{"type": "text", "text": "done"}],
+        "stop_reason": "end_turn", "usage": raw}}
+    _loop_round(tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step, round_idx=2,
+                accumulated=accumulated)
+    parts = [int(raw.get(key) or 0) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+    recorded = accumulated["_last_round_cache_usage"]
+    assert [recorded[key] for key in ("prompt_tokens", "cached_tokens", "cache_write_tokens")] == [sum(parts), *parts[1:]]
+    facts = _switch_facts(accumulated, "anthropic::claude-sonnet-4.6", 2)
+    assert f"; tokens {shown}; tariff unknown." in facts
+    if "input_tokens" in raw and "cache_read_input_tokens" not in raw:
+        assert "input 20" not in facts and "cache read 0" not in facts and "cache write 0" not in facts
+
+
+def test_switch_facts_never_size_a_tariff_tier_by_an_unreported_input(tmp_path, monkeypatch, offline):
+    """The real OpenAI-compatible adapter: a tiered cached tariff is sized only by the answer's reported
+    input, so an unreported count leaves the tier unmeasured and a reported one selects its own tier."""
+    import time
+
+    from ouroboros import pricing
+    from ouroboros.provider_models import normalize_model_identity
+
+    key = ("openrouter", normalize_model_identity("x-ai/grok-4.5"))
+    tiered = pricing.PricingSchedule((1.0, 0.1, 1.25, 5.0), tiers=((200_000, (2.0, 0.2, 2.5, 10.0)),),
+                                     source={"service_tier": "default"})
+    monkeypatch.setitem(pricing._cached_pricing, key, {"endpoint-a": tiered})
+    monkeypatch.setitem(pricing._pricing_fetched_at, key, time.time())
+    reported = {}
+    for raw, round_idx in (({"completion_tokens": 10}, 1), ({"prompt_tokens": 250_000, "completion_tokens": 10}, 2)):
+        accumulated = {}
+        step = {"kind": "response", "body": {
+            "id": f"gen-tier-{round_idx}", "choices": [{"index": 0, "finish_reason": "stop",
+                                                        "message": {"role": "assistant", "content": "ok"}}],
+            "usage": raw}}
+        _loop_round(tmp_path / str(round_idx), monkeypatch, "x-ai/grok-4.5", {"OPENROUTER_API_KEY": "or-fixture-key"},
+                    step, round_idx=round_idx, accumulated=accumulated)
+        reported[round_idx] = (accumulated["_last_round_cache_usage"], _switch_facts(accumulated, "x-ai/grok-4.5", round_idx))
+    unreported, facts = reported[1]
+    assert "tokens input unknown, cache read unknown, cache write unknown; tariff unknown (input tier unmeasured)." in facts
+    assert "$1.00/M" not in facts and "$2.00/M" not in facts
+    assert unreported["reported_tokens"]["prompt_tokens"] is None
+    _measured, facts = reported[2]  # a reported input selects its own tier
+    assert ("tokens input 250,000, cache read unknown, cache write unknown; cached catalog tariff $2.00/M in, "
+            "$10.00/M out, cache read $0.20/M (estimated input tier).") in facts
+
+
 @pytest.mark.parametrize("raw,expected", [
     ({"prompt_tokens": 11, "completion_tokens": 2}, [11, 2, None, None]),
     ({"prompt_tokens": 11, "completion_tokens": 2, "precached_prompt_tokens": 0}, [11, 2, 0, None]),
@@ -402,12 +467,16 @@ def test_round_cache_fields_derive_from_reported_counters(tmp_path, monkeypatch,
     step = {"kind": "response", "status_code": 200, "json": {
         "id": "msg_round", "role": "assistant", "content": [{"type": "text", "text": "done"}],
         "stop_reason": "end_turn", "usage": raw}}
-    _loop_round(tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step,
-                round_idx=round_idx, accumulated=accumulated)
+    counters, _persisted, adapter = _loop_round(tmp_path, monkeypatch, "anthropic::claude-sonnet-4.6", ANTHROPIC, step,
+                                                round_idx=round_idx, accumulated=accumulated)
     [row] = [row for row in _rows(tmp_path / "logs" / "events.jsonl") if row["type"] == "llm_round"]
     assert (row["cache_hit_rate"], row["cache_cold_restart"]) == (pytest.approx(hit) if hit else hit, cold)
     # Cache routing keeps reading the billing-shaped counters it always read.
     parts = [int(raw.get(key) or 0) for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
     assert accumulated["_last_round_cache_usage"] == {
         "round": round_idx, "model": accumulated["_last_round_cache_usage"]["model"],
-        "provider": "anthropic", "prompt_tokens": sum(parts), "cached_tokens": parts[1], "cache_write_tokens": parts[2]}
+        "provider": "anthropic", "prompt_tokens": sum(parts), "cached_tokens": parts[1], "cache_write_tokens": parts[2],
+        # This accepted call's own money as its producer stated it (route facts read it); no engine billing here.
+        "cost": adapter["cost"], "cost_final": adapter["cost_final"], "billing": None,
+        # Beside them, the counters as reported: the durable llm_round row's own values, unknown kept unknown.
+        "reported_tokens": dict(zip(COUNTERS, counters))}

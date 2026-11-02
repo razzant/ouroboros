@@ -52,7 +52,7 @@ def core(*, extra=(), memory=False):
 
 def plan_for(snapshot, monkeypatch, *, preferred="max", window=1_000_000, data_root=None):
     monkeypatch.setattr(cf, "_governance_blocks", lambda _env, _core, *, mode: ("MAX BOOK" if mode == "max" else "BOOK MAP", ""))
-    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a: 1.0)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
     evidence = SimpleNamespace(route_fp="synthetic-route", status="asserted", stale=False, window_tokens=window)
     return cf.build_context_fit_plan(SimpleNamespace(drive_root=data_root), snapshot, {"id": "task", "type": "task"},
         preferred_mode=preferred, tool_schemas=[], route_resolver=lambda *_a, **_k: ({"model": "m", "provider": "p"}, evidence))
@@ -168,14 +168,16 @@ def test_initial_projection_estimate_counts_full_large_tail_and_frozen_capture_h
 
 def test_mode_projection_and_rebind_preserve_actual_shortened_tail_without_reloading_raw(monkeypatch):
     body = {"role": "user", "content": "BIG_REVIEW_BODY " * 30_000, REVIEW_HISTORY_MESSAGE_KEY: {"binding": "exact"}}
-    initial = plan_for(core(extra=[body], memory=True), monkeypatch, window=120_000)
+    # The ~120k-token body must start beside its reply and work room (owner 7A), crowding my story to
+    # first sentences (F5l) or pointers (F5).
+    initial = plan_for(core(extra=[body], memory=True), monkeypatch, window=214_000)
     source_hash = initial.core_sha256
     actual = initial.messages_for("max")[:2] + [{"role": "assistant", "content": "My authored understanding"},
                                                {"role": "user", "content": "Later owner words remain exact"}]
     lowered = initial.reproject_transcript(actual, "low")
     assert lowered[1:] == actual[1:]
     assert "BIG_REVIEW_BODY" not in json.dumps(lowered)
-    rebound = initial.reproject_for_route(window_tokens=120_000, known_window=True, ratio=1.0, output_reserve=65_536,
+    rebound = initial.reproject_for_route(window_tokens=214_000, known_window=True, ratio=1.0, output_reserve=65_536,
                                           tool_schemas=[], current_messages=actual)
     assert rebound.core_sha256 == source_hash and rebound.core is initial.core
     for mode in ("max", "low", "nano"):
@@ -187,9 +189,9 @@ def test_mode_projection_and_rebind_preserve_actual_shortened_tail_without_reloa
         assert rebound.reproject_transcript(emitted, mode) == emitted
     # Even a subsequent rebind without a supplied newer transcript keeps the
     # already selected continuation rather than reverting to the initial tail.
-    again = rebound.reproject_for_route(window_tokens=130_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[])
+    again = rebound.reproject_for_route(window_tokens=224_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[])
     assert again.messages_for("max")[1:] == actual[1:]
-    assert "F5" in initial.projection("max").memory_facts["floor"]["steps"]
+    assert {"F5l", "F5"} & set(initial.projection("max").memory_facts["floor"]["steps"])
     # The shorter tail on the same window unfolds nothing (owner 2A): the shown story keeps its bytes.
     assert rebound.projection("max").memory_facts["floor"]["steps"] == initial.projection("max").memory_facts["floor"]["steps"]
     assert rebound.projection("max").system_content_json == initial.projection("max").system_content_json

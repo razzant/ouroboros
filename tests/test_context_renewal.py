@@ -90,6 +90,8 @@ def test_renewal_publishes_the_seed_with_an_exact_source_and_continues_the_same_
     source = json.loads(record["content"].rsplit("rows: ", 1)[1].split("\n", 1)[0].rstrip("."))
     assert json.loads(read_actor_source_bytes(pathlib.Path(tmp_path), "renewal", source)) == original
     assert events and events[0]["checkpoint_kind"] == "context_view_renewed" and events[0]["owner_visible"]
+    assert "context-size recovery" in messages[-1]["content"]
+    assert "provider refused" not in messages[-1]["content"]
 
 
 def test_the_passes_address_records_since_the_newest_note_stay_in_the_seed(tmp_path):
@@ -129,46 +131,35 @@ def test_renewal_is_not_attempted_when_it_cannot_help_or_the_failure_is_not_size
     assert renew_after_refusal(ctx(only_host), tools) is False and only_host == before  # nothing substantive leaves
 
 
-def test_a_source_the_mind_restored_leaves_the_renewed_view_by_its_address(tmp_path, monkeypatch):
-    """Review r2 (Opus N1, 18.10): a source restored with ``restore_unit_refs`` after the newest note holds the
-    whole unit, and no refusal pass addresses it, so a seed that kept it might never fit. It leaves the view and
-    the record lists its address; the passes' own records after the note still stay (the test above)."""
-    import ouroboros.loop as loop
-
+def test_a_source_the_mind_restored_stays_whole_across_renewal(tmp_path):
+    """Chosen sources stay, before or after a note; unasked work can still leave."""
     messages = _transcript()
     request = replace(_request(messages, 0), working_note=NOTE,
                       expected_view_revision=cc.context_reclaim_transcript_sha256(messages), keep_unit_ids=())
     folded, receipt = cc.compact_tool_history_llm(messages, request=request, observed_messages=messages,
-                                                  tool_schemas=[], drive_root=tmp_path, task_id="renewal",
-                                                  fit_candidate=lambda _m, _t: {"accepted": True})
+        tool_schemas=[], drive_root=tmp_path, task_id="renewal", fit_candidate=lambda _m, _t: {"accepted": True})
     ref = next(dict(item) for item in receipt.source_refs if "unit_id" in item)
-    restored, _refs = cc._restored_source_views(  # as compact_context's view request builds them
+    restored, _refs = cc._restored_source_views(
         [ref], drive_root=tmp_path, task_id="renewal", request=replace(request, route_fp="actor"))
-    rows = [*folded, *restored, _owner(OWNER_LATER)]
-    seed, left = renewal_seed(rows)
-    assert left["restored_sources"] == 1 and restored[0] not in seed and _owner(OWNER_LATER) in seed
-    assert any(NOTE in json.dumps(row.get("content"), ensure_ascii=False) for row in seed)  # the note stays
-    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
-    limit_ctx = SimpleNamespace(messages=rows, accumulated_usage={"_context_refusal_round": 4}, drive_root=tmp_path,
-                                drive_logs=tmp_path / "logs", task_id="renewal", round_idx=4, event_queue=None,
-                                tool_schemas=[])
-    assert renew_after_refusal(limit_ctx, SimpleNamespace(_ctx=SimpleNamespace(messages=rows))) is True
-    record = rows[-1]["content"]
-    assert rows[-1][HOST_CONTEXT_KIND_KEY] == RENEWAL_RECORD_NAME and "1 sources I restored" in record
-    listed = json.loads(record.split("restore_unit_refs brings each back): ", 1)[1])
-    assert listed == [{key: ref[key] for key in ("checkpoint_ref", "unit_id", "raw_sha256")}]
-    # Review r4 (Fable A2): the index lists calls only; a restored source or a pass record is no call.
-    assert "Tool units since my newest note" not in record
-    # Review r4 (Fable A1): a restore made in the same call as a note sits before that note; it leaves and is
-    # listed too, so the pointer is not one checkpoint deeper.
     note_at = max(i for i, row in enumerate(folded) if cc._capsule_metadata(row)[0]
                   and (cc._capsule_metadata(row)[1] or {}).get("authorship") == "actor")
-    together = [*folded[:note_at], *restored, *folded[note_at:], _owner(OWNER_LATER)]
-    seed, left = renewal_seed(together)
-    assert left["restored_sources"] == 1 and restored[0] not in seed
-    from ouroboros.context_renewal import restored_sources
+    for at in (note_at, len(folded)):
+        rows = [*folded[:at], *restored, *folded[at:], _owner(OWNER_LATER)]
+        for extra in ([], _tool("unasked", "Disposable body. " * 1000)):
+            seed, left = renewal_seed([*rows, *extra])
+            assert left["restored_sources"] == 0 and restored[0] in seed and _owner(OWNER_LATER) in seed
+            assert any(NOTE in json.dumps(row.get("content"), ensure_ascii=False) for row in seed)
+            assert (left["tool_rows"] > 0) is bool(extra)
+            assert not any(row.get("tool_call_id") == "unasked" for row in seed)
+            from ouroboros.context_renewal import restored_sources
+            assert restored_sources(seed) == [{key: ref[key] for key in ("checkpoint_ref", "unit_id", "raw_sha256")}]
+            from ouroboros.context_renewal import physical_window_cut
+            from ouroboros.context_fit import estimate_context_prompt_tokens
+            expanded = [*rows[:2], {"role":"assistant", "content":"old whole reply "*10000}, *rows[2:]]
+            cut, record = physical_window_cut(expanded, drive_root=tmp_path, task_id="renewal",
+                measure=estimate_context_prompt_tokens, usable=estimate_context_prompt_tokens(rows)+1500)
+            assert record and restored[0] in cut
 
-    assert restored_sources(together) == listed
 
 
 def test_a_second_renewal_keeps_the_first_renewals_index_until_a_newer_note(tmp_path):

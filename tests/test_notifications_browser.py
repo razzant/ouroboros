@@ -277,6 +277,7 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
     pref(page, 'show_text').check()
     page.wait_for_function(SHOW_TEXT_SAVED)
 
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     page.wait_for_function(SOCKET_READY)
@@ -503,6 +504,7 @@ def test_app_tone_volume_previews_only_on_press_and_survives_reload(subscription
     capture_block(block, 'notifications-tone-sound-off-block')
     pref(page, 'sound').check()
 
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('#chat-input')
     block = open_notifications(page)

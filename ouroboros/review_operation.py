@@ -55,6 +55,10 @@ _OPEN_STATES = frozenset({OPERATION_PREPARING, OPERATION_RETAINED, OPERATION_DIS
 # never-dispatched one, and neither is an unknown outcome.
 COLLECTED, DEFERRED, UNAVAILABLE, NEVER_DISPATCHED = (
     "collected", "deferred", "unavailable", "never_dispatched")
+# ``usage.custody_state`` of a lost seat whose own row names a requested, never-bound start:
+# an attach-only read cannot bind it, but its review's own collection may still replay that
+# exact request under its original key (``review_pause._settle_left_record``).
+START_UNBOUND = "start_unbound"
 _OBSERVE_TIMEOUT_SEC = 10.0
 _CONTROL_RECHECK_SEC = 1.0
 
@@ -69,35 +73,47 @@ _CLOSED_DETACHED: Dict[str, str] = {}
 
 
 def controller_identity() -> Dict[str, Any]:
-    """This process as a review controller: pid, its birth token and custody session."""
+    """This process as a review controller: pid, birth (the ps spelling every release
+    reads), validated ``kernel_birth`` (``process_identity``) and custody session."""
     from ouroboros.platform_layer import process_start_time
     from ouroboros.process_custody import current_custody_session_id
+    from ouroboros.process_identity import process_kernel_birth
 
     pid = os.getpid()
     if pid not in _SELF:
         _SELF.clear()
-        _SELF[pid] = {"pid": pid, "birth": process_start_time(pid)}
+        _SELF[pid] = {"pid": pid, "birth": process_start_time(pid), "kernel_birth": process_kernel_birth(pid) or ""}
     return {**_SELF[pid], "session": str(current_custody_session_id() or "")}
 
 
 def controller_state(identity: Any) -> str:
     """Return proven ``local``, ``alive``, ``dead`` or ``unknown``.
-    No live pid (including zombies) or a changed birth proves the controller gone;
-    a live pid with missing/unreadable birth is unknown. For our own pid/birth,
-    distinct nonempty custody sessions prove the pre-exec controller gone;
-    another process's session cannot prove that."""
+    No live pid (including zombies) proves the controller gone. Kernel births of one
+    validated kind decide (``process_identity.same_birth``); without them an equal
+    ``birth`` spelling proves it alive and a different one proves it gone only when both
+    are one validated kind. Another zone or locale spells one live process's ``ps`` start
+    differently, so that difference, like a missing or unreadable birth, is unknown: an old
+    record on a reused pid stays unknown until that process ends. For our own pid
+    (pid and birth survive exec; this process mints its identity
+    once), a different birth names another holder, and distinct nonempty custody sessions
+    prove the pre-exec controller gone; another process's session cannot prove that."""
+    from ouroboros.process_identity import process_kernel_birth, same_birth
+
     try:
         pid = int(identity.get("pid") or 0) if isinstance(identity, dict) else 0
     except (TypeError, ValueError):
         pid = 0
     if pid <= 0:
         return "unknown"
-    birth = str(identity.get("birth") or "")
+    birth, kernel = str(identity.get("birth") or ""), str(identity.get("kernel_birth") or "")
     if pid == os.getpid():
         own = controller_identity()
-        if not birth or not own["birth"]:
-            return "unknown"
-        if birth != own["birth"]:
+        same = same_birth(own.get("kernel_birth"), kernel)
+        if same is None:
+            if not birth or not own["birth"]:
+                return "unknown"
+            same = birth == own["birth"]
+        if not same:
             return "dead"
         session = str(identity.get("session") or "")
         if not session or not own["session"]:
@@ -108,17 +124,19 @@ def controller_state(identity: Any) -> str:
 
     if not pid_is_alive(pid) or pid_is_zombie(pid):
         return "dead"
-    live_birth = process_start_time(pid) if birth else ""
-    if not live_birth:
-        return "unknown"
-    return "alive" if live_birth == birth else "dead"
+    same = same_birth(process_kernel_birth(pid), kernel) if kernel else None
+    if same is None and birth:
+        live_birth = process_start_time(pid)
+        same = True if live_birth and live_birth == birth else same_birth(live_birth, birth)
+    return "unknown" if same is None else "alive" if same else "dead"
 
 
 def operation_stop_state(root: pathlib.Path, task_id: str) -> str:
-    """Panic, immediate/settled cancellation, clear or unknown; unreadable authority is never clear."""
+    """Current Restart, immediate/settled cancellation, clear or unknown."""
     try:
-        if any((root / "state" / name).exists() for name in ("panic_stop.flag", "owner_restart_no_resume.flag")):
-            return "panic"
+        from ouroboros.delegate_recovery import owner_restart_in_progress
+        if owner_restart_in_progress(root):
+            return "owner_restart"
         from ouroboros.cancel_intents import cancel_pending, resolve_owner_stop_intent
         from ouroboros.task_results import load_task_result
         if cancel_pending(root, task_id, strict=True) and not resolve_owner_stop_intent(root, task_id, propagate_busy=control_probe_active())[1]:
@@ -197,9 +215,9 @@ class ReviewOperation:
         self.control_state = ""
         self._drains = 0
         self._dispatched = False
-        # The owner paused the author while this operation's launched reviewers
-        # ran: the author took pending rows and parked (``review_custody``).
-        self.author_detached = False
+        # A background caller already left its author slot; a synchronous author
+        # can also detach later while its reviewers run (``review_custody``).
+        self.author_detached = bool(getattr(parent, "author_detached", False))
         self._control, self._checked_at = "", float("-inf")
         parent_task = parent.task if isinstance(parent.task, dict) else {}
         metadata = getattr(parent.tool_context, "task_metadata", None)
@@ -245,7 +263,7 @@ class ReviewOperation:
                 if control_probe_requires_current():
                     raise
                 self.control_state = "unknown"  # A paid receiver keeps its operation and late result.
-            if self.control_state in {"panic", "cancelled"}:
+            if self.control_state in {"panic", "cancelled", "owner_restart"}:
                 self._control = self.control_state
             if self.control_state != "unknown":
                 self._checked_at = now
@@ -703,7 +721,11 @@ def collect_recorded_review_actor(root: Any, *, task_id: str, surface: str, row:
         request, slot = recorded_review_assignment(
             root, task_id=task_id, surface=surface, row=row, retry_key=retry_key,
             root_task_id=root_task_id, review_contract=review_contract)
-        actor, _fact = _collect_pending_row(root, request, slot, row, usage_ctx, None)
+        actor, fact = _collect_pending_row(root, request, slot, row, usage_ctx, None)
+        if fact == COLLECTED:
+            from ouroboros.review_seat_outcome import publish_seat_execution
+
+            publish_seat_execution(request, slot, actor, usage_ctx)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         slot = ReviewSlot(slot_id=str(row.get("slot_id") or row.get("slot") or ""),
                           model=str(row.get("model") or row.get("model_id") or ""))
@@ -740,15 +762,25 @@ def recover_review_producer(root: Any, request: Any, slot: Any, row: dict) -> An
         outcome = payload.get("producer_outcome") if isinstance(payload, dict) else None
         if not manifest.get("producer_complete") or not isinstance(outcome, dict):
             return None  # Historical/partial blobs carry no completed-producer receipt.
-        original_request, original_slot = recorded_review_assignment(root, row=row, assignment=(request, slot))
+        try:
+            original_request, original_slot = recorded_review_assignment(root, row=row, assignment=(request, slot))
+        except FileNotFoundError:
+            if manifest.get("collection") != "attach_only_observation":
+                raise
+            original_request, original_slot = request, slot  # no retained prompt: the recorded assignment binds
         expected = review_operation_binding(original_request, original_slot, operation)
         binding = outcome.get("recovery_binding")
         if not isinstance(binding, dict) or manifest.get("review_operation_binding") != binding:
             raise ValueError("producer binding missing or inconsistent")
         if {k: v for k, v in binding.items() if k != "pending_invocation_id"} != expected:
             raise ValueError("operation/task/root/material/contract/roster binding mismatch")
-        _prompt_manifest, _prompt, prompt_ref = read_call_payload(
-            root, task_id=request.task_id or "review", call_id=f"{operation}_prompt")
+        try:
+            _prompt_manifest, _prompt, prompt_ref = read_call_payload(
+                root, task_id=request.task_id or "review", call_id=f"{operation}_prompt")
+        except FileNotFoundError:
+            if manifest.get("collection") != "attach_only_observation":
+                raise
+            prompt_ref = None  # an older invocation-only row observed cold: its assignment is the recorded one
         token = str(binding.get("pending_invocation_id") or "")
         frozen_tokens = recorded_invocation_tokens(row)
         if frozen_tokens and frozen_tokens != {token}:
@@ -759,7 +791,8 @@ def recover_review_producer(root: Any, request: Any, slot: Any, row: dict) -> An
         if outcome.get("operation_id") != operation or outcome.get("slot_id") != slot.slot_id:
             raise ValueError("producer actor identity mismatch")
         # The outcome is stamped before its failure is logged; this verified operation's row holds the receipt (#1578).
-        actor = ReviewActorRecord(**{**outcome, "error_event_logged": row.get("error_event_logged") is True})
+        actor = ReviewActorRecord(**{**outcome, "error_event_logged": bool(
+            outcome.get("error_event_logged") or row.get("error_event_logged"))})
         message = payload.get("message")
         actor.raw_text = str(message.get("content") or "") if isinstance(message, dict) else ""
         actor.usage = dict(payload.get("usage") or {})
@@ -768,6 +801,9 @@ def recover_review_producer(root: Any, request: Any, slot: Any, row: dict) -> An
         if actor.operation_state in {"in_flight", "custody_lost"}:
             actor.status, actor.raw_text = "error", ""
             actor.error = actor.error or "Producer outcome still lacks terminal custody; full partial source retained"
+        from ouroboros.review_seat_outcome import finalize_seat_outcome
+
+        finalize_seat_outcome(original_request, original_slot, actor)
         return actor
     except (OSError, ValueError, KeyError, TypeError) as exc:
         actor = _row_actor(slot, operation, row, state="custody_lost",
@@ -807,7 +843,7 @@ def _invocation_for_operation(root: Any, slot: Any, operation_id: str, row: dict
 
 
 def _observe_delegated_review(root: Any, request: Any, slot: Any, row: dict, operation_id: str,
-                              *, controller_known: bool = True) -> Tuple[Any, str]:
+                              *, controller_known: bool = True, usage_ctx: Any = None) -> Tuple[Any, str]:
     """Attach-only reading of a delegated reviewer whose worker is gone.
 
     Only a terminal run read, or the daemon's definite refusal, settles the row.
@@ -842,7 +878,7 @@ def _observe_delegated_review(root: Any, request: Any, slot: Any, row: dict, ope
             return _row_actor(slot, operation_id, row, state="custody_lost",
                               reason="The recorded delegated invocation belongs to another operation."), UNAVAILABLE
     if record is not None and record.get("state") == "started" and record.get("run_id"):
-        observed = _attach_only_run(root, request, slot, operation_id, str(record["run_id"]), record)
+        observed = _attach_only_run(root, request, slot, operation_id, str(record["run_id"]), record, usage_ctx)
         return (observed, COLLECTED) if observed is not None else (_frozen_actor(row, slot), DEFERRED)
     if not controller_known:
         return _frozen_actor(row, slot), DEFERRED
@@ -853,12 +889,17 @@ def _observe_delegated_review(root: Any, request: Any, slot: Any, row: dict, ope
     if record.get("state") == "failed_definite":
         return _row_actor(slot, operation_id, row, state="not_dispatched",
                           reason="The daemon definitively refused this reviewer's start."), NEVER_DISPATCHED
-    return _row_actor(slot, operation_id, row, state="custody_lost", reason=(
+    actor = _row_actor(slot, operation_id, row, state="custody_lost", reason=(
         "A start was requested but no run was ever bound to it; its outcome stays unknown "
-        "and it is never re-posted.")), UNAVAILABLE
+        "and it is never re-posted."))
+    # Only the seat's own token and the retained exact body let its review's collection replay it.
+    if recorded_invocation_tokens(row) and isinstance(record.get("request"), dict) and record["request"]:
+        actor.usage["custody_state"] = START_UNBOUND
+    return actor, UNAVAILABLE
 
 
-def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_id: str, invocation: dict) -> Any:
+def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_id: str, invocation: dict,
+                     usage_ctx: Any = None) -> Any:
     """Read one existing run: authenticated protocol handshake, GET run, GET output, local parse.
 
     The handshake is the engine's non-generative protocol negotiation (an HTTP
@@ -871,7 +912,12 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
     from ouroboros.review_execution import _full_session_text, session_identity_deltas
     from ouroboros.gateways.claudexor import final_attempt_facts
     from ouroboros.review_records import ReviewActorRecord
+    from ouroboros.review_seat_outcome import retain_collected_outcome
     from ouroboros.review_verdict_extraction import canonicalize_session_verdict
+    from ouroboros.review_session_usage import session_usage_facts
+    from ouroboros.delegate_custody_usage import observe_session_usage
+    from ouroboros.tools.review_helpers import emit_review_usage
+    from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
     from ouroboros.triad_review import default_output_contract, request_output_shape
 
     try:
@@ -885,6 +931,20 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
             return None
         summary = custody.summary_of(detail)
         state = str(summary.get("state") or "")
+        observed = final_attempt_facts(detail, run_id)
+        routes = (invocation.get("request") or {}).get("harnesses") or []
+        requested_route = str(routes[0]) if len(routes) == 1 else ""
+        usage = session_usage_facts(run_id, requested_route=requested_route, observed_attempt=observed,
+                                    summary=summary, attempt_execution=detail.get("attemptExecution"))
+        if usage_ctx is not None:  # Observe terminal facts even if the output read below fails.
+            observe_session_usage(lambda facts: emit_review_usage(
+                usage_ctx, model=str(facts.get("resolved_model") or ""), usage=facts,
+                source=f"review_substrate:{request.surface}", extra={
+                    "task_id": request.task_id, "root_task_id": invocation.get("root_task_id") or request.task_id,
+                    "parent_task_id": invocation.get("parent_task_id") or "",
+                    "delegation_role": "subagent" if invocation.get("parent_task_id") else "",
+                    **{key: str(invocation.get(key) or "") for key in REVIEW_ATTRIBUTION_KEYS},
+                    "surface": request.surface, "slot_id": slot.slot_id}), usage)
         text = _full_session_text(gateway, run_id, detail) if state == "succeeded" else ""
     except Exception:
         log.debug("attach-only review observation of %s did not complete", run_id, exc_info=True)
@@ -894,9 +954,8 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
             gateway.close()
         except Exception:
             log.debug("attach-only gateway close failed", exc_info=True)
-    usage = {"provider": "claudexor", "delegated_run_started": True, "delegated_run_id": run_id,
-             "invocation_id": str(invocation.get("invocation_id") or ""),
-             "collection": "attach_only_observation", "cost": None, "run_state": state}
+    usage.update(invocation_id=str(invocation.get("invocation_id") or ""),
+                 collection="attach_only_observation", cost=None, run_state=state)
     try:
         from ouroboros.review_checking import terminal_seat_evidence
 
@@ -910,16 +969,12 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
                     "error": f"{type(exc).__name__}: {exc}"}
     if evidence:
         usage["checking_evidence"] = evidence
-    observed = final_attempt_facts(detail, run_id)
     if isinstance(observed.get("effort_resolution"), dict):
         usage["effort_resolution"] = observed["effort_resolution"]
     # Requested identity comes only from this paid invocation, never live settings
     # or the summary's request echoes. Absent final-attempt facts stay unknown.
-    routes = (invocation.get("request") or {}).get("harnesses") or []
-    requested_route = str(routes[0]) if len(routes) == 1 else ""
-    from ouroboros.review_session_usage import session_usage_facts  # #1578: one session usage projection
-
-    usage.update(session_usage_facts(run_id, requested_route=requested_route, observed_attempt=observed, summary=summary))
+    if invocation.get("prompt_cache_ttl"):  # its recorded TTL intent, where a live seat's rides
+        usage["review_source_delivery"] = {"prompt_cache_ttl": copy.deepcopy(invocation["prompt_cache_ttl"])}
     usage.update(resolved_model=observed.get("model", ""), observed_attempt=observed,
                  delegated_route=observed.get("harness_id", ""), requested_route=requested_route,
                  applied_profile=observed.get("profile_id", ""))
@@ -930,10 +985,13 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
     if invocation.get("invocation_id"):
         binding["pending_invocation_id"] = str(invocation["invocation_id"])
     if state != "succeeded":
-        return ReviewActorRecord(slot_id=slot.slot_id, model=slot.model, status="error", usage=usage,
-                                 error=f"delegated review run {run_id} ended {state or 'without a state'}",
-                                 operation_id=operation_id, operation_state="late_settled",
-                                 recovery_binding=binding)
+        interrupted = state in {"cancelled", "interrupted"}
+        actor = ReviewActorRecord(slot_id=slot.slot_id, model=slot.model, status="error", usage=usage,
+                                  error=f"delegated review run {run_id} ended {state or 'without a state'}",
+                                  failure_code="review_run_cancelled" if interrupted else "review_run_failed",
+                                  transport_status="interrupted" if interrupted else "provider_transport_error",
+                                  operation_id=operation_id, operation_state="late_settled", recovery_binding=binding)
+        return retain_collected_outcome(root, request, slot, actor)
     shape = request_output_shape(request)
     canonical, method, _unused = canonicalize_session_verdict(
         text, conformance_passed=str(summary.get("outputConformance") or "").lower() == "passed",
@@ -946,19 +1004,33 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
     actor = ReviewActorRecord(slot_id=slot.slot_id, model=slot.model,
                               status="ok" if canonical.strip() else "empty", raw_text=canonical, usage=usage,
                               operation_id=operation_id, operation_state="late_settled", recovery_binding=binding)
-    try:
-        from ouroboros.observability import persist_call
+    return retain_collected_outcome(root, request, slot, actor, transcript=text)
 
-        actor.response_ref = persist_call(
-            root, task_id=request.task_id or "review", call_id=f"{operation_id}_collected",
-            call_type=f"{request.surface}_review_collected",
-            payload={"message": {"content": canonical, "session_transcript": text}, "usage": usage},
-            manifest={"surface": request.surface, "slot_id": slot.slot_id, "collection": "attach_only_observation"})
-    except Exception:
-        log.warning("Collected review transcript could not be retained: %s", operation_id, exc_info=True)
-    if method == "parse_unavailable":
-        actor.parse_status = "parse_unavailable"
-    return actor
+
+def _observe_retained_observation_usage(root: Any, request: Any, slot: Any, actor: Any, usage_ctx: Any) -> None:
+    """A retained cold observation hands its usage to the first collector with an endpoint.
+
+    The observation itself was collected without one (or its endpoint already saw it);
+    the process-local once-per-run latch keeps the row single and the attribution is the
+    recorded invocation's, never the collector's scope."""
+    usage = actor.usage or {}
+    if usage_ctx is None or usage.get("collection") != "attach_only_observation":
+        return
+    from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
+    from ouroboros.delegate_custody import invocation_record
+    from ouroboros.delegate_custody_usage import observe_session_usage
+    from ouroboros.tools.review_helpers import emit_review_usage
+
+    token = str((actor.recovery_binding or {}).get("pending_invocation_id") or usage.get("invocation_id") or "")
+    invocation = (invocation_record(root, token) if token else None) or {}
+    observe_session_usage(lambda facts: emit_review_usage(
+        usage_ctx, model=str(facts.get("resolved_model") or ""), usage=facts,
+        source=f"review_substrate:{request.surface}", extra={
+            "task_id": request.task_id, "root_task_id": invocation.get("root_task_id") or request.task_id,
+            "parent_task_id": invocation.get("parent_task_id") or "",
+            "delegation_role": "subagent" if invocation.get("parent_task_id") else "",
+            **{key: str(invocation.get(key) or "") for key in REVIEW_ATTRIBUTION_KEYS},
+            "surface": request.surface, "slot_id": slot.slot_id}), usage)
 
 
 def _collect_pending_row(root: Any, request: Any, slot: Any, row: dict, usage_ctx: Any,
@@ -972,7 +1044,7 @@ def _collect_pending_row(root: Any, request: Any, slot: Any, row: dict, usage_ct
     slot = recorded_review_slot(request, slot, operation_id, row.get("recovery_binding"))
     if not row.get("recovery_binding") and root and str(getattr(slot.route, "value", slot.route)) == "agent_session":
         try:
-            _original_request, slot = recorded_review_assignment(root, row=row, assignment=(request, slot))
+            request, slot = recorded_review_assignment(root, row=row, assignment=(request, slot))
         except FileNotFoundError:
             pass  # Older invocation-only rows may have no retained prompt.
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -990,6 +1062,8 @@ def _collect_pending_row(root: Any, request: Any, slot: Any, row: dict, usage_ct
         return copy.deepcopy(cached), COLLECTED
     recovered = recover_review_producer(root, request, slot, row)
     if recovered is not None and recovered.operation_state != "in_flight":
+        if recovered.operation_state != "custody_lost":
+            _observe_retained_observation_usage(root, request, slot, recovered, usage_ctx)
         return recovered, UNAVAILABLE if recovered.operation_state == "custody_lost" else COLLECTED
     identity = controller if isinstance(controller, dict) else (row.get("usage") or {}).get("review_controller")
     # A row with no controller on record keeps the pre-operation reading (its
@@ -997,7 +1071,8 @@ def _collect_pending_row(root: Any, request: Any, slot: Any, row: dict, usage_ct
     # is not presumed dead.
     state = controller_state(identity) if isinstance(identity, dict) and identity else "dead"
     if state != "alive" and str(getattr(slot.route, "value", slot.route) or "") == "agent_session":
-        return _observe_delegated_review(root, request, slot, row, operation_id, controller_known=state != "unknown")
+        return _observe_delegated_review(root, request, slot, row, operation_id,
+                                         controller_known=state != "unknown", usage_ctx=usage_ctx)
     if state in {"alive", "unknown"}:
         return _frozen_actor(row, slot), DEFERRED  # another process owns or may own this worker
     return _row_actor(slot, operation_id, row, state="custody_lost", reason=(

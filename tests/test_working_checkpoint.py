@@ -282,10 +282,12 @@ def test_the_real_loop_continues_the_frozen_state_and_never_reruns_the_unknown_c
         return {"role": "assistant", "content": "Continued from the saved state", "tool_calls": []}, 0.0
 
     monkeypatch.setattr(loop, "_dispatch_round_model", dispatch)
+    noted = []  # a continued task's view was captured at its start: no second Low-start line
+    monkeypatch.setattr(loop, "_note_low_start", lambda *a, **kw: noted.append(a))
     kwargs = _loop_kwargs(tmp_path, registry, [])
     kwargs["task_id"] = task_id
     result, usage, _trace = loop.run_llm_loop(**kwargs)
-    assert result == "Continued from the saved state" and not ran
+    assert result == "Continued from the saved state" and not ran and noted == []
     contents = [str(row.get("content") or "") for row in seen_messages]
     assert "Saved object 42" in contents, "completed results are restored"
     unknown = [row for row in seen_messages if row.get("tool_call_id") == "inflight"]

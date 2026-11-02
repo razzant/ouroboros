@@ -1,11 +1,13 @@
 // Skills' page modules (host_modules.js) over the real contributions store and a fake page: the versioned context
 // and nothing else, every failure (import, throw, reject, no start in time, a provider it does not declare) turning
 // that one contribution off with one notice while the rest run, disposal on leave, revision change, Panic and unload,
-// and the recovery paths: the boot marker, a start that skips after an unfinished one, `?plugins=off` and its doors.
+// and recovery through the start ledger: an entry before every import, a module held after a start the page did not
+// outlive (named once, Start it mounts it, a new revision mounts as usual), and `?hold=all`.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createContributionsStore } from '../modules/contributions.js';
-import { BOOT_MARKER_KEY, createHostModules, originFacts, pluginsUrl } from '../modules/host_modules.js';
+import { createHolds, HOLDS_KEY } from '../modules/holds.js';
+import { createHostModules, originFacts } from '../modules/host_modules.js';
 
 const tick = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -35,6 +37,13 @@ const hostItem = (key, extra = {}) => {
         render: { kind: 'host', url: `/api/extensions/${skill}/ui/r1/ui/${id}.js` }, ...extra };
 };
 
+const ledger = (store) => JSON.parse(store.map.get(HOLDS_KEY) || 'null')?.entries || {};
+const seeded = (entries) => {
+    const local = storage();
+    local.setItem(HOLDS_KEY, JSON.stringify({ v: 1, entries }));
+    return local;
+};
+
 async function setup({ items = [], modules = {}, href = 'http://127.0.0.1:8765/#chat', local = storage(),
     session = storage(), now = 1_000_000, start = true } = {}) {
     let payload = { contributions: items };
@@ -48,15 +57,17 @@ async function setup({ items = [], modules = {}, href = 'http://127.0.0.1:8765/#
     });
     const doc = Object.assign(events(), { documentElement: { dataset: { theme: 'dark' } } });
     const imported = [];
-    const markersAtImport = [];
+    const ledgerAtImport = [];
     const notices = [];
     const drafts = [];
-    const runtime = createHostModules({ store, win, doc, now: () => clock.now, mountTimeoutMs: 40,
+    // The ledger's own page-lifetime listener sits on a window of its own: the runtime's listeners are counted below.
+    const holds = createHolds({ win: { location: win.location, localStorage: local, sessionStorage: session }, now: () => clock.now });
+    const runtime = createHostModules({ store, win, doc, holds, mountTimeoutMs: 40, settleMs: 10,
         draft: { insert: (text) => { drafts.push(text); return true; } },
         notice: (text, tone, options = {}) => notices.push({ text, tone, ...options }),
         importModule: async (url) => {
             imported.push(url);
-            markersAtImport.push(local.map.get(BOOT_MARKER_KEY) || session.map.get(BOOT_MARKER_KEY) || null);
+            ledgerAtImport.push({ ...ledger(local), ...ledger(session) });
             const found = modules[url];
             if (found instanceof Error) throw found;
             return typeof found === 'function' ? found() : found;
@@ -64,7 +75,7 @@ async function setup({ items = [], modules = {}, href = 'http://127.0.0.1:8765/#
     await store.refresh();
     if (start) runtime.start();
     await tick();
-    return { store, runtime, win, doc, local, session, clock, imported, markersAtImport, notices, drafts, reads,
+    return { store, runtime, holds, win, doc, local, session, clock, imported, ledgerAtImport, notices, drafts, reads,
         async publish(next) { payload = { contributions: next }; await store.refresh(); await tick(); } };
 }
 
@@ -188,66 +199,56 @@ test('a module may register only the client provider its contribution declares',
     assert.deepEqual(h2.runtime.clientProviders('stt'), [], 'a module may withdraw its provider itself');
 });
 
-test('the boot marker stands before the first import of a batch and goes once the batch settled', async () => {
+test('each start stands in the ledger before its import and goes a second after it settled', async () => {
     const one = hostItem('one:x');
     const two = hostItem('two:x');
     const h = await setup({ items: [one, two], modules: {
         [one.render.url]: { mount: () => ({ dispose() {} }) }, [two.render.url]: new Error('HTTP 404') } });
-    assert.equal(h.markersAtImport.length, 2);
-    assert.deepEqual(JSON.parse(h.markersAtImport[0]), { at: 1_000_000, keys: ['one:x', 'two:x'] });
-    assert.equal(h.local.map.has(BOOT_MARKER_KEY), false, 'a batch that mounted or failed cleanly leaves no marker');
+    assert.equal(h.ledgerAtImport.length, 2);
+    assert.deepEqual(h.ledgerAtImport[0]['module:one:x'], { reason: 'start', rev: 'r1', at: 1_000_000, n: 1 },
+        'written before the module\'s first byte runs');
+    await tick(30);
+    assert.deepEqual(ledger(h.local), {}, 'a start that mounted or failed with the page alive leaves nothing');
 });
 
-test('a start that did not finish skips every module next time, however long ago, with the way back', async () => {
-    const one = hostItem('one:x');
-    const modules = { [one.render.url]: { mount: () => ({ dispose() {} }) } };
-    const local = storage();
-    local.setItem(BOOT_MARKER_KEY, JSON.stringify({ at: 1_000_000 - 60_000, keys: ['one:x'] }));
-    const h = await setup({ items: [one], modules, local, href: 'http://127.0.0.1:8765/?plugins=on&x=1#chat' });
-    assert.equal(h.runtime.mode(), 'skipped');
-    assert.deepEqual(h.imported, [], 'no page code runs');
-    const [skipped] = h.notices;
-    assert.equal(skipped.text, 'Plugins were skipped because the last start did not finish.');
-    assert.deepEqual([skipped.tone, skipped.ttl, skipped.action.label], ['warn', 0, 'Start with plugins']);
-    await h.publish([hostItem('one:x', { revision: 'r2', render: { kind: 'host', url: '/api/extensions/one/ui/r2/ui/x.js' } })]);
-    assert.deepEqual(h.imported, [], 'a lifecycle change does not undo the skip');
-    h.win.emit('pagehide', { persisted: false });
-    assert.equal(local.map.has(BOOT_MARKER_KEY), true, 'reloading a skipped page skips again: only the action clears it');
-    skipped.action.run();
-    assert.equal(local.map.has(BOOT_MARKER_KEY), false);
-    assert.deepEqual(h.win.navigations, ['http://127.0.0.1:8765/?x=1#chat'], 'the same page, plugins on');
-    const old = storage();
-    old.setItem(BOOT_MARKER_KEY, JSON.stringify({ at: 1_000_000 - 6 * 60 * 60_000, keys: ['one:x'] }));
-    const reopened = await setup({ items: [one], modules, local: old });
-    assert.equal(reopened.runtime.mode(), 'skipped', 'a phone reopened hours after a freeze skips the frozen module too');
-    assert.deepEqual(reopened.imported, []);
-    const clean = await setup({ items: [one], modules, local: storage() });
-    assert.equal(clean.runtime.mode(), 'running', 'no marker: page code runs');
-    assert.deepEqual(clean.runtime.mounted(), ['one:x']);
-    assert.deepEqual(clean.notices, []);
+test('a module whose last start the page did not outlive is held, named once, and Start it mounts it', async () => {
+    const one = hostItem('one:x', { skill_label: 'Device voice' });
+    const two = hostItem('two:x');
+    let mounted = 0;
+    const modules = { [one.render.url]: { mount: () => { mounted += 1; return { dispose() {} }; } },
+        [two.render.url]: { mount: () => ({ dispose() {} }) } };
+    const local = seeded({ 'module:one:x': { reason: 'start', rev: 'r1', at: 1 }, 'module:two:x': { reason: 'start', rev: 'r0', at: 1 } });
+    const h = await setup({ items: [one, two], modules, local });
+    assert.deepEqual(h.imported, [two.render.url], 'a hold of an older revision is not this revision\'s');
+    const [held] = h.notices;
+    assert.equal(held.text, 'Device voice did not start: the page stopped while it was starting last time.');
+    assert.deepEqual([held.tone, held.ttl, held.action.label], ['warn', 0, 'Start it']);
+    await h.publish([one, two, { ...hostItem('plain:z'), placement: 'composer.plus', render: { kind: 'declarative', url: '' } }]);
+    assert.equal(h.notices.length, 1, 'a lifecycle change neither mounts it nor names it again');
+    held.action.run();
+    await tick();
+    assert.equal(mounted, 1);
+    assert.deepEqual(h.runtime.mounted().sort(), ['one:x', 'two:x']);
+    const fixed = hostItem('one:x', { revision: 'r2', render: { kind: 'host', url: '/api/extensions/one/ui/r2/ui/x.js' } });
+    modules[fixed.render.url] = { mount: () => ({ dispose() {} }) };
+    const updated = await setup({ items: [fixed], modules, local: seeded({ 'module:one:x': { reason: 'start', rev: 'r1', at: 1 } }) });
+    assert.deepEqual(updated.runtime.mounted(), ['one:x'], 'the skill\'s next revision starts as usual');
+    assert.deepEqual(updated.notices, []);
 });
 
-test('?plugins=off starts without page code and says so; the More menu door reloads that way', async () => {
+test('?hold=all holds every page module for that load, each released by Start it', async () => {
     const one = hostItem('one:x');
     const modules = { [one.render.url]: { mount: () => ({ dispose() {} }) } };
-    const h = await setup({ items: [one], modules, href: 'http://127.0.0.1:8765/?plugins=off#chat' });
-    assert.equal(h.runtime.mode(), 'off');
+    const h = await setup({ items: [one], modules, href: 'http://127.0.0.1:8765/?hold=all#chat' });
     assert.deepEqual(h.imported, []);
-    const [off] = h.notices;
-    assert.deepEqual([off.text, off.tone, off.ttl, off.action.label],
-        ['Started without plugins.', 'info', 0, 'Restart with plugins']);
-    off.action.run();
-    assert.deepEqual(h.win.navigations, ['http://127.0.0.1:8765/#chat']);
-    const running = await setup({ items: [one], modules,
-        href: 'http://127.0.0.1:8765/?_ouro_refresh=1&_ouro_reason=ws-drop&keep=1#tgWebAppData=abc' });
-    let prevented = false;
-    const door = { closest: (selector) => (selector === '[data-plugins="off"]' ? door : null) };
-    running.doc.emit('click', { target: door, preventDefault: () => { prevented = true; } });
-    assert.equal(prevented, true);
-    assert.deepEqual(running.win.navigations, ['http://127.0.0.1:8765/?keep=1&plugins=off#tgWebAppData=abc'],
-        'the same page and fragment, the reconnect markers dropped');
-    running.doc.emit('click', { target: { closest: () => null } });
-    assert.equal(running.win.navigations.length, 1, 'any other press is not the door');
+    const [held] = h.notices;
+    assert.equal(held.text, 'one did not start: this page was opened with everything held.');
+    held.action.run();
+    await tick();
+    assert.deepEqual(h.runtime.mounted(), ['one:x']);
+    const plain = await setup({ items: [one], modules });
+    assert.deepEqual(plain.runtime.mounted(), ['one:x'], 'without the flag and with no hold, page code runs');
+    assert.deepEqual(plain.notices, []);
 });
 
 test('Panic and an unload dispose every module and none mounts again; a page kept for back-forward keeps them', async () => {
@@ -265,22 +266,21 @@ test('Panic and an unload dispose every module and none mounts again; a page kep
     const u = await setup({ items: [one], modules });
     u.win.emit('pagehide', { persisted: false });
     assert.deepEqual([disposed, u.runtime.mode()], [2, 'stopped']);
-    assert.equal(u.local.map.has(BOOT_MARKER_KEY), false, 'an orderly end leaves no marker');
+    assert.deepEqual(ledger(u.local), {}, 'an orderly end leaves no hold');
     u.runtime.destroy();
     assert.equal(u.win.listenerCount() + u.doc.listenerCount(), 0, 'destroy releases the page listeners');
 });
 
-test('where local storage is refused the marker lives in session storage', async () => {
+test('where local storage refuses a write the ledger lives in session storage', async () => {
     const one = hostItem('one:x');
     const h = await setup({ items: [one], local: storage({ refuse: true }),
         modules: { [one.render.url]: { mount: () => ({ dispose() {} }) } } });
-    assert.ok(h.markersAtImport[0], 'the marker stood during the import');
-    assert.equal(h.session.map.has(BOOT_MARKER_KEY), false, 'and went after it');
+    assert.ok(h.ledgerAtImport[0]['module:one:x'], 'the entry stood during the import');
+    await tick(30);
+    assert.deepEqual(ledger(h.session), {}, 'and went after it');
 });
 
-test('page URL and origin facts', () => {
-    assert.equal(pluginsUrl('https://ouro.example/app?plugins=off#x', true), 'https://ouro.example/app#x');
-    assert.equal(pluginsUrl('https://ouro.example/app', false), 'https://ouro.example/app?plugins=off');
+test('origin facts', () => {
     assert.deepEqual(originFacts({ location: { hostname: 'ouro.localhost' }, isSecureContext: true }), { secure: true, loopback: true });
     assert.deepEqual(originFacts({ location: { hostname: '192.168.1.20' }, isSecureContext: false }), { secure: false, loopback: false });
     assert.deepEqual(originFacts({ location: { hostname: '[::1]' } }), { secure: false, loopback: true });

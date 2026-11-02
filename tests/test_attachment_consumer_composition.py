@@ -185,7 +185,7 @@ def test_phone_composer_touch_removal_ime_failed_upload_and_cleanup(direct_serve
             # "+", tapped, opens the composer's menu; its Attach file opens the chooser; the chosen files are staged.
             page.locator("#chat-plus").tap()
             with page.expect_file_chooser() as chooser:
-                page.locator(".chat-plus-menu [data-plus-item='attach']").tap()
+                page.locator(".chat-plus-menu:not([data-leaving]) [data-plus-item='attach']").tap()
             chooser.value.set_files(_phone_files())
             page.wait_for_function("() => document.querySelectorAll('#chat-attachment-preview .attach-badge').length === 6")
             geometry = page.evaluate(_COMPOSER_GEOMETRY)

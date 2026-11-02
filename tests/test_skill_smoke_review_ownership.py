@@ -1,243 +1,308 @@
-"""Keyless checks of the skill-smoke live review lane's own machinery.
+"""Task-policy and custody contracts of the current (ordinary-task) smoke adapter.
 
-``tests/test_skill_smoke_official.py::test_review_grants_and_enable`` runs a paid
-live review only in its CI leg, and its verdict stays live by owner decision. Two
-of its properties are machinery, not model behaviour, so they are pinned here with
-test doubles and no provider: the review runs under the product's own slot window
-and the test's outer budget covers that window, and the test owns review custody's
-by-design late worker (``owned_review_workers``) instead of tripping the session's
-thread-leak check.
+The old direct marketplace three-wave/thread-drain helper is retired. Its
+unsettled-wave prohibition now has an actual-consumer witness in
+system_e2e/test_skill_smoke_author; server lifetime, not a pytest-owned review thread,
+owns the worker. There is deliberately no provider retry/reset after ambiguity.
 """
-
-from __future__ import annotations
-
-import threading
-import time
+from pathlib import Path
+from contextlib import contextmanager
 from types import SimpleNamespace
+import json
+import runpy
+import shutil
 
 import pytest
 
+from ouroboros.tools import ToolContext, ToolRegistry
+from tests.skill_smoke_author import AUTHOR_TOOLS, REVIEW_CYCLES, author_policy, author_settings
 import tests.test_skill_smoke_official as smoke
-from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
-from tests.conftest import _THREAD_LEAK_GRACE_SEC
-from tests.test_skill_smoke_official import owned_review_workers, review_env  # noqa: F401 -- fixtures
-
-_HELD_SEC = _THREAD_LEAK_GRACE_SEC + 1.0  # outlasts the thread-leak check's grace
 
 
-@pytest.fixture()
-def stale_review_overrides(monkeypatch):
-    """A runner environment that still carries the retired test-side windows."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "300")
-    monkeypatch.setenv("OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC", "120")
+def test_effective_catalog_and_dispatch_withhold_mutation_execution_and_delegation(tmp_path):
+    registry = ToolRegistry(Path(__file__).resolve().parents[1], tmp_path)
+    disabled = author_policy(registry._ctx.repo_dir, tmp_path)
+    context = ToolContext(repo_dir=registry._ctx.repo_dir, drive_root=tmp_path)
+    context.task_id = "ci-author-policy"
+    context.task_metadata = {"task_contract": {"disabled_tools": disabled}}
+    registry.set_context(context)
+    names = {schema["function"]["name"] for schema in registry.schemas()}
+    assert names == AUTHOR_TOOLS
+    from ouroboros.tools.registry_guards import _capability_resource_guard_result
+    for name in ("write_file", "run_command", "run_script", "toggle_skill", "skill_exec",
+                 "delegate_start", "schedule_subagent", "start_task", "switch_model",
+                 "skill_owner_action", "configure_presence", "verify_and_record"):
+        result = _capability_resource_guard_result(context, name, {})
+        assert result is not None and result.status == "blocked", name
 
 
-def test_the_live_review_runs_in_the_product_window_and_its_budget_covers_it(
-        stale_review_overrides, review_env):  # noqa: F811 -- pytest fixture injection
-    from ouroboros.review_custody import _logical_timeout
-
-    # As the skill review builds its api slot (no timeout fields) for a context with no task deadline.
-    slot = ReviewSlot(slot_id="skill-smoke-reviewer", model=smoke._REVIEW_MODEL)
-    window = _logical_timeout(slot, ReviewRequest(surface="skill_review", goal="review"), {})
-    assert window == smoke._REVIEW_WINDOW_SEC  # the shipped transport bound: review_env left no override
-    marker = next(mark for mark in smoke.test_review_grants_and_enable.pytestmark if mark.name == "timeout")
-    # Every wave at the window, a late worker's drain to the same bound, and setup on top.
-    assert marker.args == (smoke._REVIEW_TEST_TIMEOUT_SEC,)
-    assert smoke._REVIEW_TEST_TIMEOUT_SEC > (smoke._REVIEW_WAVES + 1) * window
-
-
-def _late_review(tmp_path, release: threading.Event, task_id: str):
-    """One review whose slot window ends while its worker still holds the paid call."""
-
-    class HeldLLM:
-        def chat(self, **_kwargs):
-            assert release.wait(30), "the test never released the held review call"
-            return {"content": '{"verdict":"PASS","findings":[],"summary":"late"}'}, {}
-
-    ctx = SimpleNamespace(task_id=task_id, task_attempt=1, task_metadata={}, event_queue=None, pending_events=[])
-    request = ReviewRequest(surface="scope", goal="review diff", task_id=task_id, task_attempt=1)
-    slot = ReviewSlot(slot_id="slot_a", model="same/model", timeout_sec=0.05, transport_timeout_sec=30)
-    result = run_review_request(request, slots=[slot], drive_root=tmp_path, llm=HeldLLM(), usage_ctx=ctx)
-    actor = result.actors[0]
-    assert (actor["operation_state"], actor["late_result_pending"]) == ("in_flight", True), actor
-    return actor
+def test_two_paid_cycles_and_finite_author_window_are_the_live_consumers_budget():
+    settings = author_settings(smoke._REVIEW_MODEL)
+    assert REVIEW_CYCLES == smoke._REVIEW_WAVES == settings["OUROBOROS_REVIEW_MAX_CYCLES"] == 2
+    assert settings["OUROBOROS_RUNTIME_MODE"] == "advanced"
+    assert settings["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+    assert smoke._REVIEW_MODEL == "deepseek/deepseek-v4.1-flash"
+    assert settings["OUROBOROS_MODEL"] == settings["OUROBOROS_MODEL_LIGHT"] == smoke._REVIEW_MODEL
+    roster = json.loads(settings["OUROBOROS_SUBAGENTS"])
+    assert roster["enabled"] is True and len(roster["items"]) == 1
+    reviewer = roster["items"][0]
+    assert reviewer["route"] == {"kind": "api_model", "target_id": smoke._REVIEW_MODEL}
+    assert reviewer["effort"] == "low" and reviewer["delivery"] == "native" and reviewer["review_eligible"] is True
+    assert settings["OUROBOROS_EFFORT_MIN"] == settings["OUROBOROS_EFFORT_TASK"] == settings["OUROBOROS_EFFORT_MAX"] == "low"
+    assert settings["TOTAL_BUDGET"] == settings["OUROBOROS_PER_TASK_COST_USD"] == 10
+    assert smoke._REVIEW_AUTHOR_TIMEOUT_SEC > 2 * smoke._REVIEW_WINDOW_SEC
+    assert smoke._REVIEW_TEST_TIMEOUT_SEC > smoke._REVIEW_AUTHOR_TIMEOUT_SEC
 
 
-def test_the_drain_reports_a_held_late_worker_and_returns_once_it_retires(tmp_path):
-    release = threading.Event()
-    before = set(smoke.active_review_attempts())
-    actor = _late_review(tmp_path, release, "smoke-drain-direct")
+def test_no_import_oracle_detects_import_even_when_loader_catches_exception(tmp_path):
+    from tests.system_e2e.test_skill_smoke_author import assert_not_imported
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text("from pathlib import Path\nPath(__file__).with_name('imported.marker').write_text('yes')\nraise RuntimeError('caught by loader')\n")
+    assert_not_imported(tmp_path)
+    with pytest.raises(RuntimeError, match="caught by loader"):
+        runpy.run_path(str(plugin))
+    with pytest.raises(AssertionError, match="payload was imported"):
+        assert_not_imported(tmp_path)
+
+
+@pytest.mark.parametrize("start_error", [False, True])
+@pytest.mark.parametrize("export_error", ["none", "write", "parse"])
+def test_failed_tree_reap_retains_candidate_data_and_blocks_ci_enable(tmp_path, monkeypatch, capsys, start_error, export_error):
+    """No sockets/server: the actual CI entry must not reach enable after failed teardown."""
+    import tests.skill_smoke_author as author
+    import tests.candidate_checkout as checkouts
+    from ouroboros.skill_loader import load_enabled
+    source = tmp_path / "source"
+    payload = source / "skills/ouroboroshub/probe"
+    payload.mkdir(parents=True)
+    (payload / "SKILL.md").write_text("---\nname: probe\ntype: extension\nentry: plugin.py\n---\n")
+    (payload / "plugin.py").write_text("def register(api): pass\n")
+    candidate = checkouts.CandidateCheckout(None, tmp_path / "repo")
+    candidate.path.mkdir()
+
+    @contextmanager
+    def checkout(*_args, **_kwargs):
+        yield candidate
+
+    class Container:
+        def __init__(self, **kwargs):
+            assert kwargs == {"lifeline": True, "overload": True}
+
+        def spawn(self, *_args, **_kwargs):
+            return SimpleNamespace(wait=lambda **_kw: 0)
+
+        def reap(self):
+            return "unconfirmed descendant"
+
+        def close(self):
+            pass
+
+    def initialize(self, clone, data, settings, **_kwargs):
+        self.clone, self.data_root, self.settings_path = clone, data, settings
+        self.proc, self.base_url = None, "unused"
+
+    def ready(self, _timeout):
+        if start_error:
+            raise ValueError("original readiness failure")
+
+    monkeypatch.setattr(checkouts, "candidate_checkout", checkout)
+    monkeypatch.setattr(author, "verify_checkout", lambda *_args: None)
+    monkeypatch.setattr(author, "require_candidate_interpreter", lambda *_args: None)
+    monkeypatch.setattr(author, "ProcessContainer", Container)
+    monkeypatch.setattr(author.IsolatedServer, "__init__", initialize)
+    monkeypatch.setattr(author.IsolatedServer, "stop", lambda _self: None)
+    monkeypatch.setattr(author.SmokeAuthorServer, "_wait_ready", ready)
+    monkeypatch.setattr(author.SmokeAuthorServer, "_read_authoritative_settings", lambda _self: {})
+    monkeypatch.setattr(author.SmokeAuthorServer, "_patch_settings_ports", lambda _self: None)
+    monkeypatch.setattr(author.SmokeAuthorServer, "_env", lambda _self: {})
+    monkeypatch.setattr(author.SmokeAuthorServer, "wait_task", lambda *_args, **_kw: {"status": "completed"})
+    monkeypatch.setattr(author, "_api", lambda *_args, **_kw: {"task_id": "probe-task"})
+    monkeypatch.setattr(author, "seed_owner_state", lambda *_args: None)
+    monkeypatch.setattr(author, "author_policy", lambda *_args: [])
+    if export_error == "write":
+        def fail_write(*_args):
+            raise OSError("synthetic export failure")
+        monkeypatch.setattr(author, "write_record", fail_write)
+    if export_error == "parse":
+        logs = tmp_path / "author/data/logs"
+        def fail_parse(self, _timeout):
+            logs.mkdir(parents=True, exist_ok=True)
+            (logs / "tools.jsonl").write_text("malformed JSON")
+            ready(self, _timeout)
+        monkeypatch.setattr(author.SmokeAuthorServer, "_wait_ready", fail_parse)
+    monkeypatch.setattr(smoke, "DATA_DIR", source)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "stub-not-a-credential")
+    run = tmp_path / "run"  # stands in for the whole battery's scratch root
+    run.mkdir()
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(run))
+    enabled = []
+    monkeypatch.setattr(smoke, "save_enabled", lambda *args: enabled.append(args))
     try:
-        still = smoke.wait_for_review_workers(before, 0.3, poll_sec=0.05)
-        assert list(still.values()) == [actor["operation_id"]]  # a worker that has not retired is named
+        with pytest.raises(checkouts.CandidateError, match="unconfirmed descendant") as raised:
+            smoke.test_review_grants_and_enable("probe", None, lambda _slug: None, tmp_path)
+        assert candidate.unproven == 1 and candidate.path.exists()
+        assert (tmp_path / "author/data").exists()
+        assert not enabled and not load_enabled(tmp_path / "author/data", "probe")
+        if export_error != "write":
+            evidence = json.loads((tmp_path / "author/author-evidence.json").read_text())
+            assert evidence["server_stopped"] is False
+            assert "unconfirmed descendant" in evidence["teardown_failure"]
+            if export_error == "parse":
+                assert "author_tool_calls" in evidence["evidence_errors"][0]
+        else:
+            assert "SKILL_SMOKE_EVIDENCE_INCOMPLETE" in capsys.readouterr().err
+        # A failed export keeps the author's own tree, never the run around it (#1908).
+        assert (tmp_path / "author/OUROBOROS_RETAINED.txt").is_file() is (export_error != "none")
+        assert not (run / "OUROBOROS_RETAINED.txt").exists()
+        if start_error:
+            assert isinstance(raised.value.__cause__, ValueError)
+            assert str(raised.value.__cause__) == "original readiness failure"
+        checkouts._retire_checkout(candidate.path, candidate, True)
+        assert candidate.path.exists(), "unproven checkout was deleted"
     finally:
-        release.set()
-    assert smoke.wait_for_review_workers(before, 10, poll_sec=0.05) == {}
+        # The reap and the export faults are stubs: no process ever ran from this tree.
+        from tests._shared import retire_synthetic_retention
+        try:
+            json.loads("malformed JSON")
+        except ValueError as exc:
+            parse = f"author_tool_calls: {type(exc).__name__}: {exc}"
+        faults = ("local: OSError: synthetic export failure", "export: OSError: synthetic export failure", parse)
+        retire_synthetic_retention(candidate.path, "1 process tree(s) started from this checkout were never proven gone")
+        retire_synthetic_retention(tmp_path / "author/data", "CANDIDATE_RETAINED: tree reap: unconfirmed descendant")
+        retire_synthetic_retention(tmp_path / "author", *(
+            f"test diagnostics incomplete: SKILL_SMOKE_EVIDENCE_INCOMPLETE: {fault}" for fault in faults))
 
 
-def test_settling_waits_out_a_late_worker_but_names_a_settled_attempt_left_behind(tmp_path):
-    from ouroboros import review_custody
+def test_export_keeps_full_judgments_but_not_credentials_or_private_runtime(tmp_path, monkeypatch):
+    from tests.skill_smoke_author import persist_author_evidence
+    root = tmp_path / "scratch/author"
+    root.mkdir(parents=True)
+    destination = tmp_path / "durable"
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(destination))
+    credential = "synthetic-credential-not-a-token-pattern"
+    judgment = "Complete reviewer judgment " + "evidence " * 2000
+    actor = {"raw_text": judgment + credential, "parsed_items": [{"reason": judgment}],
+             "response_ref": "/private/runtime/ref.json", "operation_state": "settled"}
+    evidence = {"task_id": "task", "original_hash": "hash", "server_stopped": True,
+                "author_answer": "Grounded argument " + credential, "author_trace": "skill_review(rebuttal)",
+                "review_history": [{"status": "blockers", "paid": True, "raw_actor_records": [actor]},
+                                   {"status": "clean", "paid": True, "rebuttal_sha256": "arg", "raw_actor_records": [actor]}],
+                "review": {"raw_result": judgment, "raw_actor_records": [actor], "findings": [{"reason": judgment}]},
+                "settings": {"OPENROUTER_API_KEY": credential}, "author_tool_calls": [
+                    {"tool": "skill_review", "args": {"skill": "probe", "review_rebuttal": judgment + credential}}]}
+    assert not persist_author_evidence(root, evidence, credential)
+    shutil.rmtree(root.parent)  # only this test's disposable input
+    files = list(destination.glob("skill-smoke-author/*/author-evidence.json"))
+    assert len(files) == 1 and not root.exists()
+    text = files[0].read_text()
+    exported = json.loads(text)
+    assert credential not in text and "/private/runtime" not in text
+    assert "settings" not in exported and "author_tool_calls" not in exported
+    assert exported["review"]["raw_result"] == judgment
+    assert exported["review_history"][0]["raw_actor_records"][0]["parsed_items"][0]["reason"] == judgment
+    assert exported["review_history"][1]["rebuttal_sha256"] == "arg"
+    assert exported["review_calls"][0]["arguments"]["review_rebuttal"] == judgment + "***"
 
-    before = set(smoke.active_review_attempts())
-    release = threading.Event()
-    _late_review(tmp_path, release, "smoke-settle-late")
+
+@pytest.mark.parametrize("export_error", [False, True])
+def test_author_entry_summary_uses_paid_verdict_and_failed_export_stays_red(tmp_path, monkeypatch, capsys, export_error):
+    import tests.skill_smoke_author as author
+    payload = tmp_path / "source/skills/ouroboroshub/probe"
+    payload.mkdir(parents=True)
+    (payload / "SKILL.md").write_text("---\nname: probe\ntype: instruction\n---\nProbe text\n")
+    server = SimpleNamespace(start=lambda: None, stop=lambda: None, base_url="unused",
+                             wait_task=lambda *_args, **_kw: {"status": "completed", "result": "author reasoning"})
+    monkeypatch.setattr(author, "SmokeAuthorServer", lambda *_args, **_kw: server)
+    monkeypatch.setattr(author, "_api", lambda *_args, **_kw: {"task_id": "task"})
+    monkeypatch.setattr(author, "author_policy", lambda *_args: [])
+    monkeypatch.setattr(author, "seed_owner_state", lambda *_args: None)
+    monkeypatch.setattr(author, "load_review_waves", lambda *_args, **_kw: [{"paid": True, "status": "warnings"}])
+    gate = []
+    def assert_gate(*_args):
+        gate.append(True)
+        return {"status": "warnings"}
+    monkeypatch.setattr(author, "assert_review_evidence", assert_gate)
+    if export_error:
+        def fail_write(*_args):
+            raise OSError("synthetic export failure")
+        monkeypatch.setattr(author, "write_record", fail_write)
+    args = dict(candidate=SimpleNamespace(path=tmp_path / "repo"), source_data=tmp_path / "source",
+                root=tmp_path / "author", name="probe", model="stub", timeout_sec=1,
+                credential=("OPENROUTER_API_KEY", "stub-not-a-credential"))
+    run = tmp_path / "run"  # stands in for the whole battery's scratch root
+    run.mkdir()
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(run))
     try:
-        assert [row["late"] for key, row in smoke.active_review_attempts().items() if key not in before] == [True]
-        threading.Timer(0.5, release.set).start()
-        assert smoke.settle_review_workers(before) == ""  # the by-design late worker is waited out
+        if export_error:
+            with pytest.raises(AssertionError, match="SKILL_SMOKE_EVIDENCE_INCOMPLETE"):
+                author.run_author_review(**args)
+            assert not gate
+        else:
+            assert author.run_author_review(**args)["review"]["status"] == "warnings"
+            assert gate == [True]
+            assert (tmp_path / "author/author-evidence.json").exists()
+        assert "final=warnings" in capsys.readouterr().out
+        assert (tmp_path / "author/OUROBOROS_RETAINED.txt").is_file() is export_error
+        assert not (run / "OUROBOROS_RETAINED.txt").exists()
     finally:
-        release.set()  # a failed assertion above must not leave the worker held for its bound
-
-    # An attempt whose caller took a settled answer must not outlive the review: no long wait for it.
-    lingering = review_custody.ActiveReviewAttempt(key="smoke-lingering", operation_id="op-lingering")
-    with review_custody._ACTIVE_LOCK:
-        review_custody._ACTIVE[lingering.key] = lingering
-    try:
-        started = time.monotonic()
-        problem = smoke.settle_review_workers(before)
-        assert "none of them late" in problem and "op-lingering" in problem, problem
-        assert time.monotonic() - started < 10, "a settled attempt got the late worker's long wait"
-    finally:
-        with review_custody._ACTIVE_LOCK:
-            review_custody._ACTIVE.pop(lingering.key, None)
+        from tests._shared import retire_synthetic_retention
+        retire_synthetic_retention(tmp_path / "author", *(  # the injected export fault, nothing else
+            f"test diagnostics incomplete: SKILL_SMOKE_EVIDENCE_INCOMPLETE: {stage}: OSError: synthetic export failure"
+            for stage in ("local", "export")))
 
 
-def test_a_leak_beside_a_late_worker_is_named_after_the_late_worker_retires(tmp_path):
-    from ouroboros import review_custody
+@pytest.mark.parametrize("source_missing", [False, True])
+def test_actual_dispatch_source_preserves_long_rebuttal_before_scratch_cleanup(tmp_path, monkeypatch, source_missing):
+    import tests.skill_smoke_author as author
+    from ouroboros.tool_call_log import new_invocation, persist_dispatch_source, invocation_fields
+    from ouroboros.utils import sanitize_tool_args_for_log
+    source = tmp_path / "source"
+    payload = source / "skills/ouroboroshub/probe"
+    payload.mkdir(parents=True)
+    (payload / "SKILL.md").write_text("---\nname: probe\ntype: instruction\n---\nProbe\n")
+    root = tmp_path / "author"
+    destination = tmp_path / "durable"
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(destination))
+    argument = "Exact evidence, including the final qualification. " * 100
+    args = {"skill": "probe", "review_rebuttal": argument}
+    preview = sanitize_tool_args_for_log("skill_review", args)
+    assert preview["review_rebuttal"].startswith("<TRUNCATED:")
 
-    before = set(smoke.active_review_attempts())
-    release = threading.Event()
-    actor = _late_review(tmp_path, release, "smoke-settle-mixed")
-    lingering = review_custody.ActiveReviewAttempt(key="smoke-mixed-lingering", operation_id="op-mixed-lingering")
-    with review_custody._ACTIVE_LOCK:
-        review_custody._ACTIVE[lingering.key] = lingering
-    try:
-        threading.Timer(_HELD_SEC, release.set).start()  # past the leak's grace: the late worker outlives it
-        started = time.monotonic()
-        problem = smoke.settle_review_workers(before)
-        assert "none of them late" in problem and "op-mixed-lingering" in problem, problem
-        # The fixture restores the environment right after this report: never under a running late worker.
-        assert actor["operation_id"] not in smoke.wait_for_review_workers(before, 0, poll_sec=0).values()
-        assert time.monotonic() - started < 10, "the leak got the late worker's long wait"
-    finally:
-        release.set()
-        with review_custody._ACTIVE_LOCK:
-            review_custody._ACTIVE.pop(lingering.key, None)
+    def finish(*_args, **_kwargs):
+        data = root / "data"
+        logs = data / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        invocation = new_invocation("call", {}, 1)
+        persist_dispatch_source({}, logs, "task", invocation, "skill_review", args)
+        assert invocation["args_source_status"] == "ready"
+        if source_missing:
+            shutil.rmtree(data / "observability")
+        row = {"type": "tool_call", "task_id": "task", "tool": "skill_review",
+               "status": "ok", "args": preview, **invocation_fields(invocation)}
+        (logs / "tools.jsonl").write_text(json.dumps(row) + "\n")
+        return {"status": "completed", "result": "Finished"}
 
-
-def test_owned_review_workers_holds_teardown_until_the_late_worker_retires(
-        tmp_path, owned_review_workers):  # noqa: F811 -- pytest fixture injection
-    """Without the fixture's wait this item fails the session's thread-leak check:
-    the late worker outlives the test body by more than that check's grace."""
-    release = threading.Event()
-    before = set(smoke.active_review_attempts())
-    actor = _late_review(tmp_path, release, "smoke-drain-fixture")
-    threading.Timer(_HELD_SEC, release.set).start()
-    # The body ends while the worker still holds the call: only the fixture's teardown waits for it.
-    assert actor["operation_id"] in smoke.wait_for_review_workers(before, 0, poll_sec=0).values()
-
-
-def _wave(*records, wave_id="w"):
-    return {"review_wave_id": wave_id, "raw_actor_records": list(records)}
-
-
-_TRANSPORT = {"status": "error", "transport_status": "provider_transport_error"}
-_REFUSED = {**_TRANSPORT, "http_status": 429, "failure_code": "429", "tokens_in": 0, "tokens_out": 0}
-_ANSWERED = {"status": "ok", "transport_status": "ok"}
-
-
-def test_a_provider_outage_is_told_apart_from_a_review_that_answered():
-    unavailable = {**_TRANSPORT, "http_status": "503"}
-    # The model answered with calls the native executor could not use: labelled a transport error, no HTTP status.
-    malformed = {**_TRANSPORT, "failure_code": "native_round_without_progress"}
-    crashed = {**_TRANSPORT, "failure_code": ""}  # a product exception after a good round: no HTTP status either
-    rejected = {**_TRANSPORT, "http_status": 400}  # the request itself was refused: ours to fix, never waited out
-    unparseable = {"status": "error", "transport_status": "ok", "raw_text": "not a verdict"}
-    for wave, outage in ((_wave(_REFUSED), True), (_wave(_REFUSED, unavailable), True),
-                         (_wave(_REFUSED, _ANSWERED), False), (_wave(malformed), False), (_wave(crashed), False),
-                         (_wave(_REFUSED, malformed), False), (_wave(rejected), False),
-                         (_wave({**_REFUSED, "http_status": True}), False),
-                         (_wave(unparseable), False), (_wave(), False), (None, False)):
-        assert smoke._refused_by_provider(wave) is outage, wave
-
-
-def test_every_wave_the_retries_can_send_is_within_the_review_cycle_cap(review_env):  # noqa: F811 -- fixture
-    """A refused wave is a paid cycle too: under the shipped cap of two, a third wave after an outage wait
-    would be refused locally before it reached the provider (Opus's probe of 2e349e80f)."""
-    from ouroboros.review_cycles import review_max_cycles
-    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
-
-    assert int(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MAX_CYCLES"]) < smoke._REVIEW_WAVES
-    assert review_max_cycles() == smoke._REVIEW_WAVES
-
-
-def test_an_outage_is_waited_out_but_an_answered_failure_keeps_its_one_retry(monkeypatch):
-    """Each attempt records its wave (or, crashing before any send, none); the retry rules read only a wave
-    the latest attempt recorded, so an older outage never stands in for an attempt that wrote nothing."""
-    sleeps, history, flows = [], [], []
-    monkeypatch.setattr(smoke.time, "sleep", sleeps.append)
-    monkeypatch.setattr(smoke, "_smoke_retry_refusal", lambda *_a: "" if history else "no recorded wave")
-    monkeypatch.setattr(smoke, "_review_diag", lambda *_a: "")
-    monkeypatch.setattr(smoke, "load_history", lambda *_a, **_k: history[-1:])
-    pending, clean = ("pending", "quorum failure", "not_required", {}), ("clean", "", "not_required", {})
-    outage, answered, crash = (pending, _REFUSED), (pending, _ANSWERED), (pending, None)
-
-    def run(*attempts):
-        sleeps.clear(), history.clear(), flows.clear()
-
-        def flow(*_a):
-            result, record = attempts[len(flows)]
-            flows.append(1)
-            if record is not None:
-                history.append(_wave(record, wave_id=f"w{len(flows)}"))
-            return result
-        monkeypatch.setattr(smoke, "_run_review_flow", flow)
-        return smoke._review_with_one_settled_retry("skill", "skill")
-
-    # Two outages, then the provider answers: waited out twice, no settled retry spent.
-    status, *_rest, note = run(outage, outage, (clean, _ANSWERED))
-    assert status == "clean" and len(flows) == 3 and sleeps == [smoke._OUTAGE_BACKOFF_SEC] * 2, (flows, sleeps)
-    assert "2 provider outage" in note and "settled" not in note
-    # A model that answered but failed: exactly one settled retry, never the outage wait.
-    status, *_rest, note = run(answered, answered, (clean, _ANSWERED))
-    assert status == "pending" and len(flows) == 2 and sleeps == [] and "one settled retry is spent" in note
-    # An outage, then an answered failure: the settled retry still runs, within the wave budget.
-    status, *_rest, note = run(outage, answered, (clean, _ANSWERED))
-    assert status == "clean" and len(flows) == 3 and len(sleeps) == 1 and "one settled retry" in note
-    # A route that never answers: outage waits until the wave budget is spent, then red.
-    status, *_rest, note = run(*[outage] * smoke._REVIEW_WAVES, (clean, _ANSWERED))
-    assert status == "pending" and len(flows) == smoke._REVIEW_WAVES == len(sleeps) + 1 and "waves are spent" in note
-    # A retry that crashes before any send records no wave: the earlier outage never counts again (Opus, r5).
-    status, *_rest, note = run(outage, crash, (clean, _ANSWERED))
-    assert status == "pending" and len(flows) == 2 and "recorded no wave of its own" in note
-    # A reused data dir's older 429 row never stands in for a first attempt that recorded nothing (Opus, r6).
-    stale = _wave(_REFUSED, wave_id="old")
-    sleeps.clear(), history.clear(), flows.clear()
-    history.append(stale)
-    monkeypatch.setattr(smoke, "_run_review_flow", lambda *_a: flows.append(1) or pending)
-    status, *_rest, note = smoke._review_with_one_settled_retry("skill", "skill")
-    assert status == "pending" and len(flows) == 1 and sleeps == [] and "recorded no wave of its own" in note
-    # A first attempt that records no wave is never retried.
-    status, *_rest, note = run(crash, (clean, _ANSWERED))
-    assert status == "pending" and len(flows) == 1 and "not retried" in note
-    # A review that raised after recording a legitimate 429 wave is a crash, never an outage (astra, r6):
-    # the settled retry's wave was refused, then finalization raised; a third, clean answer must not hide it.
-    raised = (("pending", f"{smoke._REVIEW_RAISED} KeyError: 'paid'", "not_required", {}), _REFUSED)
-    status, *_rest, note = run(answered, raised, (clean, _ANSWERED))
-    assert status == "pending" and len(flows) == 2 and sleeps == [] and "the review itself raised" in note
-    status, *_rest, note = run(raised, (clean, _ANSWERED))
-    assert status == "pending" and len(flows) == 1 and "the review itself raised" in note
-
-
-def test_the_crash_marker_is_what_the_install_path_answers_when_the_review_raises(tmp_path, monkeypatch):
-    """The retry rule above reads the install path's own answer; were its wording to drift, a review that
-    raised after a refused wave would read as an outage again."""
-    from ouroboros import skill_review
-    from ouroboros.marketplace.install import _run_skill_review
-
-    def raises(*_a, **_k):
-        raise KeyError("paid")
-
-    monkeypatch.setattr(skill_review, "review_skill", raises)
-    status, findings, error = _run_skill_review(tmp_path, tmp_path, "skill")
-    assert (status, findings) == ("pending", []) and error.startswith(smoke._REVIEW_RAISED), error
+    server = SimpleNamespace(start=lambda: None, stop=lambda: None, base_url="unused", wait_task=finish)
+    monkeypatch.setattr(author, "SmokeAuthorServer", lambda *_args, **_kw: server)
+    monkeypatch.setattr(author, "_api", lambda *_args, **_kw: {"task_id": "task"})
+    monkeypatch.setattr(author, "author_policy", lambda *_args: [])
+    monkeypatch.setattr(author, "seed_owner_state", lambda *_args: None)
+    monkeypatch.setattr(author, "load_review_waves", lambda *_args, **_kw: [{"paid": True, "status": "clean"}])
+    gate = []
+    monkeypatch.setattr(author, "assert_review_evidence", lambda *_args: gate.append(True) or {"status": "clean"})
+    kwargs = dict(candidate=SimpleNamespace(path=tmp_path / "repo"), source_data=source,
+                  root=root, name="probe", model="stub", timeout_sec=1,
+                  credential=("OPENROUTER_API_KEY", "stub-not-a-credential"))
+    if source_missing:
+        with pytest.raises(AssertionError, match="SKILL_SMOKE_EVIDENCE_INCOMPLETE"):
+            author.run_author_review(**kwargs)
+        assert not gate
+    else:
+        author.run_author_review(**kwargs)
+        assert gate == [True]
+    shutil.rmtree(root)
+    exported = json.loads(next(destination.glob("skill-smoke-author/*/author-evidence.json")).read_text())
+    if source_missing:
+        assert exported["evidence_errors"]
+    else:
+        assert exported["review_calls"][0]["arguments"]["review_rebuttal"] == argument

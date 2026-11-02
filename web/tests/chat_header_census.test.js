@@ -141,6 +141,22 @@ for (const chatId of [1, 7]) {
         } finally { fx.instance.destroy(); restoreDom(fx.prior); }
     });
 
+    test(`a preparing turn's start step rides beside the header word, and its started call clears it (chat ${chatId})`, () => {
+        const fx = makeInstance({ chatId });
+        const hydrate = (name) => {
+            const served = structuredClone(SERVER_CASES[name]);
+            fx.state.census = { active_chat_activities: [], active_chat_activities_complete: true, supervisor_ready: true,
+                ...served, works: served.works.map((item) => ({ ...item, room: chatId })), rooms: { [chatId]: served.rooms[1] } };
+            fx.instance.hydrateStateSnapshot(fx.state.census, Infinity);
+            const badge = fx.mount.querySelector('.status-badge');
+            return [badge.textContent, badge.dataset.step, fx.mount.querySelector('.rw-trigger')?.title];
+        };
+        try {
+            assert.deepEqual(hydrate('direct_preparing'), ['Preparing', 'Building context', 'Preparing · Building context']);
+            assert.deepEqual(hydrate('direct_requested'), ['Working', '', 'Working']);
+        } finally { fx.instance.destroy(); restoreDom(fx.prior); }
+    });
+
     test(`the header says the server's room over mixed census rows; each card keeps its own words (chat ${chatId})`, () => {
         const fx = makeInstance({ chatId });
         const row = { activity_id: 'queued-call', chat_id: chatId, kind: 'direct_chat', phase: 'working',

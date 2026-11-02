@@ -24,6 +24,7 @@ def isolated_custody(monkeypatch):
     monkeypatch.setattr(custody, "_CUSTODY", {})
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
 
 
 def _call(ctx, run_id, decision="apply", **options):

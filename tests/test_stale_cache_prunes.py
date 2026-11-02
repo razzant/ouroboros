@@ -106,8 +106,7 @@ def test_the_terminal_failure_survives_the_marker_it_is_cached_in(tmp_path):
 def test_every_reconcile_pass_runs_both():
     import inspect
 
-    import ouroboros.server_maintenance as sm
 
-    src = inspect.getsource(sm._run_reconcile_prunes)
+    src = inspect.getsource(__import__("ouroboros.maintenance_retirement", fromlist=["run"]).run)
     assert "prune_stale_code_intel_roots" in src
     assert "prune_failed_reconcile_markers" in src

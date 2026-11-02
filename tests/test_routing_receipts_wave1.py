@@ -220,7 +220,7 @@ def test_a_resumed_turn_keeps_its_own_unconfirmed_acts(tmp_path):
     act = {"action": "steer_task", "client_message_id": "agent-steer:tok", "routing_token": "tok", "target": "t-1"}
     state = json.loads(json.dumps(continuation_state(
         types.SimpleNamespace(task_id="turn-1", unconfirmed_routing_acts=[act]), [], {}, {}, 1, [], set())))
-    restored = types.SimpleNamespace(unconfirmed_routing_acts=[])
+    restored = types.SimpleNamespace(task_id="turn-1", unconfirmed_routing_acts=[])  # the resumed turn's own context
     restore_continuation_state(types.SimpleNamespace(_ctx=restored), state, [], {}, {}, set())
     assert restored.unconfirmed_routing_acts == [act]
     state.pop("unconfirmed_routing_acts")
@@ -446,9 +446,9 @@ def test_a_relayed_owner_steer_refused_by_a_pending_cancel_gets_no_standalone_bu
     tmp_path, monkeypatch,
 ):
     """R15: an act that wears an owner message shows its cause on that message's
-    receipt line; only an UNLABELLED owner act (a synthetic receipt id, so no
-    chat row can show the refusal) still gets the standalone cancel-pending
-    notice."""
+    receipt line, once its ACK is handed over; only an UNLABELLED owner act (a
+    synthetic receipt id, so no chat row can show the refusal) still gets the
+    standalone cancel-pending notice."""
     import ouroboros.cancel_intents as cancel_intents
     from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX, latest_chat_annotations
     from supervisor.events import _handle_steer_task
@@ -456,10 +456,11 @@ def test_a_relayed_owner_steer_refused_by_a_pending_cancel_gets_no_standalone_bu
     monkeypatch.setattr(
         cancel_intents, "cancel_pending", lambda _root, task_id, **_k: task_id == "t-target",
     )
-    notices = []
+    notices, acks = [], []
     supervisor = _supervisor_ctx(
         tmp_path, notices, running={"t-target": {"task": {"id": "t-target", "chat_id": 1}}},
     )
+    supervisor.bridge = types.SimpleNamespace(send_routing_ack=lambda _chat_id, **kwargs: acks.append(kwargs))
     base = {"type": "steer_task", "target_task_id": "t-target", "message": "stop after this file",
             "chat_id": 1}
 
@@ -468,6 +469,7 @@ def test_a_relayed_owner_steer_refused_by_a_pending_cancel_gets_no_standalone_bu
     row = latest_chat_annotations(tmp_path)["cm-owner-1"]
     assert (row["status"], row["reason"]) == ("rejected", "cancel_pending")
     assert row["cause"] == "Not delivered: that task is being stopped"
+    assert [(ack["cause"], ack["routing_notice_carrier"]) for ack in acks] == [(row["cause"], "routing_ack")]
     assert notices == []
 
     unlabelled = f"{AGENT_RECEIPT_ID_PREFIX}tok-2"

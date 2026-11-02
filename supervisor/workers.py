@@ -20,7 +20,7 @@ from supervisor.message_bus import send_with_budget
 from supervisor.message_bus import coerce_chat_identity  # noqa: F401 -- worker_health leaf reads it via the _pool() handle
 from ouroboros.config import DATA_DIR, REPO_DIR as CONFIG_REPO_DIR, WORKER_SPAWN_GRACE_SEC
 from ouroboros.depth_evidence import parse_task_depth
-from ouroboros.model_wait import stamp_execution_handoff
+from ouroboros.model_wait import record_execution_close, stamp_execution_handoff
 from ouroboros.review_owner_custody import (
     reconcile_confirmed_dead_review_owners as _reconcile_review_owners,
 )
@@ -1330,10 +1330,7 @@ def kill_workers(
                     return None
                 task_id = str(task.get("id") or "").strip()
                 retry_claim = _prepare_retry_claim(task, task_id)
-                if retry_claim is None:
-                    terminalization_retry_ids.append(task_id or "<missing-task-id>")
-                    return False
-                if _settle_terminalization_retry_task(task, retry_claim):
+                if retry_claim is not None and _settle_terminalization_retry_task(task, retry_claim):
                     return True
                 terminalization_retry_ids.append(task_id or "<missing-task-id>")
                 return False
@@ -1363,6 +1360,8 @@ def kill_workers(
                     successor = dict(task)
                     continuing_wait = isinstance(successor.get("_owner_wait_resume"), dict)
                     successor["_attempt"] = int(meta.get("attempt") or task.get("_attempt") or 1) + (0 if continuing_wait else 1)
+                    retention.attach_preserved_successor_source(
+                        DRIVE_ROOT, str(task_id), successor, task, successor["_attempt"] - 1)
                     stamp_execution_handoff(successor, meta)  # #939: no fresh explicit time
                     try:
                         from ouroboros.owner_hurry import retry_reset
@@ -1378,6 +1377,7 @@ def kill_workers(
                     preserved_successors.append(str(task_id))
                     RUNNING.pop(str(task_id), None)
                     continue
+                record_execution_close(DRIVE_ROOT, str(task_id), task, meta)  # #939: this attempt ends here
                 if _settle_terminalization_task(
                     task,
                     reason=result_reason,
@@ -1727,12 +1727,14 @@ def _settle_cancelled_pending_row(
             "accounted_upper_bound_usd": None,
         }
     try:
+        from supervisor.cancel_publication import queued_address
         stored = write_task_result(
             DRIVE_ROOT, task_id, status_cancelled,
             strict_existing_dict=True,
             result=("Cancelled before this continuation started." if int(task.get("_attempt") or 1) > 1
                     else "Cancelled before start."), **cost_fields,
             **intent_outcome_fields(intent),
+            _field_projector=lambda existing, patch: {**queued_address(task, existing), **patch},
         ) or {}
         stored_status = str(stored.get("status") or "").strip()
         if not stored_status:
@@ -2237,7 +2239,6 @@ from supervisor.worker_assignment import (  # noqa: E402, F401 -- intentional pu
 )
 from supervisor.worker_chat_lane import (  # noqa: E402, F401 -- intentional public re-exports
     _broadcast_task_named,
-    _handle_chat_direct_locked,
     _run_chat_task,
     auto_resume_after_restart,
     handle_chat_direct,
@@ -2278,7 +2279,6 @@ from supervisor.worker_promotion import (  # noqa: E402, F401 -- intentional pub
     _origin_from_mapping,
     _origin_from_task_record,
     _promote_duplicate_reason,
-    _promoted_force_plan_metadata,
     _report_binding_failure,
     ensure_project_scope,
     promote_chat_to_task,

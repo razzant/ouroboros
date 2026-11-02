@@ -105,7 +105,7 @@ def test_the_coordinator_records_every_step_and_stops_between_steps_only():
 # --- the lifespan ---------------------------------------------------------------------------
 
 @pytest.fixture
-def boot_app(tmp_path, monkeypatch):
+def boot_app(tmp_path, monkeypatch, request):
     """The real ASGI app on a temp root, the lifespan's patch helper of the extension tests."""
     import server as srv
     from tests.test_extensions_api import _patch_lifespan_for_drive_root_test
@@ -114,7 +114,7 @@ def boot_app(tmp_path, monkeypatch):
     drive_root.mkdir()
     srv.app.app.state.drive_root = drive_root
     srv.app.app.state.repo_dir = tmp_path / "repo"
-    _patch_lifespan_for_drive_root_test(monkeypatch, srv, {})
+    _patch_lifespan_for_drive_root_test(monkeypatch, srv, {}, request)
     monkeypatch.setattr(srv, "_boot_managed_update_tasks", lambda: None)
     monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
     return srv, drive_root
@@ -340,14 +340,16 @@ def test_the_dialogue_cutover_runs_before_the_dialogue_opens_and_a_failure_stays
 
     source = inspect.getsource(server.lifespan)
     assert source.index("_dialogue_cutover(lifespan_drive_root)") < source.index("_open_dialogue(settings")
+    # The lifespan's own steps are the boot owners that choose an existing store's journal (store_journal).
+    assert "usage_store.migrate_from_journal(lifespan_drive_root, initialize_journal=True)" in source
     BOOT.reset()
     calls = []
-    monkeypatch.setattr(dialogue_import, "cutover", lambda root: calls.append(root))
+    monkeypatch.setattr(dialogue_import, "cutover", lambda root, **kwargs: calls.append((root, kwargs)))
     server._dialogue_cutover(tmp_path)
     steps = {row["name"]: row for row in BOOT.snapshot()["steps"]}
-    assert calls == [tmp_path] and steps["dialogue_cutover"]["state"] == "done"
+    assert calls == [(tmp_path, {"initialize_journal": True})] and steps["dialogue_cutover"]["state"] == "done"
 
-    def held(_root):
+    def held(_root, **_kwargs):
         raise RuntimeError("append lock held")
 
     monkeypatch.setattr(dialogue_import, "cutover", held)

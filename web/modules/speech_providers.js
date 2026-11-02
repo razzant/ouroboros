@@ -42,7 +42,7 @@ function availability(provider, env) {
 export function providerReason(code) {
     return {
         missing: 'The chosen engine is disabled, removed or awaiting review.',
-        not_loaded: 'The chosen engine has not started. Check plugins or choose another engine.',
+        not_loaded: 'The chosen engine has not started. Check its skill or choose another engine.',
         unsupported_format: 'This browser cannot record a format the engine accepts.',
         unsupported_runtime: 'This engine cannot read aloud on this surface.',
         missing_route: 'The engine has no live speech route.',

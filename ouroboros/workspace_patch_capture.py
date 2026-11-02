@@ -26,6 +26,7 @@ from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tupl
 
 from ouroboros.artifact_storage import compress_in_place
 from ouroboros.contracts.task_constraint import normalize_task_constraint
+from ouroboros.git_observation import numstat_paths
 from ouroboros.headless_status import (
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_READY_NO_CHANGES,
@@ -33,6 +34,7 @@ from ouroboros.headless_status import (
 )
 from ouroboros.utils import atomic_write_json, utc_now_iso
 from ouroboros.workspace_patch_rules import (
+    NAMED_EVIDENCE_EXCLUSION,
     _PATCH_EXCLUDE_RULES_VERSION,
     _PATCH_MAX_UNTRACKED_FILE_BYTES,
     _incidental_lockfile_excludes,
@@ -93,8 +95,17 @@ def write_workspace_patch_artifacts(
     acting_constraint = _acting_constraint_from_task(task)
     task_base_sha = str(acting_constraint.base_sha or "").strip() if acting_constraint else ""
     preflight_head = _preflight_head_from_task(task)
-    if not task_base_sha and not preflight_head and _preflight_head_present(task):
-        preflight_head = _GIT_UNBORN_HEAD
+    if not task_base_sha and not preflight_head and (acting_constraint or _preflight_head_present(task)):
+        manifest = _empty_patch_manifest(root, status=ARTIFACT_STATUS_FAILED, errors=[{
+            "type": "workspace_base_unknown",
+            "message": "The required original Git basis was not recorded; the workspace is retained without a patch.",
+        }])
+        manifest.update(base_provenance="unknown", note=manifest["errors"][0]["message"])
+        patch_path.unlink(missing_ok=True)
+        atomic_write_json(manifest_path, manifest, trailing_newline=True)
+        return [{"kind": "workspace_patch_manifest", "name": manifest_path.name,
+                 "path": str(manifest_path), **stream_artifact_file(manifest_path),
+                 "workspace_root": str(root)}], manifest
     base_ref, base_head, base_is_empty_tree = _workspace_patch_base(
         root,
         errors,
@@ -112,11 +123,10 @@ def write_workspace_patch_artifacts(
     except (OSError, ValueError) as exc:
         errors.append({"type": "file_capture_failed", "message": f"{type(exc).__name__}: {exc}"})
         file_baseline = {}
-    changed_tracked = _git_path_list(
-        ["git", "diff", "--name-only", "--no-renames", "-z", "--no-ext-diff", "--no-color", base_ref, "--"],
-        root,
-        errors,
-    )
+    # Confirm binary rows too, keeping unchanged large files out of outputs without index writes.
+    cmd = ["git", "diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-color", base_ref, "--"]
+    changed_tracked = numstat_paths(_git_bytes(cmd, root, errors=errors), cmd,
+                                   lambda args: _git_bytes(args, root, errors=errors))
     # A tracked WAL index (committed beside its database, or staged in a copy) is shared memory as an
     # untracked one is: never diffed, and never named for an integration to stage over the target's own.
     wal_indexes = {rel: reason for rel in changed_tracked if (reason := _wal_index_reason(root, rel))}
@@ -130,6 +140,18 @@ def write_workspace_patch_artifacts(
     # v6.52.2: exclude declared ephemeral scratch (run_command/run_script `scratch=[...]`) so a
     # throwaway verification file the agent forgot to delete never leaks into the workspace patch.
     scratch = _declared_scratch(artifact_dir, root)
+    base_sizes = baseline_blob_sizes(root, base_ref, errors=errors)
+    # A delegated copy's named evidence folder: its owner retains those files beside this
+    # capture, so one NEW since the recorded baseline (untracked, staged or committed in the
+    # copy) never rides the work product; a path the baseline holds is the project's own.
+    evidence = str(metadata.get("host_evidence") or "").strip("/")
+    held = {rel for rel in {*untracked, *changed_tracked} if evidence and rel not in base_sizes
+            and rel not in file_baseline and (rel == evidence or rel.startswith(evidence + "/"))}
+    excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in sorted(held & set(untracked)))
+    held_tracked = sorted(held - set(untracked))
+    tracked_excluded.extend({"path": rel, "reason": NAMED_EVIDENCE_EXCLUSION} for rel in held_tracked)
+    untracked = [rel for rel in untracked if rel not in held]
+    changed_tracked = [rel for rel in changed_tracked if rel not in held]
     # git's binary verdict for the whole inventory in one process (two when empty
     # files need their attribute verdict; #1241); the loop below keeps its per-file
     # order and reads the verdict instead of spawning ``git diff --numstat`` per file.
@@ -181,12 +203,6 @@ def write_workspace_patch_artifacts(
     # treated the same hit as a per-file skip; the patch now matches it (#447).
 
     # Large generated data rides a file artifact, never a giant binary Git patch.
-    base_sizes: Dict[str, int] = {}
-    for row in _git_bytes(["git", "ls-tree", "-r", "-l", "-z", base_ref, "--"], root, errors=errors).split(b"\0"):
-        header, separator, raw_path = row.partition(b"\t")
-        fields = header.split()
-        if separator and len(fields) == 4 and fields[3].isdigit():
-            base_sizes[raw_path.decode("utf-8", errors="replace")] = int(fields[3])
     large_tracked = []
     for rel in changed_tracked:
         if rel in file_baseline:
@@ -228,9 +244,9 @@ def write_workspace_patch_artifacts(
         if not errors:
             tracked_lock_excludes = sorted(set(changed_tracked) & incidental_lock_excludes)
             tracked_pathspec = ["--"]
-            if tracked_lock_excludes or large_tracked or file_baseline or wal_indexes:
-                tracked_pathspec += ["."] + [f":(exclude,literal){rel}" for rel in
-                                             [*tracked_lock_excludes, *large_tracked, *file_baseline, *wal_indexes]]
+            if tracked_lock_excludes or large_tracked or file_baseline or wal_indexes or held_tracked:
+                tracked_pathspec += ["."] + [f":(exclude,literal){rel}" for rel in [
+                    *tracked_lock_excludes, *large_tracked, *file_baseline, *wal_indexes, *held_tracked]]
             for rel in tracked_lock_excludes:
                 tracked_excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
             diffstat = _git_stdout(
@@ -301,8 +317,10 @@ def write_workspace_patch_artifacts(
         "manifest_name": "workspace_patch.json",
         "base_provenance": ("task_constraint" if task_base_sha else "admission_head" if preflight_head
                             else "empty_tree" if base_is_empty_tree else "capture_head"),
-        "base_explanation": "Application patch relative to the recorded base; includes eligible workspace changes and may include branch differences. It does not attribute authorship.",
-        "comparison_note": "No auxiliary comparison target was selected. Use vcs_diff(base=..., head=...) for two trees, or base only for the current worktree.",
+        "base_explanation": ("Current workspace at capture time relative to the recorded base; may include branch differences and later unrelated changes. It does not attribute authorship."
+                             if task_base_sha or preflight_head else
+                             "Current workspace comparison at capture time; no original admission basis was recorded. It may include later unrelated changes and does not attribute authorship."),
+        "comparison_note": "No auxiliary comparison target was selected. Use vcs_read(action=diff, base=..., head=...) for two trees, or base only for the current worktree.",
         "current_branch": _git_stdout(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], root, allow_rc={0, 1}, errors=diagnostics).strip(),
         "tracking_upstream": _git_stdout(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], root, allow_rc={0, 128}, errors=diagnostics).strip(),
         "base_ref": base_ref,
@@ -449,32 +467,16 @@ def _workspace_patch_base(
             return expected_base_sha, expected_base_sha, False
         return resolved, resolved, False
 
-    head_errors: List[Dict[str, Any]] = []
-    head = _git_stdout(["git", "rev-parse", "--verify", "HEAD"], root, allow_rc={0}, errors=head_errors).strip()
-    if head:
-        return head, head, False
+    from ouroboros.workspace_preflight import git_head_basis
 
-    worktree_errors: List[Dict[str, Any]] = []
-    inside = _git_stdout(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        root,
-        allow_rc={0},
-        errors=worktree_errors,
-    ).strip()
-    if inside == "true" and _head_reflog_exists(root):
-        errors.extend(head_errors)
-        errors.append({
-            "type": "git_invalid_head",
-            "command": ["git", "rev-parse", "--verify", "HEAD"],
-            "message": "HEAD could not be resolved but the repository has HEAD history; refusing to treat it as unborn",
-        })
-        return "HEAD", "", False
-    if inside == "true":
+    head, state = git_head_basis(root)
+    if state == "known":
+        return head, head, False
+    if state == "unborn":
         empty_tree = _git_empty_tree_oid(root, errors)
         if empty_tree:
             return empty_tree, _GIT_UNBORN_HEAD, True
-
-    errors.extend(head_errors or worktree_errors)
+    errors.append({"type": "git_invalid_head", "message": "HEAD could not be verified; unborn state is unproven"})
     return "HEAD", "", False
 
 
@@ -500,6 +502,17 @@ def _git_empty_tree_oid(root: pathlib.Path, errors: List[Dict[str, Any]]) -> str
         })
         return ""
     return (result.stdout or "").strip()
+
+
+def baseline_blob_sizes(root: pathlib.Path, base_ref: str, *, errors: List[Dict[str, Any]]) -> Dict[str, int]:
+    """The recorded baseline's blobs (symlink entries included), shared by capture and retention."""
+    sizes: Dict[str, int] = {}
+    for row in _git_bytes(["git", "ls-tree", "-r", "-l", "-z", base_ref, "--"], root, errors=errors).split(b"\0"):
+        header, separator, raw_path = row.partition(b"\t")
+        fields = header.split()
+        if separator and len(fields) == 4 and fields[3].isdigit():
+            sizes[raw_path.decode("utf-8", errors="replace")] = int(fields[3])
+    return sizes
 
 
 def _head_reflog_exists(root: pathlib.Path) -> bool:
@@ -534,12 +547,14 @@ def _git_bytes(
     allow_rc: Iterable[int] = (0,),
     errors: Optional[List[Dict[str, Any]]] = None,
 ) -> bytes:
+    from ouroboros.git_observation import host_git_env
     try:
         result = subprocess.run(
             list(cmd),
             cwd=str(cwd),
             capture_output=True,
             timeout=30,
+            env=host_git_env(),
         )
     except subprocess.TimeoutExpired:
         if errors is not None:
@@ -570,6 +585,7 @@ def _append_git_output(
     errors: List[Dict[str, Any]],
     diagnostics: List[Dict[str, Any]],
 ) -> int:
+    from ouroboros.git_observation import host_git_env
     written_box = {"value": 0}
     read_errors: List[str] = []
     try:
@@ -579,6 +595,7 @@ def _append_git_output(
                 cwd=str(cwd),
                 stdout=subprocess.PIPE,
                 stderr=stderr_fh,
+                env=host_git_env(),
             )
             assert proc.stdout is not None
 
@@ -870,14 +887,12 @@ def _preflight_head_from_task(task: Dict[str, Any]) -> str:
     meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     preflight = meta.get("workspace_preflight") if isinstance(meta.get("workspace_preflight"), dict) else {}
     git = preflight.get("git") if isinstance(preflight.get("git"), dict) else {}
-    return str(git.get("head") or "")
+    return str(git.get("head") or (_GIT_UNBORN_HEAD if git.get("head_state") == "unborn" else ""))
 
 
 def _preflight_head_present(task: Dict[str, Any]) -> bool:
     meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    preflight = meta.get("workspace_preflight") if isinstance(meta.get("workspace_preflight"), dict) else {}
-    git = preflight.get("git") if isinstance(preflight.get("git"), dict) else {}
-    return "head" in git
+    return "workspace_preflight" in meta
 
 
 def _acting_constraint_from_task(task: Dict[str, Any]):

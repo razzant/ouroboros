@@ -1,8 +1,8 @@
 // V12 (TZ-1): a task card's one "Files" row. The host's recorded result rows are
 // projected into root files and ONE folder record per nested tree (name, file count,
 // size, member paths as its tooltip), with real download / directory-ZIP links built
-// only from host-written fields (`artifacts`, `artifact_archives`); no backend is faked.
-import { taskArtifactArchiveUrl, taskArtifactDownloadUrl } from './api_client.js';
+// only from host-written fields (`artifacts`, `artifact_archives`, `wrap_up_document`); no backend is faked.
+import { taskArtifactArchiveUrl, taskArtifactDownloadUrl, taskWrapUpDocumentUrl } from './api_client.js';
 import { isTerminalTaskDetail } from './log_events.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
 
@@ -48,9 +48,10 @@ function folderArchive(taskId, name, archives) {
  * (status ready or unstated, no errors); a stat-only listing says `unverified`. A folder
  * offers its `.zip` only where the host's `artifact_archives` calls it available, with the
  * host's member count/size and `excluded` rows; a folder the host refuses says `no
- * archive`. Reads only host-written fields. null when the list names nothing.
+ * archive`. Wrap up's saved work (`wrap_up_document`) is its own entry, written when downloaded:
+ * no file of the count, no size. Reads only host-written fields. null when nothing is named.
  */
-export function projectResultArtifacts(taskId, records, archives = null) {
+export function projectResultArtifacts(taskId, records, archives = null, wrapUp = null) {
     const files = [];
     const folders = new Map();
     for (const row of Array.isArray(records) ? records : []) {
@@ -82,16 +83,19 @@ export function projectResultArtifacts(taskId, records, archives = null) {
     const dirs = [...folders.values()].sort((a, b) => a.name.localeCompare(b.name));
     for (const folder of dirs) folder.archive = folderArchive(taskId, folder.name, archives);
     const fileCount = files.length + dirs.reduce((sum, folder) => sum + folder.fileCount, 0);
-    return fileCount ? { files, folders: dirs, fileCount } : null;
+    const wrapUpUrl = taskWrapUpDocumentUrl(taskId, wrapUp);
+    const saved = wrapUpUrl ? { wrapUp: { name: wrapUp.name, url: wrapUpUrl } } : {};
+    return fileCount || wrapUpUrl ? { files, folders: dirs, fileCount, ...saved } : null;
 }
 
 /**
  * Keep a card's one Files row in step with a SETTLED detail's record list: a detail without
- * the list leaves the row as it was, an empty list removes it. true when the items changed.
+ * the list (or saved work) leaves the row as it was, an empty one removes it. true when the items changed.
  */
 export function syncResultFilesItem(record, detail) {
-    if (!record || !isTerminalTaskDetail(detail) || !Array.isArray(detail?.artifacts)) return false;
-    const view = projectResultArtifacts(record.groupId, detail.artifacts, detail.artifact_archives);
+    const records = Array.isArray(detail?.artifacts) ? detail.artifacts : detail?.wrap_up_document ? [] : null;
+    if (!record || !isTerminalTaskDetail(detail) || !records) return false;
+    const view = projectResultArtifacts(record.groupId, records, detail.artifact_archives, detail.wrap_up_document);
     const key = `files|${record.groupId}`;
     const index = record.items.findIndex((item) => item.dedupeKey === key);
     const current = record.items[index];
@@ -118,8 +122,12 @@ function folderTooltip(folder) {
     return shown.join('\n') + (more > 0 ? `\n… ${more.toLocaleString('en-US')} more` : '');
 }
 
-// Rows use the markdown list markup (`md-li`, `md-link`) this body already styles.
+// Rows use the markdown list markup (`md-li`, `md-link`) this body already styles. Saved work
+// leads, outside the row limit, so any number of files leaves it reachable.
 function resultArtifactsHtml(view, limit = RESULT_FILE_ROWS) {
+    const saved = view.wrapUp
+        ? `<span class="md-li">• <a class="md-link" href="${escapeHtmlAttr(view.wrapUp.url)}" download="${escapeHtmlAttr(view.wrapUp.name)}">Work saved at Wrap up</a>${metaTail(['every saved text'])}</span>`
+        : '';
     const rows = [
         ...view.files.map((file) => ({
             files: 1,
@@ -144,17 +152,18 @@ function resultArtifactsHtml(view, limit = RESULT_FILE_ROWS) {
         })),
     ];
     const hidden = rows.slice(limit).reduce((sum, row) => sum + row.files, 0);
-    return rows.slice(0, limit).map((row) => `<span class="md-li">• ${row.html}</span>`).join('')
+    return saved + rows.slice(0, limit).map((row) => `<span class="md-li">• ${row.html}</span>`).join('')
         + (hidden ? `<span class="md-li">+${fileCountText(hidden).replace(/ (files?)$/, ' more $1')}</span>` : '');
 }
 
 /** The timeline markup of a Files item (`item.resultArtifacts`, see `syncResultFilesItem`). */
 export function resultFilesItemHtml(item) {
+    const count = item.resultArtifacts.fileCount;
     return `
         <div class="chat-live-line ${item.phase || 'result'}" data-live-line-key="${escapeHtmlAttr(item.lineKey || '')}" data-result-files data-expanded="0">
             <div class="chat-live-line-head">
                 <span class="chat-live-line-title">Files</span>
-                <span class="chat-live-line-time">${fileCountText(item.resultArtifacts.fileCount)}</span>
+                <span class="chat-live-line-time">${count ? fileCountText(count) : ''}</span>
             </div>
             <div class="chat-live-line-body">${resultArtifactsHtml(item.resultArtifacts)}</div>
         </div>

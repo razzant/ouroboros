@@ -8,6 +8,9 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_owner_continue import _interrupted
+from tests.test_swarm_host_admission import host as _api_host
+
+api_host = _api_host
 
 
 def _event(action, target, nonce="mind-call-1"):
@@ -20,7 +23,7 @@ def test_self_pause_refused_and_nonce_reuses_the_provider_call(tmp_path):
     from ouroboros.tool_call_log import invocation_scope
 
     emitted = []
-    ctx = SimpleNamespace(task_id="mind-root", pending_events=emitted, event_queue=None)
+    ctx = SimpleNamespace(task_id="mind-root", drive_root=tmp_path, pending_events=emitted, event_queue=None)
     assert json.loads(_pause_task(ctx, "mind-root"))["error"] == "self_pause_refused"
     assert json.loads(_continue_task(ctx, "other"))["error"] == "control_call_identity_missing"
     with invocation_scope({"tool_call_id": "provider-call"}):
@@ -44,14 +47,14 @@ def test_mind_pause_other_root_records_actor_and_resume_keeps_attribution(tmp_pa
     result = _apply(_event("pause_task", "other"))
     assert result["ok"]
     fence = read_fence(tmp_path, "other")
-    assert fence["actor"] == "mind" and fence["actor_task_id"] == "mind-root"
+    assert fence["by"]["actor"] == "ouroboros" and fence["by"]["task_id"] == "mind-root"
     # The owner reads who decided and why: Ouroboros, in its own sentence.
     assert fence["by"]["actor"] == "ouroboros" and fence["by"]["text"] == "finish the earlier request"
     assert fence["by"]["at"] and pause_author(fence)["text"] == "finish the earlier request"
     assert _apply(_event("pause_task", "other"))["fence_id"] == fence["fence_id"]
     resumed = _apply(_event("resume_task", "other", "resume-call"))
     assert resumed["ok"], resumed
-    assert read_fence(tmp_path, "other")["resume_actor"]["actor_task_id"] == "mind-root"
+    assert read_fence(tmp_path, "other")["resume_actor"]["task_id"] == "mind-root"
 
 
 def test_panic_hold_survives_mind_resume_but_owner_can_select_it(tmp_path, monkeypatch):
@@ -114,8 +117,8 @@ def test_mind_continue_and_owner_button_race_share_one_successor(tmp_path, monke
     assert len(workers.PENDING) == 1 and workers.PENDING[0]["id"] == successor
     claim = load_task_result(tmp_path, "pred-1")["continued_by"]
     if answers[0].get("ok"):
-        assert claim["actor"] == "mind" and claim["actor_task_id"] == "mind-root"
-        assert load_task_result(tmp_path, successor)["continuation_admission"]["actor"] == "mind"
+        assert claim["by"]["actor"] == "ouroboros" and claim["by"]["task_id"] == "mind-root"
+        assert load_task_result(tmp_path, successor)["continuation_admission"]["by"]["actor"] == "ouroboros"
     else:
         assert "actor" not in claim
 
@@ -130,7 +133,7 @@ def test_mind_continue_is_attributed_and_idempotent(tmp_path, monkeypatch):
     first, again = _apply(event), _apply(event)
     assert first["ok"] and again["replay"]
     assert first["successor_task_id"] == again["successor_task_id"]
-    assert load_task_result(tmp_path, "pred-1")["continued_by"]["actor_task_id"] == "mind-root"
+    assert load_task_result(tmp_path, "pred-1")["continued_by"]["by"]["task_id"] == "mind-root"
 
 
 @pytest.mark.parametrize("source", ["owner", "panic"])
@@ -154,3 +157,43 @@ def test_control_refusal_arrives_as_system_task_mail_not_owner_words(tmp_path, m
     assert record["kind"] == "task_message" and record["provenance"] == "system"
     assert json.loads(record["text"])["outcome"]["error"] == "task_not_live"
     assert pushed[0]["actor_task_id"] == "mind-root"
+
+
+@pytest.mark.serial
+@pytest.mark.parametrize("actor", ["ordinary-analysis", "silence-analysis"])
+def test_api_selected_task_id_retains_pause_resume_continue(api_host, actor):
+    from starlette.requests import Request
+
+    from ouroboros.gateway.tasks import _create_task_from_body
+    from ouroboros.owner_pause import read_fence
+    from ouroboros.task_results import load_task_result
+    from ouroboros.tool_call_log import invocation_scope
+    from ouroboros.tools.control_mind import _request_control
+    from supervisor import workers
+    from supervisor.events_mind_controls import _apply
+
+    request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace(
+        drive_root=api_host.root, repo_dir=workers.REPO_DIR))})
+    for task_id in (actor, "other"):
+        response = _create_task_from_body(request, {"task_id": task_id, "description": "Ordinary work"})
+        assert response.status_code == 200, response.body
+    stored = load_task_result(api_host.root, actor)
+    assert "work_diagnostic" not in stored["metadata"]
+    ctx = SimpleNamespace(task_id=actor, drive_root=api_host.root, task_metadata=stored["metadata"],
+                          pending_events=[], event_queue=None)
+    _interrupted(api_host.root)
+    for action, target in (("pause_task", "other"), ("resume_task", "other"), ("continue_task", "pred-1")):
+        with invocation_scope({"tool_call_id": action}):
+            receipt = json.loads(_request_control(ctx, action, target, "Complete the request"))
+        assert receipt["ok"], receipt
+        event = ctx.pending_events.pop()
+        outcome = _apply(event)
+        assert outcome["ok"], outcome
+        if action == "pause_task":
+            assert read_fence(api_host.root, target)["by"]["task_id"] == actor
+        elif action == "resume_task":
+            assert read_fence(api_host.root, target)["resume_actor"]["task_id"] == actor
+        else:
+            assert load_task_result(api_host.root, target)["continued_by"]["by"]["task_id"] == actor
+            assert _apply(event)["successor_task_id"] == outcome["successor_task_id"]
+    assert not api_host.attempts

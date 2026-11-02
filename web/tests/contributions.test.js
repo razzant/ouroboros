@@ -135,6 +135,42 @@ test('attach reads at boot, on every socket open, on extension_lifecycle, on a f
     assert.equal(reads.calls.length, 5, 'and the page event no longer reads');
 });
 
+test('onLifecycle hears each lifecycle end, changed projection or not; never a subscription, the boot read or a socket open', async () => {
+    const reads = client([{}, {}, {}, {}, {}, {}, {}]);
+    const store = createContributionsStore({ client: reads });
+    const handlers = new Map();
+    const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    const target = new EventTarget();
+    let changes = 0, ends = 0;
+    store.onChange(() => { changes += 1; });
+    const off = store.onLifecycle(() => { ends += 1; });
+    store.attach({ ws, target });
+    await tick();
+    handlers.get('open')();
+    await tick();
+    assert.equal(ends, 0, 'subscribing, the boot read and a socket open are no lifecycle end');
+    const row = (phase) => ({ type: 'chat', role: 'system', is_progress: true, system_type: 'skill_lifecycle',
+        lifecycle: { kind: 'update', target: 'slack-bridge', phase } });
+    handlers.get('chat')(row('running'));
+    handlers.get('chat')({ type: 'chat', role: 'assistant', content: 'completed' });
+    assert.equal(ends, 0, 'a running job and an ordinary message are none either');
+    // An off connector's update: the projection leaves the skill out, so nothing changed for onChange.
+    handlers.get('chat')(row('completed'));
+    await tick();
+    assert.equal(ends, 1);
+    assert.equal(changes, 1, 'only the boot read changed the projection');
+    handlers.get('extension_lifecycle')({ type: 'extension_lifecycle', skill: 'x' });
+    target.dispatchEvent(new Event('ouro:skill-lifecycle'));
+    assert.equal(ends, 3, 'every trigger the store reads on, except a socket open');
+    off();
+    handlers.get('chat')(row('failed'));
+    assert.equal(ends, 3, 'the disposer stops it');
+    store.onLifecycle(() => { ends += 1; });
+    store.destroy();
+    assert.equal(handlers.size, 0);
+    assert.equal(ends, 3, 'destroy releases the socket and its listeners');
+});
+
 function room(initial = '') {
     let text = initial;
     const composer = {

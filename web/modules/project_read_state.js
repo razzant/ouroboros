@@ -31,10 +31,11 @@ const searched = (window) => window?.latest_message === null && Number.isSafeInt
  *   older?: (current: () => boolean) => Promise<{status?: string}>,  // one older page, while `current()`
  *   present?: (current: () => boolean) => Promise<unknown>,  // the newest page, if not drawn, while `current()`
  *   delivered?: (id: string) => boolean,  // a drawn page holds this row
+ *   onNote?: () => void,  // every reading moment (a scroll edge, a paint, an arrival): read_ahead.js samples there
  * }} facts
  */
 export function createProjectReadReceipt({ read, isShown, isReadingLatest, onReadingLatest = () => {}, land = () => {},
-    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false }) {
+    arriving = () => null, older = async () => ({}), present = async () => {}, delivered = () => false, onNote = () => {} }) {
     let generation = 0;
     let coveredRevision = 0;
     let readingLatest = false;
@@ -101,6 +102,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
     // Scroll edges report arrivals only; a discrete change (the page or the
     // window shown again, another newest message) reports the current position once.
     const note = ({ discrete = false } = {}) => {
+        onNote();
         const latest = isReadingLatest(newest());
         if (latest && (discrete || !readingLatest)) onReadingLatest();
         readingLatest = latest;
@@ -149,6 +151,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
             // Two frames cover layout followed by paint/composite.
             await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
             const painted = own === generation && isShown();
+            if (painted) onNote();
             const atLatest = painted && isReadingLatest(newest());
             // A withheld read lowers the edge, so the next arrival retries it.
             if (painted && !atLatest) readingLatest = false;
@@ -189,7 +192,7 @@ export function createProjectReadReceipt({ read, isShown, isReadingLatest, onRea
 // The feed the reader can see: its viewport less the chrome drawn over it, the
 // header above and the composer below; chrome covering it all leaves an empty
 // band, where nothing is on screen. Eviction keeps the whole viewport.
-function readBand(viewport, header, composer) {
+export function readBand(viewport, header, composer) {
     let { top, bottom } = viewport.getBoundingClientRect();
     if (header?.getClientRects?.().length) top = Math.max(top, header.getBoundingClientRect().bottom);
     if (composer?.getClientRects?.().length) bottom = Math.min(bottom, composer.getBoundingClientRect().top);

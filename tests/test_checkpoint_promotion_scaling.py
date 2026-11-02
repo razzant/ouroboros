@@ -188,24 +188,38 @@ def test_payload_memory_does_not_grow_with_retained_history(tmp_path):
     import gc
     import tracemalloc
 
-    def peak(count):
-        parent, task = tmp_path / str(count), f"memory-{count}"
+    def peak(name, count, *, measured=True):
+        parent, task = tmp_path / name, f"memory-{name}"
         parent.mkdir()
         child = headless.prepare_task_drive(parent, task, "empty")
         refs = [observability.write_blob(child, {"text": (str(index) + "x" * 262_144)}) for index in range(count)]
         gc.collect()
-        tracemalloc.start()
+        enabled, high = gc.isenabled(), None
         try:
+            if measured:  # no GC pass inside: payloads a reference cycle holds count, whatever the thresholds
+                gc.disable()
+                tracemalloc.start()
             with observability.child_ref_promotion_scope():
-                observability.promote_child_task_refs(parent, child, task, {"review_evidence": {"source_refs": refs}})
-                _current, high = tracemalloc.get_traced_memory()
-                return high
+                _, state = observability.promote_child_task_refs(
+                    parent, child, task, {"review_evidence": {"source_refs": refs}})
+                if measured:
+                    _current, high = tracemalloc.get_traced_memory()
         finally:
-            tracemalloc.stop()
+            if measured:
+                tracemalloc.stop()
+                if enabled:
+                    gc.enable()
+        assert state["status"] == "complete" and not state["unavailable_refs"], state
+        remove_store_tree(child)
+        for index, ref in enumerate(refs):
+            assert observability.read_blob_ref(parent, ref) == {"text": str(index) + "x" * 262_144}
+        return high
 
-    small, large = peak(16), peak(64)
+    peak("warmup", 16, measured=False)  # one-time imports and caches land in neither measurement
+    small, large = peak("small", 16), peak("large", 64)
     # Metadata grows with references; another 48 x 256 KiB of payload must not
-    # remain live in the operation memo. This is a test allowance, no runtime cap.
+    # remain live, in the operation memo or in a reference cycle. This is a test
+    # allowance, no runtime cap.
     assert large - small < 4 * 1024 * 1024, (small, large)
 
 

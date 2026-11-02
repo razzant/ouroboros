@@ -307,13 +307,22 @@ def test_nonproof_outcomes_never_mint_a_receipt(candidate, monkeypatch, outcome)
             web.mkdir(parents=True)
             (web / "test.test.js").write_text("// test\n")
             monkeypatch.setattr(pr, "run_node_tests", lambda *a: None)
-    result = pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx)
-    assert not getattr(ctx, "_preflight_test_proof", None)
-    assert _proof_events(ctx.drive_root) == []
-    if outcome in {"no_git", "no_suite"}:
-        assert result is None and not ctx._preflight_tests_passed
-    elif outcome != "node_missing":
-        assert result
+    from tests._shared import retire_synthetic_gate_hold
+    from tests.test_preflight_runner import _pin_preflight_root
+
+    temp_root = (ctx.drive_root.parent / "preflight-root").resolve()
+    temp_root.mkdir()
+    _pin_preflight_root(monkeypatch, temp_root)
+    try:
+        result = pr.run_hermetic_pytest(ctx.repo_dir, ctx=ctx)
+        assert not getattr(ctx, "_preflight_test_proof", None)
+        assert _proof_events(ctx.drive_root) == []
+        if outcome in {"no_git", "no_suite"}:
+            assert result is None and not ctx._preflight_tests_passed
+        elif outcome != "node_missing":
+            assert result
+    finally:
+        retire_synthetic_gate_hold(candidate.repo_dir, temp_root, "live descendant")  # the stubbed lane proved no process
 
 
 @pytest.mark.parametrize("change", ["tree", "index", "head", "args", "env", "python", "workers", "serial", "timeout"])

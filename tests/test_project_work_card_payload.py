@@ -58,6 +58,26 @@ def test_live_census_keeps_known_outcome_separate_from_open_finalization(tmp_pat
     assert gateway_state._chat_activities_snapshot_safe(tmp_path, direct_turns=[]) == []
 
 
+@pytest.mark.parametrize("debt", [[], ["run-1"], None], ids=["healed", "open", "no-list"])
+def test_live_census_carries_the_rows_current_custody_debt(tmp_path, activity_queue, debt):
+    """#1583: the census row carries the row's current debt list (absent stays absent) beside the
+    raw stamp and axes, so its outcome heals with the list rather than with a rewrite."""
+    stamp = "delegated_custody_unreconciled"
+    activity_queue.RUNNING["root"] = {"task": {"id": "root", "root_task_id": "root", "chat_id": 1}, "started_at": 1}
+    write_task_result(
+        tmp_path, "root", "completed", result="answer", reason_code=stamp,
+        outcome_axes={"execution": {"status": "ok", "reason_code": "final_message"},
+                      "objective": {"status": "not_evaluated", "source": "none", "warning": stamp, "warnings": [stamp]}},
+        root_phase_checkpoint={"post_task_synthesis": "running"},
+        **({} if debt is None else {"delegated_runs_unreconciled": debt}))
+    row = gateway_state._chat_activities_snapshot_safe(tmp_path, direct_turns=[])[0]
+    assert row["reason_code"] == stamp and row["outcome_axes"]["objective"]["warning"] == stamp
+    if debt is None:
+        assert "delegated_runs_unreconciled" not in row
+    else:
+        assert row["delegated_runs_unreconciled"] == debt
+
+
 def test_census_result_memo_refreshes_without_inventing_a_missing_outcome(tmp_path, activity_queue, monkeypatch):
     from ouroboros import task_store
 

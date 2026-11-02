@@ -82,6 +82,7 @@ def test_contributor_trust_boundary_covers_functional_review_dependencies():
         "ouroboros/delegate_custody_usage.py",
         "ouroboros/delegate_output.py",
         "ouroboros/gateways/claudexor.py",
+        "ouroboros/gateways/claudexor_identity.py",
         "ouroboros/outcomes.py",
         "ouroboros/openrouter_attribution.py",
         "ouroboros/platform_layer.py",
@@ -92,7 +93,7 @@ def test_contributor_trust_boundary_covers_functional_review_dependencies():
         # review_substrate_changed diagnostic, exactly as one editing
         # review_substrate.py does (XG-5R4.1).
         "ouroboros/review_execution.py",
-        "ouroboros/review_actor_aggregation.py",
+        "ouroboros/review_seat_outcome.py", "ouroboros/review_wave.py",
         "ouroboros/review_dispatch.py",
         "ouroboros/review_slot_cancel.py",
         "ouroboros/review_evidence.py",
@@ -1028,6 +1029,24 @@ def test_external_review_cost_report_never_turns_unknown_into_zero():
     assert "not treated as $0" in report["note"]
     # A seat never dispatched remains outside the actor report.
     assert _record_actors({"rows": [{"seat_id": "x", "status": "not_dispatched"}]}) == []
+
+
+def test_packet_seats_carry_each_seats_one_saved_text(tmp_path, monkeypatch):
+    from ouroboros import review_ledger as ledger
+    from scripts.run_external_review import _seat_records
+    from tests.test_review_ledger import BOTH, _facts, _raw
+
+    refusal = "Engine refusal: measured 940000 characters; limit 900000 characters"
+    raws = [_raw("ok", "m1", parts=BOTH, raw_text="Received answer\nEND"),
+            _raw("refused", "m2", "error", parts=BOTH, raw_text="", error=refusal),
+            _raw("open", "m3", "timeout", parts=BOTH, raw_text="Still running.", operation_id="op", operation_state="in_flight")]
+    record = ledger.write_record(tmp_path, ledger.build_commit_gate_record(_facts(raws), drive_root=tmp_path))
+    reads = []
+    original = ledger.read_source
+    monkeypatch.setattr(ledger, "read_source", lambda *args: reads.append(args) or original(*args))
+    answers = {seat["seat_id"]: seat["answer"] for seat in _seat_records(record, tmp_path)}
+    assert answers == {"ok": "Received answer\nEND", "refused": refusal, "open": "Still running."}
+    assert len(reads) == 3  # one selected text per seat, nothing else read
 
 
 @pytest.mark.parametrize("status", ["pending", "responded"])

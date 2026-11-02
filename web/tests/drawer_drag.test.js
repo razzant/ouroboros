@@ -52,13 +52,13 @@ function world({ open = false, stack = true, coarse = true, enabled = DRAWER_DRA
     const sidebar = withStyle(fakeEl('sidebar'));
     const scrim = withStyle(fakeEl('scrim'));
     const room = fakeEl('room'); room.parentElement = doc.body;
-    const state = { open, set: [], grabs: 0, snaps: [] };
+    const state = { open, set: [], grabs: 0, snaps: [], order: [] };
     const flags = { field: new Set(), sideways: new Set(), blocked: false, selection: false };
     const env = { stack, coarse, layoutHandlers: new Set() };
     const dispose = bindDrawerDrag({
         sidebar, scrim, isOpen: () => state.open,
-        setOpen: (v) => { state.set.push(v); state.open = v; scrim.hidden = !v; },
-        isStack: () => env.stack, isCoarse: () => env.coarse, onGrab: () => { state.grabs += 1; }, onSnap: (v) => state.snaps.push(v), win, doc, enabled,
+        setOpen: (v) => { state.set.push(v); state.order.push(`set:${v}`); state.open = v; scrim.hidden = !v; },
+        isStack: () => env.stack, isCoarse: () => env.coarse, onGrab: () => { state.grabs += 1; }, onSnap: (v) => { state.snaps.push(v); state.order.push(`snap:${v}`); }, win, doc, enabled,
         onLayout: (fn) => { env.layoutHandlers.add(fn); return () => env.layoutHandlers.delete(fn); },
         isField: (el) => flags.field.has(el), isSideways: (el) => flags.sideways.has(el),
         ...(blockers ? {} : { isBlocked: () => flags.blocked }), hasSelection: () => flags.selection,
@@ -147,6 +147,9 @@ test('a start is eligible anywhere on the room, the edge included, but a field, 
     const shown = world({ blockers: [{ getClientRects: () => [] }, { getClientRects: () => [{}] }] });
     open(shown); assert.deepEqual(shown.state.set, [], 'an open menu owns the finger'); shown.dispose();
     assert.match(FIELD_SELECTOR, /input, textarea/); assert.match(SIDEWAYS_SELECTOR, /\[data-scroll-x\]/); assert.match(BLOCKING_SELECTOR, /dialog\[open\]/);
+    // A closed menu's leaving picture and a folding Shade no longer own the finger; their live forms do.
+    for (const live of ['.ui-popup', '.chat-photo-menu']) assert.ok(BLOCKING_SELECTOR.includes(`${live}:not([data-leaving])`), live);
+    assert.ok(BLOCKING_SELECTOR.includes('.rw-shade:not([hidden]):not([inert])'));
     // A button, a link or a summary under the finger does not stop a drag: the click that ends it is swallowed.
     for (const control of ['button', 'a[href]', 'summary', 'label', 'details', '[role="button"]']) {
         assert.equal(FIELD_SELECTOR.split(', ').includes(control), false, control);
@@ -285,6 +288,18 @@ test('a slow release commits past half (open) or 30% (close); a fast one commits
     assert.equal(w.dragging(), false, 'a start outside the open drawer and its scrim is not a close');
     w.touch('touchend', { x: 200, y: 300 });
     assert.deepEqual(w.state.set, []);
+    w.dispose();
+});
+
+test('a thumb that rests before it lifts is no fling; the same drag lifted while moving is', () => {
+    let w = world();
+    open(w, { from: 100, to: 100 + 12 + 80, steps: 4, dt: 16, up: false });  // fast, p = 0.25
+    w.touch('touchend', { x: 192, y: 300, dt: 150 });  // held still for 150 ms first
+    assert.deepEqual(w.state.set, [], 'under half and at rest: it springs back');
+    w.dispose();
+    w = world();
+    open(w, { from: 100, to: 100 + 12 + 80, steps: 4, dt: 16 });  // lifted 16 ms after its last move
+    assert.deepEqual(w.state.set, [true], 'lifted in motion it is a fling: it opens');
     w.dispose();
 });
 
@@ -435,6 +450,8 @@ test('a finger that latches the drawer open or closed snaps once (the haptic); a
     w.touch('touchmove', { x: 288 - 110, y: 300, dt: 200 });
     w.touch('touchend', { x: 288 - 110, y: 300, dt: 200 });
     assert.deepEqual(w.state.snaps, [true, false], 'and latched closed');
+    assert.deepEqual(w.state.order, ['snap:true', 'set:true', 'snap:false', 'set:false'],
+        'each latch is felt as the finger leaves, before the state commits');
     w.runTimers();
     w.touch('touchstart', { x: 100, y: 300 });
     w.touch('touchmove', { x: 112, y: 300 });
@@ -442,6 +459,7 @@ test('a finger that latches the drawer open or closed snaps once (the haptic); a
     w.touch('touchcancel', { x: 112 + 200, y: 300 });
     assert.deepEqual(w.state.set.at(-1), true, 'the system took the touch and the drawer opened…');
     assert.deepEqual(w.state.snaps, [true, false], '…but that was not the finger\'s latch');
+    assert.equal(w.state.order.at(-1), 'set:true', 'the system\'s latch commits without a haptic');
     w.dispose();
 });
 
@@ -471,5 +489,35 @@ test('what moves with the drawer (the room card, its veil) follows its number an
     w.touch('touchend', { x: 102, y: 340 });
     assert.equal(card.classList.contains('dragging'), false);
     assert.equal(card.styleProps.has('--drawer-p'), false);
+    w.dispose();
+});
+
+test('a finger that rested longer than the sample window before it lifted has no speed: where it stopped decides', () => {
+    // Quickly to 30% open, then still: under half, it springs back closed (no fling read from moves long gone).
+    let w = world();
+    open(w, { from: 100, to: 100 + 12 + 96, steps: 4, dt: 16, up: false });  // 24px per 16ms, p = 0.3
+    w.touch('touchend', { x: 208, y: 300, dt: DRAG.sampleWindow + 300 });
+    assert.deepEqual(w.state.set, [], 'rested under half: springs back');
+    w.dispose();
+    // The open drawer quickly 12% of the way closed, then still: less than 30% gone, it stays open.
+    w = world({ open: true });
+    w.scrim.hidden = false;
+    w.touch('touchstart', { x: 300, y: 300, target: w.sidebar });
+    w.touch('touchmove', { x: 288, y: 300 });
+    w.touch('touchmove', { x: 268, y: 300 });
+    w.touch('touchmove', { x: 250, y: 300 });
+    w.touch('touchend', { x: 250, y: 300, dt: DRAG.sampleWindow + 300 });
+    assert.deepEqual(w.state.set, [], 'rested open: stays open');
+    w.dispose();
+    // The system taking a rested finger reads its place too.
+    w = world();
+    open(w, { from: 100, to: 100 + 12 + 96, steps: 4, dt: 16, up: false });
+    w.touch('touchcancel', { x: 208, y: 300, dt: DRAG.sampleWindow + 300 });
+    assert.deepEqual(w.state.set, [], 'taken after a rest under half: back closed');
+    w.dispose();
+    // Lifted while still moving (within the window), the same drag keeps the finger's speed: a fling.
+    w = world();
+    open(w, { from: 100, to: 100 + 12 + 96, steps: 4, dt: 16 });
+    assert.deepEqual(w.state.set, [true], 'lifted moving: a fling opens');
     w.dispose();
 });

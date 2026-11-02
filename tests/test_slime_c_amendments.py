@@ -1,6 +1,6 @@
 """Phase C amendments (slime saga): live final-answer delivery before blocking
-post-task cognition, sealed final ground truth into synthesis, the durable
-per-project last-result pointer, and the project reflections read-back.
+post-task cognition, sealed final ground truth into synthesis, and the durable
+per-project last-result pointer.
 
 Incident e9108a09: the owner's answer waited 34 minutes behind a hung
 backlog groom, the reaper killed the worker, and the buffered send_message
@@ -98,7 +98,6 @@ class TestLiveFinalAnswerDelivery:
             observed["sealed_final"] = kwargs.get("sealed_final")
             return None
 
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", hanging_post_task)
 
         # type=evolution → the blocking post-task branch (same class as the
@@ -136,7 +135,6 @@ class TestLiveFinalAnswerDelivery:
 
         event_queue = queue.Queue()
         pending_events = []
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "dedupe1", "type": "evolution", "chat_id": 1, "text": "hi"}
@@ -199,7 +197,6 @@ class TestLiveFinalAnswerDelivery:
             "task_id": "proact1", "parent_task_id": "", "root_task_id": "",
         }
         pending_events = [proactive]
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "proact1", "type": "evolution", "chat_id": 1, "text": "hi"}
@@ -296,7 +293,6 @@ class TestLiveFinalAnswerDelivery:
                 raise RuntimeError("manager gone")
 
         pending_events = []
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "fallback1", "type": "evolution", "chat_id": 1, "text": "hi"}
@@ -316,7 +312,6 @@ class TestLiveFinalAnswerDelivery:
 
         event_queue = queue.Queue()
         pending_events = []
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(atp, "_run_post_task_processing_async", lambda *a, **kw: None)
 
         task = {"id": "plain1", "type": "task", "chat_id": 1, "text": "hi"}
@@ -402,7 +397,7 @@ class TestSealedFinalPackage:
         task = {"id": "refl1", "type": "task", "chat_id": 1, "text": "make a pdf",
                 "drive_root": str(drive_root)}
         decision = post_task_evolution._decide_promotion(
-            SimpleNamespace(drive_root=drive_root), task, sealed, object(), force=False)
+            SimpleNamespace(drive_root=drive_root), task, sealed, object())
 
         assert decision == {"promote": False, "objective": "", "requires_plan_review": True, "backlog_id": ""}
         assert "Sealed final outcome (host-attested ground truth)" in captured["prompt"]
@@ -422,7 +417,6 @@ class TestSealedFinalPackage:
         import ouroboros.agent_task_pipeline as atp
 
         observed = {}
-        monkeypatch.setattr(atp, "_run_scratchpad_consolidation", lambda *a, **kw: None)
         monkeypatch.setattr(
             atp, "_run_post_task_processing_async",
             lambda *a, **kw: observed.update(sealed=kw.get("sealed_final")),
@@ -579,57 +573,3 @@ class TestProjectLastResultPointer:
         # Still NOT a letters-home task: no journal milestone, no digest.
         assert not [e for e in pending if e.get("type") == "project_digest"]
         assert not (drive_root / "projects" / "slime" / "journal.jsonl").exists()
-
-
-class TestProjectReflectionsReadBack:
-    """A project-bound context must include the project's OWN full reflections
-    (the canonical log only carries bounded pointer rows)."""
-
-    def test_project_bound_context_includes_project_reflection(
-        self, tmp_path, monkeypatch,
-    ):
-        import ouroboros.config as cfg
-
-        monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
-
-        from ouroboros.context import build_recent_sections
-        from ouroboros.memory import Memory
-        from ouroboros.plan_review_facts import LATE_SETTLEMENT_TASK_TYPE
-        from ouroboros.project_facts import project_reflections_path
-        from ouroboros.utils import append_jsonl
-
-        path = project_reflections_path("slimeproj")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        append_jsonl(path, {
-            "ts": "2026-08-10T12:00:00Z", "task_id": "ref42", "task_type": "task",
-            "goal": "PROJECT_LESSON_MARKER remember the slime physics fix",
-            "key_markers": [], "reflection": "An automatic lesson an earlier version wrote.",
-        })
-        append_jsonl(path, {
-            "ts": "2026-08-11T12:00:00Z", "task_id": "ref43", "type": LATE_SETTLEMENT_TASK_TYPE,
-            "task_type": LATE_SETTLEMENT_TASK_TYPE, "reflection": "LATE_HOST_ROW_MARKER reviewers passed it.",
-        })
-
-        drive_root = tmp_path / "drive"
-        (drive_root / "logs").mkdir(parents=True)
-        sections = build_recent_sections(
-            Memory(drive_root=drive_root), env=None, project_id="slimeproj",
-        )
-
-        combined = "\n\n".join(sections)
-        assert "Project execution reflections (this project's own: slimeproj)" in combined
-        # The host row stays whole; the old automatic body is one dated pointer to its source.
-        assert "LATE_HOST_ROW_MARKER reviewers passed it." in combined
-        assert "PROJECT_LESSON_MARKER" not in combined and "An automatic lesson" not in combined
-        assert "Historical automatic reflections: 1 row(s) in the newest 20, dated 2026-08-10T12:00:00" in combined
-        assert "journal_read(project_id='slimeproj', source='reflections')" in combined
-
-    def test_non_project_context_has_no_project_section(self, tmp_path):
-        from ouroboros.context import build_recent_sections
-        from ouroboros.memory import Memory
-
-        drive_root = tmp_path / "drive"
-        (drive_root / "logs").mkdir(parents=True)
-        combined = "\n\n".join(
-            build_recent_sections(Memory(drive_root=drive_root), env=None))
-        assert "Project execution reflections" not in combined

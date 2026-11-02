@@ -41,6 +41,8 @@ def test_model_final_answer_is_mirrored_whole_for_every_terminal_phase(phase):
     (_result(terminal_origin="host_salvage"), "error"),   # preserved bytes are not a final answer
     (_result(terminal_origin="host_notice"), "error"),    # the host's own notice is not his voice
     (_result(terminal_origin=""), "done"),                # unknown authorship is never assumed
+    (_result(wake_silent=True), "done"),                  # retained internal words are not speech
+    (_result(wake_silent=True, terminal_host_notice="A host notice."), "warn"),
     (_result(result="   "), "done"),                      # nothing to say
     (_result(result={"answer": "x"}), "done"),            # a malformed result is never repr()-ed into his voice
     (_result(), "working"),                               # the outbox freezes the first send
@@ -121,7 +123,9 @@ def test_the_answer_survives_live_frame_durable_row_and_history_replay(monkeypat
         progress_meta={**facts, "project_id": "launch", "project_name": "Launch",
                        "target_label": "Launch › Ship release", "status": "completed",
                        "completion_answer": ANSWER,
-                       "completion_notice": {"neutral": True, "detail": "", "phase": "warn", "salvage": ""},
+                       "completion_notice": {"neutral": True, "detail": "", "phase": "warn", "salvage": "",
+                                             "cause": "The recorded reason has no description yet.",
+                                             "undescribed": ["future_reason"]},
                        "terminal_time": {"v": 1, "source": "executor_terminal", "occurred_at": "2026-09-24T18:18:27Z"}},
     )
 
@@ -149,7 +153,8 @@ def test_the_answer_survives_live_frame_durable_row_and_history_replay(monkeypat
     for key in ("outcome_axes", "reply_to"):
         assert replayed[key] == stored[key] == live[key] == facts[key]
     assert replayed["completion_notice"] == stored["completion_notice"] == live["completion_notice"] == {
-        "neutral": True, "detail": "", "phase": "warn", "salvage": ""}
+        "neutral": True, "detail": "", "phase": "warn", "salvage": "",
+        "cause": "The recorded reason has no description yet.", "undescribed": ["future_reason"]}
 
 
 def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):
@@ -189,3 +194,29 @@ def test_moved_direct_completion_uses_bound_main_request_without_a_result_origin
          "outcome_axes": {"execution": {"status": "infra_failed"}}}, {})
     assert queued[0]["progress_meta"]["reply_to"] == reference_from_row(origin)
     assert queued[0]["progress_meta"]["outcome_axes"]["execution"]["status"] == "infra_failed"
+
+
+@pytest.mark.parametrize("reason, salvaged", [("worker_crash_signal", False), ("example_new_reason", True)])
+def test_a_no_answer_ending_carries_its_web_facts_beside_its_unchanged_text(tmp_path, monkeypatch, reason, salvaged):
+    """Owner 1A/2A (21.10): Main's row for an ending with no authored answer carries the work's own name and a cause
+    the web row can say (a typed code with no sentence yet reads neutrally, the exact code beside it for details);
+    its text, Telegram's notice detail and the answered-row limitation keep the canonical words and the exact code."""
+    from ouroboros import outcomes
+    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
+
+    result = {"status": "failed", "reason_code": reason, "outcome_axes": outcomes.terminal_outcome_axes(
+        lifecycle="failed", execution=outcomes.EXECUTION_INFRA_FAILED, reason_code=reason, review_trigger="worker_terminal")}
+    result.update({"terminal_origin": "host_salvage", "result": "Two update scenarios remain unchecked."} if salvaged
+                  else {"result": "❌ worker process crashed (signal 9)."})
+    event = _enqueue_row(tmp_path, monkeypatch, result)
+    meta, known = event["progress_meta"], reason in TASK_CAUSE_PHRASES
+    canonical = f"{TASK_CAUSE_PHRASES[reason]}." if known else f"{reason}."
+    salvage = ("Preserved intermediate output (not a final answer): Two update scenarios remain unchecked."
+               if salvaged else "")
+    assert event["text"] == "Launch › Ship release · Failed\n" + " ".join(p for p in (canonical, salvage) if p)
+    assert (meta["task_name"], meta["project_name"]) == ("Ship release", "Launch")
+    assert "completion_answer" not in meta and meta["completion_reason"] == canonical
+    notice = meta["completion_notice"]
+    assert (notice["phase"], notice["detail"], notice["salvage"]) == ("error", canonical, salvage)
+    assert notice["cause"] == (canonical if known else TASK_CAUSE_PHRASES["reason_undescribed"])
+    assert notice["undescribed"] == ([] if known else [reason])

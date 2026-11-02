@@ -64,6 +64,7 @@ def test_native_loop_fallback_then_symbolic_return_uses_real_role_account_and_fi
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "4")
     monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "inline")
@@ -209,6 +210,7 @@ def test_lost_create_reply_without_operation_id_cannot_authorize_new_generation(
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", MODEL)
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a", "fallback": ["account-b"]}))
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
@@ -374,6 +376,9 @@ def test_primary_choice_survives_shared_cold_continuation(main_call, monkeypatch
     from ouroboros.model_slots import route_binding
 
     ctx, _gateway, owner, _events, _decide, _observations = main_call
+    # This route-only fixture has no resident or current tool catalog.
+    monkeypatch.setattr(ctx.tools, "schemas", lambda: [], raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", MODEL)  # the primary follows Main: its current slot is this model
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "decoy", "fallback": ["account-b"]}))
     owner.overrides["main"] = {"model_account_override": primary_account}
     inner = ctx.tools._ctx

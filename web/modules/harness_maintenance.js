@@ -64,6 +64,10 @@ function problemText(problem) {
     return String(problem?.message || problem?.code || '');
 }
 
+// What an update does, said once where the owner decides on one (it used to sit in the section's copy).
+const UPDATE_NOTE = 'Program updates replace files in place and may interrupt new starts. Returning to an earlier version may require a download. Retry a waiting task separately.';
+const DETAILS_CARET = '<svg class="settings-disclosure-caret" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false"><path d="M3.5 2 7 5 3.5 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+
 function button(action, label, disabled = false) {
     return `<button type="button" class="btn btn-default" data-maintenance-action="${action}"${disabled ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
 }
@@ -93,8 +97,13 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     if (targets.includes('baseline') && entry.releaseTested?.version) {
         extraActions.push(button('baseline', `Install release version ${entry.releaseTested.version}`, !canAct));
     }
+    // This view's own sentences (an unconfirmed acceptance, an unavailable inspection) say what to do next and stay
+    // on the row; the engine's exact problem text is a diagnostic, shown under Details. Only a typed source gets a
+    // short visible cause: the inventory's problem with the latest version is about the latest version.
     const error = view.operationError || view.inspectionError;
-    const notice = error || problemText(operation?.problem) || problemText(entry?.availableProblem);
+    const engineProblem = problemText(operation?.problem) || problemText(entry?.availableProblem);
+    const notice = error || engineProblem;
+    const cause = !error && !problemText(operation?.problem) && engineProblem ? 'Latest version not determined' : '';
     const status = `${view.operationError && operation ? 'Last observed: ' : ''}${maintenanceOperationLine(operation)}`;
     const tone = notice || ['failed', 'interrupted'].includes(operation?.state) ? 'warn' : 'muted';
     const selected = entry?.selection || {};
@@ -110,19 +119,27 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
     const details = facts.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
     const limitations = (operation?.limitations || []).map((code) => LIMITATIONS[code] || code).join(' ');
     const progress = (operation?.progress || []).join('\n');
+    const panelId = `harness-maintenance-details-${String(entry?.harness || view.harness || 'program').replace(/[^A-Za-z0-9_-]/g, '-')}`;
+    // One state row: the operation's status, a short typed cause or this view's own sentence, then the Details
+    // toggle, whose panel holds the exact engine text, what an update does, the version facts and the rarer actions.
     return `<div class="harness-maintenance-row">
         <div class="harness-maintenance-line">${escapeHtml(maintenanceVersionLine(entry, view))}</div>
         <div class="harness-maintenance-actions">${actions.join('')}</div>
-        ${status ? `<div class="harness-maintenance-notice ui-status" data-tone="${tone}" role="status">${escapeHtml(status)}</div>` : ''}
-        ${notice ? `<div class="harness-maintenance-notice" data-tone="warn">${escapeHtml(notice)}</div>` : ''}
-        ${entry && !entry.maintainable ? `<div class="harness-maintenance-notice">${escapeHtml(entry.remedy || 'Updates are unavailable for the selected installation.')}</div>` : ''}
-        <details class="harness-maintenance-details"${view.expanded ? ' open' : ''}>
-            <summary>Version details</summary>
+        <div class="harness-maintenance-state">
+            ${status ? `<span class="harness-maintenance-notice ui-status" data-tone="${tone}" role="status">${escapeHtml(status)}</span>` : ''}
+            ${error ? `<span class="harness-maintenance-notice" data-tone="warn">${escapeHtml(error)}</span>` : ''}
+            ${cause ? `<span class="harness-maintenance-cause">${escapeHtml(cause)}</span>` : ''}
+            ${entry && !entry.maintainable ? `<span class="harness-maintenance-notice">${escapeHtml(entry.remedy || 'Updates are unavailable for the selected installation.')}</span>` : ''}
+            <button type="button" class="settings-disclosure ui-hit-area" data-maintenance-details aria-expanded="${view.expanded ? 'true' : 'false'}" aria-controls="${panelId}">Details${DETAILS_CARET}</button>
+        </div>
+        <div class="harness-maintenance-details" id="${panelId}"${view.expanded ? '' : ' hidden'}>
+            ${engineProblem ? `<p class="harness-maintenance-exact">Exact message: <code>${escapeHtml(engineProblem)}</code></p>` : ''}
+            <p>${escapeHtml(UPDATE_NOTE)}</p>
             <dl>${details}</dl>
             ${limitations ? `<p>${escapeHtml(limitations)}</p>` : ''}
             ${progress ? `<pre>${escapeHtml(progress)}</pre>` : ''}
             ${extraActions.length ? `<div class="harness-maintenance-actions">${extraActions.join('')}</div>` : ''}
-        </details>
+        </div>
     </div>`;
 }
 
@@ -148,12 +165,21 @@ export function createHarnessMaintenanceController({
         host()?.querySelectorAll('[data-family-maintenance]').forEach((element) => {
             const harness = element.dataset.familyMaintenance;
             const state = record(harness);
+            // A rebuild keeps the focused control: the same action or Details toggle takes the focus back.
+            const active = element.ownerDocument?.activeElement;
+            const focused = active && element.contains?.(active)
+                ? (active.dataset?.maintenanceAction ? `[data-maintenance-action="${active.dataset.maintenanceAction}"]`
+                    : active.hasAttribute?.('data-maintenance-details') ? '[data-maintenance-details]' : '') : '';
             element.innerHTML = harnessMaintenanceMarkup(rows.get(harness), {
-                ...state, inspectionError: state.inspectionError || inventoryError,
+                ...state, harness, inspectionError: state.inspectionError || inventoryError,
                 inspectionPending: reads.has(harness) || reads.has('*'),
             });
-            element.querySelector('details')?.addEventListener('toggle', (event) => {
-                state.expanded = event.currentTarget.open;
+            if (focused) element.querySelector(focused)?.focus?.();
+            element.querySelector('[data-maintenance-details]')?.addEventListener('click', (event) => {
+                state.expanded = !state.expanded;
+                event.currentTarget.setAttribute('aria-expanded', String(state.expanded));
+                const panel = element.querySelector('.harness-maintenance-details');
+                if (panel) panel.hidden = !state.expanded;
             });
             element.querySelectorAll('[data-maintenance-action]').forEach((control) => {
                 control.addEventListener('click', () => act(harness, control.dataset.maintenanceAction));
@@ -260,11 +286,18 @@ export function createHarnessMaintenanceController({
                 }
                 // A typed pre-acceptance refusal has no installation effect.
                 // Network/5xx/non-JSON replies retain exactly this key/body.
-                if ([400, 409].includes(error.status) && problem?.code) state.request = null;
-                if (state.request) state.unknownCurrent = true;
+                const preparation = problem?.context?.scope === 'this_attempt'
+                    && problem.context.acceptance === 'not_submitted';
+                // A local preparation response knows only THIS attempt. It
+                // cannot erase an earlier lost POST using the same key.
+                if ((preparation || [400, 409].includes(error.status) && problem?.code)
+                    && !(preparation && request.mayHaveSubmitted)) state.request = null;
+                if (state.request && !preparation) request.mayHaveSubmitted = true;
+                if (state.request?.mayHaveSubmitted) state.unknownCurrent = true;
                 state.operationError = state.request
                     ? `Update acceptance unconfirmed: ${error.message || error}. Retry the same request to recover its result.`
-                    : `Update not started: ${error.message || error}`;
+                    : preparation && ['maintenance_restart_required', 'maintenance_preparation_failed'].includes(problem?.code)
+                        ? String(error.message || error) : `Update not started: ${error.message || error}`;
                 return null;
             }).finally(() => { state.busy = null; render(); });
         render();

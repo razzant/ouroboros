@@ -64,6 +64,47 @@ def test_plain_reply_and_voluntary_selection_need_one_round(turn):
     assert 'task_completion' not in trace
 
 
+@pytest.mark.parametrize('statement', [None, 'Solo would have avoided coordination; parallel checks helped.'])
+def test_accepted_completion_retains_only_an_authored_swarm_comparison(turn, tmp_path, statement):
+    from ouroboros.swarm_receipt import publish
+    from ouroboros.task_results import write_task_result
+
+    registry, calls, notes, run = turn
+    write_task_result(tmp_path, 'author-task', 'running')
+    schema = registry.get_schema_by_name('finish_task')['function']['parameters']['properties']
+    assert schema['swarm_comparison']['type'] == 'string'
+    kwargs = {'swarm_comparison': statement} if statement is not None else {}
+    text, usage, trace = run([finish('Done.', **kwargs)])
+    assert text == 'Done.' and len(calls) == 1
+    comparison = publish(tmp_path, 'author-task')['mind_comparison']
+    if statement is None:
+        assert comparison['state'] == 'not_recorded'
+    else:
+        assert comparison == {'source': 'task.swarm_comparison', 'author': 'mind', 'value': statement}
+    assert registry.get_schema_by_name('finish_task')['function']['parameters']['properties'] == schema
+
+
+def test_held_completion_does_not_publish_its_swarm_comparison(turn, tmp_path, monkeypatch):
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    registry, calls, notes, run = turn
+    write_task_result(tmp_path, 'author-task', 'running')
+    hold_first_delivery(monkeypatch)
+    text, usage, trace = run([finish('Held answer', swarm_comparison='An unaccepted comparison'), finish('Done.')])
+    assert text == 'Done.' and len(calls) == 2
+    assert 'swarm_comparison' not in load_task_result(tmp_path, 'author-task')
+
+
+@pytest.mark.parametrize('statement, accepted', [('An authored comparison', True), (17, False)])
+def test_swarm_comparison_argument_is_text_without_deciding_completion(turn, statement, accepted):
+    from ouroboros.tools.control_runtime import _finish_task
+
+    registry, calls, notes, run = turn
+    result = _finish_task(registry._ctx, action='finish', answer='Done.', swarm_comparison=statement)
+    assert ('completion_requested' in result) is accepted
+    assert ('swarm_comparison must be text' in result) is not accepted
+
+
 def test_retained_report_interim_then_short_complete_selection(turn, monkeypatch):
     registry, calls, notes, run = turn
     review_calls = hold_first_delivery(monkeypatch)
@@ -117,6 +158,38 @@ def test_schema_bookkeeping_exempts_only_successful_results(turn, name, failure)
         assert trace['completion_refusals'][0]['reason'].startswith('unobserved_tool_results')
     else:
         assert not trace.get('completion_refusals')
+
+
+@pytest.mark.parametrize('name, arguments', [('chronicle_write', {'kind': 'page', 'text': 'What I did'}),
+                                             ('memory_mark', {}),
+                                             ('update_scratchpad', {'content': 'Next: the docs'})])
+@pytest.mark.parametrize('answer, held', [('written', False), ('⚠️ PARTIAL_WRITE: two decisions not recorded', True),
+                                          ('⚠️ TOOL_ERROR: write failed', True)])
+def test_a_receipt_write_rides_with_the_answer_unless_it_said_more(turn, name, arguments, answer, held):
+    """The page, a note or an addressed message written in the finishing response does not cost
+    the answer a round (owner decision 27.10); a warning or a failure from it is read first."""
+    registry, calls, notes, run = turn
+    registry.override_handler(name, lambda _ctx, **kw: answer)
+    response = finish('The asked fact')
+    response['tool_calls'].insert(0, {'id': 'receipt', 'type': 'function', 'function': {
+        'name': name, 'arguments': json.dumps(arguments)}})
+    text, _, trace = run([response, finish('Read it first')])
+    assert len(calls) == (2 if held else 1)
+    assert text == ('Read it first' if held else 'The asked fact')
+    assert bool(trace.get('completion_refusals')) is held
+
+
+def test_only_an_ok_receipt_write_skips_the_read_before_finish():
+    from ouroboros.tool_capabilities import COMPLETION_RECEIPT_TOOLS, completion_observation_calls
+
+    def call(tool, code='OK', is_error=False):
+        return {'tool': tool, 'tool_result_code': code, 'is_error': is_error}
+
+    assert completion_observation_calls([call(name) for name in sorted(COMPLETION_RECEIPT_TOOLS)]) == []
+    held = [call('tell_task', 'LEGACY_WARNING'), call('forward_to_worker', 'TOOL_ERROR', True),
+            call('update_identity'), call('update_world'), call('read_file'), call('verify_and_record'),
+            call('a_tool_added_later'), call('chronicle_write', None)]
+    assert completion_observation_calls(held) == held
 
 
 def test_stop_avoids_reviews_nudges_and_question_parking(turn, monkeypatch):
@@ -202,6 +275,8 @@ def test_reply_later_is_consumed_once_then_a_hold_needs_new_selection(turn, monk
     from tests.test_presence_runner import _admission
     registry, calls, notes, run = turn
     registry._ctx.task_contract = {'capability_ceiling': presence_ceiling_payload(_admission().capability_ceiling)}
+    from tests.presence_legacy_helpers import register_legacy_completion
+    register_legacy_completion(registry)
     checked = hold_first_delivery(monkeypatch)
     text, _, _ = run([_call('message', ''), {'content': 'Chosen reply-later'},
         {'content': 'Interim, unselected'}, _call('message', 'Deliberately selected')])

@@ -28,7 +28,7 @@ OWNER_EFFORT_TIERS: tuple[str, ...] = tuple(tier for tier in EFFORT_SCALE if tie
 # Who decided one actor's effort (``choose_effort``); task records and chat frames carry it verbatim.
 EFFORT_SOURCES: tuple[str, ...] = ("auto", "pin", "model_name", "cyber")
 # The lane-era global review effort, kept ONLY as the frozen legacy skill-review fingerprint
-# literal (``skill_review_cycles``): an empty reviewer row reviews at the range's top, never here.
+# literal: an empty reviewer row reviews at the range's top, never here.
 REVIEW_POOL_DEFAULT_EFFORT = "high"
 
 
@@ -199,6 +199,7 @@ def resolve_prompt_cache_ttl() -> str:
     Validated like ``resolve_effort``: an unknown value falls back to the shipped default.
     Consumed ONLY by the finalizer (``llm.LLMClient._normalize_payload_cache_ttl``), by
     ``review_helpers.cached_prompt_blocks`` (its marker gets stamped to the same value anyway),
+    by ``effort_evidence.session_prompt_cache_ttl_request`` for native session starts,
     and by ``usage_accounting._reservation_cost`` as the payload-free admission fallback
     (payload-carrying sites use the finalizer's applied TTL) — never by per-builder marking
     sites (docs/DEVELOPMENT.md cache-friendliness invariant)."""
@@ -223,6 +224,14 @@ def normalize_runtime_mode(value: Any) -> str:
     return text if text in VALID_RUNTIME_MODES else default_val
 
 
+VALID_SUBAGENTS_MODES = ("off", "auto", "swarm")
+
+
+def normalize_subagents_mode(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in VALID_SUBAGENTS_MODES else str(SETTINGS_DEFAULTS["OUROBOROS_SUBAGENTS_MODE"])
+
+
 VALID_SAFETY_MODES = ("full", "light", "off")
 
 
@@ -239,6 +248,7 @@ _SAFETY_MODE_RANK = {"full": 2, "light": 1, "off": 0}
 # Effect vocabulary shared by the owner gateway and task-local runtime readers.
 IMMEDIATE_SETTINGS = frozenset({
     "TOTAL_BUDGET",
+    "OUROBOROS_SUBAGENTS_MODE",  # live room rounds/admissions; never a task snapshot authority
     # The interface language is read live by the gateway (every /api/ui/i18n read) and by
     # the Telegram skill; a running task's runtime block keeps the tag it started with.
     "OUROBOROS_UI_LANGUAGE",
@@ -247,6 +257,9 @@ IMMEDIATE_SETTINGS = frozenset({
     # the currently running task's next tool call. The inner shell subprocess
     # timeout still prefers the worker env (next task) — disclosed residual.
     "OUROBOROS_TOOL_TIMEOUT_SEC",
+    # model_concurrency._cap() reads the settings document at every physical call in every
+    # process, so a saved cap reaches running work at its next call, not at the next task.
+    "OUROBOROS_MODEL_MAX_CONCURRENCY",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
     "OUROBOROS_UPDATE_CHANNEL",

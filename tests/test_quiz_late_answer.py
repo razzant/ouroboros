@@ -485,9 +485,9 @@ def test_a_late_answer_direct_turn_starts_with_the_rebuilt_frame(tmp_path, monke
 
 
 def test_a_late_answer_bypasses_an_unrelated_project_reader(tmp_path, monkeypatch):
-    """End to end through the real bridge intake: a late answer in a Project room
-    with exactly one live root lands in THAT root's mailbox as the owner's words
-    with its typed late_answer provenance, so the drain can rebuild the frame."""
+    """End to end through the real bridge intake: a late answer in a Project room whose
+    one live root is unrelated work never enters that root's mailbox; a fresh head
+    receives the answer with its typed late_answer provenance."""
     from types import SimpleNamespace
 
     import server
@@ -526,6 +526,151 @@ def test_a_late_answer_bypasses_an_unrelated_project_reader(tmp_path, monkeypatc
     assert len(heads) == 1
     metadata = heads[0][1]["task_metadata"]
     _assert_host_snapshot(metadata["late_answer"], "task-1", "q1")
+
+
+def _late_answer_head(head_id, asker, chat_id, *, project_id="", started=1000.0, accepting=True):
+    """A live direct head that a late answer to ``asker`` started, as agent.py leaves it mid-turn."""
+    import threading
+    from types import SimpleNamespace
+
+    from supervisor.active_activity import get_direct_activity_registry
+
+    head = SimpleNamespace(
+        _busy=True, _accepting_owner_messages=accepting, _current_task_id=head_id, _current_chat_id=chat_id,
+        _current_task_metadata={**({"project_id": project_id} if project_id else {}),
+                                "late_answer": {"task_id": asker, "quiz_id": "q0"}},
+        _current_task_text="1. sqlite", _task_started_ts=started, _last_activity_ts=started,
+        _owner_message_admission_lock=threading.Lock())
+    get_direct_activity_registry().register(head_id, chat_id=chat_id, actor=head)
+    return head
+
+
+def _late_answered(tmp_path, monkeypatch, chat_id):
+    """task-1 asked q1 in ``chat_id`` and finished; the owner's late answer waits at bridge intake."""
+    import supervisor.message_bus as mb
+
+    record_asked(tmp_path, "task-1", quiz_id="q1", question="Which db?",
+                 options=["sqlite", "postgres"], assumption="sqlite meanwhile", chat_id=chat_id)
+    reconcile_terminal(tmp_path, "task-1")
+    bridge, _frames = _late_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(mb, "load_state", lambda: {"session_id": "s-1"})
+    app = _decision_app(tmp_path, monkeypatch, live_task=None)
+    resp = _post(app, {"request_id": "r1", "decision_id": "quiz:task-1:q1", "option_index": 1})
+    assert resp.status_code == 200 and resp.json()["forwarded"] is True
+    return bridge
+
+
+def _intake(tmp_path, monkeypatch, bridge, *, running=None):
+    """One pass of the real bridge intake; returns the fresh heads it started."""
+    import threading
+    from types import SimpleNamespace
+
+    import server
+    from tests.test_v6730_origin_invariant import _ImmediateThread
+
+    started = []
+    ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, PENDING=[], RUNNING=dict(running or {}),
+        load_state=lambda: {"owner_id": 1, "owner_chat_id": 1, "session_id": "s-1"},
+        update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
+        consciousness=SimpleNamespace(inject_observation=lambda _t: None, pause=lambda: None, resume=lambda: None),
+        get_chat_agent=lambda: SimpleNamespace(_busy=False),
+        handle_chat_direct=lambda *a, **k: started.append((a, k)),
+        send_with_budget=lambda *a, **k: None,
+    )
+    monkeypatch.setattr(bridge, "send_routing_ack", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    server._process_bridge_updates(bridge, 0, ctx)
+    return started
+
+
+@pytest.mark.parametrize("room", ["project", "main"])
+@pytest.mark.parametrize("head_asker", ["task-1", "task-other"])
+def test_a_late_answer_reaches_the_head_its_askers_earlier_answer_started(tmp_path, monkeypatch, room, head_asker):
+    """One asker's answers are one thread: through the real bridge intake, a late answer reads the
+    live head that an earlier late answer to the SAME asker started, beside an unrelated reader, in
+    a Project or in Main; a head holding another asker's answer is unrelated, and a fresh head starts."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "racer") if room == "project" else {}
+    chat_id = int(project["chat_id"]) if project else 1
+    bridge = _late_answered(tmp_path, monkeypatch, chat_id)
+    _late_answer_head("head-1", head_asker, chat_id, project_id=str(project.get("id") or ""))
+    unrelated = {"id": "busy-root", "chat_id": chat_id, "root_task_id": "busy-root",
+                 "delegation_role": "root", "drive_root": str(tmp_path)}
+    started = _intake(tmp_path, monkeypatch, bridge, running={"busy-root": {"task": unrelated}})
+
+    assert drain_owner_entries(tmp_path, "busy-root", set()) == []
+    if head_asker == "task-1":
+        assert started == []
+        [entry] = drain_owner_entries(tmp_path, "head-1", set())
+        assert (entry["late_answer"]["task_id"], entry["late_answer"]["quiz_id"]) == ("task-1", "q1")
+    else:
+        [(_args, kwargs)] = started
+        _assert_host_snapshot(kwargs["task_metadata"]["late_answer"], "task-1", "q1")
+        assert drain_owner_entries(tmp_path, "head-1", set()) == []
+
+
+def test_two_heads_of_one_askers_answers_give_the_next_one_to_the_earliest(tmp_path, monkeypatch):
+    """A start race left two heads of one asker's late answers: the next answer goes to the
+    earliest of them instead of starting a third; the later head's mailbox stays empty."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "racer")
+    chat_id = int(project["chat_id"])
+    bridge = _late_answered(tmp_path, monkeypatch, chat_id)
+    _late_answer_head("head-late", "task-1", chat_id, project_id=project["id"], started=1002.0)
+    _late_answer_head("head-early", "task-1", chat_id, project_id=project["id"], started=1001.0)
+
+    assert _intake(tmp_path, monkeypatch, bridge) == []
+    assert [e["late_answer"]["quiz_id"] for e in drain_owner_entries(tmp_path, "head-early", set())] == ["q1"]
+    assert drain_owner_entries(tmp_path, "head-late", set()) == []
+
+
+def test_a_late_answer_head_running_as_queued_work_still_holds_its_askers_thread(tmp_path, monkeypatch):
+    """A head that continued in the background runs as a queue row; its typed late-answer
+    provenance still makes it the reader of the next answer to the same asker."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "racer")
+    chat_id = int(project["chat_id"])
+    bridge = _late_answered(tmp_path, monkeypatch, chat_id)
+    pooled = {"id": "pooled-head", "chat_id": chat_id, "root_task_id": "pooled-head", "delegation_role": "root",
+              "drive_root": str(tmp_path), "metadata": {"late_answer": {"task_id": "task-1", "quiz_id": "q0"}}}
+
+    assert _intake(tmp_path, monkeypatch, bridge, running={"pooled-head": {"task": pooled, "started_at": 1000.0}}) == []
+    assert [e["late_answer"]["quiz_id"] for e in drain_owner_entries(tmp_path, "pooled-head", set())] == ["q1"]
+
+
+def test_a_late_answer_head_that_stopped_reading_leaves_the_next_answer_to_a_fresh_head(tmp_path, monkeypatch):
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from ouroboros.projects_registry import create_project
+
+    project = create_project(tmp_path, "racer")
+    chat_id = int(project["chat_id"])
+    bridge = _late_answered(tmp_path, monkeypatch, chat_id)
+    _late_answer_head("head-1", "task-1", chat_id, project_id=project["id"], accepting=False)
+
+    assert len(_intake(tmp_path, monkeypatch, bridge)) == 1
+    assert drain_owner_entries(tmp_path, "head-1", set()) == []
+
+
+def test_an_ordinary_main_message_never_joins_a_late_answer_head(tmp_path, monkeypatch):
+    """Main keeps one head per owner message: only a late answer follows its asker's head."""
+    import supervisor.message_bus as mb
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    bridge, _frames = _late_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr(mb, "load_state", lambda: {"session_id": "s-1"})
+    _late_answer_head("head-1", "task-1", 1)
+    mb.accept_local_message(bridge, tmp_path, "what else is open?", chat_id=1, user_id=1,
+                            source="web", client_message_id="m-1")
+
+    assert len(_intake(tmp_path, monkeypatch, bridge)) == 1
+    assert drain_owner_entries(tmp_path, "head-1", set()) == []
 
 
 def test_a_late_web_answer_passes_the_supervisor_consumer_seam(tmp_path, monkeypatch):

@@ -65,7 +65,7 @@ def fit(monkeypatch):
         return {"model": task["model"], "provider": "openrouter"}, evidence
 
     monkeypatch.setattr(context_fit, "resolve_context_fit_route", resolve)
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: fact.density)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: fact.density)
     return fact
 
 
@@ -235,7 +235,7 @@ def test_light_account_and_manual_window_share_real_context_resolver(monkeypatch
     monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", accounts)
     monkeypatch.setattr(config, "load_settings", lambda: settings)
     monkeypatch.setattr(c, "_consolidation_route", lambda: (model, False))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
     probes = []
 
     def probe(_root, **kwargs):
@@ -308,7 +308,7 @@ def test_unavailable_capacity_reader_retains_ordinary_call(monkeypatch):
     def unavailable(*args, **kwargs):
         raise OSError("catalog unavailable")
     monkeypatch.setattr(capability_evidence, "probe", unavailable)
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
     llm = _LLM()
     assert _call(llm)[0] and len(llm.calls) == 1
 

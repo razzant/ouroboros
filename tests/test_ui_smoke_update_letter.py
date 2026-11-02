@@ -1,5 +1,5 @@
-"""Dashboard -> Updates update-letter acceptance (docs/ARCHITECTURE.md "Visual verification
-policy"): the letter on the real consumer flow, real UI, real browser.
+"""Dashboard -> Updates description acceptance (docs/ARCHITECTURE.md "Visual verification
+policy"): the description on the real consumer flow, real UI, real browser.
 
 Sibling of ``test_ui_smoke_playwright.py`` (which carries the shared server fixture and
 sits at its byte gate); marker-gated the same way, runs in the same CI job.
@@ -72,6 +72,7 @@ def test_ui_smoke_update_letter_renders_below_the_action(direct_server, tmp_path
                         xss: window.__letter_xss === 1,
                         buttons: body.querySelectorAll('button').length,
                         refresh: section.querySelector('#updates-letter-refresh').textContent.trim(),
+                        write: section.querySelector('#updates-letter-write').textContent.trim(),
                         codeBlocks: section.querySelectorAll('.md-code-block').length,
                         headline: document.querySelector('#updates-summary').textContent,
                         action: document.querySelector('#btn-update-primary').textContent,
@@ -96,7 +97,7 @@ def test_ui_smoke_update_letter_renders_below_the_action(direct_server, tmp_path
     assert info["provenance"].startswith("Written by Ouroboros 6.113.5 about 6.114.0")
     assert info["strong"] == 1 and info["scripts"] == 0 and info["xss"] is False
     assert info["buttons"] == 0, "the authored body retains no Copy or other generated controls"
-    assert "Refresh" in info["refresh"]
+    assert "Check" in info["refresh"] and info["write"] == "Rewrite", "Check and the explicit authoring request stay apart"
     assert info["codeBlocks"] == 1, "the fenced block still renders; only its control is gone"
     assert info["headline"].startswith("Update available") and info["action"] == "Update to 6.114.0"
     assert info["order"][0] < info["order"][1] < info["order"][2], "action row, then letter, then Recovery"

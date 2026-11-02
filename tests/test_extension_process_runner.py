@@ -90,7 +90,7 @@ def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path)
         repo_dir=pathlib.Path(__file__).resolve().parents[1],
         drive_root=child_drive,
         budget_drive_root=str(drive_root),
-        task_metadata={"budget_drive_root": str(drive_root)},
+        task_metadata={"budget_drive_root": str(drive_root), "work_kind": "owner"},  # an owner task's minted kind
         task_contract={"objective": "native-objective"},
     ))
     assert _payload(registry.execute(tool_name, {"message": "ok"})).endswith(f":ok:{child_drive}:{drive_root}:native-objective")
@@ -211,6 +211,7 @@ def test_out_of_process_extension_tool_failure_uses_tool_error_prefix(tmp_path):
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("native_tool_fail", "boom")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
 
     result = registry.execute(tool_name, {})
 
@@ -254,6 +255,7 @@ def test_out_of_process_extension_child_does_not_receive_settings_as_env(tmp_pat
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("native_env_contract", "check")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
 
     assert _payload(registry.execute(tool_name, {})).endswith("no-env-leak")
 
@@ -513,6 +515,7 @@ def test_isolated_dependency_extension_dispatches_out_of_process_without_native_
     assert tool is not None
     assert tool["out_of_process"] is True
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
     assert _payload(registry.execute(tool_name, {})).endswith("pure-isolated")
 
 
@@ -552,6 +555,7 @@ def test_isolated_dependency_extension_stdout_does_not_break_child_protocol(tmp_
         assert stat.S_IMODE(calls_dir.stat().st_mode) == 0o700
     tool_name = extension_loader.extension_surface_name("isolated_noisy_stdout", "value")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
     assert _payload(registry.execute(tool_name, {})).endswith("pure-isolated-noisy")
 
 
@@ -610,6 +614,7 @@ def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tre
     assert err is None, err
     tool_name = extension_loader.extension_surface_name("isolated_parallel_imports", "alive")
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {'work_kind': 'owner'}  # an owner task's minted kind
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(registry.execute, tool_name, {"delay": 0.4})

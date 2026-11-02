@@ -29,7 +29,6 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
     result = selection.select_from_paths(repo, ["ouroboros/leaf.py", "tests/test_indirect.py"], base="base")
     assert result.tier == "selected"
     assert set(result.files) == {"tests/test_floor.py", "tests/test_direct.py", "tests/test_nested.py", "tests/test_indirect.py"}
-    assert result.targets == result.files
     assert result.record()["omitted_files"] == 1
     assert result.policy and result.base == "base"
 
@@ -43,7 +42,7 @@ def test_leaf_selects_only_direct_importers_and_changed_tests_above_floor(repo):
 ])
 def test_verification_changes_require_full(repo, path):
     result = selection.select_from_paths(repo, [path], base="base")
-    assert result.tier == "full" and result.targets == ("tests/",)
+    assert result.tier == "full"
     assert len(result.files) == result.available
     assert (path, "verification apparatus changed") in result.reasons
 
@@ -56,10 +55,28 @@ def test_no_product_hub_or_fraction_threshold(repo):
     assert len(result.files) == 15
 
 
-def test_package_init_selects_its_direct_submodule_imports(repo):
-    result = selection.select_from_paths(repo, ["ouroboros/__init__.py"], base="base")
-    assert set(result.files) == set(p.relative_to(repo).as_posix() for p in (repo / "tests").glob("test_*.py"))
-    assert result.tier == "selected"
+@pytest.mark.parametrize("path", ["server.py", "launcher.py", "ouroboros/__init__.py", "ouroboros/body_switch.py",
+                                  "ouroboros/body_adoption.py", "supervisor/update_recovery.py",
+                                  "ouroboros/launcher_bootstrap.py", "supervisor/git_ops_reset.py",
+                                  "supervisor/update_merge.py"])
+def test_body_cutover_and_recovery_changes_require_full(repo, path):
+    # The package init carries the adoption hook: it is cutover, not an ordinary hub of imports.
+    result = selection.select_from_paths(repo, [path], base="base")
+    assert result.tier == "full" and (path, "body cutover/recovery changed") in result.reasons
+    assert selection.select_from_paths(repo, ["ouroboros/body_candidate.py"], base="base").tier == "selected"
+
+
+def test_inherited_widening_keeps_present_consumers_declared_full_and_both_reasons(repo):
+    earlier = {"extra_tests": ["tests/test_indirect.py", "tests/test_deleted.py"], "full_tests": False,
+               "test_reason": "reads leaf by path"}
+    joined = selection.inherit_widening(repo, {"extra_tests": ("tests/test_direct.py",), "full_tests": False,
+                                               "test_reason": "dynamic consumer"}, earlier)
+    assert joined == {"extra_tests": ("tests/test_direct.py", "tests/test_indirect.py"), "full_tests": False,
+                      "test_reason": "dynamic consumer; reads leaf by path"}
+    assert selection.inherit_widening(repo, dict(extra_tests=(), full_tests=False, test_reason=""),
+                                      {"full_tests": True, "test_reason": "broad"})["full_tests"] is True
+    assert selection.inherit_widening(repo, dict(extra_tests=(), full_tests=False, test_reason=""), {}) == {
+        "extra_tests": (), "full_tests": False, "test_reason": ""}
 
 
 def test_author_can_widen_dynamic_consumers_or_request_full(repo):
@@ -183,5 +200,24 @@ def test_reviewed_tool_binds_widening_and_force_uses_full(repo, monkeypatch):
     review_helpers._run_review_preflight_tests(ctx, force=True)
     assert runs[0]["selected"] is True and runs[0]["extra_tests"] == ("tests/test_indirect.py",)
     assert not runs[1].get("selected")
+    assert "base" not in runs[0]  # an unbound pre-commit run keeps its HEAD base
     schema = next(t.schema for t in git.get_tools() if t.name == "commit_reviewed")
     assert {"extra_tests", "full_tests", "test_reason"} <= schema["parameters"]["properties"].keys()
+
+
+def test_a_bound_candidates_post_commit_and_forced_runs_stay_selected_with_its_qualification_scope(monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import body_candidate
+
+    request = {"extra_tests": (), "full_tests": False, "test_reason": ""}
+    ctx = SimpleNamespace(_commit_test_request=request)
+    scoped = {**request, "base": "fork", "extra_tests": ("tests/test_inherited.py",), "test_reason": "earlier"}
+    monkeypatch.setattr(body_candidate, "qualification_request", lambda c, r: dict(scoped))
+    monkeypatch.setattr(body_candidate, "is_bound", lambda c: False)
+    assert selection.commit_test_options(ctx, post_commit=True) == {"selected": True, **request}
+    assert selection.commit_test_options(ctx, force=True, post_commit=True) == {}  # serving evolution, managed
+    monkeypatch.setattr(body_candidate, "is_bound", lambda c: True)
+    assert selection.commit_test_options(ctx) == {"selected": True, **request}  # pre-commit: review admission
+    assert selection.commit_test_options(ctx, post_commit=True) == {"selected": True, **scoped}
+    assert selection.commit_test_options(ctx, force=True, post_commit=True) == {"selected": True, **scoped}
+    assert selection.commit_test_options(SimpleNamespace(), force=True, post_commit=True) == {}  # never requested

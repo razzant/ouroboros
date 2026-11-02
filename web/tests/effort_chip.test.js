@@ -56,6 +56,7 @@ function fixture() {
     const messages = document.byId.get('chat-messages');
     return {
         meta: (id) => walkCard(messages, id)?.querySelector('[data-live-meta]')?.innerHTML ?? null,
+        facts: (id) => walkCard(messages, id)?.querySelector('[data-live-facts]')?.innerHTML ?? null,
         emit: (row, seconds = 0) => handlers.get('chat')({ chat_id: 1, role: 'system', is_progress: true,
             ts: `2026-10-10T12:00:${String(seconds).padStart(2, '0')}Z`, ...row }),
         close() { instance.destroy(); restoreDom(env.prior); },
@@ -71,8 +72,8 @@ test('a child card paints the chip from its frames and keeps it across frames wi
         f.emit({ role: 'assistant', task_id: ROOT, content: 'Child queued', subagent_event: 'scheduled', ...lineage('kid-a'),
             effort_level: 'high', effort_requested: 'ultra', effort_source: 'auto', model: 'openai/gpt-5.6-terra' });
         assert.match(f.meta('kid-a'), new RegExp(String.raw`<span class="chat-live-meta-text chat-live-effort" data-effort-source="auto">Effort High \(asked Ultra\)${tail}`));
-        assert.match(f.meta('kid-a'), /Agent model: gpt-5.6-terra<span class="chat-live-meta-sep">&nbsp;· <\/span><\/span><\/span><span class="chat-live-meta-part"><span class="chat-live-meta-text chat-live-effort"/,
-            'after the executor block, separated by text');
+        assert.match(f.meta('kid-a'), /gpt-5.6-terra<span class="chat-live-meta-sep">&nbsp;· <\/span><\/span><\/span><span class="chat-live-meta-part"><span class="chat-live-meta-text chat-live-effort"/,
+            'a child without an executor runs on its own model: the effort follows that model, separated by text');
         f.emit({ role: 'assistant', task_id: 'kid-a', content: 'Reading the tests.', narration: true, subagent_event: 'progress', ...lineage('kid-a') }, 1);
         assert.match(f.meta('kid-a'), /Effort High \(asked Ultra\)/, 'a progress frame without the fact keeps the chip');
         f.emit({ role: 'assistant', task_id: ROOT, content: 'Child done', subagent_event: 'completed', status: 'completed', result: 'ok',
@@ -91,5 +92,49 @@ test('a child card paints the chip from its frames and keeps it across frames wi
         // An old frame: no level, no chip — never back-filled from the owner's range.
         f.emit({ role: 'assistant', task_id: ROOT, content: 'Child queued', subagent_event: 'scheduled', ...lineage('kid-e', 'scout') }, 6);
         assert.doesNotMatch(f.meta('kid-e'), /chat-live-effort/);
+    } finally { f.close(); }
+});
+
+// The Coordinator row of the details states the coordinating model and, when the schedule recorded one,
+// its provenance (chosen_by): escaped through the renderer, never inferred from a role or a model name.
+test('the coordinator row carries the recorded provenance and escapes a chosen row name', () => {
+    const f = fixture();
+    try {
+        f.emit({ role: 'assistant', task_id: ROOT, content: 'Child done', subagent_event: 'completed', status: 'completed',
+            result: 'ok', ...lineage('kid-p', 'auditor'), model: 'claudexor::codex=gpt-6-astra', executor_route: 'claude',
+            execution_evidence: { delegated_runs_started: 1, delegated_runs_settled: 1, delegated_runs_succeeded: 1,
+                delegated_runs_failed: 0, subscription_cost_usd: 0, harness_models: ['claude-opus-5-5[1m]'] },
+            parent_cognitive_route: { model: 'claudexor::codex=gpt-6-astra', chosen_by: 'delegator',
+                selected_supervisor_snapshot: { selected_subagent_id: '<chosen&row>' } } });
+        const facts = f.facts('kid-p');
+        assert.match(facts, /<dt>Coordinator<\/dt><dd>codex=gpt-6-astra \(chosen by the delegator \(&lt;chosen&amp;row&gt;\)\)<\/dd>/);
+        assert.doesNotMatch(facts, /<chosen&row>/);
+        assert.doesNotMatch(f.meta('kid-p'), /chosen by the delegator/, 'the compact line never carries provenance');
+    } finally {
+        f.close();
+    }
+});
+
+// A session child's effort carrier is the LEAF's dispatch decision, not the nanny's reasoning level.
+// Keep it visible with the executor identity, using the same chosen/requested/source wording as native children.
+test('a delegated child keeps its leaf dispatch effort visible while the coordinator stays in details', () => {
+    const f = fixture();
+    try {
+        f.emit({ role: 'assistant', task_id: ROOT, content: 'Child done', subagent_event: 'completed', status: 'completed',
+            result: 'ok', ...lineage('kid-x', 'auditor'), model: 'claudexor::codex=gpt-6-astra', executor_route: 'claude',
+            execution_evidence: { delegated_runs_started: 1, delegated_runs_settled: 1, delegated_runs_succeeded: 1,
+                delegated_runs_failed: 0, subscription_cost_usd: 0, harness_models: ['claude-opus-5-5[1m]'] },
+            effort_level: 'high', effort_requested: 'high', effort_source: 'cyber' });
+        const meta = f.meta('kid-x');
+        assert.match(meta, /Claude Code/);
+        assert.match(meta, />claude-opus-5-5\[1m\]</, 'the executor\'s observed model');
+        assert.match(meta, /chat-live-effort/);
+        assert.match(meta, /Effort High \(Cyber Pro\)/, 'the leaf dispatch level remains visible');
+        assert.doesNotMatch(meta, /gpt-6-astra/, 'the coordinator never stands in for the executor');
+        const facts = f.facts('kid-x');
+        assert.match(facts, /<dt>Coordinator<\/dt><dd>codex=gpt-6-astra<\/dd>/);
+        assert.doesNotMatch(facts, /<dt>Effort<\/dt>/, 'no duplicate effort row');
+        // The executor's own sentence is the first row of the same details.
+        assert.match(facts, /^<div class="chat-live-fact"><dt>Executor<\/dt><dd>Delegated to your Claude Code account — 1 run settled \(1 ok\), \$0\.00 subscription<\/dd><\/div>/);
     } finally { f.close(); }
 });

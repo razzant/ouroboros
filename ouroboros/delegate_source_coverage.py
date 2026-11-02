@@ -296,8 +296,9 @@ def record_started_custody(
     snapshot_id: str, execution_binding_fingerprint: str, target_root: str,
     baseline_sha: str, authority_source: str,
     resource_ref: Dict[str, Any], capture_mode: str, processing: Mapping[str, Any] | None = None,
+    prompt_cache_ttl: Mapping[str, Any] | None = None,
     continuation_of: str = "", capture_id: str = "", snapshot_task_id: str = "", max_seconds_basis: str = "",
-    row_effort: Optional[str] = None,
+    row_effort: Optional[str] = None, plan_facts: Optional[dict] = None,
 ) -> bool:
     """Write the one STARTED custody row, including the source binding.
 
@@ -322,6 +323,7 @@ def record_started_custody(
         profile_id=route.profile_id,
         effort=route.effort,
         processing_preference=(processing or {}).get("requested"),
+        prompt_cache_ttl=dict(prompt_cache_ttl) if isinstance(prompt_cache_ttl, Mapping) and prompt_cache_ttl else None,
         project_id=project_id,
         project_owned=project_owned,
         project_persistent=project_persistent,
@@ -337,8 +339,8 @@ def record_started_custody(
         work_order_source_request=work_order_source_request,
         authority_fingerprint=authority_fingerprint,
         snapshot_id=snapshot_id,
-        execution_root=(root if snapshot_id or (resource_ref.get("workspace_kind") == "directory"
-                                               and resource_ref.get("strategy") == "direct") else ""),
+        execution_root=(root if snapshot_id or (resource_ref.get("workspace_kind") in ("directory", "git")
+                                               and resource_ref.get("strategy") in ("direct", "in_place")) else ""),
         execution_binding_fingerprint=execution_binding_fingerprint,
         baseline_sha=baseline_sha,
         target_root=target_root,
@@ -348,11 +350,12 @@ def record_started_custody(
         mode=authority.mode,
         isolation=authority.isolation,
         delegated=authority.delegated,
+        **(plan_facts or {}),
         continuation_of=str(continuation_of or ""),
         capture_id=str(capture_id or ""),
         snapshot_task_id=str(snapshot_task_id or ""),
     )
-    return custody_module.record_started(
+    recorded = custody_module.record_started(
         drive,
         entry,
         shape={
@@ -363,6 +366,11 @@ def record_started_custody(
             "capture_mode": capture_mode,
         },
     )
+    if recorded and entry.promotion:
+        from ouroboros.delegate_plan import promotion_notice
+
+        promotion_notice(ctx, entry)
+    return recorded
 
 
 __all__ = [

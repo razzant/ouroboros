@@ -135,54 +135,20 @@ def test_commit_findings_do_not_promote_an_adviser_to_a_blocker(additional):
 
 @pytest.mark.parametrize("additional", [False, True])
 def test_skill_aggregator_hears_advisers_without_counting_them(additional):
-    from ouroboros.skill_review import _aggregate_status, _extract_actor_findings
+    from ouroboros.review_ledger import seat_findings
+    from ouroboros.skill_review_status import status_from_findings
+    from ouroboros.triad_review import parse_seat_answers
     from tests._skill_review_shared import _make_actor, _pass_array_for_script_skill
     passing = _pass_array_for_script_skill()
     failing = passing.replace('"verdict": "PASS"', '"verdict": "FAIL"', 1)
-    findings, responded = _extract_actor_findings({"results": [
+    parsed = parse_seat_answers({"results": [
         {**_make_actor("openai/a", passing), "slot_id": "a"},
-        {**_make_actor("openai/critic", failing), "slot_id": "critic", "additional": additional}]})
-    assert len(responded) == (1 if additional else 2)
-    assert _aggregate_status(findings, "script") == ("clean" if additional else "blockers")
-    assert any(row["verdict"] == "FAIL" for row in findings)
-
-
-@pytest.mark.parametrize("additional", [False, True])
-def test_skill_chunk_quorum_never_counts_advisers(additional):
-    from tests.test_skill_review_passes import _actor, _run
-    def run(*_args, **_kwargs):
-        return json.dumps({"results": [{**_actor("ok"), "slot_id": "a"},
-            {"model": "m/b", "slot_id": "b", "text": "", "verdict": "ERROR"},
-            {**_actor("ok"), "slot_id": "critic"}]})
-    plan = {"models": ["m/a", "m/b", "m/c"], "slot_ids": ["a", "b", "critic"],
-            "routes": ["api_chat"] * 3, "retrieves": [False] * 3, "additional": [False, False, additional]}
-    _, _, _, error = _run(["first", "second"], run, models=plan["models"], row_plan=plan)
-    assert bool(error) is additional
-    if additional:
-        assert "only 1/2" in error
-
-
-def test_skill_subset_persists_panel_and_full_pool_cannot_reuse_it(tmp_path, monkeypatch, roster):
-    from ouroboros.skill_review import review_skill
-    from ouroboros.skill_loader import load_review_state
-    from tests._skill_review_shared import _build_skill, _make_ctx, _make_actor, _pass_array_for_script_skill
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(_build_skill(tmp_path)))
-    ctx, calls = _make_ctx(tmp_path), []
-    def run(_ctx, **kwargs):
-        calls.append(kwargs["row_plan"]["slot_ids"])
-        return json.dumps({"results": [{**_make_actor(model, _pass_array_for_script_skill()), "slot_id": sid}
-            for model, sid in zip(kwargs["models"], kwargs["row_plan"]["slot_ids"])]})
-    monkeypatch.setattr("ouroboros.tools.review._handle_multi_model_review", run)
-    refused = review_skill(ctx, "weather", reviewers=["a"])
-    assert refused.dispatch_refusal_code == "TOOL_ARG_ERROR" and not calls
-    first = review_skill(ctx, "weather", reviewers=["a"], reason="small payload")
-    assert first.status == "clean" and first.panel["assigned"] == ["a"]
-    assert load_review_state(ctx.drive_root, "weather").panel["reason"] == "small payload"
-    whole = review_skill(ctx, "weather")
-    assert whole.status == "clean" and whole.panel["assigned"] == ["a", "b", "c"]
-    assert calls == [["a"], ["a", "b", "c"]]
-    assert first.review_contract_fingerprint != whole.review_contract_fingerprint
+        {**_make_actor("openai/critic", failing), "slot_id": "critic", "additional": additional}]},
+        {"a": ("skill",), "critic": ("skill",)})
+    critical, advisory, extra = seat_findings([record.to_dict() for record in parsed.actor_records],
+                                              {"critic"} if additional else set())
+    assert status_from_findings([*critical, *advisory], "script") == ("clean" if additional else "blockers")
+    assert (len(extra) == 1) is additional and any(row["verdict"] == "FAIL" for row in parsed.findings)
 
 
 def test_owner_skill_job_defaults_to_whole_pool_and_freezes_tick_edits(tmp_path, monkeypatch, roster):
@@ -206,3 +172,44 @@ def test_owner_skill_job_defaults_to_whole_pool_and_freezes_tick_edits(tmp_path,
         assert result["status"] == "blockers"
     finally:
         _reset_queue()
+
+
+def test_a_required_root_blocks_by_widening_and_advisory_by_requiring_a_reason(roster):
+    """Blocking seats every ticked reviewer and records the request it widened; Advisory
+    refuses the same narrowing with no reason and composes it once a reason is given."""
+    widened = slots.compose_review_panel(["b", "adviser"], surface="result_required", strictness="blocking")
+    assert [seat.slot.slot_id for seat in widened.seats if not seat.additional] == ["a", "b", "c"]
+    assert widened.additional == ("adviser",)
+    assert widened.facts["widened_from"] == ["b", "adviser"] and widened.facts["composition"] == "full_pool"
+
+    with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_REASON_REQUIRED"):
+        slots.compose_review_panel(["b"], surface="result_required", strictness="advisory")
+    with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_EMPTY"):
+        slots.compose_review_panel(["adviser"], "only a critic", surface="result_required", strictness="advisory")
+    narrowed = slots.compose_review_panel(["b"], "the risky claim", surface="result_required", strictness="advisory")
+    assert [seat.slot.slot_id for seat in narrowed.seats if not seat.additional] == ["b"]
+    assert narrowed.facts["widened_from"] == [] and narrowed.facts["composition"] == "composed"
+
+
+def test_auto_result_cyber_pro_and_omission_do_not_take_the_required_root_floor(roster):
+    """The floor is the Required-root surface only. Auto (surface ``result``) and Cyber Pro
+    keep the named rows; omitting reviewers, or the host seating them, is the whole pool."""
+    auto = slots.compose_review_panel(["b"], surface="result", strictness="blocking")
+    assert [seat.slot.slot_id for seat in auto.seats] == ["b"] and auto.facts["widened_from"] == []
+    cyber = slots.compose_review_panel(["b"], surface="result_required", strictness="cyber_pro")
+    assert [seat.slot.slot_id for seat in cyber.seats] == ["b"]
+    assert cyber.facts["widened_from"] == [] and cyber.facts["reason_missing"] is True
+    named_all = slots.compose_review_panel(["a", "b", "c"], surface="result_required", strictness="advisory")
+    assert named_all.facts["widened_from"] == [] and sorted(named_all.facts["assigned"]) == ["a", "b", "c"]
+    host = slots.compose_review_panel(surface="result_required", strictness="blocking", chosen_by="host")
+    assert host.facts["chosen_by"] == "host" and host.facts["widened_from"] == []
+    assert host.facts["composition"] == "full_pool" and host.facts["assigned"] == ["a", "b", "c"]
+    assert slots.compose_review_panel(surface="result_required", strictness="advisory").facts["chosen_by"] == "ouroboros"
+
+
+def test_the_result_surface_text_states_the_required_root_rule():
+    from ouroboros.subagent_runtime import _REVIEW_SURFACES
+
+    text = _REVIEW_SURFACES["result"]
+    assert "Required root" in text and "chosen by the host" in text
+    assert "composes freely" in text and "Off is refused" in text

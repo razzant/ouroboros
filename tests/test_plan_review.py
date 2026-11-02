@@ -282,9 +282,13 @@ class TestPlanRowTypedFacts(unittest.TestCase):
         self.assertEqual(plan_row_typed_facts(row), {
             "failure_code": "subscription_window_exhausted",
             "reset_at": "2030-01-01T00:00:00Z", "http_status": 429,
-            "transport_status": "provider_transport_error", "reported_cause": "",
+            "transport_status": "provider_transport_error", "reported_cause": "", "failure_details": {},
             "capability_delta": [{"reason": "reduced"}],
         })
+        # A recorded structured refusal is carried as the same dict, never flattened to prose.
+        details = {"code": "native_transcript_cap_exceeded", "measured": 940000, "limit": 900000}
+        refused = _plan_row_from_actor({**actor, "failure_details": details}, None)
+        self.assertEqual(plan_row_typed_facts(refused)["failure_details"], details)
 
     def test_a_pre_typed_row_defaults_to_honest_absence(self):
         """Fail-open: an actor from an engine that carries no typed facts (code:null
@@ -296,7 +300,7 @@ class TestPlanRowTypedFacts(unittest.TestCase):
                          ("", "", None))
         self.assertEqual((row["transport_status"], row["capability_delta"]), ("", []))
         facts = plan_row_typed_facts({"slot_id": "s2"})  # e.g. a preflight_oversize row
-        self.assertEqual(facts["failure_code"], "")
+        self.assertEqual((facts["failure_code"], facts["failure_details"]), ("", {}))
         self.assertEqual(facts["capability_delta"], [])
 
 

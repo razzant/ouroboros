@@ -40,35 +40,23 @@ def _build_script_skill(root, name: str = "alpha"):
     return skill_dir
 
 
-def _pass_actor(model: str):
-    findings = [
-        {"item": "manifest_schema", "verdict": "PASS", "severity": "critical", "reason": "ok"},
-        {"item": "permissions_honesty", "verdict": "PASS", "severity": "critical", "reason": "ok"},
-        {"item": "no_repo_mutation", "verdict": "PASS", "severity": "critical", "reason": "ok"},
-        {"item": "path_confinement", "verdict": "PASS", "severity": "critical", "reason": "ok"},
-        {"item": "env_allowlist", "verdict": "PASS", "severity": "critical", "reason": "ok"},
-        {"item": "timeout_and_output_discipline", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
-        {"item": "extension_namespace_discipline", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
-        {"item": "widget_module_safety", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
-        {"item": "inject_chat_minimization", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
-        {"item": "event_subscription_minimization", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
-        {"item": "companion_process_safety", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
-        {"item": "host_token_handling", "verdict": "PASS", "severity": "critical", "reason": "n/a"},
-        {"item": "error_handling", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
-        {"item": "integration_preflight", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
-        {"item": "bug_hunting", "verdict": "PASS", "severity": "advisory", "reason": "ok"},
-        {"item": "completion_notification", "verdict": "PASS", "severity": "advisory", "reason": "n/a"},
-        {"item": "context_snapshot_discipline", "verdict": "PASS", "severity": "advisory", "reason": "n/a"},
-    ]
-    return {
-        "model": model,
-        "request_model": model,
-        "provider": "openrouter",
-        "verdict": "REVIEW",
-        "text": json.dumps(findings),
-        "tokens_in": 1,
-        "tokens_out": 1,
-    }
+def _clean_wave(monkeypatch, sends=None) -> list:
+    """The fold's physical seam under the REAL custody layer: the golden pool's seats, each answering the skill
+    question clean (``[]`` + NO_FINDINGS) through ``ReviewCoordinator._run_slot``. A fake above custody (the
+    dispatcher, ``tools.review._handle_multi_model_review``) produces no seat operation, so custody reads every
+    seat as unanswered and the wave forms no verdict — the shape the pre-fold private parser accepted is gone."""
+    import ouroboros.review_substrate as substrate
+    from tests import _contributor_packet_shared as shared
+    from tests.review_pool_rosters import set_review_pool
+
+    def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        actor.raw_text = "[]\nNO_FINDINGS"
+        return actor
+
+    sends = [] if sends is None else sends
+    set_review_pool(monkeypatch, shared.golden_pool())
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    return sends
 
 
 def test_interrupted_review_job_cannot_late_write_pass(tmp_path, monkeypatch):
@@ -102,12 +90,7 @@ def test_interrupted_review_job_cannot_late_write_pass(tmp_path, monkeypatch):
         },
         trailing_newline=True,
     )
-    monkeypatch.setattr(
-        "ouroboros.tools.review._handle_multi_model_review",
-        lambda *_a, **_kw: json.dumps(
-            {"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}
-        ),
-    )
+    _clean_wave(monkeypatch)  # a real clean verdict per seat, which the guard then refuses
 
     outcome = review_skill(ctx, "alpha")
 
@@ -151,12 +134,7 @@ def test_mismatched_review_job_hash_cannot_late_write_pass(tmp_path, monkeypatch
         },
         trailing_newline=True,
     )
-    monkeypatch.setattr(
-        "ouroboros.tools.review._handle_multi_model_review",
-        lambda *_a, **_kw: json.dumps(
-            {"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}
-        ),
-    )
+    _clean_wave(monkeypatch)  # a real clean verdict per seat, which the guard then refuses
 
     outcome = review_skill(ctx, "alpha")
 
@@ -197,12 +175,7 @@ def test_mismatched_lifecycle_job_id_cannot_late_write_pass(tmp_path, monkeypatc
         },
         trailing_newline=True,
     )
-    monkeypatch.setattr(
-        "ouroboros.tools.review._handle_multi_model_review",
-        lambda *_a, **_kw: json.dumps(
-            {"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}
-        ),
-    )
+    _clean_wave(monkeypatch)  # a real clean verdict per seat, which the guard then refuses
 
     outcome = review_skill(ctx, "alpha")
 
@@ -329,16 +302,20 @@ def test_direct_review_ignores_historical_completed_job_hash(tmp_path, monkeypat
         },
         trailing_newline=True,
     )
-    monkeypatch.setattr(
-        "ouroboros.tools.review._handle_multi_model_review",
-        lambda *_a, **_kw: json.dumps(
-            {"results": [_pass_actor("fake/a"), _pass_actor("fake/b")]}
-        ),
-    )
+    # The one wave over the golden pool with an offline seam: every seat answers the skill question clean.
+    import ouroboros.review_substrate as substrate
+    from tests import _contributor_packet_shared as shared
+    from tests.review_pool_rosters import set_review_pool
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    set_review_pool(monkeypatch, shared.golden_pool())
+    sends: list = []
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends))
 
     outcome = review_skill(ctx, "alpha")
 
-    assert outcome.status == "clean"
+    assert outcome.status == "clean", outcome.error
+    assert sorted(send["slot_id"] for send in sends) == ["s1", "t1", "t2"]
     assert load_review_state(drive_root, "alpha").content_hash == content_hash
 
 

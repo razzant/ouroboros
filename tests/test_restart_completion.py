@@ -182,14 +182,19 @@ sys.exit(server.main())
     env["OUROBOROS_DATA_DIR"] = str(tmp_path / "data")
     env["OUROBOROS_SETTINGS_PATH"] = str(tmp_path / "data" / "settings.json")
     env.pop("OUROBOROS_PLANNED_RESTART_TRANSACTION_ID", None)
-    with subprocess.Popen([sys.executable, str(script), phase, "returned" if uvicorn_returns else "held", panic_entry,
-                           str(ready), str(release)], env=env, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, text=True) as proc:
+    # The parent waits for ready before reading output. A traceback during spawn
+    # must not fill a pipe and block the restart watcher before it publishes ready.
+    output_path = tmp_path / "watcher-output.log"
+    with output_path.open("w", encoding="utf-8") as output_file, subprocess.Popen(
+        [sys.executable, str(script), phase, "returned" if uvicorn_returns else "held", panic_entry,
+         str(ready), str(release)], env=env, stdout=output_file, stderr=subprocess.STDOUT, text=True,
+    ) as proc:
         try:
-            deadline = time.monotonic() + 15
+            # Includes a cold server import and durable state initialization.
+            deadline = time.monotonic() + 45
             while not ready.exists() and proc.poll() is None and time.monotonic() < deadline:
                 time.sleep(.01)
-            assert ready.exists(), proc.communicate(timeout=5)[0]
+            assert ready.exists(), output_path.read_text(encoding="utf-8")
             # Panic is held before persistence. Neither explicit watcher exits nor
             # main's implicit exit 0 may terminate this interpreter in that window.
             assert not (tmp_path / "data/state/panic_stop.flag").exists()
@@ -199,15 +204,15 @@ sys.exit(server.main())
                 pass
             else:
                 pytest.fail(f"watcher exited {proc.returncode} before Panic persistence:\n"
-                            + proc.communicate(timeout=5)[0])
+                            + output_path.read_text(encoding="utf-8"))
             release.write_text("continue", encoding="utf-8")
-            output, _ = proc.communicate(timeout=10)
-            assert proc.returncode == 99, output
+            proc.wait(timeout=10)
+            assert proc.returncode == 99, output_path.read_text(encoding="utf-8")
         finally:
             release.touch()
             if proc.poll() is None:
                 proc.kill()
-                proc.communicate(timeout=5)
+                proc.wait(timeout=5)
     assert (tmp_path / "data/state/panic_stop.flag").read_text(encoding="utf-8") == "panic"
     persisted = json.loads((tmp_path / "data/state/state.json").read_text(encoding="utf-8"))
     assert persisted["evolution_mode_enabled"] is False
@@ -219,7 +224,13 @@ sys.exit(server.main())
 @pytest.mark.parametrize("uvicorn_returns", [True, False], ids=["returned", "held"])
 def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, managed, uvicorn_returns):
     import server
+    from ouroboros import server_restart
     from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV
+    from tests._work_stop_helpers import live_restart
+
+    transaction = live_restart(tmp_path, monkeypatch)
+    transaction_id = transaction["transaction_id"]
+    monkeypatch.setattr(server_restart, "_LAST_RETURN_TX", {"id": transaction_id})
 
     cleanup_entered, release_cleanup, transfer, release_server = (threading.Event() for _ in range(4))
     calls, failures = [], []
@@ -254,7 +265,7 @@ def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, man
         assert calls[-1][0] == "cleanup_finished"
         assert (host, port) == ("127.0.0.1", 9123)
         assert kwargs["owner_initiated"] is True
-        assert server.os.environ[PLANNED_RESTART_TRANSACTION_ENV] == "planned-same-attempt"
+        assert server.os.environ[PLANNED_RESTART_TRANSACTION_ENV] == transaction_id
         calls.append(("reexec", None))
 
     def exit_process(code):
@@ -267,7 +278,7 @@ def test_restart_waits_for_cleanup_and_transfers_once(monkeypatch, tmp_path, man
     owner = threading.Event()
     owner.set()
     monkeypatch.setattr(server, "_owner_restart_requested", owner)
-    monkeypatch.setattr(server, "_planned_delegate_restart_transaction_id", "planned-same-attempt")
+    monkeypatch.setattr(server, "_planned_delegate_restart_transaction_id", transaction_id)
     monkeypatch.setattr(server, "_LAUNCHER_MANAGED", managed)
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     monkeypatch.setattr(server, "_event_loop", None)
@@ -440,7 +451,7 @@ sys.exit(server.main())
     # only for the caller's physical exit, without changing the spawn boundary.
     with stdout.open("w", encoding="utf-8") as out, stderr.open("w", encoding="utf-8") as err:
         result = subprocess.run([sys.executable, str(script), *arguments], env=env,
-                                stdout=out, stderr=err, timeout=15)
+                                stdout=out, stderr=err, timeout=45)
     errors = stderr.read_text(encoding="utf-8", errors="replace")
     output = stdout.read_text(encoding="utf-8", errors="replace") + errors
     if failure in {"cleanup", "reexec"}:

@@ -448,6 +448,8 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
             continue
         addressed = False
         if "plan_ask" in wave:  # the plan record's ask: its message, participants and replies live in the record
+            from ouroboros.plan_record import ask_subject
+
             ask = wave.get("plan_ask")
             if task_id:
                 entry("plan_record:" + task_id, "this task's plan record: every revision, ask (message, attached evidence "
@@ -456,7 +458,7 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
                 addressed = True
             for row in wave.get("reviewers") or []:
                 if isinstance(row, Mapping) and isinstance(row.get("response"), Mapping):
-                    address(row["response"].get("source"), f"reply of {_seat(row)} to plan ask {ask} on revision {wave.get('revision')}")
+                    address(row["response"].get("source"), f"reply of {_seat(row)} to plan ask {ask} on {ask_subject(wave.get('revision'))}")
         elif wave.get("review_record_id"):  # a review ledger record
             rid = str(wave["review_record_id"])
             verdict = wave.get("verdict")
@@ -469,7 +471,10 @@ def review_index_view(mandatory: Mapping[str, Any], family: str, *, task_id: str
             addressed = True
             for row in wave.get("reviewers") or []:
                 if isinstance(row, Mapping) and isinstance(row.get("response"), Mapping):
-                    address(row["response"].get("source"), f"answer of seat {_seat(row)} in record {rid}")
+                    source = row["response"].get("source")
+                    role = source.get("role") if isinstance(source, Mapping) else ""
+                    what = f"{role} note" if role in ("failure", "pending") else "answer"
+                    address(source, f"{what} of seat {_seat(row)} in record {rid}")
             for decision in wave.get("author_decisions") or []:
                 if isinstance(decision, Mapping):
                     address(decision.get("source_ref"), f"author decision on record {rid}")

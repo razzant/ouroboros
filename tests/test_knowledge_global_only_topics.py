@@ -1,12 +1,11 @@
-"""The reserved shared topics resolve to the global shelf from any room.
+"""Three topics resolve to the global shelf from any room.
 
-`overview` is the orientation every context loads, `improvement-backlog` is the
-P7 SSOT, and `patterns` is the Pattern Register, whose author (the acting mind,
-through knowledge_write) and whose readers (context, deep self-review, the
-headless copy) all use the canonical drive. Before this, a project room silently minted
-`projects/<id>/knowledge/overview.md`: the write succeeded, nothing read it, and
-the resident orientation slot stayed empty. Ordinary topics keep following the
-room they were written in.
+`overview` is the orientation every context loads. `patterns` and
+`improvement-backlog` are ordinary notes kept at their old global address, so an
+earlier call from a project room still reaches the one existing note. Before
+this, a project room silently minted `projects/<id>/knowledge/overview.md`: the
+write succeeded, nothing read it, and the resident orientation slot stayed
+empty. Ordinary topics keep following the room they were written in.
 """
 
 from __future__ import annotations
@@ -29,15 +28,9 @@ def test_reserved_set_is_exactly_the_three_shared_topics():
         tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, tools.PATTERNS_TOPIC})
 
 
-def test_pattern_register_topic_reaches_the_drive_the_writer_and_readers_use(tmp_path):
-    """The Pattern Register has one home, and it is the one everybody else uses.
-
-    The register's author (the acting mind's `knowledge_write`) and its readers
-    (`context.py`, `deep_self_review`, the headless copy) all address
-    `memory/knowledge/patterns.md` on the canonical drive. A project room that
-    could mint `projects/<id>/knowledge/patterns.md` through the tool would be
-    writing error-class learning into a file none of them ever open.
-    """
+def test_the_former_register_keeps_its_one_global_home(tmp_path):
+    """The former register keeps one home: a call from a project room reaches the
+    existing global note instead of minting a second, project-local one."""
     ctx = project_ctx(tmp_path)
     canonical = tmp_path / "memory" / "knowledge" / "patterns.md"
 
@@ -119,7 +112,8 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     schemas = {entry.name: entry.schema for entry in tools.get_tools()}
     props = schemas["knowledge_write"]["parameters"]["properties"]
 
-    assert "Reserved topics (improvement-backlog, overview, patterns) always resolve to global." in props["scope"]["description"]
+    assert "The topics overview, patterns and improvement-backlog always resolve to global." in props["scope"]["description"]
+    assert "The overview always stays active." in props["mode"]["description"]
     assert "people and relationships" in props["scope"]["description"]
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]

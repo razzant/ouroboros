@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { taskArtifactArchiveUrl, taskArtifactDownloadUrl } from '../modules/api_client.js';
+import { taskArtifactArchiveUrl, taskArtifactDownloadUrl, taskWrapUpDocumentUrl } from '../modules/api_client.js';
 
 test('captured task files use the backend canonical URL encoding', () => {
     assert.equal(taskArtifactDownloadUrl('task', "résumé's (complete).zip"),
@@ -28,4 +28,15 @@ test('a recorded directory archive is addressed by its basename plus .zip and th
     }
     assert.equal(taskArtifactArchiveUrl('task', '.github'), '/api/tasks/task/artifacts/.github.zip?archive=.github');
     assert.equal(taskArtifactArchiveUrl('other/task', 'repo'), '');
+});
+
+test("Wrap up's saved work is the task file route with the detail's name and Stop request", () => {
+    const name = 'work-saved-at-wrap-up-task.md';
+    assert.equal(taskWrapUpDocumentUrl('task', { name, request_id: 'ci_1' }), `/api/tasks/task/artifacts/${name}?wrap_up=ci_1`);
+    assert.equal(taskWrapUpDocumentUrl('task', { name, request_id: '' }), `/api/tasks/task/artifacts/${name}?wrap_up=`);
+    for (const wrapUp of [null, undefined, {}, { name }, { name: 'a/b.md', request_id: 'ci_1' },
+        { name: '.hidden.md', request_id: 'ci_1' }, { name: 42, request_id: 'ci_1' }]) {
+        assert.equal(taskWrapUpDocumentUrl('task', wrapUp), '', JSON.stringify(wrapUp));
+    }
+    assert.equal(taskWrapUpDocumentUrl('other/task', { name, request_id: 'ci_1' }), '');
 });

@@ -20,7 +20,6 @@ import pytest
 
 from supervisor.log_addressing import (
     TASK_LINEAGE_FIELDS,
-    TurnEventQueue,
     stamp_recorded_row,
     task_event_queue,
     task_lineage,
@@ -125,17 +124,34 @@ def test_a_warm_workers_next_task_does_not_relabel_the_previous_tasks_late_frame
     assert stamp_recorded_row(unknown) == {"type": "llm_api_error", "task_id": "never-ran"}
 
 
-def test_the_direct_lane_endpoint_keeps_its_turn_stamps():
-    """The direct lane's existing contract (chat, lane fact, origin, Stop marker
-    on work frames, first-work callback) is unchanged by the pooled generalization."""
+@pytest.mark.parametrize("metadata,named", [({}, True),
+    ({"initiator": "consciousness", "wake_cause": "own_clock"}, False),
+    ({"initiator": "consciousness", "wake_cause": "focus"}, False),
+    ({"initiator": "consciousness", "usage_category": "consciousness_task"}, True)])
+def test_the_direct_lane_endpoint_keeps_its_turn_stamps(monkeypatch, tmp_path, metadata, named):
+    """The lane names working Main turns, while a wake supplies its own title at finish."""
+    from ouroboros import project_naming
+    from supervisor import worker_chat_lane as lane
+
     captured, inner = _capture()
     fired = []
-    turn = TurnEventQueue(inner, "turn-1", 42, initiator="consciousness", on_first_work=lambda: fired.append(1))
-    turn.put({"type": "task_done", "task_id": "turn-1"})
-    assert captured[-1]["chat_id"] == 42 and captured[-1]["_is_direct_chat"] is True
-    assert captured[-1]["initiator"] == "consciousness"
-    turn.put({"type": "log_event", "data": {"type": "tool_call_started", "task_id": "turn-1", "tool": "read_file"}})
-    assert captured[-1]["data"]["cancelable"] is True and fired == [1]
+    monkeypatch.setattr(lane, "_pool", lambda: SimpleNamespace(DRIVE_ROOT=tmp_path, get_event_q=lambda: inner))
+    monkeypatch.setattr(project_naming, "spawn_turn_namer", lambda *a, **kw: fired.append(1))
+    agent = SimpleNamespace()
+
+    def handle_task(task):
+        turn = agent._event_queue
+        turn.put({"type": "task_done", "task_id": task["id"]})
+        assert captured[-1]["chat_id"] == 42 and captured[-1]["_is_direct_chat"] is True
+        assert captured[-1].get("initiator", "") == metadata.get("initiator", "")
+        turn.put({"type": "log_event", "data": {"type": "tool_call_started", "task_id": task["id"], "tool": "read_file"}})
+        return []
+
+    agent.handle_task = handle_task
+    assert lane._execute_chat_task({"task": {"id": "turn-1", "text": "Work", "metadata": metadata},
+        "agent": agent, "chat_id": 42, "task_metadata": metadata,
+        "registry": SimpleNamespace(unregister=lambda tid: None)})
+    assert captured[-1]["data"]["cancelable"] is True and fired == ([1] if named else [])
     assert "root_task_id" not in captured[-1]["data"], "a turn without lineage stamps none"
 
 

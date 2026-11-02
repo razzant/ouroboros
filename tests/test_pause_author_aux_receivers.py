@@ -50,7 +50,7 @@ def author(tmp_path, monkeypatch):
     registry = _registry(tmp_path, monkeypatch, "t-wait", 1)
     monkeypatch.setattr(loop, "_forced_fallback_result", lambda *_a, **_k: pytest.fail("Pause published a fallback final"))
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *_a, **_k: pytest.fail("no provider"))
-    monkeypatch.setattr("ouroboros.loop_llm_call.estimate_cost_optional",
+    monkeypatch.setattr("ouroboros.pricing.estimate_cost_optional",
                         lambda *_a, **_k: pytest.fail("fake chat must return known usage without pricing fallback"))
     yield registry
     budget_pause.end_dispatch_fence("t-wait")

@@ -81,7 +81,7 @@ test('ordinary update selects clean or assisted merge without recovery replaceme
     const pill = readFileSync(new URL('../modules/update_status.js', import.meta.url), 'utf8');
     assert.doesNotMatch(pill, /updateApply\(/);
     assert.doesNotMatch(pill, /updatePreflight\(/);
-    assert.match(pill, /openDashboardTab\?\.\('updates'\)/);
+    assert.match(pill, /openDashboardTab\('updates'\)/);
 });
 
 

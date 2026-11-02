@@ -53,6 +53,9 @@
  * @typedef {Object} ResponseLimitPreview
  * @property {ResponseLimitRoute} route
  * @property {ResponseLimit} response_limit
+ * @property {Object} window Sourced context projection, including contradiction and retired acknowledgement.
+ * @property {Object} window_route The window acknowledgement's independent route and fingerprint.
+ * @property {boolean} window_ack Whether a confirmation can be cleared.
  */
 
 /**
@@ -64,7 +67,7 @@
 
 /**
  * `POST /api/owner/capability-ack`: `max_output_tokens` present records the route's maximum response
- * (0 removes it); otherwise `window_tokens` (> 0) records its context window. A sent `route_fp` must match.
+ * (0 removes it); otherwise `window_tokens` records its context window (0 removes it). A sent `route_fp` must match.
  * @typedef {Object} CapabilityAckRequest
  * @property {string} provider
  * @property {string} model

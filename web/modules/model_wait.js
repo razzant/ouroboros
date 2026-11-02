@@ -4,19 +4,21 @@ import { fetchJson, jsonPost } from './api_client.js';
 import { claudexorStatus } from './claudexor_status_store.js';
 import { startLogin } from './harness_accounts.js';
 import { createModelRolesEditor, MODEL_ACCOUNTS_KEY, modelRolesHost, parseModelSource } from './model_roles.js';
-import { API_PROVIDER_CREDENTIAL_KEYS } from './route_editor_primitives.js';
+import { API_PROVIDER_CREDENTIAL_KEYS, apiProviderLabel } from './route_editor_primitives.js';
+import { adoptConnectionLabels, connectionLabel, routeConnectionId } from './connection_labels.js';
 import { desiredLiveCardPhase, setLiveCardPhase } from './task_phase_chip.js';
 import { taskDoneIsTerminal } from './log_events.js';
 
-/** Only the provider credential fields; no other setting reaches the picker draft. */
+/** Only the provider credential fields and the connection list; no other setting reaches the picker draft. */
 function providerCredentials(settings = {}) {
-    return Object.fromEntries(API_PROVIDER_CREDENTIAL_KEYS
-        .filter((key) => key in settings).map((key) => [key, settings[key]]));
+    return { ...Object.fromEntries(API_PROVIDER_CREDENTIAL_KEYS
+        .filter((key) => key in settings).map((key) => [key, settings[key]])),
+    _meta: { connections: settings?._meta?.connections } };
 }
 
 export function modelWaitRoleLabel(role = '') {
-    const labels = { main: 'Main', light: 'Light', vision: 'Vision', consciousness: 'Background consciousness',
-        deep_review: 'Deep self-review', websearch: 'Web search' };
+    const labels = { main: 'Main', light: 'Light', vision: 'Vision', consciousness: 'Consciousness',
+        safety: 'Safety Supervisor', deep_review: 'Deep self-review', websearch: 'Web search' };
     if (labels[role]) return labels[role];
     const [kind, ...identity] = String(role).split(':');
     const suffix = identity.join(':');
@@ -26,8 +28,9 @@ export function modelWaitRoleLabel(role = '') {
     return String(role || 'Model');
 }
 
-/** Host wait reasons: `unavailable` is an engine-dated pool refusal, neither quota nor sign-in. */
-export const MODEL_WAIT_REASONS = ['quota', 'auth', 'auth_quota', 'unavailable'];
+/** Host wait reasons: `unavailable` is an engine-dated pool refusal, neither quota nor sign-in;
+ *  `connection_unavailable`: the API key the route names is turned off or removed in Accounts. */
+export const MODEL_WAIT_REASONS = ['quota', 'auth', 'auth_quota', 'unavailable', 'connection_unavailable'];
 
 /** A late snapshot cannot rewind a row or reopen a resolved wait episode. */
 export function mergeModelWaits(previous = {}, incoming = {}) {
@@ -146,22 +149,27 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         const pending = view.sending || isPending(row);
         const mixed = row.reason === 'auth_quota';
         const pool = row.reason === 'unavailable';
+        const keyOff = row.reason === 'connection_unavailable';
         const quota = row.reason === 'quota' || mixed;
         const observesAccess = row.availability_observation !== 'unavailable';
         const timed = (quota || pool) && observesAccess;
         node.querySelector('[data-wait-role]').textContent = modelWaitRoleLabel(row.role);
-        node.querySelector('[data-wait-reason]').textContent = !observesAccess ? 'Waiting for provider access' : mixed ? 'Waiting for access'
-            : pool ? 'Waiting for an account' : row.reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
+        node.querySelector('[data-wait-reason]').textContent = keyOff ? 'Key unavailable' : !observesAccess ? 'Waiting for provider access'
+            : mixed ? 'Waiting for access' : pool ? 'Waiting for an account' : row.reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
         // Amber only while the wait needs the owner (the host's revision-bound fact); a wait that goes on by itself is a
         // quiet tray with a neutral sentence (docs/DESIGN.md "Status marks").
         const owner = row.requires_owner_action === true;
         if (node.dataset.owner !== (owner ? '1' : '0')) node.dataset.owner = owner ? '1' : '0';
         node.querySelector('[data-wait-reason]').dataset.tone = owner ? 'warn' : 'neutral';
         const model = parseModelSource(row.model).model || row.model;
-        node.querySelector('[data-wait-model]').textContent = `${model || 'Model'} · ${!observesAccess ? 'Configured API access' : row.credential_profile_id ? `Account: ${row.credential_profile_id}` : 'Auto rotation'}`;
+        const key = routeConnectionId(row.model);
+        node.querySelector('[data-wait-model]').textContent = `${model || 'Model'} · ${keyOff
+            ? (key ? connectionLabel(key) : apiProviderLabel(parseModelSource(row.model).source))
+            : !observesAccess ? 'Configured API access' : row.credential_profile_id ? `Account: ${row.credential_profile_id}` : 'Auto rotation'}`;
         const reset = row.reset_at ? new Date(row.reset_at) : null;
         const known = reset && Number.isFinite(reset.getTime());
-        node.querySelector('[data-wait-reset]').textContent = !observesAccess
+        node.querySelector('[data-wait-reset]').textContent = keyOff
+            ? 'This API key is turned off or removed in Accounts. Turn it back on, choose another model, or stop.' : !observesAccess
             ? 'Automatic access checks are unavailable. Retry after access is restored, choose another model, or stop.' : (mixed
             ? 'Some accounts need sign-in; others are waiting for quota. ' : '') + (pool
             ? `No account can serve this model now. ${known ? `The engine reported a reset at ${reset.toLocaleString()}; availability is unconfirmed.` : 'The reset time is not known.'}`
@@ -175,7 +183,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
             ? requested.auto_continue : row.auto_continue !== false;
         const auth = node.querySelector('[data-wait-login]');
         auth.hidden = row.reason !== 'auth' || !observesAccess;
-        node.querySelector('[data-wait-settings]').textContent = mixed ? 'Accounts' : 'Settings';
+        node.querySelector('[data-wait-settings]').textContent = mixed || keyOff ? 'Accounts' : 'Settings';
         const saved = view.persisted?.saved;
         node.querySelector('[data-wait-notice]').textContent = view.error
             || (view.sending ? 'Sending your choice…' : isPending(row)
@@ -315,6 +323,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
                 settingsPromise = null; throw error;
             });
             const settings = await settingsPromise;
+            adoptConnectionLabels(settings?._meta?.connections);
             if (destroyed || !view.node.isConnected || view.row.state !== 'waiting') return;
             const id = view.editorId;
             onDomWrite(() => {

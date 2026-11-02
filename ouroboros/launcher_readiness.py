@@ -16,27 +16,6 @@ from typing import Optional
 log = logging.getLogger("launcher")
 
 
-def owned_server_port(proc, port, data_dir) -> Optional[int]:
-    """The live child's measured service binding, or no authority to send a command.
-
-    Readiness alone can outlive a process; a stale/default port never authorizes Panic.
-    Older servers without a binding use the launcher's local installation stop instead.
-    """
-    from ouroboros.server_process import read_service_bindings, service_binding_is_live
-
-    if proc is None or port is None or proc.poll() is not None:
-        return None
-    try:
-        binding = read_service_bindings(data_dir).get("main")
-        if (isinstance(binding, dict) and binding.get("pid") == proc.pid and binding.get("port") == port
-                and binding.get("host") in {"127.0.0.1", "0.0.0.0"}
-                and service_binding_is_live(binding) and proc.poll() is None):
-            return port
-    except (OSError, ValueError, TypeError):
-        pass
-    return None
-
-
 def wait_for_server(port: int, timeout: Optional[float] = None, abort_event=None, proc=None) -> bool:
     """Wait for the agent HTTP server to answer ``/api/health`` (200 as soon as its socket serves;
     the body's ``boot`` phase is logged, the UI shows the rest).

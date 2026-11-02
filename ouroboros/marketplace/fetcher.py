@@ -74,7 +74,7 @@ def _is_sensitive(path: pathlib.PurePosixPath) -> bool:
 
 def _is_loadable_binary(path: pathlib.PurePosixPath) -> bool:
     try:
-        from ouroboros.skill_review import _LOADABLE_BINARY_EXTENSIONS
+        from ouroboros.skill_review_packs import _LOADABLE_BINARY_EXTENSIONS
     except Exception:  # pragma: no cover
         return False
     name_lower = path.name.lower()

@@ -132,7 +132,8 @@ def test_reused_call_id_and_identical_text_keep_both_visible_outcomes(tmp_path):
     for row, invocation, exit_code, is_error in zip(records, ("failed-attempt", "successful-attempt"), (17, 0), (True, False)):
         text = _visible(row)
         assert f'"exit_code":{exit_code}' in text and f'"is_error":{json.dumps(is_error)}' in text
-        assert f"invocation {invocation}" in text and f"trace/{invocation}.json" in text and f"source/{invocation}.txt" in text
+        assert f"invocation {invocation}" in text and f"source/{invocation}.txt" in text
+        assert f"trace/{invocation}.json" not in text  # the exact checkpoint retains the bulky diagnostic receipt
         assert "outcome binding unknown" not in text and "CONSEQUENTIAL-TAIL" not in text
         assert "WRONG-global-most-recent" not in json.dumps(row)
     _assert_exact_restore(tmp_path, messages, request, receipt)
@@ -257,7 +258,7 @@ def test_first_main_refusal_recovers_unobserved_body_on_same_model_and_effort(ma
     monkeypatch.setattr("ouroboros.loop_llm_call._sleep_within_deadline", lambda *_a, **_kw: True)
     answer, _, _ = f.run([refuse] * 8)
     assert answer == "Recovered from the exact address." and len(f.inputs) >= 2
-    assert rungs == ["host_copies", "bodies", "floor", "unseen_bodies", "books"]  # books already navigation
+    assert rungs == ["host_copies", "bodies", "floor", "books", "unseen_bodies"]  # books already navigation
     assert before_observation and all(observation is None for observation in before_observation)
     assert len({entry["model"] for entry in f.inputs}) == 1
     assert len({entry["reasoning_effort"] for entry in f.inputs}) == 1

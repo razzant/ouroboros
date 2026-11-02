@@ -1,8 +1,8 @@
 """#939: the explicit execution budget through its real producers and consumers.
 
 Each scenario drives the production seams (gateway admission, ``assign_tasks``,
-the supervisor timeout rail, the exact-Resume grant and its consumption, crash and
-timeout retry producers, the supervisor wait projection) instead of seeding the
+the supervisor timeout rail, the exact-Resume grant and its consumption, the crash
+retry producer, the supervisor wait projection) instead of seeding the
 values a producer was supposed to deliver. Clock: ``model_wait`` is the one owner.
 """
 from __future__ import annotations
@@ -122,41 +122,6 @@ def test_exact_resume_capacity_delay_is_excluded_once_on_both_clocks(tmp_path, m
     assert waiter.executed_seconds() == pytest.approx(execution_elapsed_seconds(meta, clock[0]))
     assert waiter.executed_seconds() == pytest.approx(executed_before + 50)
     assert waiter.execution_window_remaining() == pytest.approx(3600 - executed_before - 50)
-
-
-def test_timeout_retry_stamps_the_handoff_and_folds_newer_quota_facts(pool, monkeypatch):  # noqa: F811
-    from ouroboros.task_results import write_task_result
-    from supervisor import queue, task_reaper, workers
-    from tests.test_retained_work_recovery import _saved
-
-    write_task_result(pool.root, "owner", "running")
-    _saved(pool.root, "owner", 3)
-    meta = pool.meta
-    meta["task"]["execution_timeout_sec"] = 7200
-    meta["model_wait_quota_clock"] = {"revision": 9, "elapsed_sec": 500.0, "observed_at": time.time(), "active": False}
-    task = {**meta["task"], "_attempt": 3}
-    before = execution_elapsed_seconds(meta, time.time())
-    requeued, _attempt, _reason, _ = task_reaper._enqueue_retry(
-        queue, task, task_id="owner", retry_task_id="owner-retry", attempt=3,
-        terminal_reason="idle_timeout", recon_fields={}, clock_meta=meta)
-    after = execution_elapsed_seconds(meta, time.time())
-    assert requeued
-    retry = workers.PENDING[-1]
-    assert before <= retry["_execution_handoff_sec"] <= after  # the clock at the stamp, inside the real call
-    handoff = retry["_working_recovery"]
-    assert handoff["from_attempt"] == 3  # the killed attempt's own checkpoint: its newer clock fact is folded in
-    assert handoff["model_wait_quota_clock"]["revision"] == 9 and handoff["model_wait_quota_clock"]["active"] is False
-    # The real assignment and the real worker start read the same clock, the folded fact included.
-    workers.RUNNING.pop("owner")  # the reaper's own removal of the ended attempt
-    monkeypatch.setattr("supervisor.state.budget_remaining", lambda *_a, **_k: 5.0)
-    sent = []
-    _idle_worker(workers, sent, wid=1)
-    workers.assign_tasks()
-    assert [row["id"] for row in sent] == ["owner-retry"]
-    running = workers.RUNNING["owner-retry"]
-    waiter = _agent_start(sent[0], pool.root, monkeypatch)
-    now = time.time()
-    assert waiter.executed_seconds(now=time.monotonic()) == pytest.approx(execution_elapsed_seconds(running, now), abs=2)
 
 
 def _stored_progress(root):

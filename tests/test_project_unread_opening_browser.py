@@ -337,6 +337,7 @@ def test_a_room_kept_hidden_during_the_reach_asks_for_nothing_until_it_is_opened
             assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=200), room.older
             _stage_file(room.page)
             room.page.locator("#project-panel-close").evaluate("el => el.click()")
+            room.page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state='attached')
             assert room.page.locator('.chat-instance-panel[data-pending-work="1"]').count() == 1
             room.release()
             room.settled()
@@ -370,6 +371,8 @@ def test_a_reopened_room_lands_once_after_its_superseded_reach(direct_server_wit
             room.open()
             assert _wait_for(room.page, lambda: len(room.held) == 1, attempts=200), room.older
             room.page.locator("#project-panel-close").evaluate("el => el.click()")
+            # After the exit, the replacement reads independently of the destroyed room's held page.
+            room.messages.wait_for(state='detached')
             room.open()
             read = _wait_for(room.page, lambda: room.seen() == [revision], attempts=200)
             room.release()

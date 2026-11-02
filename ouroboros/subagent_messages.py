@@ -23,6 +23,11 @@ SUBAGENT_MESSAGE_FIELDS: tuple[str, ...] = (
     "effective_model_lane",
     "model",
     "executor_route",
+    "parent_cognitive_route",
+    "coordinator_route",
+    "coordinator_billing",
+    "coordinator_provenance",
+    "use_local_model",
     # The effort decision (``settings_scales.choose_effort``) as three scalars: the level the
     # child (a session row: its leaf) runs at, the parent's request, who decided.
     "effort_level",
@@ -162,6 +167,21 @@ def subagent_message_meta(
         "effort_requested": first("effort_requested"),
         "effort_source": first("effort_source"),
     }
+    cognitive = source.get("parent_cognitive_route") or metadata.get("parent_cognitive_route")
+    if isinstance(cognitive, Mapping):
+        meta["parent_cognitive_route"] = dict(cognitive)
+    else:
+        cognitive = {}
+    from ouroboros.subagent_runtime import cognitive_route_billing_basis
+
+    local = source.get("use_local_model", metadata.get("use_local_model", cognitive.get("use_local_model", False)))
+    cost = source.get("cost_usd", source.get("cost", metadata.get("cost_usd", metadata.get("cost"))))
+    route, billing = cognitive_route_billing_basis(first("coordinator_route") or meta["model"] or cognitive.get("model", ""),
+                                                 use_local=local, cost=cost)
+    meta.update(use_local_model=bool(local), coordinator_route=route,
+                coordinator_billing=first("coordinator_billing", "nanny_billing") or billing)
+    if first("coordinator_provenance"):
+        meta["coordinator_provenance"] = first("coordinator_provenance")
     if event:
         meta["subagent_event"] = str(event)
     return meta

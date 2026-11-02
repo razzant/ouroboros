@@ -214,7 +214,9 @@ def completion_event_view(root: Any, event: dict, record: dict) -> dict:
 def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dict | None = None) -> dict:
     from ouroboros import project_dialogue as dialogue
     from ouroboros.project_facts import resolve_project_id
+    from ouroboros.task_finalization import quiet_finish
 
+    quiet = quiet_finish(row)
     lineage = _lineage(tid, row)
     is_root = lineage["is_root_task"]
     role = str(row.get("role") or ("root" if is_root else "child"))
@@ -246,7 +248,7 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
     ])
     notice = completion_notice({**event, **row, "terminal_delivery": delivery})
     excerpt = dialogue._completion_excerpt(row, chat_id=chat_id, salvage_only=True)
-    text += "".join(f" {part}" for part in (verdict, excerpt) if part)
+    text = dialogue.QUIET_RUN_HEADLINE if quiet else text + "".join(f" {part}" for part in (verdict, excerpt) if part)
     from ouroboros.dialogue_provenance import presence_provenance_fields
 
     result = {
@@ -260,8 +262,14 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         "project_id": resolve_project_id(row), "chat_id": chat_id,
         "delegation_role": str(row.get("delegation_role") or ""), "role": role,
         "status": row["status"], "outcome": outcome, "outcome_phase": phase, "outcome_final": True,
+        "wake_silent": row.get("wake_silent") is True, "quiet_effective": quiet, **{key: row[key] for key in ("suggested_name", "wake_summary", "schedule_name") if row.get(key)},
         "outcome_authority": "canonical_task_result_after_finalization",
+        # Memory stamps copy the recorded objective; readers interpret it using answer provenance.
         "outcome_axes": row.get("outcome_axes") or {}, "reason_code": str(row.get("reason_code") or ""),
+        "_result_text_present": (isinstance(row.get("result"), str) and bool(row["result"]))
+        if "result" in row else row.get("_result_text_present") is True,
+        "terminal_origin": str(row.get("terminal_origin") or ""),
+        **({"cancel_origin": dict(row["cancel_origin"])} if isinstance(row.get("cancel_origin"), dict) else {}),
         "result_ref": {"kind": "task_result", "task_id": tid, "reader": "get_task_result"}, "text": text,
         **({"reason_detail": verdict} if verdict else {}),
         "completion_notice": notice,
@@ -586,9 +594,14 @@ def settle_terminal_projection(drive_root: Any, task_id: str, *, task: dict | No
                 return SETTLEMENT_DEFERRED
             effective = {**(task or {}), **stored, "id": tid}
             done = {**(event or {}), **stored, "ts": ready["task_done_ts"], "chat_id": ready["chat_id"]}
-            disposition, _queued = dialogue.project_completion_delivery_outcome(
-                drive_root, done, tid, effective, stored, done, event_queue=event_queue,
-                source_delivery=source_delivery)
+            from ouroboros.task_finalization import quiet_finish
+
+            if quiet_finish(stored):
+                disposition = dialogue.MAIN_MIRROR_INELIGIBLE
+            else:
+                disposition, _queued = dialogue.project_completion_delivery_outcome(
+                    drive_root, done, tid, effective, stored, done, event_queue=event_queue,
+                    source_delivery=source_delivery)
             if clear_terminal_projection_obligation(drive_root, tid, stored, disposition):
                 return SETTLEMENT_SETTLED
             # Owed remains discoverable until the strict sender acknowledges it.
@@ -670,9 +683,9 @@ def _source_address(address: Any) -> str | None:
 def _stamp_entry(task_id: str, row: dict, source: str, address: Any = None) -> dict:
     """One task's stamp: the keys every page carries, then optional facts copied from the same source.
 
-    Copied, never interpreted: ``outcome_final`` and ``reason_code`` as the source
-    holds them, ``objective_status`` from its ``outcome_axes``; the axes themselves
-    stay with their source (one axis can be kilobytes of policy denials).
+    Copied, never interpreted: ``outcome_final``, ``outcome_authority`` and ``reason_code``
+    as the source holds them, ``objective_status`` from its ``outcome_axes``; the axes
+    themselves stay with their source (one axis can be kilobytes of policy denials).
     """
     entry = {"task_id": task_id, "status": str(row.get("status") or ""), "outcome": str(row.get("outcome") or ""),
              "outcome_phase": str(row.get("outcome_phase") or ""), "source": source,
@@ -682,6 +695,8 @@ def _stamp_entry(task_id: str, row: dict, source: str, address: Any = None) -> d
         entry["review_verdict"] = str(row["reason_detail"])
     if isinstance(row.get("outcome_final"), bool):
         entry["outcome_final"] = row["outcome_final"]
+    if isinstance(row.get("outcome_authority"), str) and row["outcome_authority"].strip():
+        entry["outcome_authority"] = row["outcome_authority"].strip()
     if row.get("reason_code"):
         entry["reason_code"] = str(row["reason_code"])
     axes = row.get("outcome_axes")

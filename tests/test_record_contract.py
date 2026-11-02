@@ -31,7 +31,7 @@ WRITERS = {
     "task_metrics_event": ("supervisor/events_worker_reports.py",),
     "task_cost_finalized": ("supervisor/events_task_done.py", "ouroboros/post_task_checkpoint.py"),
     "llm_round": ("ouroboros/loop_llm_call.py",),
-    "llm_usage": ("supervisor/events_budget.py",),
+    "llm_usage": ("supervisor/events_budget.py", "ouroboros/delegate_collection.py"),
     "llm_api_error": ("ouroboros/loop_llm_call.py",),
     "worker_crash": ("supervisor/worker_process.py",),
     "worker_dead_detected": ("supervisor/worker_health.py",),

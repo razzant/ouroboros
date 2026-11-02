@@ -154,11 +154,11 @@ def _feed_scroll(page, feed="#chat-messages"):
 
 
 def _wait_reader_footer(page, feed="#chat-messages"):
-    # Done precedes model_execution hydration. renderLiveCardMeta can still grow
-    # the card when modelExecutionLabel supplies the Last solve response line.
+    # Done precedes model_execution hydration. renderLiveCardMeta can still repaint
+    # the card's compact model when the Last solve response fact arrives.
     card = page.locator(f"{feed} .chat-live-card").last
     card.locator('[data-phase="done"]').wait_for()
-    card.locator('[data-live-meta]').filter(has_text="Last solve response:").wait_for()
+    card.locator('[data-live-facts]').filter(has_text="Last solve response").wait_for(state="attached")
     # The work's Stop… stays until the state census stops listing it (its post-task tail),
     # up to a few seconds after Done; its row leaving shrinks the card above the files.
     card.locator('[data-cancel-run]').wait_for(state="detached", timeout=30_000)

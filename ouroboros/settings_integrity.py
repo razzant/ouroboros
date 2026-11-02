@@ -1,12 +1,7 @@
-"""Strict settings-snapshot integrity pin (benchmark isolation trust root).
+"""Pinned settings snapshots, private actor reads and live room choices.
 
-An isolated benchmark server seeds its child with an exact settings snapshot
-and pins its sha256 in ``OUROBOROS_SETTINGS_SHA256``: while the pin is
-present the snapshot is an owner-authored trust root — every read verifies
-the complete byte stream and every writer refuses. Extracted from
-``config.py`` (which re-exports the public names, so every existing
-``config.X`` import keeps working) to keep the SSOT module inside its size
-ratchet.
+Benchmark OUROBOROS_SETTINGS_SHA256 pins verify complete bytes and refuse
+every writer. Public integrity names are re-exported by config.py.
 """
 from __future__ import annotations
 
@@ -158,7 +153,16 @@ def copy_task_settings_context(context) -> None:
 
 
 def runtime_setting(key: str, default=None):
-    """Environment-shaped runtime read; absence in the snapshot stays absent."""
+    """Environment-shaped runtime read; absence in the snapshot stays absent.
+
+    A route key (``route_choice.ROUTE_SETTING_KEYS``: model slots, accounts, provider keys) reads the
+    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot."""
+    from ouroboros.route_choice import ROUTE_SETTING_KEYS, live_setting
+
+    if key in ROUTE_SETTING_KEYS:
+        served, value = live_setting(key, default)
+        if served:
+            return value
     snapshot = _TASK_SETTINGS.get()
     if snapshot is not None and _next_task_setting(key):
         return snapshot.environ.get(key, default)
@@ -183,15 +187,14 @@ def runtime_environ() -> dict[str, str]:
                     env.pop(key, None)
                 else:
                     env[key] = snapshot.environ[key]
+    from ouroboros.route_choice import live_environ_overlay
+
+    live_environ_overlay(env)  # a model call in a child (vision) uses the current model and key, never a cleared one
     return env
 
 
 def _actor_project(scope: tuple[Path, Mapping]) -> str:
-    """The actor's current room, including descendants of a converted task.
-
-    RoomResolver owns lineage; the admitted caller supplies the facts a new
-    direct turn has not stored yet. A working directory is not a room.
-    """
+    """Current room from lineage or admitted facts, never a working directory."""
     from ouroboros.project_admission import reserved_project_for_chat
     from ouroboros.projects_registry import RoomResolver, get_reserved_project
 
@@ -210,30 +213,41 @@ def _actor_project(scope: tuple[Path, Mapping]) -> str:
 def _with_cognition(snapshot: TaskSettingsSnapshot, cognition: Mapping) -> TaskSettingsSnapshot:
     from ouroboros.composer_cognition import cognition_overrides
     from ouroboros.context_mode_compat import VALID_CONTEXT_MODES
-    from ouroboros.settings_scales import EFFORT_SCALE, effort_rank
+    from ouroboros.settings_scales import EFFORT_SCALE, effort_rank, VALID_SUBAGENTS_MODES
 
     effort = cognition.get("effort_range")
-    if (cognition.get("context_mode") not in VALID_CONTEXT_MODES or not isinstance(effort, Mapping)
+    if (cognition.get("subagents_mode", "auto") not in VALID_SUBAGENTS_MODES
+            or cognition.get("context_mode") not in VALID_CONTEXT_MODES or not isinstance(effort, Mapping)
             or any(effort.get(key) not in EFFORT_SCALE for key in ("min", "recommended", "max"))
             or effort_rank(effort["min"]) > effort_rank(effort["max"])):
         raise ValueError("Saved actor cognition is invalid")
     values = cognition_overrides(cognition)
+    values.pop("OUROBOROS_SUBAGENTS_MODE")  # this axis is live, never restored from an actor snapshot
     values["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = cognition.get("context_mode_auto_low", "false")
     return replace(snapshot, settings=MappingProxyType({**snapshot.settings, **values}),
                    environ=MappingProxyType({**snapshot.environ, **values}))
 
 
-def actor_settings_snapshot(snapshot: TaskSettingsSnapshot, task: Mapping, drive_root: Path) -> TaskSettingsSnapshot:
-    """Capture this room privately; a new subordinate resolves its room again."""
-    from ouroboros.composer_cognition import read_cognition
+def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
+    from ouroboros.consciousness_authority import is_consciousness_origin
     from ouroboros.dialogue_provenance import presence_metadata_binding
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
     actor = {key: task.get(key) or metadata.get(key) for key in (
         "id", "parent_task_id", "root_task_id", "project_id", "chat_id")}
     actor["presence"] = bool(task.get("_presence_turn") or presence_metadata_binding(metadata) is not None)
-    scope = (Path(task.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root),
-             MappingProxyType(actor))
+    actor["autonomous"] = bool(task.get("type") == "evolution" or metadata.get("evolution_root_task_id")
+                               or metadata.get("evolution_transaction") or is_consciousness_origin(metadata)
+                               or metadata.get("work_kind") == "consciousness" or actor["presence"])
+    return (Path(task.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root),
+            MappingProxyType(actor))
+
+
+def actor_settings_snapshot(snapshot: TaskSettingsSnapshot, task: Mapping, drive_root: Path) -> TaskSettingsSnapshot:
+    """Capture this room privately; a new subordinate resolves its room again."""
+    from ouroboros.composer_cognition import read_cognition
+
+    scope = _actor_scope(task, drive_root)
     snapshot = replace(snapshot, actor_scope=scope)
     project_id = _actor_project(scope)
     if not project_id:
@@ -250,6 +264,7 @@ def captured_cognition() -> dict | None:
     if snapshot is None:
         return None
     cognition = cognition_from_settings(snapshot.environ)
+    cognition.pop("subagents_mode")
     marker = snapshot.environ.get("OUROBOROS_CONTEXT_MODE_AUTO_LOW", "")
     if cognition["context_mode"] == "low" and not owner_declared_low(marker):
         cognition["context_mode_auto_low"] = marker
@@ -279,6 +294,70 @@ def live_effort_range() -> dict[str, str]:
         return effort_range(settings)
     root, _actor = snapshot.actor_scope
     return read_cognition(root, _actor_project(snapshot.actor_scope), settings=settings)["effort_range"]
+
+
+def live_subagents_mode(*, task: Mapping | None = None, drive_root: Path | None = None,
+                        settings: Mapping | None = None) -> str:
+    """Live room choice from explicit or bound actor facts; autonomous work keeps its controls."""
+    from ouroboros import config
+    from ouroboros.composer_cognition import read_cognition
+
+    settings = config.load_settings() if settings is None else settings
+    snapshot = _TASK_SETTINGS.get()
+    scope = _actor_scope(task, drive_root or config.DATA_DIR) if task is not None else (snapshot.actor_scope if snapshot else None)
+    if scope is None:
+        return config.normalize_subagents_mode(settings.get("OUROBOROS_SUBAGENTS_MODE"))
+    if scope[1].get("autonomous"):
+        return "auto"
+    return read_cognition(scope[0], _actor_project(scope), settings=settings)["subagents_mode"]
+
+
+def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mapping | None = None,
+                              project: Mapping | None = None) -> None:
+    """Root telemetry. Queue callers supply settings and the admitted row (None for Main), without more IO."""
+    if settings is not None:
+        # Restate effective_subagents_mode from admitted facts, without IO under the queue lock.
+        from ouroboros.settings_scales import normalize_subagents_mode
+        from ouroboros.subagent_runtime import subagents_availability
+
+        cognition = project.get("cognition") if project is not None else None
+        mode = ((cognition if isinstance(cognition, Mapping) else {}).get("subagents_mode") if project is not None
+                else settings.get("OUROBOROS_SUBAGENTS_MODE"))
+        mode = "auto" if _actor_scope(task, drive_root)[1].get("autonomous") else normalize_subagents_mode(mode)
+        mode = mode if subagents_availability(settings) == "available" else "off"
+    else:
+        # Direct turns have no queue admission row. Resolve their accepted room,
+        # excluding unstarted lineage so the pre-start storage wait retains ownership.
+        lineage = {"id", "parent_task_id", "root_task_id"}
+        room = {key: value for key, value in task.items() if key not in lineage}
+        room["metadata"] = {key: value for key, value in (task.get("metadata") or {}).items() if key not in lineage}
+        mode = effective_subagents_mode(task=room, drive_root=drive_root)
+    task.setdefault("metadata", {})["subagents_mode"] = mode
+
+
+def room_subagents_mode_applies() -> bool:
+    """Consciousness and Evolve keep their own controls, including their descendants."""
+    snapshot = _TASK_SETTINGS.get()
+    return not (snapshot and snapshot.actor_scope and snapshot.actor_scope[1].get("autonomous"))
+
+
+def actor_subagents_availability() -> str | None:
+    """Live Settings gate for a bound actor; pure catalog resolvers keep their supplied settings."""
+    from ouroboros import config
+    from ouroboros.subagent_runtime import subagents_availability
+
+    snapshot = _TASK_SETTINGS.get()
+    return subagents_availability(config.load_settings()) if snapshot and snapshot.actor_scope else None
+
+
+def effective_subagents_mode(*, task: Mapping | None = None, drive_root: Path | None = None) -> str:
+    """Settings can withhold the catalog without changing the saved room choice."""
+    from ouroboros import config
+    from ouroboros.subagent_runtime import subagents_availability
+
+    if subagents_availability(config.load_settings()) != "available":
+        return "off"
+    return live_subagents_mode(task=task, drive_root=drive_root)
 
 
 def read_environ() -> Mapping:
@@ -315,8 +394,9 @@ def skill_settings(settings_reader=None) -> dict:
     """What a skill reads: the settings document as it reads now, in a task or not (owner choice A, #1122).
 
     The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment and the
-    funded-credential disclosure of its handlers; grants and the manifest allowlist filter it afterwards, and the
-    task's own model, account and review reads keep its snapshot (``runtime_settings``). The loader lets the
+    funded-credential disclosure of its handlers; grants and the manifest allowlist filter it afterwards; the
+    task's review reads keep its snapshot while its model, account and key reads share this view
+    (``route_choice``, ``runtime_settings``). The loader lets the
     environment stand in for a key the document leaves unset, and a long-lived process still holds what earlier
     projections mirrored there — this task's start, an earlier task's, the server's it inherited — so a key the owner
     cleared or deleted since would come back. The read overlays ``skill_environ`` instead: our mirrored values never
@@ -341,6 +421,9 @@ def runtime_settings(*, settings_reader=None) -> dict:
                 settings.pop(key, None)
             else:
                 settings[key] = copy.deepcopy(snapshot.settings[key])
+    from ouroboros.route_choice import live_settings_overlay
+
+    live_settings_overlay(settings)  # route keys read the document as it is now (route_choice)
     return settings
 
 
@@ -406,22 +489,38 @@ def read_settings_bytes_verified(settings_path: Path) -> bytes | None:
     return raw
 
 
-def read_settings_json_verified(settings_path: Path):
+def read_settings_json_verified(settings_path: Path, *, behind_writer: bool = False):
     """Decode the verified snapshot; under a pin a decode failure is typed.
 
     Returns the parsed JSON value (any type) or ``None`` for an absent or —
     without a pin — unreadable/undecodable file. One helper so the two
-    config.py read paths cannot drift apart in their pin semantics.
+    config.py read paths cannot drift apart in their pin semantics. Every
+    writer replaces the document whole, except ``save_settings``' fallback for a
+    filesystem that cannot rename, which truncates and writes in place under the
+    settings lock: a prefix of one JSON object never decodes, so a lock-free read
+    (``behind_writer``) that cannot decode reads once more behind that lock. So does
+    one that cannot open a present file (Windows: an open meeting a writer's replace).
     """
     raw_bytes = read_settings_bytes_verified(settings_path)
     if raw_bytes is None:
-        return None
+        return _read_behind_the_writer(settings_path) if behind_writer and settings_path.exists() else None
     try:
         return json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         if expected_settings_sha256():
             raise SettingsIntegrityError("settings snapshot is unreadable") from exc
-        return None
+        return _read_behind_the_writer(settings_path) if behind_writer else None
+
+
+def _read_behind_the_writer(settings_path: Path):
+    """The same read once more, behind the lock a writer holds until its bytes are complete."""
+    from ouroboros import config
+
+    fd = config._acquire_settings_lock()
+    try:
+        return read_settings_json_verified(settings_path)
+    finally:
+        config._release_settings_lock(fd)
 
 
 def verify_settings_integrity(settings_path: Path) -> str | None:

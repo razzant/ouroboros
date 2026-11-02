@@ -80,7 +80,7 @@ def test_only_outermost_acquisitions_are_measured_with_their_wait_hold_and_site(
     lock = MeasuredRLock()
     with lock:  # outermost: one measured hold
         with lock:  # re-entrant: depth only
-            time.sleep(0.05)
+            time.sleep(0.07)  # a Windows sleep may end a ~15.6 ms tick early
     facts = lock.drain()
     assert facts["count"] == 1, "a re-entrant acquisition is not measured again"
     assert facts["hold_max_sec"] >= 0.05 and facts["hold_total_sec"] == facts["hold_max_sec"]
@@ -89,7 +89,7 @@ def test_only_outermost_acquisitions_are_measured_with_their_wait_hold_and_site(
     assert facts["hold_max_site"].endswith(" in test_only_outermost_acquisitions_are_measured_with_their_wait_hold_and_site")
 
     entered = threading.Event()
-    holder = threading.Thread(target=_hold, args=(lock, 0.2, entered))
+    holder = threading.Thread(target=_hold, args=(lock, 0.22, entered))
     holder.start()
     assert entered.wait(5)
     assert lock.acquire(blocking=False) is False and lock.acquire(timeout=0.01) is False, "refused, not measured"

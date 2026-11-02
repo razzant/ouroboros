@@ -1,6 +1,6 @@
 // Resources are engine facts, with independent clocks. This leaf presents them
 // and one explicit confirmation; the shared Accounts store owns all transport.
-import { accountName, accountTargetKey, quotaConstraintFact, resourceCapabilitiesRead,
+import { accountCapabilityMarks, accountName, accountTargetKey, quotaConstraintFact, resourceCapabilitiesRead,
     resetRecoverable, READ_OK } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { formatRelativeAge } from './ui_helpers.js';
@@ -20,6 +20,18 @@ const dateText = value => {
 };
 const fact = (label, value) => `<div class="resource-fact"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`;
 const note = value => value ? `<div class="resource-age">${esc(value)}</div>` : '';
+
+/** One muted line per model this account cannot serve right now; the engine probes again later. */
+export function capabilityMarkup(row, payload) {
+    return accountCapabilityMarks(payload, row).map(mark => {
+        const reason = String(mark.provider_reason || '').trim();
+        const brief = reason.length > 160 ? `${reason.slice(0, 159)}\u2026` : reason;
+        const retry = Date.parse(mark.expires_at || '') > Date.now()
+            ? `may be retried ${dateText(mark.expires_at)}` : 'the next request may recheck it';
+        return `<div data-model-capability>${esc(`Cannot serve ${mark.requested_model}${brief ? `: ${brief}` : ''}`
+            + ` \u00b7 temporary mark set ${dateText(mark.observed_at)}; ${retry}`)}</div>`;
+    }).join('');
+}
 
 export function resourceSnapshot(row, payload) {
     return (payload?.resources || []).find(resource => resource.target?.harness === row.harness

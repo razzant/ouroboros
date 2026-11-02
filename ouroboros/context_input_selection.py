@@ -204,19 +204,6 @@ def historical_inputs_exhibit(ctx, drive_root=None, task_id="") -> dict:
     return result
 
 
-def _task_requires_development_context(task: Dict[str, Any]) -> bool:
-    """Return whether low mode should inline the engineering handbook.
-
-    Web chat tasks are direct-chat but still may ask for code/self-modification.
-    Err toward preserving engineering competence unless a structured caller
-    explicitly declares that this task does not need DEVELOPMENT.md.
-    """
-    explicit = task.get("context_requires_development")
-    if explicit is not None:
-        return normalize_bool(explicit)
-    return str(task.get("type") or "") == "task" or not bool(task.get("_is_direct_chat"))
-
-
 def _explicit_self_body_docs_flag(task: Dict[str, Any]) -> Optional[bool]:
     """Explicit context_requires_self_body_docs from the task or its contract;
     None when neither declares it."""
@@ -241,22 +228,76 @@ def _task_requires_self_body_docs(task: Dict[str, Any]) -> bool:
     return task_type in {"evolution", "deep_self_review", "review"}
 
 
-def _task_uses_external_context(task: Dict[str, Any]) -> bool:
-    """Return True for structured headless/workspace/delegated task surfaces."""
-
+def _pointer_surface(task: Dict[str, Any]) -> bool:
+    """BIBLE P1's on-demand surfaces: a delegated subagent, an external API/CLI/scheduled source or actor."""
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     source = str(metadata.get("source") or task.get("source") or "").strip().lower()
     actor = str(task.get("actor_id") or metadata.get("actor_id") or "").strip().lower()
     delegation_role = str(task.get("delegation_role") or metadata.get("delegation_role") or "").strip().lower()
-    if str(task.get("workspace_root") or metadata.get("workspace_root") or "").strip():
+    return (delegation_role == "subagent" or source in {"api_task", "cli", "scheduled_task", "skill_scheduled_task"}
+            or actor in {"cli", "scheduler"})
+
+
+def _bound_tree_is_body(task: Dict[str, Any], ctx: Any) -> Optional[bool]:
+    """Whether the task's bound work tree is Ouroboros's body (a worktree, copy or fork of it): ``True`` when
+    ``body_fact`` recognizes it, ``False`` when it proves a foreign tree, ``None`` without a binding or when
+    the fact is unknown (no git, no remote, an unreadable tree)."""
+    from ouroboros.review_body_fact import BODY_FALSE, BODY_TRUE, body_fact
+    from ouroboros.tools.tool_resolution import system_repo_dir_for
+    from ouroboros.workspace_copies import same_directory
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    root = str(task.get("workspace_root") or metadata.get("workspace_root") or "").strip()
+    if not root:
+        return None
+    try:
+        system = system_repo_dir_for(ctx)
+        if same_directory(root, system):
+            return True
+        data = getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None)
+        fact = body_fact(root, system_repo=system, data_dir=data).body
+    except Exception:
+        log.debug("bound tree body fact unavailable; the subject stays unknown", exc_info=True)
+        return None
+    return True if fact == BODY_TRUE else False if fact == BODY_FALSE else None
+
+
+def development_resident(task: Dict[str, Any], ctx: Any) -> bool:
+    """Whether docs/DEVELOPMENT.md stays whole in Max, by the subject of the work (BIBLE P1, owner 6A).
+
+    The task's own ``context_requires_development`` wins either way (absent is not false); a delegated child
+    or an external API/CLI/scheduled surface gets the pointer unless the task itself asks for the handbook;
+    self-body work keeps it; a bound work tree ``body_fact`` proves foreign gets the pointer. Anything else,
+    an unbound task or a tree whose body fact is unknown, keeps the book: missing facts never narrow it.
+    Project membership is not a signal.
+    """
+    explicit = task.get("context_requires_development")
+    if explicit is not None:
+        return normalize_bool(explicit)
+    if _explicit_self_body_docs_flag(task) is True:
         return True
-    if delegation_role == "subagent":
-        return True
-    if source in {"api_task", "cli", "scheduled_task", "skill_scheduled_task"}:
-        return True
-    if actor in {"cli", "scheduler"}:
-        return True
-    return False
+    if _pointer_surface(task):
+        return False
+    return _task_requires_self_body_docs(task) or _bound_tree_is_body(task, ctx) is not False
+
+
+def task_input_pointer(env: Any, task: Dict[str, Any], user_content_json: str) -> Optional[str]:
+    """The exact task input as a source pointer (user content JSON), or ``None`` when it cannot be retained.
+
+    The original input stays exact in the captured core and the actor source store; only its Nano delivery
+    changes. This is neither the external-assignment compiler nor a summary.
+    """
+    try:
+        from ouroboros.artifacts import store_actor_source_bytes
+        source = store_actor_source_bytes(env.drive_root, str(task["id"]), category="context_checkpoints",
+            source_id="task_input", data=user_content_json.encode("utf-8"), extension="json")
+    except (OSError, ValueError, KeyError):
+        log.warning("Exact task input source could not be retained; preserving complete input", exc_info=True)
+        return None
+    return json.dumps("[Exact task input source]\nThe complete original user input is stored as JSON at this source. "
+                      "Read its full content through the given reader in ranges before substantive decisions. "
+                      "This pointer is not a summary or a change to the task.\n"
+                      + json.dumps(source, ensure_ascii=False, sort_keys=True), ensure_ascii=False)
 
 
 def _validate_declared_input_task(task: Dict[str, Any]) -> None:
@@ -287,44 +328,67 @@ def _capture_declared_context_core(
 
     Branch before shared memory is opened. Do not guess which memory sentences
     might bias this case. Rebuilds read the same durable task selection, while
-    retries and fitting operate on the resulting immutable ContextCore.
+    retries and fitting operate on the resulting immutable ContextCore. A task
+    scheduled with ``DECLARED_WORDS_FACT`` carries the owner's words that caused
+    the work right after its receipt, ahead of the dated runtime facts: the block
+    a shared child reads, rendered from the task's own frozen record.
     """
-    from ouroboros.subagent_work_order import input_source_selection_receipt
-    from ouroboros.subagent_runtime import current_model_visible_subagent_catalog, review_facts_block, review_records_block
+    from ouroboros.safety_config import owner_rules_section
+    from ouroboros.memory_view import _owner_words_block  # the shared child's block, byte for byte
+    from ouroboros.subagent_work_order import declared_inputs_carry_owner_words, input_source_selection_receipt
+    from ouroboros.subagent_metrics import fact_line
+    from ouroboros.section_floor import HostSection, capture_sections, labelled_section
+    from ouroboros.subagent_runtime import (
+        current_model_visible_subagent_catalog, review_facts_block, review_records_block, subagent_supervision_fact_line,
+        subagent_catalog_section,
+    )
 
     canonical_root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
     same_drive = canonical_root.resolve(strict=False) == memory.drive_root.resolve(strict=False)
     process_memory = memory if same_drive else Memory(drive_root=canonical_root, repo_dir=memory.repo_dir)
     supplementary_messages: list = []
+    words = _owner_words_block(task) if declared_inputs_carry_owner_words(task) else ""
     parts = [
         "## Input source selection\n\n" + json.dumps(input_source_selection_receipt(task), ensure_ascii=False, sort_keys=True),
+        *([words] if words else []),
         runtime_builder(env, task, ctx=ctx, captured_at=sources["captured_at"],
                         supplementary_messages_out=supplementary_messages),
     ]
-    parts.extend(snapshot_labelled(section, sources["captured_at"]) for section in
+    parts.extend(labelled_section(section, lambda text: snapshot_labelled(text, sources["captured_at"]))
+                 if isinstance(section, HostSection) else snapshot_labelled(section, sources["captured_at"]) for section in
                  process_memory.recent_activity_sections(str(task["id"]), own_drive=None if same_drive else memory))
-    catalog_text = ""
+    catalog_text, catalog = "", None
     try:
         catalog = current_model_visible_subagent_catalog()
         if catalog:
-            catalog_text = "## Available subagents\n\n" + json.dumps(catalog, ensure_ascii=False, indent=1)
+            catalog_text = subagent_catalog_section(catalog)
     except Exception:
         log.debug("Failed to build Available subagents catalog", exc_info=True)
-    review_text = ""
+    review_text, review_activity = "", []
     try:
-        review_text = review_facts_block()
-        parts.append(review_records_block(drive_root=canonical_root, task_id=str(task["id"])))
+        review_text = review_facts_block(activity_out=review_activity)
+        parts.extend(review_activity)  # each seat's price and last review change: never the cached prefix
+        parts.extend(filter(None, (
+            review_records_block(drive_root=canonical_root, task_id=str(task["id"])),
+            subagent_supervision_fact_line(task, ctx=ctx, catalog=catalog),
+            fact_line(task, drive_root=canonical_root),
+        )))
     except Exception:
         log.warning("Failed to build the Review block", exc_info=True)
+    standing_rules = owner_rules_section()
     return _ContextCore(
         base_prompt=sources["base_prompt"], bible_md=sources["bible_md"],
         architecture_md=sources["architecture_md"], development_md=sources["development_md"],
-        semi_stable_text="\n\n".join(part for part in (catalog_text, review_text) if part),
+        # The owner's standing rules are governance like SYSTEM.md, not a selectable case input.
+        semi_stable_text="\n\n".join(part for part in (catalog_text, review_text, standing_rules) if part),
+        semi_stable_sections=capture_sections((part for part in (catalog_text, review_text, standing_rules) if part), prefix='stable'),
         dynamic_text="\n\n".join(parts),
+        dynamic_sections=capture_sections(parts, prefix='dynamic'),
         user_content_json=json.dumps(user_builder(task), ensure_ascii=False, sort_keys=True),
         docs_need_development=_task_requires_self_body_docs(task),
         reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),
         compact_reference_docs=True,
         dynamic_head_text=sources.get("design_nav", ""),
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
+        connections=sources.get("connections", ("", "")),
     )

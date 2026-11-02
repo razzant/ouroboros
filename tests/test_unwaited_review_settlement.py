@@ -94,12 +94,18 @@ def test_a_left_review_whose_seats_still_run_keeps_its_record_pending_in_process
     record_id = _record(data)
     running = [_seats()[0], {**_seats()[1], "operation_state": "in_flight", "late_result_pending": True,
                              "status": "error", "raw_text": ""}]
-    monkeypatch.setattr(review_pause, "_left_seats", lambda record: (None, running, ""))
+    # S3 collection updates the paid attempt as well as its ledger record.
+    from ouroboros.review_state import CommitAttemptRecord, update_state
+    attempt = CommitAttemptRecord(ts="2026-10-22T00:00:00Z", commit_message="review", status="reviewed",
+        task_id=TASK, tool_name="review_change", attempt=1, paid=True, review_record_id=record_id,
+        review_retry_key="round-1", triad_raw_results=running, late_result_pending=True)
+    update_state(data, lambda state: state.record_attempt(attempt))
+    monkeypatch.setattr(review_pause, "_left_seats", lambda record: (attempt, running, ""))
     record = {"surface": "change", "task_id": TASK, "record_id": record_id, "retry_key": "round-1",
               "drive_root": str(data), "canonical_root": str(data)}
     assert review_pause._settled_aggregate(record) == ""
     assert rl.load_record(data, record_id)["state"] == "pending"
-    monkeypatch.setattr(review_pause, "_left_seats", lambda record: (None, _seats(), ""))
+    monkeypatch.setattr(review_pause, "_left_seats", lambda record: (attempt, _seats(), ""))
     assert review_pause._settled_aggregate(record) == "PASS"
     assert rl.load_record(data, record_id)["state"] == "settled"
 

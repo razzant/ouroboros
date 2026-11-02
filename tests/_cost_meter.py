@@ -15,35 +15,49 @@ What is counted, per tag:
 - ``stat`` / ``scandir`` / ``listdir`` (and per category): ``os.stat``, ``os.lstat``,
   ``os.scandir``, ``os.listdir`` and the ``pathlib`` accessor (Python 3.10 binds those at
   class creation, so they are wrapped separately), ``os.walk`` and ``glob`` included;
+  ``dir_entries`` (and per category): the entries a listing delivered to its reader (each one a
+  ``scandir`` iterator yields, the whole ``listdir`` list), so a history-sized directory listed in
+  ONE call still costs its size;
 - ``open`` (and per category): ``io.open``/``builtins.open``/``Path.open``; ``os_open`` for
   raw ``os.open``; ``read_bytes`` (and per category): bytes delivered by files opened for
   reading through those doors (``os.read``/``os.pread`` on a counted descriptor included; ``os.pread``
-  exists only on POSIX);
+  exists only on POSIX); ``lock_acquired``: a lock file created by an exclusive ``os.open`` (every
+  lock tier takes its name so), one per acquisition however contended, since a refused create raises;
 - ``json_loads`` and ``json_chars``: every ``json.loads``/``json.load`` and its input length;
+  ``rows_decoded``: the stored dialogue row bodies among them (``ROW_DECODER``);
+- ``rows_crossed``: every row a statement hands to Python as a ``sqlite3.Row`` (the store's row factory),
+  one SQLite-to-Python crossing each: a read that captures (``store_capture``) crosses once per statement;
 - ``popen`` (argv[0] names kept in ``popen_names``) and ``thread_start`` (thread names).
 
 ``callers`` attributes counter amounts and SQL statements to reader stacks, including
 root-local work and JSON decodes which have no history path to name.
 
-Locations (``category``): ``root`` and the history locations ``CATEGORIES`` under the data root,
-``lock`` for lock files there (how often a lock is probed follows contention between threads, not
-the amount of history), ``outside`` for everything else (the interpreter, the ancestors a path
-resolution walks), ``fd`` for an integer descriptor.
+Locations (``category``): ``root`` and the history locations ``CATEGORIES`` under the data root
+(the evidence packs under ``observability/packs/`` hold settled tasks' evidence and are history),
+``execution`` for the install's delegated execution roots (``execution_root``: the private
+checkouts whose ``.review-evidence/`` trees a capture walks and copies; a copy by ``shutil.copy2``
+moves its bytes in the kernel and shows as an ``open`` of the source plus ``stat`` calls, never as
+``read_bytes``), ``lock`` for lock files there (how often a lock is probed follows contention
+between threads, not the amount of history), ``outside`` for everything else (the interpreter, the
+ancestors a path resolution walks), ``fd`` for an integer descriptor.
 
 Attribution (``tag_of``): the context variable ``BOUNDARY`` when set (an ASGI request or the
 lifespan task and everything it offloads with ``asyncio.to_thread``, which copies the
 context); otherwise the tag a thread received when it started: a ``thread_rules`` match by
-name, else the starter's tag mapped through ``lineage`` (pool workers never inherit: their
-work items carry their own context); otherwise ``bg:<thread name>``. Module-level aliases
-(``from json import loads``) are rebound while the meter is installed, so work done through
-them is counted too.
+name, else the starter's tag mapped through ``lineage``; otherwise ``bg:<thread name>``. Work
+submitted to a ``ThreadPoolExecutor`` is credited to the boundary that submitted it (the work
+item carries the submitter's tag; pool worker threads themselves inherit nothing), so a pass that
+dispatches to a pool owns what the pool does for it. Module-level aliases (``from json import
+loads``) are rebound while the meter is installed, so work done through them is counted too.
 """
 
 from __future__ import annotations
 
 import builtins
 import collections
+import concurrent.futures
 import contextvars
+import functools
 import io
 import json
 import os
@@ -60,8 +74,11 @@ BOUNDARY: contextvars.ContextVar = contextvars.ContextVar("cost_boundary", defau
 VM_STEP = 100
 # Unrelated-history locations of a data root (POSIX separators, relative to the root).
 CATEGORIES = (("archive/", "archive"), ("state/headless_tasks/", "headless"),
-              ("task_drives/", "task_drives"), ("task_results/", "task_results"))
+              ("task_drives/", "task_drives"), ("task_results/", "task_results"),
+              ("observability/packs/", "packs"))
 HISTORY = tuple(name for _prefix, name in CATEGORIES)
+EXECUTION = "execution"  # the delegated execution roots (outside the data root)
+ROW_DECODER = ("ouroboros.dialogue_store", "decode")  # (module, function) that decodes one stored row body
 _POOL_TARGETS = {("concurrent.futures.thread", "_worker")}
 _POOL_CLASSES = ("WorkerThread", "_WorkerThread")
 _DIGITS = re.compile(r"[-_]?\d+$")
@@ -96,16 +113,23 @@ def tag_of() -> str:
     return "bg:" + _DIGITS.sub("", threading.current_thread().name or "thread")
 
 
+def _forms(path: Any) -> List[str]:
+    """The absolute and the real form of a directory, longest first, each ending in a separator."""
+    if path is None:
+        return []
+    text = os.fspath(path)
+    roots = sorted({os.path.abspath(text), os.path.realpath(text)}, key=len, reverse=True)
+    return [root.rstrip(os.sep) + os.sep for root in roots]
+
+
 class CostMeter:
     """Install with ``with CostMeter(root) as meter:``; read with ``snapshot(tag)``."""
 
-    def __init__(self, data_root: Any = None, *, thread_rules: Iterable[Tuple[str, str]] = (),
+    def __init__(self, data_root: Any = None, *, execution_root: Any = None,
+                 thread_rules: Iterable[Tuple[str, str]] = (),
                  lineage: Optional[Dict[str, Optional[str]]] = None) -> None:
-        roots: List[str] = []
-        if data_root is not None:
-            text = os.fspath(data_root)
-            roots = sorted({os.path.abspath(text), os.path.realpath(text)}, key=len, reverse=True)
-        self._roots = [root.rstrip(os.sep) + os.sep for root in roots]
+        self._roots = _forms(data_root)
+        self._execution_roots = _forms(execution_root)
         self.thread_rules: List[Tuple[str, str]] = list(thread_rules)
         self.lineage: Dict[str, Optional[str]] = dict(lineage or {})
         self.counts: Dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
@@ -137,6 +161,8 @@ class CostMeter:
             text_dir = text + os.sep
         else:
             text_dir = text
+        if any(text_dir == root or text.startswith(root) for root in self._execution_roots):
+            return EXECUTION
         for root in self._roots:
             if text_dir == root:
                 return "root"
@@ -263,18 +289,54 @@ def _w_lstat(path, *args, **kwargs):
     return _ORIG["os.lstat"](path, *args, **kwargs)
 
 
+class _CountedScandir:
+    """The iterator ``os.scandir`` returned, counting every entry it yields (``dir_entries``): the
+    directory's size is paid by the reader that examines it, however few calls it made."""
+
+    __slots__ = ("_inner", "_path", "_category")
+
+    def __init__(self, inner, path, category):
+        self._inner, self._path, self._category = inner, path, category
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        entry = next(self._inner)
+        meter = _ACTIVE
+        if meter is not None:
+            meter.add("dir_entries", path=self._path, category=self._category)
+        return entry
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self._inner.close()
+
+    def close(self):
+        self._inner.close()
+
+
 def _w_scandir(path=".", *args, **kwargs):
     meter = _ACTIVE
-    if meter is not None:
-        meter.add("scandir", path=path)
-    return _ORIG["os.scandir"](path, *args, **kwargs)
+    if meter is None:
+        return _ORIG["os.scandir"](path, *args, **kwargs)
+    category = meter.category(path)
+    meter.add("scandir", path=path, category=category)
+    return _CountedScandir(_ORIG["os.scandir"](path, *args, **kwargs), path, category)
 
 
 def _w_listdir(path=".", *args, **kwargs):
     meter = _ACTIVE
-    if meter is not None:
-        meter.add("listdir", path=path)
-    return _ORIG["os.listdir"](path, *args, **kwargs)
+    if meter is None:
+        return _ORIG["os.listdir"](path, *args, **kwargs)
+    category = meter.category(path)
+    meter.add("listdir", path=path, category=category)
+    names = _ORIG["os.listdir"](path, *args, **kwargs)
+    if names:
+        meter.add("dir_entries", len(names), path=path, category=category)
+    return names
 
 
 def _w_os_open(path, flags, *args, **kwargs):
@@ -284,6 +346,8 @@ def _w_os_open(path, flags, *args, **kwargs):
         category = meter.category(path)
         meter.add("os_open", path=path, category=category)
         meter._fd_category[fd] = category
+        if category == "lock" and flags & os.O_EXCL:
+            meter.add("lock_acquired")
     return fd
 
 
@@ -377,7 +441,21 @@ def _w_json_loads(s, *args, **kwargs):
             meter.add("json_chars", len(s))
         except TypeError:
             pass
+        frame = sys._getframe(1)
+        if (frame.f_globals.get("__name__"), frame.f_code.co_name) == ROW_DECODER:
+            meter.add("rows_decoded")
     return _ORIG["json.loads"](s, *args, **kwargs)
+
+
+class _CountedRow(sqlite3.Row):
+    """``sqlite3.Row`` while a meter is installed (the store sets ``row_factory = sqlite3.Row`` at each
+    connect): each row a statement hands to Python counts ``rows_crossed``."""
+
+    def __new__(cls, cursor, data):
+        meter = _ACTIVE
+        if meter is not None:
+            meter.add("rows_crossed")
+        return super().__new__(cls, cursor, data)
 
 
 def _trace(statement: str) -> None:
@@ -434,6 +512,15 @@ def _w_bootstrap_inner(self):
     return _ORIG["Thread._bootstrap_inner"](self)
 
 
+def _w_submit(self, fn, /, *args, **kwargs):
+    """A pool work item carries its submitter's boundary: the pass that dispatches owns the work."""
+    tag = tag_of() if _ACTIVE is not None else None
+    if tag is not None and not tag.startswith("bg:"):
+        fn = functools.partial(tagged, tag, functools.partial(fn, *args, **kwargs))
+        args, kwargs = (), {}
+    return _ORIG["ThreadPoolExecutor.submit"](self, fn, *args, **kwargs)
+
+
 _MODULE_PATCHES = (
     (os, "stat", "os.stat", _w_stat), (os, "lstat", "os.lstat", _w_lstat),
     (os, "scandir", "os.scandir", _w_scandir), (os, "listdir", "os.listdir", _w_listdir),
@@ -441,13 +528,14 @@ _MODULE_PATCHES = (
     (os, "pread", "os.pread", _w_os_pread), (os, "close", "os.close", _w_os_close),
     (io, "open", "io.open", _w_open), (builtins, "open", "builtins.open", _w_open),
     (json, "loads", "json.loads", _w_json_loads), (sqlite3, "connect", "sqlite3.connect", _w_connect),
+    (sqlite3, "Row", "sqlite3.Row", _CountedRow),
 )
 _ACCESSOR = getattr(pathlib, "_NormalAccessor", None)
 _ACCESSOR_PATCHES = (("stat", _w_stat), ("scandir", _w_scandir), ("listdir", _w_listdir),
                      ("open", _w_accessor_open)) if _ACCESSOR is not None else ()
 _SKIP_REBIND = {"os", "posix", "nt", "io", "_io", "builtins", "json", "sqlite3", "pathlib", __name__}
 _WRAPPERS = {wrapper for *_rest, wrapper in _MODULE_PATCHES} | {wrapper for _attr, wrapper in _ACCESSOR_PATCHES} \
-    | {_w_popen_init, _w_thread_start, _w_bootstrap_inner}
+    | {_w_popen_init, _w_thread_start, _w_bootstrap_inner, _w_submit}
 
 
 def install(meter: CostMeter) -> None:
@@ -481,11 +569,19 @@ def _install(meter: CostMeter) -> None:
             continue
         _ORIG[key] = _replace(meter, module, attr, wrapper)
         originals[id(_ORIG[key])] = wrapper
+    # Capability probes must see the same platform while its OS doors are wrapped.
+    # Otherwise confined_files imported during a cold boot refuses every POSIX child.
+    for attr in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks", "supports_effective_ids"):
+        if hasattr(os, attr):
+            supported = getattr(os, attr)
+            setattr(os, attr, {originals.get(id(call), call) for call in supported})
+            meter._patched.append((os, attr, supported))
     for attr, wrapper in _ACCESSOR_PATCHES:
         _ORIG["accessor." + attr] = _replace(meter, _ACCESSOR, attr, staticmethod(wrapper))
     _ORIG["Popen.__init__"] = _replace(meter, subprocess.Popen, "__init__", _w_popen_init)
     _ORIG["Thread.start"] = _replace(meter, threading.Thread, "start", _w_thread_start)
     _ORIG["Thread._bootstrap_inner"] = _replace(meter, threading.Thread, "_bootstrap_inner", _w_bootstrap_inner)
+    _ORIG["ThreadPoolExecutor.submit"] = _replace(meter, concurrent.futures.ThreadPoolExecutor, "submit", _w_submit)
     for name, module in list(sys.modules.items()):
         if module is None or name in _SKIP_REBIND:
             continue

@@ -41,8 +41,7 @@ def test_manual_and_release_callers_share_one_full_browser_lane():
     push_path = REPO_ROOT / ".github" / "workflows" / "ui-browser-push.yml"
     caller = _workflow()["jobs"]["ui-smoke"]
     assert " ".join(caller["if"].split()) == (
-        "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'"
-        " || startsWith(github.ref, 'refs/tags/v')"
+        "github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')"
     )
     assert caller["uses"] == "./.github/workflows/ui-browser.yml"
     assert "steps" not in caller, "the browser steps belong to the shared lane"
@@ -123,15 +122,18 @@ def test_the_lane_runs_the_keyless_suite_on_a_throwaway_root():
     assert steps[1]["with"]["install-project"] == "false"
     run_steps = [step for step in steps if "run" in step]
     assert len(run_steps) == 2
-    expected = [("tests/system_e2e/", "OUROBOROS_E2E_DEEP"),
-                ("tests/test_e2e_cancellation_scenarios.py", "OUROBOROS_E2E_CANCEL")]
+    expected = [("tests/system_e2e/", "OUROBOROS_E2E_DEEP", "scenarios"),
+                ("tests/test_e2e_cancellation_scenarios.py", "OUROBOROS_E2E_CANCEL", "cancellation")]
     # All four roots, all under the runner's temp: a scenario server that
     # escaped its isolation could otherwise write into the checkout.
     roots = ["OUROBOROS_APP_ROOT", "OUROBOROS_REPO_DIR", "OUROBOROS_DATA_DIR",
              "OUROBOROS_SETTINGS_PATH"]
-    for run_step, (target, lane) in zip(run_steps, expected):
+    for run_step, (target, lane, label) in zip(run_steps, expected):
+        # Each pass runs behind scripts/ci_retry.py: one retry per failed scenario, FLAKY recorded.
+        evidence = f'"${{{{ runner.temp }}}}/ci-evidence/{label}"'
         assert run_step["run"].strip() == (
-            f'python -m pytest {target} -o addopts="" -o faulthandler_timeout=540 -q'
+            f"python scripts/ci_retry.py --evidence-dir {evidence} --accepted tests/accepted_failures.json -- "
+            f'python -m pytest {target} -o addopts="" -o faulthandler_timeout=540 -q --ci-evidence-dir={evidence}'
         )
         env = run_step["env"]
         assert env[lane] == "mock"

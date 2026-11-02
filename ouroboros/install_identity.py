@@ -156,6 +156,19 @@ def initialize_install() -> dict:
         return record
 
 
+def recorded_id(path: Any) -> str:
+    """The identity PATH's install has minted for itself, read-only: ``""`` before its first boot or
+    write mints one, or while a copy still carries its original's record. A record that cannot be read
+    again keeps the identity this process last read there (copy/move never happens beneath a running
+    install); one never read gives ``""``. Never mints and never raises; a stat witness keeps reads cheap."""
+    root = layout_root(path)
+    try:
+        record = _read(root)
+    except StoreError:
+        record = (_IDENTITIES.get(root) or (None, None, None))[2]
+    return str(record["id"]) if record and _same_root(record["root"], root) else ""
+
+
 def _ownership(path: Any, *, initialize: bool = True) -> tuple[pathlib.Path, pathlib.Path | None]:
     current = canonical_root()
     if initialize and current not in _INITIALIZED:

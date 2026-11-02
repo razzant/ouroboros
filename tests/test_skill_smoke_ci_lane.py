@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import pathlib
 import re
+import os
+import json
+import subprocess
 
+import pytest
 import yaml
 
 import tests.test_skill_smoke_official as smoke
@@ -64,3 +68,48 @@ def test_the_secret_lives_only_in_the_review_step_of_a_review_leg():
     assert "-m skill_smoke" in run and "--timeout=" not in run  # the test's own marker is the bound
     others = [step for step in steps if "run" in step and step is not secret[0]]
     assert others and all("matrix.lane == 'install'" in str(step.get("if")) for step in others), others
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Review/setup shell runs only in Ubuntu legs")
+def test_review_setup_is_dependency_only_in_the_actual_composite_action(tmp_path):
+    job = _job()
+    setup = next(step for step in job["steps"] if step.get("uses") == "./.github/actions/setup-python-env")
+    assert setup["with"]["install-project"] == "${{ matrix.lane != 'review' && 'true' || 'false' }}"
+    action = yaml.safe_load((CI_PATH.parents[1] / "actions/setup-python-env/action.yml").read_text())
+    command = next(step["run"] for step in action["runs"]["steps"] if step.get("name") == "Sync locked dependencies")
+    # Execute the shipped shell consumer; only uv/python are inert executables.
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    (binary / "uv").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+    (binary / "python").write_text('#!/bin/sh\nexit 0\n')
+    for path in binary.iterdir():
+        path.chmod(0o755)
+    for lane in job["strategy"]["matrix"]["include"]:
+        install = "false" if lane["lane"] == "review" else "true"
+        script = command.replace("${{ inputs.install-project }}", install).replace(
+            "${{ inputs.interpreter }}", "shipped").replace("${{ inputs.profile }}", "test")
+        args_file = tmp_path / "args"
+        subprocess.run(["bash", "-e", "-c", script], check=True, env={
+            **os.environ, "PATH": str(binary) + os.pathsep + os.defpath,
+            "ARGS_FILE": str(args_file), "OUROBOROS_CI_INTERPRETER": "/shipped/python"})
+        args = args_file.read_text().splitlines()
+        assert ("--no-install-project" in args) is (lane["lane"] == "review")
+        assert args[:2] == ["sync", "--locked"] and args[-2:] == ["--python", "/shipped/python"]
+
+
+def test_review_evidence_upload_is_always_narrow_and_matches_the_producer(tmp_path, monkeypatch):
+    from tests.skill_smoke_author import persist_author_evidence
+    job = _job()
+    review = next(step for step in job["steps"] if "OPENROUTER_API_KEY" in (step.get("env") or {}))
+    upload = next(step for step in job["steps"] if step.get("name") == "Upload skill author and reviewer judgments")
+    assert upload["if"] == "${{ always() && matrix.lane == 'review' }}"
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["with"]["if-no-files-found"] == "error"
+    destination = review["env"]["OUROBOROS_TEST_EVIDENCE_ROOT"].replace("${{ runner.temp }}", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", destination)
+    root = tmp_path / "scratch/author"
+    root.mkdir(parents=True)
+    assert not persist_author_evidence(root, {"review_history": [], "review": {}}, "stub")
+    pattern = upload["with"]["path"].replace("${{ runner.temp }}/", "")
+    files = list(tmp_path.glob(pattern))
+    assert len(files) == 1 and json.loads(files[0].read_text())["review_history"] == []

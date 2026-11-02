@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
 import subprocess
 from types import SimpleNamespace
@@ -103,6 +104,127 @@ def test_build_colab_settings_accepts_vision_model_override():
         models={"OUROBOROS_MODEL_VISION": "google/gemini-2.5-pro"},
     )
     assert out["OUROBOROS_MODEL_VISION"] == "google/gemini-2.5-pro"
+
+
+# --- the three launch knobs: explicit launch value > what Drive saved > the first-launch triple ----------------
+
+KNOBS = ("TOTAL_BUDGET", "OUROBOROS_RUNTIME_MODE", "OUROBOROS_MAX_WORKERS")
+FIRST_LAUNCH = (200.0, "advanced", 1)
+SAVED_ON_DRIVE = {"TOTAL_BUDGET": 999.0, "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_MAX_WORKERS": 8,
+                  "TELEGRAM_CHAT_ID": "12345", "OUROBOROS_MODEL": "custom/model"}
+
+
+def _knobs(settings):
+    return tuple(settings[key] for key in KNOBS)
+
+
+def _notebook_launch(monkeypatch, *, environment, drive):
+    """The notebook's own launch statements (``secrets`` through ``settings = build_colab_settings(...)``),
+    parsed from ``notebooks/colab_quickstart.py`` and run unchanged against the real builder: the cell's
+    environment handling is part of the contract, not only the builder behind it."""
+    from ouroboros.colab_bootstrap import build_colab_settings
+
+    source = pathlib.Path(__file__).resolve().parents[1].joinpath("notebooks", "colab_quickstart.py").read_text(encoding="utf-8")
+    body = ast.parse(source).body
+
+    def assigns(node, name):
+        return isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
+
+    start = next(i for i, node in enumerate(body) if assigns(node, "secrets"))
+    end = next(i for i, node in enumerate(body) if assigns(node, "settings"))
+    launch = compile(ast.Module(body=body[start:end + 1], type_ignores=[]), "colab_quickstart.py", "exec")
+    for name in KNOBS:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    # What the cell hands the builder before its launch statements (it always names the channel).
+    scope = {"os": os, "collect_colab_secrets": lambda: {"OPENROUTER_API_KEY": "k"},
+             "build_colab_settings": build_colab_settings,
+             "_settings_seed": {**drive, "OUROBOROS_UPDATE_CHANNEL": "stable"}, "_existing_settings": dict(drive)}
+    exec(launch, scope)  # noqa: S102 -- the repo's own notebook source
+    return scope["settings"]
+
+
+@pytest.mark.parametrize(("environment", "expected"), [
+    ({}, (999.0, "pro", 8)),  # nothing explicit: every saved choice survives
+    ({"TOTAL_BUDGET": "75"}, (75.0, "pro", 8)),  # one explicit knob moves one knob
+    ({"OUROBOROS_RUNTIME_MODE": "cyber_pro"}, (999.0, "cyber_pro", 8)),
+    ({"OUROBOROS_MAX_WORKERS": "4"}, (999.0, "pro", 4)),
+    ({"TOTAL_BUDGET": "75", "OUROBOROS_RUNTIME_MODE": "light", "OUROBOROS_MAX_WORKERS": "4"}, (75.0, "light", 4)),
+    # An explicit value equal to the first-launch default is still a choice, and beats what Drive saved.
+    ({"TOTAL_BUDGET": "200", "OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_MAX_WORKERS": "1"}, FIRST_LAUNCH),
+    ({"TOTAL_BUDGET": "200"}, (200.0, "pro", 8)),
+])
+def test_notebook_launch_keeps_saved_knobs_unless_one_is_explicit(monkeypatch, environment, expected):
+    out = _notebook_launch(monkeypatch, environment=environment, drive=SAVED_ON_DRIVE)
+    assert _knobs(out) == expected
+    # Everything else the Drive document holds survives, and the launch's own host rule is untouched.
+    assert out["TELEGRAM_CHAT_ID"] == "12345" and out["OUROBOROS_MODEL"] == "custom/model"
+    assert out["OUROBOROS_SERVER_HOST"] == "127.0.0.1"
+
+
+@pytest.mark.parametrize(("drive", "expected"), [
+    ({}, FIRST_LAUNCH),  # a first launch: no Drive document at all
+    ({"TELEGRAM_CHAT_ID": "12345"}, FIRST_LAUNCH),  # a document that holds none of the three
+    ({"TOTAL_BUDGET": 999.0}, (999.0, "advanced", 1)),  # a document holding one keeps it, the rest are first-launch
+    ({"OUROBOROS_MAX_WORKERS": 8}, (200.0, "advanced", 8)),
+])
+def test_notebook_first_launch_takes_the_triple_only_for_what_drive_does_not_hold(monkeypatch, drive, expected):
+    assert _knobs(_notebook_launch(monkeypatch, environment={}, drive=drive)) == expected
+
+
+def test_a_repeat_launch_through_drive_keeps_the_saved_triple_and_an_app_edit_between_launches(monkeypatch, tmp_path):
+    """The Drive document the first launch wrote is what the second reads; a choice made in the app between
+    the two launches (Drive changes, the kernel's environment does not) is the one that survives the repeat."""
+    from unittest import mock
+
+    from ouroboros.colab_bootstrap import export_colab_env, write_colab_settings
+
+    data = tmp_path / "data"
+    with mock.patch.dict(os.environ):  # export_colab_env updates the process environment
+        first = _notebook_launch(monkeypatch, environment={}, drive=SAVED_ON_DRIVE)
+        path = write_colab_settings(data, first)
+        exported = export_colab_env(tmp_path / "repo", data, path)
+        assert not set(exported) & set(KNOBS), "the exporter never turns a built knob into a launch variable"
+        assert not set(KNOBS) & set(os.environ), "so the kernel's environment still holds no knob"
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert _knobs(saved) == (999.0, "pro", 8)
+        repeat = _notebook_launch(monkeypatch, environment={}, drive=saved)
+        assert _knobs(repeat) == (999.0, "pro", 8)
+        # The owner changes all three in the app; the next launch of the same kernel keeps THEIR values.
+        edited = {**saved, "TOTAL_BUDGET": 123.0, "OUROBOROS_RUNTIME_MODE": "light", "OUROBOROS_MAX_WORKERS": 6}
+        assert _knobs(_notebook_launch(monkeypatch, environment={}, drive=edited)) == (123.0, "light", 6)
+
+
+@pytest.mark.parametrize(("environment", "error"), [
+    ({"TOTAL_BUDGET": ""}, ValueError), ({"TOTAL_BUDGET": "lots"}, ValueError),
+    ({"OUROBOROS_MAX_WORKERS": ""}, ValueError), ({"OUROBOROS_MAX_WORKERS": "many"}, ValueError),
+])
+def test_a_set_but_blank_or_malformed_launch_variable_still_fails_as_it_did(monkeypatch, environment, error):
+    """Unset is "not given"; a set variable is a choice and goes through the same ``float``/``int`` as before."""
+    with pytest.raises(error):
+        _notebook_launch(monkeypatch, environment=environment, drive=SAVED_ON_DRIVE)
+
+
+def test_an_explicit_runtime_mode_is_stored_as_given_and_read_through_the_existing_normalization(monkeypatch):
+    from ouroboros.config import normalize_settings_raw
+
+    out = _notebook_launch(monkeypatch, environment={"OUROBOROS_RUNTIME_MODE": "bogus"}, drive=SAVED_ON_DRIVE)
+    assert out["OUROBOROS_RUNTIME_MODE"] == "bogus", "never silently replaced by the saved 'pro', never treated as unset"
+    assert normalize_settings_raw(dict(out))["OUROBOROS_RUNTIME_MODE"] == "advanced", "the reader's closed enum decides"
+
+
+def test_build_colab_settings_direct_callers_follow_the_same_precedence():
+    from ouroboros.colab_bootstrap import build_colab_settings
+
+    assert _knobs(build_colab_settings({}, existing=SAVED_ON_DRIVE)) == (999.0, "pro", 8)
+    assert _knobs(build_colab_settings({})) == FIRST_LAUNCH
+    assert _knobs(build_colab_settings({}, existing=SAVED_ON_DRIVE, total_budget=25, runtime_mode="cyber_pro", max_workers=3)) == (25.0, "cyber_pro", 3)
+    # An explicit zero-like value is still explicit (not "unset").
+    assert build_colab_settings({}, existing=SAVED_ON_DRIVE, total_budget=0.0)["TOTAL_BUDGET"] == 0.0
+    # Credentials keep their rule: a blank collected secret never wipes the saved one.
+    out = build_colab_settings({"OPENROUTER_API_KEY": ""}, existing={**SAVED_ON_DRIVE, "OPENROUTER_API_KEY": "saved-key"})
+    assert out["OPENROUTER_API_KEY"] == "saved-key"
 
 
 def test_build_colab_settings_normalizes_explicit_update_channel():

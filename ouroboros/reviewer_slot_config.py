@@ -345,17 +345,28 @@ def review_cost_facts(cost: Any, *, route: str = "", model: str = "") -> Dict[st
             "cost_kind": "subscription" if subscription else "measured" if known else "unknown"}
 
 
+# Surfaces whose counted floor is the owner's strictness: Blocking widens a named
+# subset to every ticked reviewer; Advisory refuses that narrowing without a reason.
+# ``result_required`` is the host fact "this is a Required root result wave"
+# (``review_result.required_root_wave``), never a model argument. Auto, a child and
+# Cyber Pro stay on ``result`` / free composition. ``chosen_by`` is the caller's.
+_COUNTED_FLOOR_SURFACES = frozenset({"own_body", "skill", "plan_first", "result_required"})
+
+
 def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, surface: str,
                          strictness: Optional[str] = None, snapshot: Any = None,
                          pool: Optional[Sequence[Any]] = None, reviewer_effort: str = "",
                          coupling_only: Sequence[str] = (), chosen_by: str = "ouroboros",
                          reason_field: str = "reason") -> ComposedPanel:
-    """Compose one frozen wave. Only Blocking body/skill/first-body-plan asks widen.
+    """Compose one frozen wave. Blocking widens only the counted-floor surfaces.
 
-    Advisory narrowing requires a reason; an adviser neither satisfies the counted
-    minimum nor acquires authority from its delivery. Optional plan follow-ups and
-    preflight keep their existing named-row semantics. Omission selects the pool,
-    including its disclosed Main fallback. The caller retains these facts on retries.
+    Those are body, skill, a first body-plan ask, and a Required root result wave.
+    Advisory narrowing on the same surfaces requires a reason; an adviser neither
+    satisfies the counted minimum nor acquires authority from its delivery. Optional
+    plan follow-ups, preflight, Auto/child result waves and Cyber Pro keep named-row
+    composition. Omission selects the pool, including its disclosed Main fallback.
+    ``chosen_by`` is whatever the caller records (the host floor passes ``host``).
+    The caller retains these facts on retries.
     """
     from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
     from ouroboros.review_ledger import seat_parts
@@ -386,10 +397,10 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
     named = list({slot.slot_id: slot for slot in map(resolve, reviewers)}.values())
     requested = {slot.slot_id for slot in named}
     counted = requested & by_id.keys()
-    widens = strictness == "blocking" and surface in {"own_body", "skill", "plan_first"}
+    widens = strictness == "blocking" and surface in _COUNTED_FLOOR_SURFACES
     narrowed = surface != "preflight" and bool(named) and counted != by_id.keys()
     counted_hint = "name main (the empty pool's counted seat)" if main_alone else "name at least one reviewer from the review pool"
-    if strictness == "advisory" and narrowed and surface in {"own_body", "skill", "plan_first"}:
+    if strictness == "advisory" and narrowed and surface in _COUNTED_FLOOR_SURFACES:
         if not counted:
             raise PanelCompositionError(f"REVIEW_PANEL_EMPTY: {counted_hint}; advisers are heard, not counted. No review was dispatched ($0).")
         if not str(reason).strip():
@@ -743,6 +754,15 @@ def reviewer_slot_execution_rows(surface: str, actors: Any, slots_by_id: Dict[st
             effective["processing"] = dict(usage["processing"])
         if isinstance(usage.get("effort_resolution"), dict):
             effective["effort_resolution"] = dict(usage["effort_resolution"])
+        if session:
+            from ouroboros.effort_evidence import terminal_prompt_cache_ttl
+
+            ttl_receipt = terminal_prompt_cache_ttl(
+                usage.get("observed_attempt"),
+                (usage.get("review_source_delivery") or {}).get("prompt_cache_ttl"),
+            )
+            if isinstance(ttl_receipt, dict):
+                effective["prompt_cache_ttl"] = ttl_receipt
         # D29 applied account/access, verbatim from the engine receipt; absent
         # keys mean the telemetry predates the receipt — shown as absence.
         if usage.get("applied_profile"):

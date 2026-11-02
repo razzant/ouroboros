@@ -83,6 +83,10 @@ class TestBuildSh:
     @pytest.mark.parametrize("matching", [True, False])
     def test_entry_install_requires_its_own_runtime_library_not_build_pythons(self, tmp_path, matching):
         """Run the real install block against the static-python layout (no artifact is executed)."""
+        # The PATH's bash, as the notarization tests below: a bare "bash" on Windows starts System32's WSL launcher.
+        bash = shutil.which("bash")
+        if not bash:
+            pytest.skip("build.sh's install block needs bash")
         src = _read("build.sh")
         start = src.index('cp build/macos/ouroboros-shell')
         end = src.index('echo "--- Installing packaged CLI wrappers', start)
@@ -95,7 +99,7 @@ class TestBuildSh:
         compiled = tmp_path / "build/macos/ouroboros-shell"
         compiled.parent.mkdir(parents=True)
         compiled.write_bytes(b"entry fixture, never executed")
-        result = subprocess.run(["bash", "-ec", src[start:end]], cwd=tmp_path, capture_output=True, text=True,
+        result = subprocess.run([bash, "-ec", src[start:end]], cwd=tmp_path, capture_output=True, text=True,
                                 env={**os.environ, "APP_PATH": str(app), "SHELL_PY_LIB": "libpython3.10.dylib"})
         assert (result.returncode == 0) is matching, result.stderr
         assert (app / "Contents/MacOS/ouroboros-shell").read_bytes() == compiled.read_bytes()
@@ -775,8 +779,10 @@ def test_uv_project_commands_validate_lock_freshness(path):
 
 
 def test_generated_runtime_lock_keeps_lf_on_windows():
-    attributes = _read(".gitattributes").splitlines()
-    assert "requirements-runtime.lock text eol=lf" in attributes
+    """The regenerated lock keeps LF in a Windows checkout, so the clean-tree bundle gate sees no false edit."""
+    attributes = subprocess.run(["git", "check-attr", "eol", "--", "requirements-runtime.lock"], cwd=REPO_ROOT,
+                                capture_output=True, text=True, check=True).stdout
+    assert attributes.strip() == "requirements-runtime.lock: eol: lf", attributes
 
 
 # ---------------------------------------------------------------------------
@@ -1342,21 +1348,27 @@ def test_ci_release_preflight_validates_tag_matches_version():
     assert 'tag != expected_tag' in workflow
 
 
+_RELEASE_REQUIRED = ("build", "windows-proof", "release-preflight", "lint", "full-test", "system-e2e-mock",
+                     "ui-smoke", "integration-test", "marker-guards", "docker-ui-smoke", "docker-portable-test",
+                     "skill-smoke", "test-verdict")
+
+
 def test_ci_collects_independent_failures_without_relaxing_release_gates():
+    import yaml
+
     workflow = _ci_workflow()
-    assert "${{ always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') }}" in workflow
+    jobs = yaml.safe_load(workflow)["jobs"]
     assert "tag_valid: ${{ steps.release_meta.outputs.tag_valid }}" in workflow
-    assert "needs.release-preflight.outputs.tag_valid == 'true'" in workflow
-    assert "needs.release-preflight.result == 'success'" in workflow.split("\n  release:\n", 1)[1]
-    for expression in (
-        "FULL_TEST_RESULT: ${{ needs.full-test.result }}",
-        "INTEGRATION_RESULT: ${{ needs.integration-test.result }}",
-        "SYSTEM_E2E_RESULT: ${{ needs.system-e2e-mock.result }}",
-    ):
-        assert expression in workflow
-    assert '"$FULL_TEST_RESULT" != success' in workflow
-    assert '"$INTEGRATION_RESULT" != success' in workflow
-    assert '"$SYSTEM_E2E_RESULT" != success' in workflow
+    # Builds start once the tag is valid, beside the tests, instead of waiting for them.
+    assert "needs" not in jobs["release-preflight"]
+    assert jobs["build"]["needs"] == ["release-preflight"]
+    assert "needs.release-preflight.outputs.tag_valid == 'true'" in jobs["build"]["if"]
+    # ...and the release job, not the preflight, requires every lane: nothing is waived by tag.
+    release = jobs["release"]["if"]
+    for name in _RELEASE_REQUIRED:
+        assert f"needs.{name}.result == 'success'" in release, name
+        assert name in jobs["release"]["needs"], name
+    assert "refs/tags/v7" not in workflow
     assert "if: startsWith(github.ref, 'refs/tags/v')" in workflow.split("  android-build:", 1)[1].split("  release-preflight:", 1)[0]
     assert "continue-on-error: true" in workflow.split("  vendor-package-smoke:", 1)[1].split("  release:", 1)[0]
 
@@ -1375,27 +1387,15 @@ def test_ci_setup_aware_failure_collection_guards_each_independent_lane():
     assert "refs/tags/v" in ui["Run browser tools Chromium/WebKit smoke"]["if"]
 
 
-def test_ci_release_prerequisite_shell_gate_truth_table():
+def test_ci_release_requires_success_and_never_a_skipped_or_red_lane():
+    """The release `if` asks every required job for success, so a skipped lane (no result at all)
+    or a red one stops publication on every tag alike; FLAKY and ACCEPTED tests are green lanes."""
     import yaml
 
-    jobs = yaml.safe_load(_ci_workflow())["jobs"]
-    step = next(step for step in jobs["release-preflight"]["steps"]
-                if step.get("name") == "Require test prerequisites for publication")
-    cases = [
-        (("success", "success", "success"), True),
-        (("failure", "success", "success"), False),
-        (("success", "skipped", "success"), False),
-        (("success", "success", "cancelled"), False),
-        (("", "success", "success"), False),
-    ]
-    for (full, integration, system), expected in cases:
-        env = os.environ.copy()
-        env.update(FULL_TEST_RESULT=full, INTEGRATION_RESULT=integration, SYSTEM_E2E_RESULT=system)
-        bash = shutil.which("bash")
-        if bash is None:
-            pytest.skip("workflow shell is unavailable on this host")
-        result = subprocess.run([bash, "-c", step["run"]], env=env, capture_output=True, text=True)
-        assert (result.returncode == 0) is expected, (full, integration, system, result.stderr)
+    release = yaml.safe_load(_ci_workflow())["jobs"]["release"]["if"]
+    assert "github.ref == 'refs/tags/" not in release and "github.repository ==" not in release
+    assert "!= 'skipped'" not in release
+    assert release.count("== 'success'") == len(_RELEASE_REQUIRED)
 
 
 def test_ci_failure_collection_guards_every_independent_step_and_rerun_uploads():
@@ -1403,8 +1403,9 @@ def test_ci_failure_collection_guards_every_independent_step_and_rerun_uploads()
 
     jobs = yaml.safe_load(_ci_workflow())["jobs"]
     expected = {
-        "quick-test": ["Verify generated Pages output", "Lint (deterministic F-rule gate — catches the NameError-under-except class)", "Run browser-module tests (node --test — mirrored by the hermetic commit gate)", "Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)", "Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
-        "full-test-runs": ["Run browser-module tests (node --test — mirrored by the hermetic commit gate)", "Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)", "Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
+        "lint": ["Verify generated Pages output", "Lint (deterministic F-rule gate — catches the NameError-under-except class)", "Lint browser modules (ESLint no-undef — CI-only second layer of the acorn gate)"],
+        "quick-test": ["Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
+        "full-test-runs": ["Run browser-module tests (node --test — mirrored by the hermetic commit gate)", "Run tests (parallel — excludes the costly marker lanes AND the serial real-process suites)", "Run tests (serial — real subprocess/port/global-state suites that flake under -n)", "Run tests (size-ratchet lane — blocking here, warning-only locally)", "Guard extracted transport imports stay out of core"],
         "marker-guards": ["Guard non-empty browser marker lanes", "Guard non-empty serial marker lane", "Guard non-empty skill_smoke marker lane", "Guard non-empty size_ratchet marker lane"],
         "docker-ui-smoke": ["Install UI smoke browser binaries", "Run Docker UI smoke", "Run Docker browser tools Chromium/WebKit smoke"],
         "system-e2e-mock": ["Run the keyless system E2E scenario lane (real isolated servers)", "Run the cancellation E-suite mock lane"],
@@ -1502,10 +1503,9 @@ def test_ci_has_fork_safe_three_os_betterleaks_candidate_matrix():
     start = workflow.index("  betterleaks-platform-smoke:")
     job = workflow[start : workflow.index("\n  # ─", start)]
     assert "github.event_name == 'workflow_dispatch'" in quick_job
-    assert "github.event_name == 'pull_request'" in job
-    assert "github.base_ref == 'ouroboros'" in job
-    assert "github.event_name == 'workflow_dispatch'" in job
-    assert "pull_request_target" not in job
+    # Manual runs only: ci.yml has no pull_request trigger, so no dormant PR branch is kept.
+    assert "if: github.event_name == 'workflow_dispatch'" in job
+    assert "pull_request" not in job
     assert "os: [ubuntu-latest, windows-latest, macos-latest]" in job
     assert "uses: ./.github/actions/setup-python-env" in job
     assert "python -m ouroboros.betterleaks_runtime install" in job

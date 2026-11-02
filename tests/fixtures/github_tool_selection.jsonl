@@ -1,0 +1,51 @@
+{"id": 1, "request": "Who am I on GitHub right now, and which token is that?", "tool": "github_read", "args": {"method": "whoami"}}
+{"id": 2, "request": "Покажи открытые issue в razzant/ouroboros", "tool": "github_read", "args": {"method": "list", "kind": "issue", "repo": "razzant/ouroboros"}}
+{"id": 3, "request": "Any new comments on issues or pull requests in razzant/ouroboros since last night (2026-10-21T20:00:00Z)? Old threads included.", "tool": "github_read", "args": {"method": "list", "kind": "comment", "repo": "razzant/ouroboros", "since": "2026-10-21T20:00:00Z"}}
+{"id": 4, "request": "New inline code review comments anywhere in the repo since 2026-10-21T20:00:00Z", "tool": "github_read", "args": {"method": "list", "kind": "review_comment", "since": "2026-10-21T20:00:00Z"}}
+{"id": 5, "request": "Прочитай issue #1698 целиком, с комментариями", "tool": "github_read", "args": {"method": "get", "kind": "issue", "target": 1698, "include": ["comments"], "detail": "full"}}
+{"id": 6, "request": "What does PR #2079 change? Files and the diff.", "tool": "github_read", "args": {"method": "get", "kind": "pr", "target": 2079, "include": ["files", "diff"]}}
+{"id": 7, "request": "Which review threads on PR #2079 are still unresolved? I need their ids.", "tool": "github_read", "args": {"method": "get", "kind": "pr", "target": 2079, "include": ["threads"]}}
+{"id": 8, "request": "Did CI pass for PR #2146?", "tool": "github_read", "args": {"method": "checks", "target": 2146}}
+{"id": 9, "request": "Checks for commit df31665fb0000000000000000000000000000000", "tool": "github_read", "args": {"method": "checks", "target": "df31665fb0000000000000000000000000000000"}}
+{"id": 10, "request": "Wait up to two minutes for the checks of PR #2146 to finish, then tell me", "tool": "github_read", "args": {"method": "checks", "target": 2146, "wait_seconds": 120}}
+{"id": 11, "request": "Find open issues that mention community watch", "tool": "github_read", "args": {"method": "search", "kind": "issue", "query": "community watch is:open"}}
+{"id": 12, "request": "Какие PR смержили за эту неделю (с 2026-10-15)?", "tool": "github_read", "args": {"method": "list", "kind": "pr", "state": "merged", "since": "2026-10-15T00:00:00Z"}}
+{"id": 13, "request": "List the last 100 closed issues, then give me the second page", "tool": "github_read", "args": {"method": "list", "kind": "issue", "state": "closed", "limit": 100, "cursor": "2"}}
+{"id": 14, "request": "Discussions updated since 2026-10-20T00:00:00Z", "tool": "github_read", "args": {"method": "list", "kind": "discussion", "since": "2026-10-20T00:00:00Z"}}
+{"id": 15, "request": "Read discussion #12 with all its comments and replies", "tool": "github_read", "args": {"method": "list", "kind": "discussion", "target": 12}}
+{"id": 16, "request": "Unread notifications for razzant/ouroboros", "tool": "github_read", "args": {"method": "list", "kind": "notification", "repo": "razzant/ouroboros"}}
+{"id": 17, "request": "Latest releases of the repo", "tool": "github_read", "args": {"method": "list", "kind": "release"}}
+{"id": 18, "request": "What labels does this repo have?", "tool": "github_read", "args": {"method": "list", "kind": "label"}}
+{"id": 19, "request": "Reviews submitted on PR #2079 so far", "tool": "github_read", "args": {"method": "list", "kind": "review", "target": 2079}}
+{"id": 20, "request": "Give me the raw timeline of issue #1698 (REST)", "tool": "github_read", "args": {"method": "api", "route": "repos/{owner}/{repo}/issues/1698/timeline?per_page=100"}}
+{"id": 21, "request": "Run this GraphQL query: query { viewer { login } }", "tool": "github_read", "args": {"method": "api", "graphql": "query { viewer { login } }"}}
+{"id": 22, "request": "Only number, title and updated_at of the open PRs, nothing else", "tool": "github_read", "args": {"method": "list", "kind": "pr", "fields": ["number", "title", "updated_at"]}}
+{"id": 23, "request": "Show me issue comment 123456", "tool": "github_read", "args": {"method": "get", "kind": "comment", "target": 123456}}
+{"id": 24, "request": "Open PRs by kazzand", "tool": "github_read", "args": {"method": "search", "kind": "pr", "query": "author:kazzand is:open"}}
+{"id": 25, "request": "Ответь в issue #1698: спасибо, исправлено в 7.6.1", "tool": "github_write", "args": {"method": "comment", "target": 1698, "body": "Спасибо, исправлено в 7.6.1."}}
+{"id": 26, "request": "Reply inline to review comment 987 on PR #2079: done", "tool": "github_write", "args": {"method": "comment", "target": 2079, "reply_to": 987, "body": "Done."}}
+{"id": 27, "request": "Answer in discussion #12: the roadmap is in docs/ROADMAP.md", "tool": "github_write", "args": {"method": "comment", "kind": "discussion", "target": 12, "body": "The roadmap is in docs/ROADMAP.md."}}
+{"id": 28, "request": "Открой issue: заголовок 'pr_merge loses the receipt on timeout', тело с шагами, лейбл bug", "tool": "github_write", "args": {"method": "create_issue", "title": "pr_merge loses the receipt on timeout", "body": "Steps: ...", "labels": ["bug"]}}
+{"id": 29, "request": "Close #1698 as not planned", "tool": "github_write", "args": {"method": "update", "target": 1698, "state": "closed", "state_reason": "not_planned"}}
+{"id": 30, "request": "Reopen #1698", "tool": "github_write", "args": {"method": "update", "target": 1698, "state": "open", "state_reason": "reopened"}}
+{"id": 31, "request": "Rename issue #1698 to 'Community watch: new replies in old threads are missed'", "tool": "github_write", "args": {"method": "update", "target": 1698, "title": "Community watch: new replies in old threads are missed"}}
+{"id": 32, "request": "Set the labels of #1698 to bug and p1", "tool": "github_write", "args": {"method": "update", "target": 1698, "labels": ["bug", "p1"]}}
+{"id": 33, "request": "Approve PR #2079", "tool": "github_write", "args": {"method": "review", "target": 2079, "event": "APPROVE"}}
+{"id": 34, "request": "Request changes on PR #2079: line 42 of ouroboros/tools/github.py swallows the error", "tool": "github_write", "args": {"method": "review", "target": 2079, "event": "REQUEST_CHANGES", "body": "One blocker inline.", "comments": [{"path": "ouroboros/tools/github.py", "line": 42, "body": "This swallows the error; return the typed result instead."}]}}
+{"id": 35, "request": "Resolve review thread PRRT_kwDOABCD1234 on PR #2079", "tool": "github_write", "args": {"method": "resolve_thread", "target": "PRRT_kwDOABCD1234"}}
+{"id": 36, "request": "Add a thumbs-up reaction to issue comment 123456 (no method does reactions)", "tool": "github_write", "args": {"method": "api", "http_method": "POST", "route": "repos/{owner}/{repo}/issues/comments/123456/reactions", "input": {"content": "+1"}}}
+{"id": 37, "request": "Lock issue #1698 as resolved", "tool": "github_write", "args": {"method": "api", "http_method": "PUT", "route": "repos/{owner}/{repo}/issues/1698/lock", "input": {"lock_reason": "resolved"}}}
+{"id": 38, "request": "Comment on PR #2079 that it is ready, but only if its head is still abc1230000000000000000000000000000000000", "tool": "github_write", "args": {"method": "comment", "target": 2079, "body": "Ready from my side.", "expect": {"head_sha": "abc1230000000000000000000000000000000000"}}}
+{"id": 39, "request": "Merge PR #2079 with squash at head abc1230000000000000000000000000000000000, bound to review record rr-77", "tool": "pr_merge", "args": {"number": 2079, "expected_head_sha": "abc1230000000000000000000000000000000000", "method": "squash", "review_record_id": "rr-77"}}
+{"id": 40, "request": "Delete my issue comment 123456", "tool": "github_write", "args": {"method": "api", "http_method": "DELETE", "route": "repos/{owner}/{repo}/issues/comments/123456"}}
+{"id": 41, "request": "Open a draft PR from feature into main at these reviewed commits.", "tool": "github_write", "args": {"method": "create_pr", "head": "feature", "base": "main", "title": "Feature", "body": "Details", "draft": true, "expect": {"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"id": 42, "request": "Retitle PR 7 if its head is still the commit I reviewed.", "tool": "github_write", "args": {"method": "update", "kind": "pr", "target": 7, "title": "New title", "expect": {"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"id": 43, "request": "Clear PR 7’s body, leaving its title alone.", "tool": "github_write", "args": {"method": "update", "kind": "pr", "target": 7, "body": "", "expect": {"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"id": 44, "request": "Retarget PR 7 to release at the commits I checked.", "tool": "github_write", "args": {"method": "update", "kind": "pr", "target": 7, "base": "release", "expect": {"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+{"id": 45, "request": "Mark PR 7 ready for review at this head.", "tool": "github_write", "args": {"method": "update", "kind": "pr", "target": 7, "draft": false, "expect": {"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"id": 46, "request": "Move PR 7 back to draft at this head.", "tool": "github_write", "args": {"method": "update", "kind": "pr", "target": 7, "draft": true, "expect": {"head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"id": 47, "request": "Keep the exact failed log for run 11 attempt 2, job 101.", "tool": "github_read", "args": {"method": "get", "kind": "run", "target": 11, "include": ["log"], "attempt": 2, "job_id": 101, "failed_only": true}}
+{"id": 48, "request": "Read run 11 metadata without downloading the log.", "tool": "github_read", "args": {"method": "get", "kind": "run", "target": 11}}
+{"id": 49, "request": "List artifacts of run 11.", "tool": "github_read", "args": {"method": "list", "kind": "artifact", "target": 11}}
+{"id": 50, "request": "Continue artifact listing at page 2, 20 entries per page.", "tool": "github_read", "args": {"method": "list", "kind": "artifact", "target": 11, "limit": 20, "cursor": "2"}}
+{"id": 51, "request": "Save artifact 501 ZIP exactly, with a 4096-byte cap.", "tool": "github_read", "args": {"method": "download", "kind": "artifact", "target": 501, "max_bytes": 4096}}

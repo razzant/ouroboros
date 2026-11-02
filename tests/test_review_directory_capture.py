@@ -13,7 +13,7 @@ from ouroboros import review_checking as rc
 from ouroboros.review_execution import ReviewRouteKind
 from ouroboros.review_substrate import run_review_request
 from ouroboros.skill_loader import compute_content_hash
-from ouroboros.skill_review_passes import skill_checking_source
+from ouroboros.skill_review_packs import skill_checking_source
 from tests._review_session_route_shared import (  # noqa: F401 - transport fixtures
     FakeGateway,
     FakeLLM,
@@ -234,7 +234,6 @@ def test_directory_link_metadata_is_retained_whole_beside_the_paid_result(
     tmp_path, writable_engine, monkeypatch,  # noqa: F811
 ):
     root, drive = _subject(tmp_path, "task_acceptance", links=True), tmp_path / "drive"
-    monkeypatch.setattr(rc, "EVIDENCE_RETAIN_BYTES", 128)  # investigations' bound; never a reviewer's
     observed = {}
 
     def edit(area):

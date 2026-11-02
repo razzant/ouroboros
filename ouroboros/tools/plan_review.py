@@ -6,8 +6,10 @@
   the work changes no files; owner 9=A); the body flag is computed at write.
 * ASK: ``ask="council"`` or ``ask=[participant ids]`` is the ONLY paid act; it sends
   the current revision (the one this call wrote, or the latest) to exactly the named
-  participants (``plan_ask``). Answers settle into the record and wake the mailbox;
-  under Blocking, a body plan's first ask includes every owner-marked reviewer.
+  participants (``plan_ask``); before any revision it is a reading of the request
+  (``revision: None``), whose replies never move an objection. Answers settle into the
+  record and wake the mailbox; under Blocking, a body plan's first ask includes every
+  owner-marked reviewer.
 * READ: no arguments → the free state: the current revision, every participant's open
   objections (``not_adjudicated`` flagged), who last saw which revision, the latest
   contributions and the pending asks; pending seats whose producer finished while
@@ -15,10 +17,11 @@
 
 Every refusal — a schema error, an old-form call (``spec``, ``review_disposition``,
 ``author_action``, …: a typed $0 refusal naming the new form, no shim), a missing first
-``affected_paths``, an unknown participant, nothing sendable, the budget or deadline
-rail — writes nothing and engages no gate. There is no cycle counter, no verdict, no
-quorum and no fingerprint routing; the only hold is the finalization gate's
-(``owner_hurry.force_plan_decision`` over ``plan_record.gate_projection``).
+``affected_paths``, an unknown participant, the budget or deadline rail — writes nothing
+and engages no gate; an ask no route could take keeps the revision it carried and its
+typed attempt. There is no cycle counter, no verdict, no quorum and no fingerprint
+routing; the only hold is the finalization gate's (``owner_hurry.plan_gate_decision``
+over ``plan_record.gate_projection``).
 """
 
 from __future__ import annotations
@@ -33,7 +36,6 @@ from ouroboros.config import (
     get_llm_transport_read_timeout_sec,
     get_review_enforcement,
     get_task_abs_ceiling_sec,
-    operation_window_sec,
 )
 from ouroboros.tools import plan_ask, plan_packet
 from ouroboros.tools.plan_review_runtime import REVIEWER_EFFORT_SCHEMA as _REVIEWER_EFFORT_SCHEMA
@@ -51,13 +53,16 @@ RETIRED_FIELDS = frozenset({"spec", "review_disposition", "author_action", "auth
                             "invariants", "decisions", "deferred", "affected_resources"})
 
 
-def _plan_task_tool_timeout_sec() -> float:
+def _plan_task_tool_timeout_sec() -> Optional[float]:
     """The outer settlement envelope of one call (never a cognition cutoff): an
-    ``agent_session`` participant inherits the task's operation window, an API
-    participant one transport read plus one finalization grace, and the entry covers
-    either plus one grace."""
-    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()),
-                operation_window_sec(get_task_abs_ceiling_sec()))
+    ``agent_session`` participant inherits the task's lifetime, an API participant one
+    transport read plus one finalization grace, and the entry covers either plus one grace.
+    ``None`` without a lifetime: a session seat then has no window, so neither does the
+    entry; the call's drain observes the owner's controls and a deadline still clamps it."""
+    lifetime = get_task_abs_ceiling_sec()
+    if lifetime is None:
+        return None
+    return (max(float(get_llm_transport_read_timeout_sec() + get_finalization_grace_sec()), float(lifetime))
             + get_finalization_grace_sec())
 
 
@@ -67,7 +72,7 @@ _DONE_WHEN_SCHEMA = {
         "type": "object", "additionalProperties": False,
         "properties": {
             "id": {"type": "string", "description": "Your stable name for this outcome (minted claim_N when absent); link verify_and_record receipts via criterion_id."},
-            "claim": {"type": "string", "description": "The observable outcome acceptance will judge — what is true when the work is done, not a method."},
+            "claim": {"type": "string", "description": "The observable outcome acceptance will judge — what is true when the work is done — or a method my human fixed for this work, never a method of my own choosing."},
             "support": {"type": "string", "description": "How it will be shown, in your words: a command and its expected output, a screenshot and what it must show, a judgment and by whom, the owner confirming."},
             "surface": {"type": "string", "description": "Optional: the interface or place where the claim is observed."},
         },
@@ -87,7 +92,11 @@ _SCHEMA = {
         "participants receive the constitutional pack). ASK (the only paid act): ask='council' sends the current revision "
         "to the review pool (Main alone when no reviewer is marked), ask=[ids] to exactly those participants — pool seats "
         "or any enabled catalog row (unticked advisers never hold); Blocking adds all ticked reviewers to a body plan's "
-        "first ask; Advisory requires a ticked reviewer and a reason when narrowed; Cyber Pro is free. Later asks use the named rows. Participants answer in parallel the first time and see each other's answers on later "
+        "first ask; Advisory requires a ticked reviewer and a reason when narrowed; Cyber Pro is free. Later asks use the named rows. "
+        "Asked before any revision, an ask is a reading: participants receive my human's words, the objective with its author, "
+        "the room and my message — no plan — and say how they read the request; nothing they raise then holds, and the "
+        "first reading of declared body work is seated like a body plan's first ask. "
+        "Participants answer in parallel the first time and see each other's answers on later "
         "asks; each receives the plan or its delta, the council so far, its own open objections, your message and your "
         "attachments. Answers arrive in your mailbox; READ (no arguments, free) shows the current revision, every open "
         "objection with who raised it, who saw which revision, the latest contributions and the pending asks. An "
@@ -112,7 +121,7 @@ _SCHEMA = {
             "ask": {
                 "anyOf": [{"type": "string", "enum": ["council"]}, {"type": "array", "items": {"type": "string"}, "minItems": 1}],
                 "description": ("Whom to ask now: 'council' = the review pool; or participant ids (pool seat ids, catalog row ids/handles). "
-                                "Named recipients only — nothing is sent unless you ask."),
+                                "Named recipients only — nothing is sent unless you ask. Before any revision, they read the request."),
             },
             "reason": {"type": "string", "description": "Why these reviewers: required when an Advisory first ask about your own code names fewer than all ticked reviewers. Blocking adds missing ticked reviewers; later asks name any enabled rows. Advisers are heard, not counted."},
             "message": {"type": "string", "description": "What you want from the asked participants now (what changed, what you decided and why, what to look at)."},
@@ -253,16 +262,13 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
         except ValueError as exc:
             return _refuse(ctx, "TOOL_ERROR", f"ERROR: PLAN_SUBJECT_ROOT_INVALID: {exc}. Nothing was written.")
         body, body_note = plan_ask.plan_is_body(ctx, revision_fields["affected_paths"], system_root=system_root, active_root=active_root)
-    elif asks and latest is None:
-        return _refuse(ctx, "TOOL_ARG_ERROR", (
-            "ERROR: PLAN_ASK_NEEDS_A_PLAN: there is no revision to ask about yet — write one first (goal, done_when, "
-            "affected_paths, plan), in this call or an earlier one. Nothing was written and nobody was called."))
     prepared = None
     if asks:
-        candidate = dict(revision_fields, n=(int(latest.get("n") or 0) if latest else 0) + 1, body=body, body_note=body_note,
-                         ts=utc_now_iso()) if revision_fields is not None else dict(latest)
-        if revision_fields is not None and latest is not None and latest.get("content_sha256") == revision_fields["content_sha256"]:
-            candidate = dict(latest)
+        # Before any revision the ask is a reading of the request: no plan travels (``revision=None``).
+        candidate = dict(latest) if latest is not None else None
+        if revision_fields is not None and (latest is None or latest.get("content_sha256") != revision_fields["content_sha256"]):
+            candidate = dict(revision_fields, n=(int(latest.get("n") or 0) if latest else 0) + 1, body=body, body_note=body_note,
+                             ts=utc_now_iso())
         try:
             prepared = plan_ask.prepare_ask(
                 ctx, record=record, revision=candidate, ask=given["ask"], message=str(given.get("message") or ""),
@@ -307,7 +313,7 @@ def _refuse_unroutable(ctx: ToolContext, exc: Any, *, revision_fields: Optional[
                        state_root: Any, task_id: str) -> str:
     """The one refusal that leaves a fact: the mind asked and NO named route could take the
     ask. The revision the call carried is recorded first (the plan exists), then the typed
-    attempt (nobody called, nothing held); a Swarm obligation reads it as attempted."""
+    attempt (nobody called, nothing held; before any revision, the reading's attempt)."""
     written = ""
     revision = plan_record.latest_revision(plan_record.load_plan_record(state_root, task_id))
     try:
@@ -319,7 +325,7 @@ def _refuse_unroutable(ctx: ToolContext, exc: Any, *, revision_fields: Optional[
         record = plan_record.append_attempt(state_root, task_id, {**exc.attempt, "revision": (revision or {}).get("n")})
     except (plan_record.PlanRecordInvalid, OSError, ValueError) as err:
         return _refuse(ctx, "TOOL_ERROR", f"ERROR: PLAN_RECORD_WRITE_FAILED: {err}.")
-    plan_ask._progress(ctx, f"📐 Plan: ask on revision {(revision or {}).get('n')} reached nobody — "
+    plan_ask._progress(ctx, f"📐 Plan: ask on {plan_record.ask_subject((revision or {}).get('n'))} reached nobody — "
                             + "; ".join(f"{sid}: {why}" for sid, why in (exc.attempt.get("not_sendable") or {}).items()) + ".")
     plan_ask._reference(ctx, task_id, record, state_root)
     return _refuse(ctx, exc.code, exc.text + written + " The attempt is on the plan record (asked, no route): a planning "
@@ -330,14 +336,16 @@ def _ask_summary(prepared: Any, record: Mapping[str, Any]) -> str:
     ask = next((a for a in record.get("asks") or [] if a.get("ask_id") == prepared.ask_id), {})
     rows = ask.get("participants") or []
     sent = [p for p in rows if p.get("dispatched")]
-    lines = [f"Ask {prepared.ask_id} on revision {ask.get('revision')}: sent to "
+    lines = [f"Ask {prepared.ask_id} on {plan_record.ask_subject(ask.get('revision'))}: sent to "
              + ", ".join(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added by you — its objections never hold'}"
                          f"{', continued' if p.get('continued') else ''})" for p in sent)
              + ("; not sent: " + "; ".join(f"{p['seat_id']} — {p.get('not_dispatched_reason') or p.get('error') or 'not sendable'}"
                                              for p in rows if not p.get("dispatched")) if any(not p.get("dispatched") for p in rows) else "")
              + "."]
     if ask.get("host_added"):
-        lines.append("This is the first ask on a body plan, so every owner-marked reviewer was included: the host added "
+        lines.append(("This reading concerns Ouroboros's own body" if ask.get("revision") is None
+                      else "This is the first ask on a body plan")
+                     + ", so every owner-marked reviewer was included: the host added "
                      + ", ".join(ask["host_added"]) + " beside the participants you named.")
     unknown = [p["seat_id"] for p in sent if p.get("status") == "pending" and p.get("unresolved")]
     pending = [p["seat_id"] for p in sent if p.get("status") == "pending" and not p.get("unresolved")]
@@ -357,11 +365,9 @@ def _decision(ctx: ToolContext, record: Mapping[str, Any], legacy: Optional[Mapp
     from ouroboros.owner_hurry import latched
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
-    metadata = getattr(ctx, "task_metadata", {})
-    metadata = metadata if isinstance(metadata, Mapping) else {}
     return plan_record.gate_projection(
         record, enforcement=str(get_review_enforcement() or ""), cyber_pro=not review_enforcement_blocks("blocking"),
-        hurry=latched(ctx) is not None, force_plan=metadata.get("force_plan") is True, legacy=legacy, unreadable=unreadable)
+        hurry=latched(ctx) is not None, legacy=legacy, unreadable=unreadable)
 
 
 def _render_done_when(rows: List[Mapping[str, Any]]) -> str:
@@ -371,29 +377,52 @@ def _render_done_when(rows: List[Mapping[str, Any]]) -> str:
                      for r in rows)
 
 
+_NO_REVISION = ("No plan revision is recorded. Ask the council to read the request, or write a plan: goal, done_when, "
+                "affected_paths ([] for no files), plan.")
+
+
+def _room_facts(participant: Mapping[str, Any]) -> str:
+    """What the own room reached this seat, each fact apart: rows delivered inline, what file reads covered of the
+    exact snapshot. Neither says what it understood, and 0 file characters never means it saw no room. The rows were
+    counted before any send: a seat never sent was delivered none, and a pending outcome says the delivery may not have
+    gone. A stored row with no provenance or measured status (an older projector's paged brief or blank 0 of N) measured
+    nothing of the room."""
+    inline, read, facts = participant.get("room_delivery"), participant.get("room_read_coverage"), []
+    if isinstance(inline, Mapping) and participant.get("status") != "not_dispatched":
+        facts.append(f"{inline.get('conversation_inline_rows', 0)} of {inline.get('conversation_rows', 0)} conversation rows inline"
+                     + (", counted for a delivery that may not have been sent"
+                        if participant.get("status") == "pending" else ""))
+    if isinstance(read, Mapping) and read.get("provenance") and read.get("status") in {"complete", "incomplete"}:
+        facts.append(f"file reads covered {read.get('covered_chars', 0)} of {read.get('complete_chars', 0)} chars ({read['provenance']})")
+    return f" [room: {'; '.join(facts)}]" if facts else ""
+
+
 def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = None,
                   legacy_error: Optional[Mapping[str, str]] = None) -> str:
-    """The read view as text: current revision, council, open objections, gate facts."""
+    """The read view as text: current revision (a reading's asks before it), council, open objections, gate facts."""
     view = plan_record.read_view(record, legacy)
     revision = view.get("revision")
-    if revision is None:
+    if revision is None and not view["asks"] and not view.get("attempts"):
         imported = [o for o in (decision.get("open_objections") or []) if o.get("legacy")]
-        lead = "No plan revision recorded for this task yet. Write one: goal, done_when, affected_paths ([] for no files), plan."
+        lead = _NO_REVISION
         if imported:
             lead += ("\n\nImported from this task's previous plan review (still open until their raisers withdraw them):\n- "
                      + "\n- ".join(f"{o['seat_id']} / {o['id']}: {o.get('text')}" for o in imported))
         return lead
-    lines = [f"# Plan — revision {revision.get('n')} of {view['revisions']}"
-             + (" (body plan: " + str(revision.get("body_note") or "changes Ouroboros's own body") + ")" if revision.get("body") else "")]
-    lines += [f"goal: {revision.get('goal') or '(none)'}", "done_when:", _render_done_when(revision.get("done_when") or []),
-              f"affected_paths: {json.dumps(revision.get('affected_paths') or [], ensure_ascii=False)}",
-              "plan:", (str(revision.get("plan") or "").strip() or "(no prose)")
-              + ("" if revision.get("plan_inline", True) else "  [prose moved to its exact source: " + str((revision.get("text_ref") or {}).get("path") or "") + "]"),
-              ""]
+    if revision is None:  # the council was asked to read the request before any plan
+        lines = [_NO_REVISION, ""]
+    else:
+        lines = [f"# Plan — revision {revision.get('n')} of {view['revisions']}"
+                 + (" (body plan: " + str(revision.get("body_note") or "changes Ouroboros's own body") + ")" if revision.get("body") else "")]
+        lines += [f"goal: {revision.get('goal') or '(none)'}", "done_when:", _render_done_when(revision.get("done_when") or []),
+                  f"affected_paths: {json.dumps(revision.get('affected_paths') or [], ensure_ascii=False)}",
+                  "plan:", (str(revision.get("plan") or "").strip() or "(no prose)")
+                  + ("" if revision.get("plan_inline", True) else "  [prose moved to its exact source: " + str((revision.get("text_ref") or {}).get("path") or "") + "]"),
+                  ""]
     lines.append("## Council")
-    if not view["asks"]:
+    if not view["asks"] and revision is not None:
         lines.append("No ask yet — nobody has seen this plan. plan_task(ask='council', message=...) sends it.")
-    for ask in view["asks"]:
+    for ask, stored in zip(view["asks"], record.get("asks") or []):
         parts = []
         for p in ask["participants"]:
             tag = p["status"] + (f" ({p['ignored_items']} malformed item{'' if p['ignored_items'] == 1 else 's'} ignored)"
@@ -407,14 +436,20 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             elif p["status"] == "pending" and p.get("unresolved"):
                 tag = ("pending — outcome unknown" + (f" ({p['error']})" if p.get("error") else "")
                        + "; a reply may still arrive, and a new ask to it may pay twice")
-            parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}")
-        lines.append(f"- ask {ask['ask_id']} on revision {ask['revision']}" + (f" — «{ask['message']}»" if ask.get("message") else "")
-                     + ": " + "; ".join(parts))
+            parts.append(f"{p['seat_id']} ({p.get('model') or '?'}{'' if p.get('owner_marked') else ', added'}): {tag}{_room_facts(p)}")
+        lines.append(f"- ask {ask['ask_id']} on {plan_record.ask_subject(ask['revision'])}"
+                     + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
+        if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold
+            points = [f"{p.get('seat_id')}/{item.get('id')}: {item.get('text')}" for p in stored.get("participants") or []
+                      if isinstance(p.get("reply"), dict) for item in p["reply"].get("objections") or []]
+            if points:
+                lines.append("  listed as objections in this reading — advice, never a standing objection: " + "; ".join(points))
     for attempt in view.get("attempts") or []:  # asks no route could take: nobody was called, nothing holds
-        lines.append(f"- attempt at {attempt.get('ts')} on revision {attempt.get('revision')}: no route — "
+        lines.append(f"- attempt at {attempt.get('ts')} on {plan_record.ask_subject(attempt.get('revision'))}: no route — "
                      + "; ".join(f"{sid}: {why}" for sid, why in (attempt.get("not_sendable") or {}).items()) + " (nobody was called)")
-    seen = [f"{sid}: saw revision {v['last_seen_revision']}" + (f", last answered in ask {v['last_answered_ask']}" if v["last_answered_ask"] else ", never answered")
-            for sid, v in view["participants"].items() if v.get("last_seen_revision") is not None]
+    seen = [f"{sid}: saw {plan_record.ask_subject(v['last_seen_revision'])}"
+            + (f", last answered in ask {v['last_answered_ask']}" if v["last_answered_ask"] else ", never answered")
+            for sid, v in view["participants"].items() if v.get("last_seen_ask")]
     if seen:
         lines.append("who saw what: " + "; ".join(seen))
     lines.append("")
@@ -433,7 +468,8 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
             flags.append("NOT ADJUDICATED in its raiser's last reply")
         if row.get("legacy"):
             flags.append("imported from the previous plan review")
-        lines.append(f"- {row['seat_id']} / {row['id']} (ask {row.get('ask_id')}, revision {row.get('revision')}) [{'; '.join(flags)}]: {row.get('text')}")
+        lines.append(f"- {row['seat_id']} / {row['id']} (ask {row.get('ask_id')}, {plan_record.ask_subject(row.get('revision'))}) "
+                     f"[{'; '.join(flags)}]: {row.get('text')}")
     lines.append("Only the participant who raised an objection can withdraw it: ask it again (ask=[its id]) after you revise or answer it.")
     withdrawn = view.get("withdrawn") or []
     if withdrawn:
@@ -478,12 +514,6 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
                      + (f" The dispatch outcome of ask(s) {', '.join(decision['unknown_outcome'])} is unknown: the substrate held the "
                         "seats when the host lost track, so a reply may still arrive and a new ask to them may pay twice."
                         if decision.get("unknown_outcome") else ""))
-    elif status == "force_plan_unmet" and decision.get("allow") and decision.get("asks_unroutable"):
-        lines.append("This task was admitted with a planning obligation; your ask reached nobody (no route could take it, "
-                     f"{decision['asks_unroutable']} attempt{'' if decision['asks_unroutable'] == 1 else 's'} recorded) — disclosed in "
-                     "your final answer, not held. Ask again when a route is available.")
-    elif status == "force_plan_unmet":
-        lines.append("This task was admitted with a planning obligation: ask the council before you finish.")
     else:
         lines.append("Nothing holds your final answer.")
     return "\n".join(lines)

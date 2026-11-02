@@ -229,10 +229,12 @@ def _fake_proc_cls():
 
 
 def test_run_child_marks_registration_exceptions(tmp_path, monkeypatch):
-    """Fix-round 3, finding 5a: the process REGISTRATION between Popen and
-    the protocol body is inside the marked span — an exception there is
-    raised strictly after a successful Popen, so it must carry the marker."""
+    """Fix-round 3, finding 5a: the process REGISTRATION after Popen (the shared
+    publication, ``shell_process.tracked_start``) is inside the marked span — an
+    exception there is raised strictly after a successful Popen, so it must carry
+    the marker."""
     from ouroboros import extension_process_runner
+    from ouroboros.tools import shell_process
 
     monkeypatch.setattr(
         extension_process_runner.subprocess, "Popen",
@@ -247,7 +249,7 @@ def test_run_child_marks_registration_exceptions(tmp_path, monkeypatch):
         def discard(self, _proc):
             pass
 
-    monkeypatch.setattr(extension_process_runner, "_active_subprocesses", _BoomSet())
+    monkeypatch.setattr(shell_process, "_active_subprocesses", _BoomSet())
     try:
         extension_process_runner._run_child(
             {"skill_name": "marker-reg"}, skill_dir=tmp_path, drive_root=tmp_path,
@@ -265,6 +267,7 @@ def test_run_child_cleanup_exception_over_a_marked_one_stays_marked(tmp_path, mo
     carry the marker too (the child really did run), with the original
     marked exception chained as its context."""
     from ouroboros import extension_process_runner
+    from ouroboros.tools import shell_process
 
     monkeypatch.setattr(
         extension_process_runner.subprocess, "Popen",
@@ -276,7 +279,9 @@ def test_run_child_cleanup_exception_over_a_marked_one_stays_marked(tmp_path, mo
         def discard(self, _item):
             raise OSError("cleanup exploded")
 
-    monkeypatch.setattr(extension_process_runner, "_active_subprocesses", _ExplodingSet())
+    registry = _ExplodingSet()  # publication (tracked_start) and the runner's discard name one set, as in production
+    monkeypatch.setattr(extension_process_runner, "_active_subprocesses", registry)
+    monkeypatch.setattr(shell_process, "_active_subprocesses", registry)
     try:
         extension_process_runner._run_child(
             {"skill_name": "marker-clean"}, skill_dir=tmp_path, drive_root=tmp_path,

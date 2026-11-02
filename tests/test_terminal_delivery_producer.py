@@ -46,7 +46,6 @@ def _finish_in_worker(root_text, task, event_queue, report_queue, attach):
     # The paid stages do nothing here: exercise the actual final callback without
     # asking a provider or replacing the checkpoint/projection/outbox writers.
     agent_task_pipeline._run_memory_fallback_draft = lambda *args, **kwargs: ""
-    agent_task_pipeline._run_scratchpad_consolidation = lambda *args, **kwargs: ""
     post_task_evolution.maybe_promote = lambda *args, **kwargs: None
     agent_task_pipeline._run_post_task_processing_async(
         env, task, {}, {}, root / "logs", blocking=True,

@@ -27,17 +27,47 @@ log = logging.getLogger(__name__)
 
 
 # Guards parent-side shared ctx state mutated during (possibly parallel)
-# schedule_subagent emission within one tool-call round. Process-local: a parent
-# ctx is never shared across processes, so a threading.Lock is sufficient.
+# schedule_subagent emission within one tool-call round. Restart's send-once
+# section also enters the deferred append below, so this lock must be reentrant.
 
 
-_SCHEDULE_EMIT_LOCK = threading.Lock()
+_SCHEDULE_EMIT_LOCK = threading.RLock()
 
 
 _PROMOTE_CONFIRM_TIMEOUT_SEC = get_promote_confirm_wait_sec()
 
 
 _PROMOTE_CONFIRM_POLL_SEC = 0.05
+
+
+def request_restart_intent(ctx: ToolContext, reason: str, *, evolution: bool = False) -> dict:
+    """Send once per requester attempt; an uncertain ACK never duplicates the request."""
+    import time
+    import uuid
+
+    from ouroboros.queue_observation import load_queue_document, queue_stamp
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    task_id, attempt = str(ctx.task_id or ""), int(getattr(ctx, "task_attempt", None) or 1)
+    with _SCHEDULE_EMIT_LOCK:  # the existing lock for parallel calls sharing one ToolContext
+        request = getattr(ctx, "pending_restart_request", None)
+        if not request or (request["task_id"], request["task_attempt"]) != (task_id, attempt):
+            request = {"type": "restart_request", "phase": "intent", "request_id": uuid.uuid4().hex,
+                       "task_id": task_id, "task_attempt": attempt, "reason": reason,
+                       "evolution_restart": evolution, "ts": utc_now_iso()}
+            ctx.pending_restart_request = request
+            request["transport"] = _emit_control_event(ctx, dict(request))
+    deadline = time.monotonic() + (_PROMOTE_CONFIRM_TIMEOUT_SEC if request["transport"] == "live" else 0)
+    while True:
+        document = load_queue_document(canonical_data_root(ctx))
+        if queue_stamp(document):
+            for key in ("restart_reply", "restart_intent"):
+                receipt = document.get(key) or {}
+                if receipt.get("request_id") == request["request_id"] and receipt.get("status") != "awaiting":
+                    return receipt
+        if time.monotonic() >= deadline:
+            return {"status": "unconfirmed", "request_id": request["request_id"]}
+        time.sleep(_PROMOTE_CONFIRM_POLL_SEC)
 
 
 def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:

@@ -45,13 +45,13 @@ def test_real_maintenance_recovers_unsent_phase_while_usage_duty_is_blocked(work
         assert entered.wait(3)
         _until(lambda: checkpoint(work)["post_task_synthesis"] == "completed")
         assert not release.is_set()
-        assert work.calls == ["fallback", "scratch", "promotion"]
+        assert work.calls == ["fallback", "promotion"]
         _until(lambda: not phase.post_task_synthesis_in_flight(work.root, work.task["id"]))
         # Another ordinary pass has no paid remainder to repeat.
         latch = threading.Lock()
         latch.acquire()
         sm._run_terminal_duty(work.root, "post_task_synthesis_recovery", latch)
-        assert work.calls == ["fallback", "scratch", "promotion"]
+        assert work.calls == ["fallback", "promotion"]
     finally:
         release.set()
         for thread in threads:

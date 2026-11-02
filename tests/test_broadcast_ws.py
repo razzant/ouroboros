@@ -71,6 +71,65 @@ def test_a_closed_loop_does_not_leak_the_unawaited_broadcast_coroutine(monkeypat
     # (a pytest side note nobody fails on) instead of a caught assertion.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        ws.broadcast_ws_sync({"type": "unit_test_closed_loop"})
+        assert ws.broadcast_ws_sync({"type": "unit_test_closed_loop"}) is False
 
+    assert [str(w.message) for w in caught] == []
+
+
+def test_the_sync_broadcast_says_whether_a_server_loop_took_the_frame(monkeypatch):
+    """A caller reporting a repaint needs the fact: only a RUNNING server loop takes the frame.
+    A process without one (a pooled worker), a loop not yet running and a loop that stopped
+    but is not closed (a shutting-down server) answer False and build no coroutine: queued on
+    a stopped loop it would never run, read as delivered and leak un-awaited at close."""
+    import gc
+    import threading
+    import warnings
+
+    from ouroboros.gateway import ws
+
+    monkeypatch.setattr(ws, "_ws_clients", [])
+    monkeypatch.setattr(ws, "_event_loop", None)
+    assert ws.broadcast_ws_sync({"type": "unit_test_no_loop"}) is False
+
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(ws, "_event_loop", loop)
+    runner = threading.Thread(target=loop.run_forever, daemon=True)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            assert ws.broadcast_ws_sync({"type": "unit_test_idle_loop"}) is False
+            runner.start()
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)  # now running
+            assert ws.broadcast_ws_sync({"type": "unit_test_live_loop"}) is True
+            # The frame settles before the loop stops.
+            asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
+            loop.call_soon_threadsafe(loop.stop)
+            runner.join(timeout=5)
+            assert not loop.is_running() and not loop.is_closed()
+            assert ws.broadcast_ws_sync({"type": "unit_test_stopped_loop"}) is False
+        finally:
+            if loop.is_running():
+                loop.call_soon_threadsafe(loop.stop)
+                runner.join(timeout=5)
+            loop.close()
+            gc.collect()
+    assert [str(w.message) for w in caught if "never awaited" in str(w.message)] == []
+
+
+def test_a_loop_closing_after_the_running_check_still_closes_the_coroutine(monkeypatch):
+    """The window between the running check and scheduling: the loop closes, the schedule
+    refuses, and the coroutine is closed, never left to warn from a bystander's code."""
+    import gc
+    import warnings
+
+    from ouroboros.gateway import ws
+
+    loop = asyncio.new_event_loop()
+    loop.close()
+    monkeypatch.setattr(loop, "is_running", lambda: True)  # running at the check, closed by the schedule
+    monkeypatch.setattr(ws, "_event_loop", loop)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert ws.broadcast_ws_sync({"type": "unit_test_closing_loop"}) is False
+        gc.collect()
     assert [str(w.message) for w in caught] == []

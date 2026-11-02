@@ -252,7 +252,7 @@ def _install_ledger_read_counters(monkeypatch):
     counters: dict = {"migrations": [], "full_reads": [], "projections": [], "breakdowns": []}
     real_migrate = usage_store.migrate_from_journal
     real_full_read = usage_store.read_usage_records
-    real_attempts = usage_store.Txn.attempts
+    real_attempts, real_attempt_rows = usage_store.Txn.attempts, usage_store.Txn.attempt_rows
     real_projection = ua.usage_projection
     real_breakdown = ua.usage_breakdown
 
@@ -269,6 +269,11 @@ def _install_ledger_read_counters(monkeypatch):
             counters["full_reads"].append(str(txn.root))
         return real_attempts(txn, where, params)
 
+    def counted_attempt_rows(txn, where="1", params=()):
+        if str(where).strip() == "1":  # the same scan, captured in one step
+            counters["full_reads"].append(str(txn.root))
+        return real_attempt_rows(txn, where, params)
+
     def counted_projection(*args, **kwargs):
         counters["projections"].append(kwargs)
         return real_projection(*args, **kwargs)
@@ -280,6 +285,7 @@ def _install_ledger_read_counters(monkeypatch):
     monkeypatch.setattr(usage_store, "migrate_from_journal", counted_migration)
     monkeypatch.setattr(usage_store, "read_usage_records", counted_full_read)
     monkeypatch.setattr(usage_store.Txn, "attempts", counted_attempts)
+    monkeypatch.setattr(usage_store.Txn, "attempt_rows", counted_attempt_rows)
     monkeypatch.setattr(ua, "usage_projection", counted_projection)
     monkeypatch.setattr(ua, "usage_breakdown", counted_breakdown)
     return counters
@@ -322,6 +328,7 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
     asyncio.run(history(request))  # cold: opens the store
     assert counters["migrations"] == counters["full_reads"] == []
     counters["projections"].clear()
+    counters["breakdowns"].clear()
 
     messages = json.loads(asyncio.run(history(request)).body)["messages"]
     live_rows = [m for m in messages if m.get("cost_with_children_partial")]
@@ -329,10 +336,12 @@ def test_live_root_surfaces_replay_the_ledger_zero_times_when_warm(
     assert live_rows  # the live-root branch really ran (not a vacuous budget)
     assert live_rows[-1]["cost_accounting_status"] == "available"
     assert counters["migrations"] == counters["full_reads"] == []
-    assert len(counters["projections"]) == 1  # one live-root projection, cached
-    assert counters["projections"][0]["root_task_id"] == "root-1"
+    # live_root_cost_projection reads the subtree breakdown with custody coverage, never a projection.
+    assert len(counters["breakdowns"]) == 1  # one live-root breakdown, cached
+    assert counters["breakdowns"][0]["root_task_id"] == "root-1"
+    assert counters["projections"] == []
 
-    counters["projections"].clear()
+    counters["breakdowns"].clear()
     payload = json.loads(_task_get_response(request).body)
 
     assert payload["cost_breakdown"]["authority"] == "physical_attempt_ledger"

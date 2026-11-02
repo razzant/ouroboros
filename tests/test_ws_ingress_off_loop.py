@@ -252,7 +252,8 @@ def test_a_redelivered_frame_rejoins_and_a_reused_id_gets_the_failure_reply(brid
 def _record_handoffs(bridge, release: threading.Event | None = None):
     """Instrument the bridge callback the socket hands every frame to: record each
     chat acceptance entering it (held until ``release`` when given) and each command
-    admitted. Nothing consumes the queue, so an admitted /panic is never executed."""
+    admitted. Panic has its separate bound emergency owner; ordinary commands
+    remain unconsumed in the queue."""
     handoffs: list[tuple[str, str]] = []
     chat_entered = threading.Event()
     original = bridge.ui_send
@@ -287,12 +288,18 @@ def _queued(bridge) -> list[str]:
         return [item["client_message_id"] or item["text"] for item in bridge._inbox.queue]
 
 
-def test_a_same_socket_panic_is_admitted_while_its_chat_acceptance_is_held(bridge):
-    """Consumer regression (TZ-1 PR1 review F2): ``confirmAndSendPanic`` uses the one
+def test_a_same_socket_panic_is_admitted_while_its_chat_acceptance_is_held(bridge, monkeypatch):
+    """Consumer regression (TZ-1 PR1 review F2): ``sendPanic`` uses the one
     SPA socket that also carries chat. With that socket's chat acceptance standing on
     a held ingress lock, its next frame — Panic — must still be received and admitted
     on one event loop; the Emergency Stop never waits for ordinary acceptance work."""
     held, release, timed_out = threading.Event(), threading.Event(), threading.Event()
+    from ouroboros import config, server_control
+
+    stopped = threading.Event()
+    monkeypatch.setattr(config, "resolve_data_dir", lambda: bridge.drive)
+    monkeypatch.setattr(server_control, "_restart_stop_requested", False)
+    bridge.panic = server_control.PanicIngress(stopped.set)  # only the physical stop is stubbed
     frames, echoed = _witness_custody(bridge, chat_echoes=1)
     handoffs, chat_entered = _record_handoffs(bridge)
 
@@ -311,19 +318,19 @@ def test_a_same_socket_panic_is_admitted_while_its_chat_acceptance_is_held(bridg
             owner.send_text(_chat_frame("held-1"))
             assert chat_entered.wait(5), "the chat frame never reached the bridge"
             owner.send_text(_command_frame("/panic"))
-            assert _wait_for(lambda: ("command", "/panic") in handoffs), (
+            assert stopped.wait(3), (
                 "Panic waited behind this socket's held chat acceptance")
             assert not timed_out.is_set() and message_bus._INGRESS_LOCK.locked()
-            assert frames == [] and _row_ids(bridge.drive) == [] and _queued(bridge) == ["/panic"]
+            assert frames == [] and _row_ids(bridge.drive) == [] and _queued(bridge) == []
             release.set()
             holder.join(5)
             assert echoed.wait(5), frames
     finally:
         release.set()
-    assert handoffs == [("chat", "held-1"), ("command", "/panic")]
+    assert handoffs == [("chat", "held-1")]
     [(echo, queued, rows)] = frames
     assert echo["client_message_id"] == "held-1" and echo["ingress_accepted"] is True
-    assert queued == ["/panic", "held-1"] and rows == ["held-1"]  # row → queue → echo
+    assert queued == ["held-1"] and rows == ["held-1"]  # row → queue → echo
 
 
 def test_same_socket_chat_frames_settle_in_receive_order_while_commands_pass(bridge):
@@ -533,7 +540,7 @@ def _expired_card(bridge, monkeypatch):
                             assumption="sqlite meanwhile", task_id="task-1") == (True, "ok")
     reconcile_terminal(bridge.drive, "task-1")
     monkeypatch.setattr(td, "request_drive_root", lambda request: bridge.drive)
-    monkeypatch.setattr(td, "_live_root_task", lambda task_id: (None, "task_not_live"))
+    monkeypatch.setattr(td, "_live_root_task", lambda task_id, **_: (None, "task_not_live"))
     forwarding = threading.Event()
     accept = message_bus.accept_local_message
 

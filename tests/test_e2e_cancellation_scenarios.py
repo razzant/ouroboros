@@ -858,8 +858,8 @@ def test_e2_delegated_patch_integration_disposes_the_snapshot(e2e_clone, tmp_pat
 
 @pytest.mark.serial
 def test_e3_conflicting_delegated_patch_preserves_the_snapshot(e2e_clone, tmp_path_factory):
-    """E3 — a conflicting integrate: the patch is NOT disposed and the snapshot survives,
-    so the owner can retry instead of losing the delegated work."""
+    """E3 — a conflicting integrate: the patch is NOT disposed and the snapshot's record and
+    its pinned result survive, so the owner can retry instead of losing the delegated work."""
     require_lane(LANE_PAID)
     root_dir = tmp_path_factory.mktemp("e2e_conflict")
     server = start_server(e2e_clone, root_dir, isolated_settings(stub=None, paid=True))
@@ -875,9 +875,10 @@ def test_e3_conflicting_delegated_patch_preserves_the_snapshot(e2e_clone, tmp_pa
         applied = [row for row in events(data_root, "delegate_run_patch_disposed")
                    if str(row.get("disposition") or row.get("outcome") or "") == "applied"]
         assert not applied, "a conflicting patch was disposed as applied"
-        registry = pathlib.Path(data_root) / "state" / "subagent_worktrees.json"
-        assert registry.exists() and registry.read_text(encoding="utf-8").strip(), \
-            "the snapshot registry was discarded on a conflict"
+        records = sorted((pathlib.Path(data_root) / "state" / "private_copies").glob("*.json"))
+        rows = [json.loads(path.read_text(encoding="utf-8")) for path in records if not path.name.startswith(".")]
+        assert any(row.get("kind") == "delegated_exec" and row.get("result_sha") for row in rows), \
+            "the snapshot's record and its result were discarded on a conflict"
     finally:
         server.stop()
 

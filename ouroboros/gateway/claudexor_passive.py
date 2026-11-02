@@ -10,35 +10,20 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
+from ouroboros.claudexor_observations import passive_read_error as _read_error
+
 log = logging.getLogger(__name__)
 
-
-# Never project arbitrary engine error codes or exception prose: either can
-# contain paths, credential material or an unbounded upstream response body.
-_SAFE_ERROR_CODES = frozenset({
-    "daemon_not_discovered", "daemon_descriptor_unreadable",
-    "daemon_descriptor_incomplete", "daemon_token_unreadable",
-    "daemon_endpoint_not_loopback", "daemon_unreachable",
-    "malformed_response", "protocol_incompatible", "daemon_recovery_only",
-})
+# The roster answers only the unified account model (Claudexor 3.6.0+): named
+# profiles, routing facts in the ``accountPools`` key its producer always emits.
+# A well-formed roster without it is the retired pre-unified model (native rows
+# in ``harnessAccounts``): a typed refusal, never an empty or malformed roster.
+# Full Accounts status classifies its own roster read with the same function.
+ACCOUNT_MODEL_UNSUPPORTED = "account_model_unsupported"
 
 
 def _elapsed_ms(start: float) -> int:
     return min(2_147_483_647, max(0, round((time.monotonic() - start) * 1000)))
-
-
-def _read_error(exc: Exception) -> dict[str, Any]:
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-
-    if not isinstance(exc, ClaudexorUnavailable):
-        return {"code": "read_failed"}
-    code = exc.code if exc.code in _SAFE_ERROR_CODES else "read_refused"
-    if exc.observation_reason == "observation_read_timeout":
-        code = "observation_read_timeout"
-    result: dict[str, Any] = {"code": code}
-    if 400 <= exc.status_code <= 599:
-        result["status_code"] = exc.status_code
-    return result
 
 
 def _object_lists(value: Any, required: tuple[str, ...], optional: tuple[str, ...] = ()) -> bool:
@@ -49,9 +34,10 @@ def _object_lists(value: Any, required: tuple[str, ...], optional: tuple[str, ..
                     for key in required + optional for row in value.get(key, [])))
 
 
-def _roster_valid(value: Any) -> bool:
-    if not _object_lists(value, ("profiles", "harnessAccounts"), ("accountPools",)):
-        return False
+def roster_error(value: Any) -> str:
+    """'' for a usable unified roster, else why the roster facet is not answered."""
+    if not _object_lists(value, ("profiles",), ("accountPools",)):
+        return "malformed_response"
     # An unidentifiable row is unreadable membership, not an empty roster.
     for wrapper in value["profiles"]:
         profile = wrapper.get("profile")
@@ -59,25 +45,32 @@ def _roster_valid(value: Any) -> bool:
             isinstance(profile.get(key), str) and profile[key]
             for key in ("harness_id", "profile_id")
         ):
-            return False
+            return "malformed_response"
         if "enabled" in profile and not isinstance(profile["enabled"], bool):
-            return False
-    return all(isinstance(row.get("harness_id"), str) and row["harness_id"]
-               for row in value["harnessAccounts"])
+            return "malformed_response"
+    if "accountPools" in value:
+        return ""  # an old client's ``harnessAccounts`` carrier beside it is never read
+    legacy = value.get("harnessAccounts")
+    if isinstance(legacy, list) and all(
+        isinstance(row, dict) and isinstance(row.get("harness_id"), str) and row["harness_id"]
+        for row in legacy
+    ):
+        return ACCOUNT_MODEL_UNSUPPORTED
+    return "malformed_response"
 
 
-def _quota_valid(value: Any) -> bool:
+def _quota_error(value: Any) -> str:
     from ouroboros.claudexor_observations import quota_envelope_valid
 
-    return quota_envelope_valid(value)
+    return "" if quota_envelope_valid(value) else "malformed_response"
 
 
-def _read_facet(reader: Callable, valid: Callable) -> tuple:
+def _read_facet(reader: Callable, check: Callable) -> tuple:
     start = time.monotonic()
     try:
         value = reader()
-        error = None if valid(value) else {"code": "malformed_response"}
-        return (value if error is None else None, error, _elapsed_ms(start))
+        code = check(value)
+        return (None if code else value, {"code": code} if code else None, _elapsed_ms(start))
     except Exception as exc:
         return None, _read_error(exc), _elapsed_ms(start)
 
@@ -119,9 +112,9 @@ def _quota_payload(*, model: str | None = None, request_kind: str = "text") -> d
         payload["timings_ms"]["discovery"] = _elapsed_ms(discovery_start)
         with gateway:
             with ThreadPoolExecutor(max_workers=2) as pool:
-                accounts_call = pool.submit(_read_facet, gateway.credential_profiles, _roster_valid)
+                accounts_call = pool.submit(_read_facet, gateway.credential_profiles, roster_error)
                 quota_call = pool.submit(
-                    _read_facet, lambda: _quota_read(gateway, model=model, request_kind=request_kind), _quota_valid,
+                    _read_facet, lambda: _quota_read(gateway, model=model, request_kind=request_kind), _quota_error,
                 )
             for facet, call in (("accounts", accounts_call), ("quota", quota_call)):
                 value, error, elapsed = call.result()
@@ -130,14 +123,10 @@ def _quota_payload(*, model: str | None = None, request_kind: str = "text") -> d
                 if error:
                     payload["read_errors"][facet] = error
                 elif facet == "accounts":
-                    # Keep native and named identities, enablement, and pool facts.
-                    # No catalog/manifest filter can erase an account here.
+                    # The unchanged envelope: named identities, enablement and pool
+                    # facts. No catalog/manifest filter can erase an account here.
                     payload["profiles"] = value
-                    # This additive envelope member shipped with the unified
-                    # account model (the same contract as GET account-pools).
-                    # Its presence, even empty, is evidence in THIS roster read;
-                    # no operations discovery is needed to resolve null aliases.
-                    payload["unified_accounts"] = "accountPools" in value
+                    payload["unified_accounts"] = True
                 else:
                     payload["quota"] = value["snapshots"]
                     payload["quota_absences"] = value.get("absences", [])

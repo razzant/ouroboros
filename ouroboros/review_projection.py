@@ -27,7 +27,7 @@ from ouroboros.review_records import review_slot_awaiting, review_slot_unresolve
 # its projection is a gap, never a transport failure or a malformed answer.
 AWAITING_PROJECTION = "awaiting"
 _AWAITING_REASON = "No answer recorded: the host returned at the dispatch barrier before this reviewer answered."
-# The plan review's outcome CLASS at delivery, stamped by owner_hurry.force_plan_decision and
+# The plan review's outcome CLASS at delivery, stamped by owner_hurry.plan_gate_decision and
 # carried on outcome_axes.execution.plan_review; the earlier engine's classes (unanswered,
 # none_answered, answered_open) survive only as the cause sentences of finished tasks.
 PLAN_REVIEW_OBJECTIONS_OPEN = "objections_open"  # objections stood open at delivery
@@ -51,6 +51,8 @@ def _sub():
 
 def _transport_error_status(error: Any, *, failure_phase: str = "") -> str:
     """Classify transport failures without depending on a non-empty message."""
+    if getattr(error, "review_run_state", "") in {"cancelled", "interrupted"}:
+        return "interrupted"
     if failure_phase == "authority":
         return "authority_error"
     error_type = type(error).__name__ if isinstance(error, BaseException) else ""
@@ -100,7 +102,8 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
     parsed = row.get("parsed") if isinstance(row.get("parsed"), (dict, list)) else None
     # The one decision point: a slot is awaited only while it carries no answer. A row that
     # carries one is judged by its answer, whatever its custody state says.
-    awaiting = review_slot_awaiting(row) and parsed is None and not str(row.get("raw_text") or "").strip()
+    outcome = row.get("outcome") or {}
+    awaiting = (review_slot_awaiting(row) or outcome.get("status") == "pending") and parsed is None and not str(row.get("raw_text") or "").strip()
     usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
     explicit_parse = str(row.get("parse_status") or "")
     if explicit_parse == AWAITING_PROJECTION:
@@ -157,9 +160,9 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
             )
             if reason:
                 break
-    reason = reason or error or ("Reviewer response was malformed or absent." if not valid else "")
+    reason = reason or error or ("Reviewer response was malformed or absent." if not valid and explicit_parse != "valid" else "")
     if awaiting:
-        reason = _AWAITING_REASON
+        reason = (reason or _AWAITING_REASON) if outcome else _AWAITING_REASON
     model = str(usage.get("resolved_model", row.get("model")) or "")
     provider = str(usage.get("provider") or row.get("provider") or "")
     if not provider:
@@ -203,6 +206,9 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
         # Flat, redacted pointer to the private full response artifact.
         "response_ref": _response_ref_projection(row.get("response_ref")),
     }
+    if outcome:
+        projection.update(transport_status=outcome["transport"], parse_status=outcome["parse"],
+                          semantic_verdict=outcome["verdict"])
     # Since when this row has been waiting, published only where the host wrote
     # a real instant on a row the two wait predicates still call unanswered. An
     # absent key is a hole, never a back-filled or inferred moment.
@@ -305,12 +311,13 @@ def _ledger_seat_executions(seat: Dict[str, Any]) -> List[Dict[str, str]]:
 def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
     """One ledger seat as a card reviewer: the parts it was asked, each part's answer
     with its findings COUNTED (the bodies ride once, bounded, in ``findings``), and the
-    observed model, else the requested one (``panel_facts`` counts the unobserved)."""
-    status, surface = str(seat.get("status") or ""), str(record.get("surface") or "review")
+    observed model, with requested identity kept separately when execution is unknown."""
+    outcome = seat.get("outcome") or {}
+    status, surface = str(outcome.get("status") or seat.get("status") or ""), str(record.get("surface") or "review")
     requested = seat.get("requested") if isinstance(seat.get("requested"), dict) else {}
     observed = str(seat.get("observed_model") or "")
-    model = observed if observed not in ("", "unknown") else str(requested.get("model") or "")
-    answers = seat.get("answers") if isinstance(seat.get("answers"), dict) else {}
+    model = observed if observed not in ("", "unknown") else ""
+    answers = outcome.get("answers") or (seat.get("answers") if isinstance(seat.get("answers"), dict) else {})
     parts = [str(part) for part in seat.get("parts") or [] if part in answers] or list(answers)
     findings: List[Dict[str, Any]] = []
     counted: Dict[str, Dict[str, Any]] = {}
@@ -326,11 +333,12 @@ def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str
                 if isinstance(item, dict) and item.get("role") == "observability_response"), None)
     actor = {
         "slot_id": str(seat.get("seat_id") or ""), "model": model,
+        "requested_model": str(requested.get("model") or ""), "observed_model": model,
         "provider": _sub().provider_for_model(model) if model else "unknown",
         "actor_role": f"{surface} {'additional ' if seat.get('additional') else ''}reviewer",
-        "transport_status": str(seat.get("transport_status") or ("success" if status in _LEDGER_PARSE else status or "unknown")),
-        "parse_status": _LEDGER_PARSE.get(status, "none"),
-        "semantic_verdict": str(((record.get("verdict") or {}).get("per_row") or {}).get(seat.get("seat_id")) or ""),
+        "transport_status": str(outcome.get("transport") or seat.get("transport_status") or ("success" if status in _LEDGER_PARSE else status or "unknown")),
+        "parse_status": outcome.get("parse") or _LEDGER_PARSE.get(status, "none"),
+        "semantic_verdict": str(outcome.get("verdict") or "") if outcome else str(((record.get("verdict") or {}).get("per_row") or {}).get(seat.get("seat_id")) or ""),
         "quorum_contribution": contributes,
         "enforcement_impact": str(record.get("enforcement") or "unknown") if contributes else "abstains",
         "operation_state": str(seat.get("operation_state") or ""),
@@ -339,7 +347,18 @@ def _ledger_seat_actor(seat: Dict[str, Any], record: Dict[str, Any]) -> Dict[str
                                 if status not in _LEDGER_PARSE else ""),
         "executions": _ledger_seat_executions(seat),
     }
-    actor.update({key: seat[key] for key in _sub().TYPED_FAILURE_FACT_KEYS if seat.get(key) not in (None, "")})
+    actor.update({key: _sub().redact_projection(seat[key]).value for key in _sub().TYPED_FAILURE_FACT_KEYS if seat.get(key) not in (None, "")})
+    # The browser gets a selector, never a filesystem path. The source door
+    # re-reads the owning record/seat and verifies the exact saved source.
+    actor["sources"] = [
+        {"role": str(source.get("role") or ""), "part": str(source.get("part") or ""),
+         "status": str(source.get("status") or ""),
+         "sha256": str((source.get("ref") or {}).get("sha256") or ""),
+         "size": (source.get("ref") or {}).get("size"), "chars": source.get("chars")}
+        for source in seat.get("source_refs") or []
+        if isinstance(source, dict) and source.get("role") in {"response", "failure"}
+        and isinstance(source.get("ref"), dict)
+    ]
     actor.update(_sub().disclosed_list_projection(
         findings, key="findings", limit=_sub().MAX_PROJECTED_ACTOR_FINDINGS, item=_sub().projected_finding_row))
     return actor
@@ -394,6 +413,48 @@ def _wave_cost(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "seats": {kind: sum(1 for cost in costs if cost["kind"] == kind) for kind in ("usd", "subscription", "unknown")}}
 
 
+def _doctrine_panel(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Pass the author-check facts through. A record without them stays unchanged."""
+    decision = record.get("author_decision")
+    if not isinstance(decision, dict):
+        return {}
+    from ouroboros.review_doctrine import EVIDENCE_KIND, FACT_KIND, LANDING_KEY, public_card_decision
+
+    if not any(isinstance(decision.get(key), dict) for key in (FACT_KIND, EVIDENCE_KIND, LANDING_KEY)):
+        return {}
+    public = public_card_decision(decision)
+    return {"author_decision": public} if public else {}
+
+
+_LANDINGS_SHOWN = 16  # a panel names the newest landed commits; its record (``source_ref``) keeps every one
+
+
+def _wave_failures_panel(verdict: Dict[str, Any]) -> Dict[str, Any]:
+    """A wave its host stopped (``verdict.wave_failures``): the producer's reason code, its masked words and a
+    selector of the complete note for the review door, never a path. A record without one says nothing."""
+    notes = []
+    for note in [item for item in verdict.get("wave_failures") or [] if isinstance(item, dict)]:
+        ref = note.get("source_ref") if isinstance(note.get("source_ref"), dict) else {}
+        inner = ref.get("ref") if isinstance(ref.get("ref"), dict) else {}
+        notes.append({"block_reason": str(note.get("block_reason") or ""),
+                      "reported_cause": _public_review_reason(note.get("reported_cause")),
+                      "source": {"seat_id": str(ref.get("seat_id") or ""), "role": str(ref.get("role") or ""),
+                                 "part": str(ref.get("part") or ""), "status": str(ref.get("status") or ""),
+                                 "sha256": str(inner.get("sha256") or ""), "size": inner.get("size"), "chars": ref.get("chars")}})
+    return {"wave_failures": notes} if notes else {}
+
+
+def _landed_panel(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The commits that landed under this record, each against its reviewed tree (``commit_landings``):
+    the newest ones, with the count of older ones only the record holds (``commit_landings_omitted``)."""
+    from ouroboros.review_doctrine import public_commit_landings
+
+    landed = public_commit_landings(record)
+    shown = landed[-_LANDINGS_SHOWN:]
+    omitted = {"commit_landings_omitted": len(landed) - len(shown)} if len(landed) > len(shown) else {}
+    return {"commit_landings": shown, **omitted} if landed else {}
+
+
 def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
     """One review-ledger record (``review_ledger.build_wave_record``) as a card panel:
     the record's ``panel`` facts (who sat and why) and every seat's answer per brief
@@ -422,6 +483,9 @@ def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
         "panel_id": record_id, "record_id": record_id, "ts": str(record.get("ts") or ""),
         "surface": str(record.get("surface") or "review"), "authority": "review_ledger",
         "record_state": str(record.get("state") or ""),
+        "revision": record.get("revision"), "review_wave_id": str(record.get("review_wave_id") or ""),
+        "subject": _sub().redact_projection(record.get("subject") or {}).value,
+        "goal": _public_review_reason((record.get("brief") or {}).get("goal")),
         "aggregate_signal": aggregate,
         "transport_status": _panel_transport([actor["transport_status"] for actor in actors]),
         "parse_status": "valid" if parsed == {"valid"} else ("none" if parsed <= {"none"} else "partial"),
@@ -433,6 +497,9 @@ def ledger_record_panel(record: Dict[str, Any]) -> Dict[str, Any]:
         "panel_facts": facts, "actors": actors, "superseded": False,
         "source_ref": {"kind": "review_ledger_record", "path": f"state/{LEDGER_SUBDIR}/{record_id}.json"},
         **({"cost": _wave_cost(costs)} if pooled else {}),
+        **_wave_failures_panel(verdict),
+        **_doctrine_panel(record),
+        **_landed_panel(record),
     }
 
 
@@ -447,14 +514,42 @@ def task_ledger_records(task: Dict[str, Any], drive_root: Any) -> tuple:
     try:
         from ouroboros import review_ledger as ledger
 
-        rows = [row for row in ledger.recent_records(root, task_id=task_id, limit=32, hot_only=True)
-                if row.get("task_id") == task_id]
-        records = [ledger.load_record(root, str(row.get("record_id") or "")) for row in rows[:LEDGER_RECORD_PANELS]]
-        more = "1+" if len(rows) > LEDGER_RECORD_PANELS else ("unknown" if ledger.archived_segments_exist(root) else 0)
+        rows, next_offset = ledger.task_record_page(root, task_id, limit=LEDGER_RECORD_PANELS, hot_only=True)
+        records = _read_record_rows(root, rows)
+        more = "1+" if next_offset is not None else ("unknown" if ledger.archived_segments_exist(root) else 0)
     except Exception:
         logging.getLogger(__name__).debug("Review ledger records unavailable for task %s", task_id, exc_info=True)
-        return [], "unknown"
+        return [review_record_gap("", "index_unavailable")], "unknown"
     return [record for record in reversed(records) if record], more
+
+
+def _read_record_rows(root: Any, rows: list) -> list:
+    from ouroboros import review_ledger as ledger
+
+    records = []
+    for row in rows:
+        record_id = str(row.get("record_id") or "")
+        try:
+            record = ledger.load_record(root, record_id)
+            records.append(record if record is not None else review_record_gap(record_id, "missing"))
+        except Exception:
+            records.append(review_record_gap(record_id, "unreadable"))
+    return records
+
+
+def task_review_history(root: Any, task_id: str, *, offset: int, limit: int) -> dict:
+    """Explicit archived history read; local gaps never hide the neighboring records."""
+    from ouroboros import review_ledger as ledger
+
+    rows, next_offset = ledger.task_record_page(root, task_id, offset=offset, limit=limit)
+    projection = compact_review_projection([], records=list(reversed(_read_record_rows(root, rows))))
+    projection["review_records_omitted"] = "1+" if next_offset is not None else 0
+    return {"task_id": task_id, "review_projection": projection, "next_offset": next_offset}
+
+
+def review_record_gap(record_id: str, reason: str) -> Dict[str, Any]:
+    """One missing unit of reading, separate from older records outside the view."""
+    return {"record_id": record_id, "review_gap": reason}
 
 
 _OWNER_SHORTENED = "… (shortened; the complete text is in the review record)"
@@ -560,8 +655,20 @@ def compact_review_projection(review_runs: Any, records: Any = ()) -> Dict[str, 
             if raw_run.get(key) not in (None, ""):
                 panel[key] = str(raw_run.get(key))
         panels.append(panel)
-    panels.extend(ledger_record_panel(record) for record in records or () if isinstance(record, dict))
-    return {"panels": panels}
+    gaps = []
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        if record.get("review_gap"):
+            gaps.append(record)
+            continue
+        try:
+            panels.append(ledger_record_panel(record))
+        except Exception:
+            # Valid JSON can still contain a malformed quorum/seat. It must
+            # not erase panels already collected from this or another domain.
+            gaps.append(review_record_gap(str(record.get("record_id") or ""), "projection_unreadable"))
+    return {"panels": panels, **({"gaps": gaps} if gaps else {})}
 
 
 def _actor_pending(actor: Dict[str, Any]) -> bool:

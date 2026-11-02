@@ -8,17 +8,19 @@ import pytest
 
 
 def test_inspector_resolves_the_main_actor_offered_by_empty_enabled_catalog(tmp_path, monkeypatch):
-    from ouroboros import config
     from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
     from ouroboros.subagent_runtime import model_visible_subagent_catalog, select_subagent_snapshot
     from ouroboros.tools.registry import ToolRegistry
+
+    from tests._shared import saved_settings
 
     settings = {
         "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": []}),
         "OUROBOROS_MODEL": "openai/synthetic-main-model",
         "OPENROUTER_API_KEY": "synthetic-unused-credential",
     }
-    monkeypatch.setattr(config, "load_settings", lambda: {})
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=settings["OUROBOROS_MODEL"],
+                   OPENROUTER_API_KEY=settings["OPENROUTER_API_KEY"])  # route keys read the saved document
     catalog = model_visible_subagent_catalog(settings)
     handle = catalog["rows"][0]["subagent_id"]
     selected, _ = select_subagent_snapshot(settings, subagent_id=handle)
@@ -172,6 +174,7 @@ from datetime import datetime, timedelta, timezone
 
 def test_unchanged_text_renewal_frequency(publisher, monkeypatch):
     from ouroboros import skill_context_snapshot as scs
+    from ouroboros.transcript_prefix import observe_send
 
     root, skill, ctx, path = publisher
     start = datetime.now(timezone.utc).replace(microsecond=0)
@@ -198,21 +201,21 @@ def test_unchanged_text_renewal_frequency(publisher, monkeypatch):
             lease = {"observed": clock["now"], "valid": clock["now"] + timedelta(seconds=420)}
             write()                                        # producer renews the unchanged text
         before = deepcopy(messages)
-        if scs.maybe_append_skill_snapshots(ctx, messages, root):
+        appended = scs.maybe_append_skill_snapshots(ctx, messages, root)
+        if appended:
             appended_at.append(step)
-        assert messages[:len(before)] == before
+        assert messages[:len(before)] == before  # metadata renewal never rewrites sent history
+        assert observe_send(ctx, messages, round_idx=step // 30) is None
     full_notes = [m for m in messages if m.get("_host_context_kind") == scs.SNAPSHOT_KIND and text in m["content"]]
     print("\nWITNESS appended at seconds:", appended_at)
     print("WITNESS full-text notes in one hour for unchanged text:", len(full_notes),
           "| chars appended:", sum(len(m["content"]) for m in full_notes))
-    assert len(full_notes) == 1 and len(messages) > 10
-    full = json.loads(full_notes[0]["content"].split("\n", 1)[1])
-    for note in messages[1:]:
-        value = json.loads(note["content"].split("\n", 1)[1])
-        assert "text" not in value
-        assert value["text_ref"]["source_sha256"] == full["source"]["sha256"]
-    assert scs.visible_snapshots(messages)[skill.name][1]["text"] == text
-    assert 0 not in scs.obsolete_snapshot_positions(messages)
+    # Once the dates in view run out one note says so and names the current text; later
+    # renewals add nothing until the conversation is next rebuilt (#2333).
+    assert len(full_notes) == 1 and len(messages) == 2
+    value = json.loads(messages[-1]["content"].split("\n", 1)[1])
+    assert "text" not in value and (value["state"], value["reason"]) == ("outdated", "validity_ended")
+    assert scs.obsolete_snapshot_positions(messages) == {0}
     from ouroboros.llm_attempt import _physical_candidate
     from ouroboros.llm_claudexor import _request
     for wire in (_physical_candidate({"messages": messages, "tools": []}),
@@ -299,21 +302,6 @@ def test_freshness_compatibility_stops_after_non_selector_failure(failure):
     assert len(gateway.calls) == 2  # no plain GET on malformed/5xx/unknown transport
 
 
-@pytest.mark.parametrize("profiles", [None, 42, {}, "bad"])
-def test_malformed_roster_cannot_identify_default_or_crash_route_health(profiles):
-    from ouroboros.claudexor_observations import default_subject_aliases
-    from ouroboros.subagent_route_health import _exhausted_window
-    roster = {"accountPools": [], "profiles": profiles}
-    assert default_subject_aliases(roster, "claude", "claude-default") == ()
-    class Gateway:
-        def credential_profiles(self): return roster
-        def quota_state(self, **scope):
-            return {"snapshots": [{"subject": {"harness": "claude", "subject_id": None},
-                    "freshness": "fresh", "availability": {"state": "exhausted", "resets_at": "2099-01-01T00:00:00Z"}}],
-                    "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"}}
-    assert _exhausted_window(Gateway(), "claude", pinned_profile="claude-default") == (False, "")
-
-
 def test_renewals_keep_visible_full_base_through_reclaim_and_restore_it_when_absent(publisher, monkeypatch):
     from datetime import timedelta
     from types import SimpleNamespace
@@ -342,9 +330,10 @@ def test_renewals_keep_visible_full_base_through_reclaim_and_restore_it_when_abs
     for step in range(2, 42, 2):
         clock["now"] = start + timedelta(seconds=step)
         _write(path, text, observed=clock["now"], valid=clock["now"] + timedelta(seconds=1))
-        assert scs.maybe_append_skill_snapshots(ctx, messages, root)
+        assert scs.maybe_append_skill_snapshots(ctx, messages, root) is (step == 2)  # one note, then nothing
         assert messages[2] == base
-    # The real host-copy reclaim may remove superseded renewals, not their text base.
+    assert len(messages) == 4 and scs.visible_snapshots(messages)[skill.name][1]["state"] == "outdated"
+    # The real host-copy reclaim removes the outdated full text and keeps the note naming the current one.
     before = deepcopy(messages)
     request = ContextReclaimRequest(route_fp="fixture", round_id="7", transcript_sha256=
         context_compaction.context_reclaim_transcript_sha256(messages), measurement_basis="cold_estimate",
@@ -352,13 +341,13 @@ def test_renewals_keep_visible_full_base_through_reclaim_and_restore_it_when_abs
     reclaimed, receipt = emergency_address_view(messages, request, rung="host_copies",
         drive_root=root, task_id="root", measure_candidate=lambda rows: len(json.dumps(rows)))
     assert receipt.status == "applied"
-    assert base in reclaimed and scs.visible_snapshots(reclaimed)[skill.name][1]["text"] == text
+    assert base not in reclaimed and scs.visible_snapshots(reclaimed)[skill.name][1]["state"] == "outdated"
     assert messages == before
-    current = scs.visible_snapshots(reclaimed)[skill.name][1]
-    assert json.loads(read_blob_ref(root, current["source"]["retained"], expected_kind="txt"))["text"] == text
-    # Cold restore loses the full base, even if a later reference survives. No memo can certify it.
+    retained = json.loads(base["content"].split("\n", 1)[1])["source"]["retained"]
+    assert json.loads(read_blob_ref(root, retained, expected_kind="txt"))["text"] == text
+    # A rebuilt conversation with no full text in view shows the current one in full again.
     cold = [*reclaimed[:2], reclaimed[-1]]
-    assert scs.visible_snapshots(cold)[skill.name][1]["state"] == "unknown"
+    assert scs.visible_snapshots(cold)[skill.name][1]["state"] == "outdated"
     fresh_ctx = SimpleNamespace(task_id="root", task_metadata={}, budget_drive_root=str(root))
     round_ctx = _CompactionRoundContext(tools=SimpleNamespace(_ctx=fresh_ctx), drive_root=root,
         drive_logs=root / "logs", task_id="root", round_idx=8, event_queue=None, emit_progress=lambda x: None)
@@ -430,3 +419,25 @@ def test_exact_snapshot_source_survives_normal_isolated_drive_prune(publisher):
     assert any(row["task_id"] == task for row in report["pruned"]) and not drive.exists()
     assert observability.read_call_payload(canonical, task_id=task, call_id="request")[1]["messages"] == messages
     assert observability.read_blob_ref(canonical, source, expected_kind="txt") == original
+
+
+def test_route_health_reads_only_the_exact_default_subject_and_never_the_roster():
+    """#244: no roster read guesses that a null subject is `<harness>-default`."""
+    from ouroboros.subagent_route_health import _exhausted_window
+
+    class Gateway:
+        def __init__(self, subject):
+            self.subject = subject
+
+        def credential_profiles(self):
+            raise AssertionError("route health must not read the roster to guess a quota subject")
+
+        def quota_state(self, **scope):
+            return {"snapshots": [{"subject": {"harness": "claude", "subject_id": self.subject},
+                                   "freshness": "fresh",
+                                   "availability": {"state": "exhausted", "resets_at": "2099-01-01T00:00:00Z"}}],
+                    "availability_scope": {"model": None, "requestKind": "text", "basis": "quota_block"}}
+
+    assert _exhausted_window(Gateway(None), "claude", pinned_profile="claude-default") == (False, "")
+    assert _exhausted_window(Gateway("claude-default"), "claude", pinned_profile="claude-default") == (
+        True, "2099-01-01T00:00:00Z")

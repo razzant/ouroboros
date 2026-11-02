@@ -32,6 +32,36 @@ export function isStackLayout(options) {
     return currentLayout(options) === 'stack';
 }
 
+/** A pinch is magnifying the page: the visual viewport is narrower than the layout one, the root's client width
+ * (`innerWidth` runs a pixel past the screen at an Interface size below 100 % and counts a classic scrollbar). A
+ * keyboard only takes height, and a page zoom moves both together, so neither counts. While it holds, the room keeps its
+ * size and the finger pans the magnified page (DESIGN "Touch and containment"). */
+export function pinchMagnified(w = win()) {
+    const vv = w?.visualViewport;
+    const layoutWidth = Number(w?.document?.documentElement?.clientWidth) || 0;
+    return Boolean(vv && layoutWidth && Number(vv.width) < layoutWidth - 1);
+}
+
+/** A window too short for the sidebar's zones pins its head and its foot over the one scroller (style.css). Their
+ * measured heights are the scroll margin of the rows there, so a row reached with Tab or brought into view is never
+ * left under either bar. Their border boxes are watched: the macOS title band and the safe area are their padding
+ * and can arrive after the first paint (a Telegram inset, a page zoom), which a content box never reports. Returns
+ * the disposer. */
+export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserver } = {}) {
+    const head = sidebar?.querySelector('.sidebar-head');
+    const foot = sidebar?.querySelector('.sidebar-foot-meta');
+    if (!head || !foot || typeof Observer !== 'function') return () => {};
+    const write = () => {
+        sidebar.style.setProperty('--sidebar-head-h', `${head.getBoundingClientRect().height}px`);
+        sidebar.style.setProperty('--sidebar-foot-h', `${foot.getBoundingClientRect().height}px`);
+    };
+    const observer = new Observer(write);
+    observer.observe(head, { box: 'border-box' });
+    observer.observe(foot, { box: 'border-box' });
+    write();
+    return () => observer.disconnect();
+}
+
 /** Hear the switch move; returns the disposer. The handler gets the new layout name. */
 export function onLayoutChange(handler, { w = win() } = {}) {
     const listener = (event) => handler(event?.detail?.layout || currentLayout({ w }));

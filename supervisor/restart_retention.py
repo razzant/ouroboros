@@ -69,30 +69,23 @@ def conserve_unreadable_pending(task: dict) -> bool:
 
 
 def saved_sleep_hold_reason(result_root: Any, *, owner_restart: bool = False) -> str:
-    """Read the existing stop carriers; an ordinary recovery asserts no owner action.
-
-    Kill callers read this only after signalling workers. The explicit Restart
-    door also supplies its known intent, independent of a flag read.
-    """
+    """Live stop intent; boot passes its translated door explicitly."""
+    from ouroboros.delegate_recovery import owner_restart_in_progress
     from supervisor.events_budget import HOLD_OWNER_RESTART, HOLD_PANIC
 
-    state = pathlib.Path(result_root) / "state"
-    if owner_restart or (state / "owner_restart_no_resume.flag").exists():
+    if panic_recorded(result_root):
+        return HOLD_PANIC
+    if owner_restart or owner_restart_in_progress(result_root):
         return HOLD_OWNER_RESTART
-    try:
-        if (state / "panic_stop.flag").read_text(encoding="utf-8").strip() == "panic":
-            return HOLD_PANIC
-    except OSError:
-        pass
     return HOLD_SAVED_SLEEP_RECOVERY
 
 
 def panic_recorded(result_root: Any) -> bool:
-    """The owner's Panic stop flag (``server_control.execute_panic_stop``): nothing returns by itself."""
-    try:
-        return (pathlib.Path(result_root) / "state" / "panic_stop.flag").read_text(encoding="utf-8").strip() == "panic"
-    except OSError:
-        return False
+    """Live emergency termination latch, not a historical installation input."""
+    from ouroboros import server_control
+    from ouroboros.config import DATA_DIR
+
+    return pathlib.Path(result_root) == pathlib.Path(DATA_DIR) and server_control._restart_stop_requested
 
 
 def pause_retention(result_root: Any, task_id: str, attempt: Optional[int] = None) -> str:
@@ -158,7 +151,8 @@ def retain_owner_pause_park(root: pathlib.Path, task_id: str, attempt: int) -> D
 
     from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
     from ouroboros.budget_pause import (
-        RAIL_OWNER_PAUSE, REASON_OWNER, STATE_PAUSED, budget_pause_row, set_budget_pause, task_owned_runs_open,
+        RAIL_OWNER_PAUSE, REASON_OWNER, STATE_PAUSED, budget_pause_row, episode_fields, set_budget_pause,
+        task_owned_runs_open,
     )
     from ouroboros.deadline_utils import parse_deadline_ts
 
@@ -181,6 +175,7 @@ def retain_owner_pause_park(root: pathlib.Path, task_id: str, attempt: int) -> D
              "scope": "root", "root_task_id": str(pause_meta.get("root_task_id") or task_id), "source_ref": source,
              "retained_owner_wait_id": wait.get("wait_id"), "owner_fence_id": str(pause_meta.get("fence_id") or ""),
              "settlement": "external_writers_running" if task_owned_runs_open(external) else "settled",
+             **episode_fields(pause_meta, external),  # the warm park's participants, partial if it kept no list
              "external_runs": external, "resume_point": {"round_idx": int(state.get("round_idx") or 0),
                                                          "phase": "boundary", "unanswered_tool_call_ids": [],
                                                          "budget_tail": "tool", "abandoned_model_attempts": []},
@@ -373,11 +368,9 @@ def retain_sleep_checkpoint(root: pathlib.Path, task_id: str, attempt: int, *, d
 
 def restart_held(task: Any) -> bool:
     """Whether this queued row carries an UNRELEASED owner-Restart hold."""
-    from supervisor.events_budget import BUDGET_HOLD_KEY, HOLD_OWNER_RESTART
+    from ouroboros.work_stop import current_stop
 
-    hold = task.get(BUDGET_HOLD_KEY) if isinstance(task, dict) else None
-    return isinstance(hold, dict) and str(hold.get("reason") or "") == HOLD_OWNER_RESTART \
-        and not hold.get("selected")
+    return current_stop(task).get("door") == "owner_restart"
 
 
 def never_started(task: Any) -> bool:
@@ -409,23 +402,13 @@ def hold_for_owner_restart(task: Dict[str, Any], drive_root: Any) -> Dict[str, A
 
 def hold_after_stop(task: Dict[str, Any], drive_root: Any, reason: str) -> Dict[str, Any]:
     """Hold recovered sleep or an owner's stop, preserving stronger prior holds."""
-    from supervisor.events_budget import HOLD_CONTINUATION_WRITER, budget_hold_fact, hold_budget_row
+    from supervisor.events_budget import hold_budget_row
+    from ouroboros.work_stop import door_can_replace
 
-    prior = budget_hold_fact(task)
-    if prior is not None:
-        if reason == HOLD_SAVED_SLEEP_RECOVERY or prior.get("reason") not in {
-                HOLD_CONTINUATION_WRITER, HOLD_SAVED_SLEEP_RECOVERY}:
-            return task
-    # A Continue waiting on its predecessor's writers is held by the newer
-    # Restart instead: a later reconciliation must not release what the owner's
-    # Restart now holds (its own release still re-checks those writers).
-    hold_budget_row(
-        task, reason=reason,
-        detail=("saved sleep recovered; held until an explicit Resume" if reason == HOLD_SAVED_SLEEP_RECOVERY
-                else "held by the owner's stop until an explicit Resume"),
-        extra={"root_task_id": str(task.get("root_task_id") or task.get("id") or ""),
-               **({"prior_hold": dict(prior)} if prior else {})},
-        result_root=pathlib.Path(task.get("budget_drive_root") or drive_root))
+    if door_can_replace(task, reason):
+        hold_budget_row(task, reason=reason, detail="saved work held until an explicit Resume",
+                        extra={"root_task_id": str(task.get("root_task_id") or task.get("id") or "")},
+                        result_root=pathlib.Path(task.get("budget_drive_root") or drive_root))
     return task
 
 
@@ -479,11 +462,12 @@ def retained_pending(task: Dict[str, Any], *, sleep_hold_reason: str = "") -> bo
     pause = task.get("_budget_pause")
     saved = isinstance(pause, dict) and pause.get("exact_continuation") is True
     from supervisor.events_budget import budget_hold_fact
+    from ouroboros.work_stop import reason_policy, record_policy
 
     hold = budget_hold_fact(task)
     if sleep_hold_reason and ((saved and pause.get("reason") == "sleep"
-                               and sleep_hold_reason != HOLD_SAVED_SLEEP_RECOVERY)
-                              or (hold or {}).get("reason") == HOLD_SAVED_SLEEP_RECOVERY):
+                               and reason_policy(sleep_hold_reason).get("replaces_door", True))
+                              or record_policy(hold).get("door_replaceable")):
         from supervisor import queue as q
 
         hold_after_stop(task, q.DRIVE_ROOT, sleep_hold_reason)
@@ -564,6 +548,26 @@ def working_saved(root: Any, task_id: str, attempt: int, *, task: Optional[Dict[
         return False
 
 
+def attach_preserved_successor_source(
+    drive_root: Any, task_id: str, successor: Dict[str, Any], prior_task: Dict[str, Any], attempt: int,
+) -> None:
+    """Freeze a stopped successor's cognition, retaining a gap if freezing fails.
+
+    Preserved successors bypass boot's RUNNING-row recovery. Native owner waits
+    already carry their source and keep their attempt, so need no second freeze.
+    """
+    if isinstance(successor.get("_owner_wait_resume"), dict):
+        return
+    from ouroboros.working_checkpoint import attach_recovery
+
+    root = pathlib.Path(prior_task.get("budget_drive_root") or drive_root)
+    saved = working_saved(root, task_id, attempt, task=prior_task)
+    if not attach_recovery(root, successor, source_task_id=task_id, from_attempt=attempt,
+                           cause="restart", prior_task=prior_task) and saved:
+        successor.setdefault("_working_recovery", {
+            "source_task_id": task_id, "from_attempt": attempt, "cause": "restart"})
+
+
 def _txn():
     from ouroboros import delegate_recovery as dr
 
@@ -623,8 +627,13 @@ def recover_aborted_update(drive_root: Any, running: Dict[str, Any], pending: Li
         if isinstance(meta, dict) and meta.get(RETAINED_FOR_BOOT) and (
                 task_id not in batch["rows"] or meta is not batch["rows"][task_id]["meta"]):
             return False
+    from supervisor.active_activity import get_direct_activity_registry
+
+    live_direct = {str(entry.activity_id) for entry in get_direct_activity_registry().actors()}
     selected = {}
     for task_id, captured in batch["rows"].items():
+        if task_id in live_direct:
+            continue
         meta = running.get(task_id)
         if meta is not captured["meta"] or not meta.get(RETAINED_FOR_BOOT):
             continue
@@ -738,8 +747,11 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
             returns.add(str(task_id))
     for record in direct or ():
         task_id = str((record or {}).get("id") or "")
-        if task_id and working_saved(pathlib.Path(record.get("budget_drive_root") or drive_root), task_id,
-                                     int(record.get("_attempt") or 1), task=record):
+        attempt = int((record or {}).get("_attempt") or 1)
+        root = pathlib.Path((record or {}).get("budget_drive_root") or drive_root)
+        if (task_id and task_id not in set(owner_wait_ids) and working_saved(root, task_id, attempt, task=record)
+                and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
+                                                                    RETAIN_OWNER_PAUSE}):
             returns.add(task_id)
     queue_ids = []
     for task in pending or ():
@@ -847,7 +859,8 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
     host already owes, or no usable source keeps the ordinary interrupted path.
     """
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
-    from supervisor.events_budget import HOLD_SAVED_WORK, continue_consumed_resume_selection, hold_budget_row
+    from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
+    from ouroboros.work_stop import retain_consumed_selection
 
     returning = set((transaction or {}).get("return_ids") or [])
     rows = [row for row in rows or () if isinstance(row, dict)]
@@ -876,7 +889,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
             fold_running_clock(task, row)  # confirmed waits newer than the saved source (#939)
             stamp_execution_handoff(task, row)
             if auto:
-                continue_consumed_resume_selection(task, stored.get("budget_pause") or {})
+                retain_consumed_selection(task, stored.get("budget_pause") or {})
         except Exception:
             log.warning("Saved work of %s unreadable at restore; ordinary interrupted path", task_id, exc_info=True)
             refused[task_id] = "unreadable"
@@ -906,7 +919,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
         if not auto:
             hold_budget_row(task, reason=HOLD_SAVED_WORK, result_root=root,
                         detail=f"work saved before the application stopped ({cause}); continues after an explicit Resume",
-                        extra={"root_task_id": str(task.get("root_task_id") or task_id), "stop_cause": cause})
+                        extra={"root_task_id": str(task.get("root_task_id") or task_id), "door": cause})
         recovered.append(task)
     return recovered
 
@@ -918,5 +931,5 @@ def hold_stopped_queue(task: Dict[str, Any], drive_root: Any, cause: str) -> Dic
     hold_budget_row(task, reason=HOLD_SAVED_WORK, result_root=pathlib.Path(task.get("budget_drive_root") or drive_root),
                     existing_result_only=True,
                     detail=f"accepted before the application stopped ({cause}); starts after an explicit Resume",
-                    extra={"root_task_id": str(task.get("root_task_id") or task.get("id") or ""), "stop_cause": cause})
+                    extra={"root_task_id": str(task.get("root_task_id") or task.get("id") or ""), "door": cause})
     return task

@@ -11,11 +11,10 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.contracts.task_contract import TOOL_NAME_ALIASES
-from ouroboros.presence_admission import PresenceAdmissionError
-from ouroboros.presence_capabilities import (
+from tests.frozen_presence_capabilities import (
     PresenceSelection, PresenceState, PresenceToolTarget, presence_state_fingerprint, save_presence_state,
 )
-from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
+from tests.frozen_presence_profile import parse_presence_profile, presence_request_fingerprint
 from ouroboros.skill_loader import load_skill
 from tests.test_presence_admission import _admit, _binding, _install_behavior
 
@@ -31,26 +30,11 @@ def _select(drive_root, skill_dir, name):
                         expected_state_fingerprint=presence_state_fingerprint(PresenceState()))
 
 
-@pytest.mark.parametrize("old,new", PAIRS)
-def test_a_required_selection_saved_under_the_old_name_admits_and_grants_the_successor(tmp_path, old, new):
-    from ouroboros.presence_authority import presence_ceiling_allows_tool
-
-    drive_root = tmp_path / "data"
-    skill_dir = _install_behavior(drive_root)
-    _select(drive_root, skill_dir, old)
-    admission = _admit(drive_root, _binding(drive_root))
-    names = [grant.name for grant in admission.capability_ceiling.tool_grants]
-    assert new in names and old not in names
-    assert presence_ceiling_allows_tool(admission.capability_ceiling, new)
-
-
-def test_a_missing_builtin_is_still_refused(tmp_path):
-    drive_root = tmp_path / "data"
-    skill_dir = _install_behavior(drive_root)
-    _select(drive_root, skill_dir, "does_not_exist")
-    with pytest.raises(PresenceAdmissionError) as caught:
-        _admit(drive_root, _binding(drive_root))
-    assert caught.value.code == "presence_required_capability_unavailable"
+def test_legacy_selections_do_not_constrain_new_focus_admission(tmp_path):
+    skill_dir = _install_behavior(tmp_path)
+    _select(tmp_path, skill_dir, "does_not_exist")
+    admission = _admit(tmp_path, _binding(tmp_path))
+    assert admission.capability_ceiling is None
 
 
 @pytest.mark.parametrize("old,new", PAIRS)
@@ -78,7 +62,7 @@ def _bound_ceiling_ctx(grant_name):
     from types import SimpleNamespace
 
     from ouroboros.presence_authority import PresenceCapabilityCeiling, PresenceToolGrant, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceArgumentBinding
+    from tests.frozen_presence_capabilities import PresenceArgumentBinding
 
     binding = PresenceArgumentBinding(("project_id",), "static", static_value="host-bound")
     ceiling = PresenceCapabilityCeiling(
@@ -104,7 +88,7 @@ def test_a_frozen_old_spelling_grant_binds_the_successors_arguments(old, new):
 
 
 def test_a_saved_builtin_name_resolves_and_a_corrupt_one_fails_typed():
-    from ouroboros.presence_capabilities import PresenceStateError, _target_from_payload
+    from tests.frozen_presence_capabilities import PresenceStateError, _target_from_payload
 
     old, new = PAIRS[0]
     target = _target_from_payload({"type": "tool", "kind": "builtin", "name": old, "provider": ""}, field_name="t")

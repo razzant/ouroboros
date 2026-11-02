@@ -128,24 +128,23 @@ def test_a_consciousness_root_carries_the_raw_marker_and_no_words(tmp_path):
     assert ow.ABSENT_FIELD not in _schedule(_root(tmp_path))[2]["metadata"]
 
 
-def test_a_swarm_roots_words_are_the_doors_text_not_the_host_notice(tmp_path, monkeypatch):
-    """The host prefixes its [SWARM_INITIATIVE] notice to a Swarm root's first user turn; the
-    door kept the owner's own text, and that text is what a child reads as my human's words."""
+def test_a_swarm_roots_words_stay_exact_with_ignored_legacy_metadata(tmp_path, monkeypatch):
+    """The root and child receive the door's exact text, without the retired host initiative."""
     from ouroboros.context import build_user_content
     from ouroboros.review_evidence_sections import _owner_content_projection
 
     monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
     door = {"origin_message_ref": dict(ORIGIN_REF), "origin_message_text": ASKED,
-            "force_plan": True, "force_plan_source": "swarm"}
+            "subagents_mode": "swarm", "force_plan": True, "force_plan_source": "swarm"}
     turn = build_user_content({"text": ASKED, "metadata": door})
-    assert "[SWARM_INITIATIVE]" in _owner_content_projection(turn)  # the root's own first turn carries the notice
+    assert _owner_content_projection(turn) == ASKED
     swarm = _root(tmp_path, metadata=door, owner_said=False)
     _initialize_owner_directives(swarm, [{"role": "user", "content": turn}])
     _event, stored, payload = _schedule(swarm)
     assert _texts(payload["metadata"][ow.FIELD]) == [ASKED] and _texts(stored[ow.FIELD]) == [ASKED]
     assert payload["metadata"][ow.FIELD][0]["ref"] == "chat 1 / msg-1"  # still the door's stamp
     assert "[SWARM_INITIATIVE]" not in ow.owner_words_text(swarm)
-    assert _holds(swarm._owner_directives, "[SWARM_INITIATIVE]")  # the root's corpus itself is unchanged
+    assert not _holds(swarm._owner_directives, "[SWARM_INITIATIVE]")
     # The other side: a door that kept no text leaves the corpus row's own projection.
     bare = _root(tmp_path, metadata={key: value for key, value in door.items() if key != "origin_message_text"},
                  owner_said=False)

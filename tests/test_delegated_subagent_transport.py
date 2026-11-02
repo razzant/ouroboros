@@ -548,16 +548,26 @@ def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime
         DELEGATE_WAIT_CEILING_SEC,
         DELEGATE_WAIT_WINDOW_MAX_SEC,
         get_delegate_wait_max_sec,
-        get_task_abs_ceiling_sec,
-        operation_window_sec,
     )
     from ouroboros.delegate_progress import EXTERNAL_WAIT_LEASE_CEILING_SEC
     from ouroboros.loop_tool_execution import _DEADLINE_CLAMPED_TOOLS, _PER_CALL_TIMEOUT_TOOLS
     from ouroboros.tools.delegate import get_tools
 
-    entry = next(e for e in get_tools() if e.schema["name"] == "delegate_wait")
-    assert "wait_sec" not in entry.schema["parameters"]["properties"]
-    assert entry.timeout_sec == operation_window_sec(get_task_abs_ceiling_sec()) + 120
+    def entry():
+        return next(e for e in get_tools() if e.schema["name"] == "delegate_wait")
+
+    assert "wait_sec" not in entry().schema["parameters"]["properties"]
+    # Lifetime + 120 when the task has one (the pre-#1196 meaning); none without one (retired
+    # pin: the 6 h operation window): the wait wakes on cancel/deadline controls itself.
+    previous_lifetime = os.environ.pop("OUROBOROS_TASK_ABS_CEILING_SEC", None)
+    try:
+        assert entry().timeout_sec is None
+        os.environ["OUROBOROS_TASK_ABS_CEILING_SEC"] = "3600"
+        assert entry().timeout_sec == 3600 + 120
+    finally:
+        os.environ.pop("OUROBOROS_TASK_ABS_CEILING_SEC", None)
+        if previous_lifetime is not None:
+            os.environ["OUROBOROS_TASK_ABS_CEILING_SEC"] = previous_lifetime
     assert DELEGATE_WAIT_WINDOW_MAX_SEC < DELEGATE_WAIT_CEILING_SEC < EXTERNAL_WAIT_LEASE_CEILING_SEC
     assert (DELEGATE_WAIT_WINDOW_MAX_SEC, DELEGATE_WAIT_CEILING_SEC,
             EXTERNAL_WAIT_LEASE_CEILING_SEC) == (1800, 2100, 2400)

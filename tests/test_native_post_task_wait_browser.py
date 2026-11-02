@@ -94,6 +94,7 @@ def test_browser_stops_native_post_task_wait_without_losing_answer(subscription_
             thread.join(5)
             assert not thread.is_alive() and len(f.engine.creates) == 1
             assert load_task_result(f.root, task_id)["root_phase_checkpoint"]["post_task_synthesis"] == "degraded"
+            ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
             page.reload()
             page.get_by_text("final answer", exact=True).wait_for()
             page.wait_for_function("() => !document.querySelector('[data-wait-id]')")

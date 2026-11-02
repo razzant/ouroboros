@@ -407,11 +407,11 @@ def test_model_id_classifiers_preserve_the_prior_ordered_vocabulary():
     from devtools.benchmarks.common.model_slots import _ACTIVE_FIXED_MODEL_KEYS
     from devtools.benchmarks.programbench.run_programbench_e2e import _MODEL_ID_SLOT_KEYS
 
-    # Exact pre-subscription vocabulary minus the reviewer carriers (the review
+    # Model-ID vocabulary includes the independent Supervisor, minus reviewer carriers (the review
     # pool lives in the roster, OUROBOROS_SUBAGENTS): adding role metadata must not
     # drop a fallback list, resurrect Heavy, or widen model-ID admission.
     prior = (
-        "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION",
+        "OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_SAFETY", "OUROBOROS_MODEL_VISION",
         "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS",
         "OUROBOROS_WEBSEARCH_MODEL",
     )
@@ -583,12 +583,19 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "teardown_unconfirmed": (False, "gateway/tasks.py: an HTTP 202 Stop acknowledgement; the recorded intent is still being finished, never a task outcome"),
     "artifact_unavailable": (False, "gateway/task_archive.py: confined single-file read unavailable; HTTP refusal, not a task terminal"),
     "artifact_unverified": (False, "gateway/task_archive.py: single-file drift or capture verification failure; HTTP refusal, not a task terminal"),
+    "wrap_up_document_invalid": (False, "gateway/task_archive.py: the Wrap up document selector combined with relpath or source; HTTP 400, not a task terminal"),
+    "wrap_up_document_unavailable": (False, "gateway/task_archive.py: no Wrap up receipt by that name and Stop, or its on-read document could not be written; HTTP 404/503, not a task terminal"),
     "upload_unavailable": (False, "gateway/files.py: a chat attachment is missing or not a regular file; HTTP 404, not a task terminal"),
     "upload_unreadable": (False, "gateway/files.py: a chat attachment's confined read failed; HTTP 503, not a task terminal"),
     "history_source_unavailable": (False, "gateway/history_paging.py: readable recent projection with explicit source gap; no task attempt was truncated"),
+    "review_history_unavailable": (False, "gateway/task_reviews.py: a task's saved review history could not be read; HTTP 503 on a read-only route, not a task terminal"),
+    "review_source_invalid": (False, "gateway/task_reviews.py: the exact saved-review selector is malformed; HTTP 400, not a task terminal"),
+    "review_source_changed": (False, "gateway/task_reviews.py: the exact selected saved review source is no longer named by its owning record; HTTP 409, not a task terminal"),
+    "review_source_unavailable": (False, "gateway/task_reviews.py: saved review text failed its integrity check or cannot be read; HTTP 404, not a task terminal"),
     "quiz_delivery_failed": (False, "gateway/task_decision.py: the answer was recorded and its delivery stays owed (503, retry); never a task terminal or trial truncation"),
-    "awaiting_recipient_read": (False, "question_answers.py: a recorded answer is in its live reader's mailbox, read pending; a delivery fact on the question, never a task terminal"),
-    "asker_not_reading": (False, "question_answers.py: the asker no longer reads, so the owed answer goes to a fresh head in its room (D8); a delivery fact, never a task terminal"),
+    "quiz_answer_unconfirmed": (False, "503 before any answer was recorded; not a task terminal or truncation"),
+    "awaiting_recipient_read": (False, "question_answers.py: a recorded answer is in its living recipient's mailbox (paused or held too), read pending; a delivery fact on the question, never a task terminal"),
+    "asker_not_reading": (False, "question_answers.py: no living asker or successor holds the answer, so it goes to named ingress in its room (the asker's live late-answer head, else a fresh head); a delivery fact, never a task terminal"),
     "promotion_not_started": (False, "promotion_intent.py: boot reconciliation of a start_task intent proven never admitted; that separate work never ran (explicit retry), so nothing was truncated and it is never a trial root's code"),
     "migrating": (False, "gateway/_helpers.py: a write door (create, Cancel, Pause, Presence) answered 503 inside the boot import window of state/current.sqlite (retry); no task attempt was truncated"),
     "budget_pausing_no_extraction": (False, "review_verdict_extraction.py: Light verdict extraction refused while the task's exact budget pause is closing dispatch (#1196); the review row stays undispatched and the attempt is paused, not truncated"),
@@ -599,6 +606,9 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "card_not_found": (False, "gateway/card_decision.py: a press or read names no stored card; HTTP 404, never a task terminal"),
     "card_stale": (False, "gateway/card_decision.py: the card changed since the press was drawn; HTTP 409, nothing recorded, never a task terminal"),
     "card_write_failed": (False, "gateway/card_decision.py: the press could not be recorded; HTTP 503 (retry), never a task terminal"),
+    "chat_unavailable": (False, "gateway/ui_holds.py: no chat writer serves this data root, so a page's hold report named nothing; HTTP 503 (the next page reports again), never a task terminal"),
+    "in_flight": (False, "gateway/ui_holds.py: another report is naming the same hold now; HTTP 503 (the next page reports again), never a task terminal"),
+    "not_confirmed": (False, "gateway/ui_holds.py: a hold row's write was not confirmed; HTTP 503 (the next page reports again), never a task terminal"),
     "pin_write_failed": (False, "gateway/cards.py: Keep on Widgets could not be saved; HTTP 503, never a task terminal"),
     "revision_required": (False, "gateway/card_decision.py: a press without the card revision it was drawn from; HTTP 400, never a task terminal"),
     "values_invalid": (False, "gateway/card_decision.py: form values the card's form does not accept; HTTP 400, never a task terminal"),
@@ -613,6 +623,8 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     "provider_unavailable": (True, "loop.py:3185 reroute + fallback exhausted"),
     "children_unabsorbed": (True, "historical forced terminal; retained for old benchmark records, no longer emitted"),
     "llm_api_error": (True, "loop_llm_call.py:630 transport death; never a fair shot"),
+    "context_overflow": (True, "loop_model_call.py: known-window admission exhausted size recovery; host-stopped, not a capability result"),
+    "output_recovery_exhausted": (True, "loop_output_exhaustion.py: empty-answer recovery exhausted; incomplete provider outcome, not task completion"),
     # S3 owner graceful stop ("Wrap up"): the owner ended the attempt, so
     # reward 0 is an owner decision, never a fair-shot capability fact (CF-02:
     # reusing finalization_grace would persist the deadline's false reason).
@@ -640,7 +652,7 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
     ),
     "delegated_custody_unreconciled": (
         False,
-        "agent_task_pipeline.py terminal custody overlay; an additive custody-debt disclosure (Done with warnings) on any task that finished with an undisposed own delegated patch, never a truncation; a truncation rail code is preserved",
+        "stored reason of rows written before #1583 (the removed terminal custody overlay); new rows keep their own reason beside the delegated_runs_unreconciled debt list; never a truncation",
     ),
     "provider_outcome_unknown": (
         False,
@@ -843,6 +855,19 @@ def _runtime_reason_code_literals() -> dict[str, str]:
         # need not be adjacent to the keyword on one source line.
         tree = ast.parse(source)
         forwarded = _forwarded_reason_arguments(tree)
+        constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
+                     for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)}
+        for function in tree.body:
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            forwarded_names = {node.value.id for node in ast.walk(function)
+                               if isinstance(node, ast.keyword) and node.arg == "reason_code" and isinstance(node.value, ast.Name)}
+            for argument, default in zip(function.args.kwonlyargs, function.args.kw_defaults):
+                if argument.arg in forwarded_names:
+                    value = constants.get(default.id) if isinstance(default, ast.Name) else default
+                    for code in values(value):
+                        if code:
+                            found.setdefault(code, f"{path.relative_to(root.parent)}:{function.lineno}")
         for node in ast.walk(tree):
             if isinstance(node, ast.keyword) and node.arg == "reason_code":
                 for code in values(node.value):
@@ -862,8 +887,9 @@ def _runtime_reason_code_literals() -> dict[str, str]:
     return found
 
 
-# Historical outcomes remain classified even after their producing rail is retired.
-_RETIRED_TRUNCATION_CODES = {"children_unabsorbed"}
+# Historical reason codes keep their recorded decision, truncating or not, after their producing rail is retired:
+# old records still carry them.
+_RETIRED_REASON_CODES = {"children_unabsorbed", "delegated_custody_unreconciled"}
 
 
 def test_truncation_vocabulary_is_derived_from_the_runtime_not_restated():
@@ -883,8 +909,8 @@ def test_truncation_vocabulary_is_derived_from_the_runtime_not_restated():
     assert {"round_limit", "deadline_local"} <= RUNTIME_TRUNCATION_REASON_CODES
 
     emitted = _runtime_reason_code_literals()
-    assert _RETIRED_TRUNCATION_CODES.isdisjoint(emitted)
-    for code in sorted(RUNTIME_TRUNCATION_REASON_CODES - _RETIRED_TRUNCATION_CODES):
+    assert _RETIRED_REASON_CODES.isdisjoint(emitted)
+    for code in sorted(RUNTIME_TRUNCATION_REASON_CODES - _RETIRED_REASON_CODES):
         assert code in emitted, f"{code} is published but no line in ouroboros/ emits it"
 
 
@@ -897,8 +923,10 @@ def test_every_runtime_reason_code_has_a_recorded_truncation_decision():
     assert not undecided, "new runtime reason code(s) with no recorded decision in _TRUNCATION_DECISIONS: " + ", ".join(
         f"{code} ({emitted[code]})" for code in undecided
     )
-    stale = sorted(set(_TRUNCATION_DECISIONS) - set(emitted) - _RETIRED_TRUNCATION_CODES)
+    stale = sorted(set(_TRUNCATION_DECISIONS) - set(emitted) - _RETIRED_REASON_CODES)
     assert not stale, f"decision recorded for code(s) the runtime no longer emits: {stale}"
+    forgotten = sorted(_RETIRED_REASON_CODES - set(_TRUNCATION_DECISIONS))
+    assert not forgotten, f"retired code(s) whose old records lost their decision: {forgotten}"
 
     decided_truncating = {c for c, (yes, _why) in _TRUNCATION_DECISIONS.items() if yes}
     assert decided_truncating == set(RUNTIME_TRUNCATION_REASON_CODES)
@@ -914,6 +942,17 @@ def test_round_capped_and_deadline_stopped_runs_are_disclosed_as_truncated():
     for code in ("round_limit", "deadline_local", "finalization_grace", "children_unabsorbed"):
         disclosed = runtime_terminal_disclosure({"status": "failed", "reason_code": code})
         assert disclosed["truncated"] is True, code
+
+
+def test_context_admission_terminal_is_truncated_without_claiming_provider_failure():
+    from ouroboros.outcomes import derive_loop_outcome
+
+    usage = {"reason_code": "context_overflow", "_last_llm_error_kind": "context_overflow",
+             "execution_status": "infra_failed"}
+    outcome = derive_loop_outcome("", usage, {})
+    assert outcome["failure"]["kind"] == "runtime"
+    assert runtime_terminal_disclosure(outcome)["truncated"] is True
+    assert runtime_terminal_disclosure({"status": "completed", "reason_code": ""})["truncated"] is False
 
 
 def test_the_two_out_of_tree_mirrors_stay_pinned_to_the_derived_vocabulary():

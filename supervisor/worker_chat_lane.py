@@ -4,8 +4,13 @@ Each chat turn owns a fresh native agent and a registered execution. A turn
 is admitted (``_admit_chat_task``: the seed, the census registration, the
 actor, the start receipt) and then executed (``_execute_chat_task``); the
 owner's message runs both in one call (``handle_chat_direct``), while a
-self-initiated wake-up (``handle_wake_direct``) admits synchronously and
-answers with a typed receipt before the body runs on its own thread.
+self-initiated wake-up (``handle_wake_direct``) admits and commits its start
+synchronously and answers with a typed receipt before the body runs on its own
+thread: only then does it own a result row, a title or a start receipt. The
+thread running a turn carries its ``TurnExecution`` (identity, thread, start
+facts), begun at the turn's first statement, adopted by its registration and
+advanced at admission, at ``handle_task`` and by the turn's own context and
+dispatch frames.
 Turns are refused while the repo-writer gate is closed
 for a DESTRUCTIVE update window (apply/replace prologue, materialization,
 rollback), so a managed update never races a turn that could touch the checkout
@@ -26,11 +31,9 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 from supervisor.state import append_jsonl
+from ouroboros.consciousness_authority import wake_cause
 from ouroboros.observability import stamp_finalization_enqueue
 from ouroboros.utils import utc_now_iso
-
-
-
 
 log = logging.getLogger(__name__)
 
@@ -84,12 +87,15 @@ def conversation_admitted_during_update(gate_reason: str) -> bool:
     return reason == assisted_writer_gate_reason(tx)
 
 
-def wake_gate_open() -> bool:
-    """The owner-conversation gate for a consciousness wake-up, WITHOUT the owner's lock
-    notice: a refused wake is the alarm's typed ``repo_writer_gate_closed``, retried quietly,
-    never a "🔒" line in Main at every attempt."""
+def wake_gate_refusal() -> str:
+    """Why the owner-conversation gate refuses a consciousness wake-up ("" while open), WITHOUT
+    the owner's lock notice: a refused wake is the alarm's typed reason, retried quietly, never a
+    "🔒" line in Main at every attempt."""
+    from ouroboros.server_restart import agent_restart_pending
+    if agent_restart_pending():
+        return "restart_pending"
     reason = _pool().repo_writer_admission_closed()
-    return not reason or conversation_admitted_during_update(reason)
+    return "" if not reason or conversation_admitted_during_update(reason) else "repo_writer_gate_closed"
 
 
 def owner_conversation_admitted(chat_id: int, client_message_id: str = "") -> bool:
@@ -155,40 +161,31 @@ def handle_chat_direct(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
 ) -> None:
-    if not owner_conversation_admitted(chat_id, str((task_metadata or {}).get("client_message_id") or "")):
-        return
-    _handle_chat_direct_locked(
-        chat_id, text, image_data,
-        task_constraint=task_constraint, task_metadata=task_metadata,
-    )
+    # The turn's own thread begins its execution at its first statement, so a turn that
+    # stops before admission decides it still says where it stands (server_liveness);
+    # its registration adopts it. The thread's store transactions and chronicle opens are
+    # metered for the turn's receipt (its scope: this thread, this turn).
+    from ouroboros import store_timing
+    from supervisor.active_activity import get_direct_activity_registry
 
-
-def _handle_chat_direct_locked(
-    chat_id: int,
-    text: str,
-    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
-    task_constraint: Optional[dict] = None,
-    task_metadata: Optional[dict] = None,
-) -> None:
-    from supervisor.state import budget_remaining, load_state
-    failure_meta = _host_operation_failure(task_metadata)
+    client_msg_id = str((task_metadata or {}).get("client_message_id") or "")
+    registry = get_direct_activity_registry()
+    execution = registry.begin_execution(chat_id, client_message_id=client_msg_id)
     try:
-        remaining = budget_remaining(load_state(), strict=True)
-    except Exception:
-        _pool().send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.", **failure_meta, role="system", system_type="task_admission_notice")
-        return
-    if remaining <= 0:
-        try:
-            _pool().send_with_budget(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.", **failure_meta, role="system", system_type="task_admission_notice")
-        except Exception:
-            pass
-        return
-
-    _run_chat_task(
-        None, chat_id, text, image_data,
-        task_constraint=task_constraint, task_metadata=task_metadata,
-    )
+        with store_timing.metered() as meter:
+            execution.meter = meter
+            if not owner_conversation_admitted(chat_id, client_msg_id):
+                return
+            # The registered agent owns the strict money read, including its storage wait and controls.
+            _run_chat_task(
+                None, chat_id, text, image_data,
+                task_constraint=task_constraint, task_metadata=task_metadata,
+                **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
+            )
+    finally:
+        registry.end_execution(execution)
 
 
 def _host_operation_failure(metadata: Optional[dict]) -> dict:
@@ -233,6 +230,39 @@ def _broadcast_task_named(msg: dict) -> None:
         log.debug("task_named broadcast failed", exc_info=True)
 
 
+def name_wake_on_admission(drive_root: Any, task: dict) -> None:
+    """Publish the wake's cause before its first frame, using the namer's enrichment seam."""
+    from ouroboros.task_finalization import wake_cause_title
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
+
+    name = wake_cause_title(task.get("metadata") or {})
+    if not name:
+        return
+    try:
+        task_id = str(task["id"])
+        current = load_task_result(drive_root, task_id) or {}
+        write_task_result(drive_root, task_id, current.get("status") or STATUS_RUNNING, suggested_name=name)
+        _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": name})
+    except Exception:
+        log.debug("wake admission title failed for %s", task.get("id"), exc_info=True)
+
+
+def _announce_turn_start(admitted: Dict[str, Any]) -> None:
+    """Announce the authoritative start immediately (owner decision 2A): the client's `Sending...`
+    retires on this receipt (once the census read it triggers has answered), not on a socket echo;
+    the census row carries the same activity<->client_message_id link, and a turn the census never
+    lists is still settled by that read."""
+    try:
+        from supervisor.message_bus import get_bridge
+
+        get_bridge().send_chat_action(
+            int(admitted["chat_id"] or 0), "typing", activity_id=str(admitted["task"]["id"]),
+            client_message_id=admitted["client_msg_id"], phase="thinking", kind=admitted["kind"],
+        )
+    except Exception:
+        log.debug("Direct-turn start typing announce failed", exc_info=True)
+
+
 def _run_chat_task(
     agent: Any,
     chat_id: int,
@@ -240,6 +270,7 @@ def _run_chat_task(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
 ) -> None:
     """Build the direct-chat task and run it on the given agent, draining events.
 
@@ -248,6 +279,7 @@ def _run_chat_task(
     admitted = _admit_chat_task(
         agent, chat_id, text, image_data,
         task_constraint=task_constraint, task_metadata=task_metadata,
+        **({"realtime_turn": realtime_turn} if realtime_turn is not None else {}),
     )
     if admitted is not None:
         _execute_chat_task(admitted)
@@ -260,6 +292,8 @@ def _admit_chat_task(
     image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
     task_constraint: Optional[dict] = None,
     task_metadata: Optional[dict] = None,
+    realtime_turn: Any = None,
+    refused: Optional[list] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build and REGISTER one direct turn; ``None`` when it was refused.
 
@@ -269,7 +303,9 @@ def _admit_chat_task(
     contract and the authoritative start receipt. The returned bundle is a
     registered execution that ``_execute_chat_task`` MUST run (it owns the
     unregister); a refusal or an admission failure has already unregistered
-    itself and, for a failure, reported it to the chat.
+    itself and, for a failure, reported it to the chat. A wake (``refused``, its
+    typed silent reason, or a consciousness origin) commits its start with its
+    registration; its thread publishes its first result, title and start receipt.
     """
     client_msg_id = ""
     if task_metadata:
@@ -285,6 +321,7 @@ def _admit_chat_task(
         "chat_id": chat_id,
         "text": text,
         "_is_direct_chat": True,
+        "_fresh_identity": True,  # host-only, set at this mint; no task row or client metadata carries it
     }
     from supervisor.active_activity import get_direct_activity_registry
 
@@ -295,27 +332,50 @@ def _admit_chat_task(
     from ouroboros.consciousness_authority import is_consciousness_origin
     from supervisor.active_activity import reply_expected
 
-    quiet = is_consciousness_origin(task_metadata)  # a wake: the alarm reports the refusal, not the chat
-    with _pool()._repo_writer_gate_lock:
-        if not (wake_gate_open() if quiet else owner_conversation_admitted(chat_id, client_msg_id)):
+    quiet = refused is not None or is_consciousness_origin(task_metadata)  # a wake: the alarm reports the refusal
+    from ouroboros.server_restart import agent_restart_pending
+    from supervisor import queue
+
+    with queue._queue_lock, _pool()._repo_writer_gate_lock:
+        closed = wake_gate_refusal() if quiet else ""
+        if closed and refused is not None:
+            refused.append(closed)
+        if closed or not (quiet or owner_conversation_admitted(chat_id, client_msg_id)):
             return None
-        activity = registry.register(
+        if agent_restart_pending() and queue.RETURNS_NAMED:
+            _pool().send_with_budget(chat_id, "Restart intake is closed. This turn was not accepted; send it after Restart.",
+                **_host_operation_failure(task_metadata), role="system", system_type="task_not_started")
+            return None
+        deferred = agent_restart_pending()
+        activity = None if deferred else registry.register(
             task["id"], chat_id,
             client_message_id=client_msg_id,
             project_id=str((task_metadata or {}).get("project_id") or ""),
             kind=kind, origin_message_ref=(task_metadata or {}).get("origin_message_ref"),
             actor=agent, reply_expected=reply_expected({"metadata": task_metadata or {}}),
         )
+        if quiet:  # one Q transaction with the gate above: a Restart accepted from here on finds started work
+            activity.execution.advance("started")
     admitted: Dict[str, Any] = {
         "task": task, "agent": agent, "activity": activity, "registry": registry,
-        "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": kind,
-        "task_metadata": task_metadata,
+        "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": kind, "quiet": quiet,
+        "task_metadata": task_metadata, "realtime_turn": realtime_turn,
+        "execution": activity.execution if activity else None,
     }
     try:
-        if agent is None:
+        if agent is None and not deferred:
             agent = _pool()._get_chat_agent()
             activity.actor = agent
             admitted["agent"] = agent
+        if realtime_turn is not None:
+            from ouroboros.live_conversation import LiveConversationTurn
+
+            if not isinstance(realtime_turn, LiveConversationTurn):
+                raise ValueError("call requires a host-admitted request")
+            if agent is not None:
+                agent._realtime_turn = realtime_turn
+            task["model"] = realtime_turn.model
+            task["use_local_model"] = False
         from ouroboros.consciousness_authority import apply_consciousness_authority
         from ouroboros.contracts.task_contract import attach_task_contract
 
@@ -332,6 +392,11 @@ def _admit_chat_task(
                 task["text"] = late_answer_model_text(
                     _pool().DRIVE_ROOT, task_metadata.get("late_answer"), str(text or ""),
                 )
+            elif task_metadata.get("card_press") is not None:
+                # A press on a finished author's card: the same, with the card frame rebuilt from the stored press.
+                from ouroboros.gateway.card_decision import card_press_model_text
+
+                task["text"] = card_press_model_text(_pool().DRIVE_ROOT, task_metadata.get("card_press"), str(text or ""))
             # The ingress-captured origin identity rides on the TASK RECORD so a
             # later post-hoc "Turn into project" reads it from the persisted
             # result instead of re-deriving identity from content.
@@ -361,7 +426,7 @@ def _admit_chat_task(
         # attachment — images natively via attachment_images + non-images via the
         # read_file(root='artifact_store', path='attachments/...') manifest — exactly
         # like the CLI/API/GAIA path. The uploads are resolved from data/uploads/ in
-        # ws._chat_attachment_uploads and carried as task['metadata'] (like force_plan).
+        # ws._chat_attachment_uploads and carried as task['metadata'].
         # On a non-empty manifest we DROP the legacy inline image_base64 so the same
         # image is not double-injected; on absent/empty uploads (older clients, the
         # single-image base64 seam) the legacy inline path above stays untouched.
@@ -416,18 +481,24 @@ def _admit_chat_task(
                 task.pop("image_base64", None)
                 task.pop("image_mime", None)
         # A rejected initial UI task must leave no partial project assignment.
-        # Bind only after all declared attachments have passed admission.
+        # Bind only after all declared attachments have passed admission, under the
+        # room basis the turn then carries like queued work, so restore and Resume
+        # readmit it on that basis (#2547).
         pid = str(task.get("project_id") or "").strip()
         if pid:
             try:
+                from ouroboros.project_admission import direct_turn_basis
                 from ouroboros.projects_registry import bind_task_to_project
 
+                basis = direct_turn_basis(_pool().DRIVE_ROOT, pid)
                 bind_task_to_project(
                     _pool().DRIVE_ROOT, task["id"], pid, chat_id,
                     origin=_pool()._origin_from_mapping(
                         task_metadata or {}, absent="mid_task_no_origin",
                     ),
+                    admission_basis=basis,
                 )
+                task["_project_admission"] = basis
             except Exception as exc:
                 _pool()._report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
         if not task["text"]:
@@ -442,33 +513,53 @@ def _admit_chat_task(
         # A consciousness wake-up derives its level's disabled_tools and mode cap
         # here, before the contract reads them (consciousness_authority).
         apply_consciousness_authority(task)
+        from ouroboros.settings_integrity import record_subagents_admission
+        record_subagents_admission(task, _pool().DRIVE_ROOT)
         attach_task_contract(task)
         from ouroboros.tool_access_roots import freeze_tool_profile
         freeze_tool_profile(task)
+        if quiet:
+            return admitted  # its thread names it and announces it (``_execute_chat_task``)
 
-        # Announce the authoritative start immediately (owner decision 2A):
-        # the client's `Sending...` retires on this receipt (once the census
-        # read it triggers has answered), not on a socket echo; the census row
-        # carries the same activity<->client_message_id link, and a turn the
-        # census never lists is still settled by that read.
-        try:
-            from supervisor.message_bus import get_bridge
+        if deferred:
+            _defer_chat_for_restart(task, chat_id, task_metadata)
+            return None
 
-            get_bridge().send_chat_action(
-                int(chat_id or 0),
-                "typing",
-                activity_id=str(task["id"]),
-                client_message_id=client_msg_id,
-                phase="thinking",
-                kind=kind,
-            )
-        except Exception:
-            log.debug("Direct-turn start typing announce failed", exc_info=True)
+        _announce_turn_start(admitted)
     except Exception as e:
         _report_direct_chat_error(admitted, e)
         registry.unregister(task["id"])
         return None
     return admitted
+
+
+def _defer_chat_for_restart(task: dict, chat_id: int, metadata: Optional[dict]) -> None:
+    """Use the ordinary durable queue, carrying the same input and attachment sources."""
+    from supervisor import queue
+
+    if task.get("image_base64"):
+        import base64
+
+        from ouroboros.artifacts import store_actor_source_bytes
+
+        task["image_source_ref"] = store_actor_source_bytes(_pool().DRIVE_ROOT, str(task["id"]),
+            category="context_checkpoints", source_id="inline-image", extension="image",
+            data=base64.b64decode(task.pop("image_base64"), validate=True))
+    task["drive_root"] = str(_pool().DRIVE_ROOT)
+    task["root_task_id"] = str(task["id"])
+    admitted = queue.enqueue_with_admission_receipt(task, durable=True)
+    blocked = (admitted or {}).get("_admission_blocked") or ""
+    if blocked:
+        _pool().send_with_budget(chat_id, f"This turn was not accepted ({blocked}). Send it after Restart.",
+            **_host_operation_failure(metadata), role="system", system_type="task_not_started")
+        return
+    from ouroboros.task_finalization import host_operation_reply_kwargs
+
+    meta = metadata or {}
+    ack = host_operation_reply_kwargs(meta.get("origin_message_ref") if meta.get("_host_operation") else None,
+                                     client_message_id=str(meta.get("client_message_id") or ""))
+    _pool().send_with_budget(chat_id, "Saved for execution after Restart.",
+                            **ack, role="system", system_type="restart_notice")
 
 
 def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
@@ -479,15 +570,31 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
     registry entry is released here, whichever way the turn ends.
     """
     task, agent, chat_id = admitted["task"], admitted["agent"], admitted["chat_id"]
-    registry = admitted["registry"]
+    registry, execution = admitted["registry"], admitted.get("execution")
     ok = False
     try:
+        from ouroboros.server_restart import agent_restart_holds, agent_restart_pending
+        from supervisor import queue
+
+        with queue._queue_lock:
+            committed = execution is not None and execution.phase not in {"accepted", "admitted"}  # a wake's admission
+            deferred = not committed and (
+                (agent_restart_pending() and bool(queue.RETURNS_NAMED)) or agent_restart_holds(task))
+            if not deferred and execution is not None:
+                execution.bind_thread()
+                execution.advance("started")  # the direct execution commits under the same lock as intent
+        if deferred:
+            _defer_chat_for_restart(task, chat_id, admitted.get("task_metadata"))
+            return False
+        if admitted.get("quiet"):  # the wake's first durable row and frames follow its actual admission
+            name_wake_on_admission(_pool().DRIVE_ROOT, task)
+            _announce_turn_start(admitted)
         # The turn's live emits (loop_llm_call and friends publish
         # straight to the agent's event queue DURING handle_task) and its
         # returned events can be consumed after this registry entry is gone:
         # stamp the authoritative chat identity before handing them off.
         on_first_work = None
-        if not task.get("project_id"):
+        if not task.get("project_id") and not wake_cause(task.get("metadata")):
             from ouroboros.project_naming import spawn_turn_namer
 
             on_first_work = lambda: spawn_turn_namer(  # noqa: E731
@@ -497,6 +604,7 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
             _pool().get_event_q(), task["id"], chat_id,
             initiator=str((admitted.get("task_metadata") or {}).get("initiator") or ""),
             on_first_work=on_first_work,
+            on_frame=execution.observe if execution is not None else None,
         )
         prev_queue = getattr(agent, "_event_queue", None)
         agent._event_queue = turn_queue
@@ -525,18 +633,24 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
             checkpoint = ((event.get("resource_limit") or {}).get("checkpoint")
                           if isinstance(event, dict) and isinstance(event.get("resource_limit"), dict) else None)
             if not (isinstance(event, dict) and str(event.get("type") or "") == "budget_pause"
-                    and event.get("_is_direct_chat") and isinstance(checkpoint, dict)):
+                    and event.get("_is_direct_chat") and (isinstance(checkpoint, dict)
+                    or (event.get("resource_limit") or {}).get("before_task_start"))):
                 remaining.append(event)
                 continue
             from supervisor.direct_pause import park_direct_pause
-            if not park_direct_pause(task, event):
-                remaining.append(event)
+            try:
+                if not park_direct_pause(task, event):
+                    remaining.append(event)
+            finally:
+                if (event.get("resource_limit") or {}).get("before_task_start"):
+                    agent._release_turn()
         for e in remaining:
             _pool().get_event_q().put(stamp_finalization_enqueue(turn_queue.stamp(e)))
         ok = True
     except Exception as e:
         from supervisor.direct_pause import recover_direct_pause
-        ok = recover_direct_pause(task)
+        if _close_failed_call(admitted, e) is None:
+            ok = recover_direct_pause(task, e)
         if not ok:
             _report_direct_chat_error(admitted, e)
     finally:
@@ -544,17 +658,86 @@ def _execute_chat_task(admitted: Dict[str, Any]) -> bool:
     return ok
 
 
+def _close_failed_call(admitted: Dict[str, Any], e: BaseException):
+    """Notify the admitted call independently of result-store recovery."""
+    if admitted.get("realtime_turn") is not None:
+        from ouroboros.call_peers import close_hub
+        from ouroboros.context_fit import MinimumViewUnfit
+        from ouroboros.contracts.realtime import RealtimeSetupError
+        from ouroboros.live_conversation import LiveConversationTurn
+        from ouroboros.realtime_setup import CONTEXT_CAPACITY_DETAIL
+        from ouroboros.store import StoreBusy
+
+        turn = admitted["realtime_turn"]
+        if isinstance(turn, LiveConversationTurn):
+            # The live run normally closes its hub. Preparation can fail before it owns that duty.
+            # Close before logging too: a busy store must not strand the admitted call.
+            if isinstance(e, MinimumViewUnfit):
+                with turn._lock:
+                    already_closed, turn._closed = turn._closed, True
+                close_hub(turn.spec.call_id, "context_capacity", detail=CONTEXT_CAPACITY_DETAIL)
+                if not already_closed:
+                    turn.publish({"type": "conversation_finished", "chat_id": turn.spec.chat_id,
+                                  "call_id": turn.spec.call_id, "task_id": admitted["task"]["id"],
+                                  "reason": "context_capacity"})
+                return RealtimeSetupError("context_capacity", CONTEXT_CAPACITY_DETAIL)
+            busy = isinstance(e, StoreBusy) or isinstance(e.__cause__, StoreBusy)
+            close_hub(turn.spec.call_id, "store_busy" if busy else "call_start_failed",
+                      detail=("The local store is busy. Please try the call again." if busy else
+                              "The call could not start. Please try again."))
+
+
+def _report_call_context_refusal(admitted, unfit, refusal) -> None:
+    """Finish an admitted call whose ordinary context build failed before the host existed."""
+    from dataclasses import asdict
+    from ouroboros.agent_task_pipeline import emit_task_results
+
+    task, agent, turn = admitted["task"], admitted["agent"], admitted["realtime_turn"]
+    measurement = {key: getattr(unfit, key) for key in (
+        "fixed_input_tokens", "memory_view_tokens", "estimated_input_tokens", "raw_input_tokens",
+        "measurement_density", "response_reserve_tokens", "work_room_tokens", "work_room_deficit_tokens")}
+    measurement.update(capacity_total_tokens=unfit.window_tokens, capacity_deficit_tokens=unfit.deficit_tokens)
+    event = {"type": "call.fit_refused", "ts": utc_now_iso(), "task_id": task["id"],
+             "call_id": turn.spec.call_id, "reason": refusal.code, "stage": "task_preparation",
+             "fit": {"measurement": measurement}, "physical": unfit.physical,
+             "deficit_tokens": unfit.deficit_tokens, "route_facts": asdict(turn.catalog_model.facts),
+             "units": turn.catalog_model.facts.basis}
+    append_jsonl(agent.env.drive_root / "logs" / "events.jsonl", event)
+    events = []
+    event_queue = _TurnEventQueue(_pool().get_event_q(), task["id"], admitted["chat_id"],
+                                initiator=str((admitted.get("task_metadata") or {}).get("initiator") or ""))
+    emit_task_results(
+        agent.env, agent.memory, agent.llm, events, task, str(refusal),
+        {"terminal_origin": "host_notice", "execution_status": "infra_failed", "reason_code": refusal.code},
+        {"reasoning_notes": [], "tool_calls": [], "fit_refusal": event},
+        getattr(agent, "_task_started_ts", time.time()), agent.env.drive_root / "logs",
+        ctx=getattr(agent.tools, "_ctx", None), event_queue=event_queue)
+    for event in events:
+        _pool().get_event_q().put(stamp_finalization_enqueue(event_queue.stamp(event)))
+    if admitted.get("activity") is not None:
+        admitted["activity"].reply_handed_off = True
+
+
 def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> None:
     """Record a direct-turn failure and conclude the turn in the chat."""
     import traceback
-    task, chat_id, kind = admitted["task"], admitted["chat_id"], admitted["kind"]
+    task, chat_id = admitted["task"], admitted["chat_id"]
     client_msg_id, task_metadata = admitted["client_msg_id"], admitted.get("task_metadata")
-    err_msg = f"⚠️ Error: {type(e).__name__}: {e}"
+    refusal = _close_failed_call(admitted, e)
+    if refusal is not None:
+        _report_call_context_refusal(admitted, e, refusal)
+        return
+    stopped = (getattr(e, "before_task_start", False)
+               and getattr(e, "control_reason", "") in {"cancelled", "finalize_requested"})
+    exhausted = getattr(e, "before_task_start", False) and getattr(e, "control_reason", "") == "budget_exhausted"
+    err_msg = ("⏹ The owner stopped this chat turn before it started; no work was done." if stopped else
+               "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings." if exhausted else
+               f"⚠️ Error: {type(e).__name__}: {e}")
     append_jsonl(
         _pool().DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
             "ts": utc_now_iso(),
-            "type": "direct_chat_error",
+            "type": "direct_chat_stopped" if stopped else "direct_chat_error",
             "task_id": str(task.get("id") or ""),
             "chat_id": int(chat_id or 0),
             "error": repr(e),
@@ -572,22 +755,10 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
         # and the keyed final right after concludes the turn's census row.
         failed_task_id = str(task.get("id") or "") if isinstance(task, dict) else ""
         if failed_task_id and client_msg_id:
-            try:
-                from supervisor.message_bus import get_bridge
-
-                get_bridge().send_chat_action(
-                    int(chat_id or 0),
-                    "typing",
-                    activity_id=failed_task_id,
-                    client_message_id=client_msg_id,
-                    phase="thinking",
-                    kind=kind,
-                )
-            except Exception:
-                log.debug("Failed-turn typing announce failed", exc_info=True)
+            _announce_turn_start(admitted)
         # The keyed final concludes its own turn and linked Sending; it keeps only the host-operation source.
         correlation = _host_operation_failure(task_metadata).get("progress_meta", {})
-        progress_meta = {"task_terminal_status": "failed"}
+        progress_meta = {"task_terminal_status": "cancelled" if stopped else "failed"}
         if "origin_message_ref" in correlation:
             progress_meta["origin_message_ref"] = correlation["origin_message_ref"]
         initiator = str((task_metadata or {}).get("initiator") or "")
@@ -598,7 +769,7 @@ def _report_direct_chat_error(admitted: Dict[str, Any], e: BaseException) -> Non
             err_msg,
             task_id=failed_task_id,
             progress_meta=progress_meta,
-            role="system", system_type="task_error")
+            role="system", system_type="task_not_started" if stopped or exhausted else "task_error")
     except Exception:
         log.debug("Suppressed exception", exc_info=True)
 
@@ -617,19 +788,21 @@ def handle_wake_direct(
     wake gets ``{"admitted": False, "task_id": "", "reason": <typed>}``
     synchronously instead of a chat notice. An admitted wake is REGISTERED
     before this returns (the census lists it, Stop reaches it, the liveness
-    read sees it) and its body runs on a daemon thread; the receipt carries
-    the registered ``task_id``. ``on_finished(task_id, ok)`` fires once the
+    read sees it) with its start committed, so a Restart accepted later lets it
+    finish, and its body runs on a daemon thread; the receipt carries the
+    registered ``task_id``. ``on_finished(task_id, ok)`` fires once the
     turn has ended, ``ok=False`` when the runner failed, so the alarm clock
     can back off after a failure too. The wake's ``task_metadata`` (its
     origin label, ledger category, reason, autonomy level, model role) rides
     verbatim on ``task["metadata"]``; nothing here pauses or resumes the
     legacy background loop. ``bind_input(task)`` runs once the wake is
-    registered (its id exists) and before its thread starts — the alarm binds
+    committed (its id exists) and before its thread starts — the alarm binds
     its immutable observation source there; a binder failure leaves the
     complete text as the wake's only input.
     """
-    if not wake_gate_open():
-        return {"admitted": False, "task_id": "", "reason": "repo_writer_gate_closed"}
+    closed = wake_gate_refusal()
+    if closed:
+        return {"admitted": False, "task_id": "", "reason": closed}
     from supervisor.state import budget_remaining, control_is, load_state
     from ouroboros.consciousness import panic_blocks_wake
 
@@ -642,15 +815,14 @@ def handle_wake_direct(
         return {"admitted": False, "task_id": "", "reason": "cost_accounting_unavailable"}
     if remaining <= 0:
         return {"admitted": False, "task_id": "", "reason": "budget_exhausted"}
+    refused: list = []
     admitted = _admit_chat_task(
         None, int(chat_id), str(text or ""), None,
-        task_constraint=None, task_metadata=dict(task_metadata or {}),
+        task_constraint=None, task_metadata=dict(task_metadata or {}), refused=refused,
     )
     if admitted is None:
-        # The gate can close between the check above and the registration — a silent
-        # refusal, nothing in the chat; every other None the lane already reported.
-        reason = "repo_writer_gate_closed" if not wake_gate_open() else "admission_failed"
-        return {"admitted": False, "task_id": "", "reason": reason}
+        # A gate closed since the check above: silent and typed; every other None the lane reported.
+        return {"admitted": False, "task_id": "", "reason": refused[0] if refused else "admission_failed"}
     task_id = str(admitted["task"]["id"])
     if bind_input is not None:
         try:
@@ -682,59 +854,40 @@ def handle_wake_direct(
 
 
 def auto_resume_after_restart() -> None:
-    """Auto-resume after a recent restart when scratchpad still has work.
-
-    The owner-Restart marker is consumed only AFTER the queue holding its
-    per-row Restart holds (``restart_retention``) is durably persisted: a
-    marker gone while the holds live only in memory would let the next boot
-    read the older queue as dispatchable work. A failed persist keeps the
-    marker (fail closed, no auto-wake) for the next boot to retry.
-    """
+    """Consume boot doors only after their work stops and controls are durable."""
     try:
-        owner_restart_flag = _pool().DRIVE_ROOT / "state" / "owner_restart_no_resume.flag"
-        if owner_restart_flag.exists():
-            from supervisor.queue import persist_queue_snapshot
-
+        from ouroboros.delegate_recovery import import_legacy_restart, pending_owner_restart, consume_owner_restart
+        from ouroboros.installation_stop import (PANIC_RECEIPT, panic_input, panic_received,
+                                                remove_received_panic)
+        from supervisor.queue import persist_queue_snapshot
+        root = _pool().DRIVE_ROOT
+        import_legacy_restart(root)
+        restart = pending_owner_restart(root)
+        if restart:
             if persist_queue_snapshot(reason="owner_restart_holds") is not True:
-                log.error("Owner restart holds are not durable yet; the restart marker is kept "
-                          "and nothing auto-resumes.")
+                log.error("Owner restart holds are not durable; its door is kept.")
                 return
             from supervisor.queue_schedules import schedule_transaction
             from supervisor.followup_policy import record_restart
-            with schedule_transaction(_pool().DRIVE_ROOT):
-                record_restart(_pool().DRIVE_ROOT)
-                owner_restart_flag.unlink(missing_ok=True)
-            panic_compat_flag = _pool().DRIVE_ROOT / "state" / "panic_stop.flag"
-            try:
-                if panic_compat_flag.read_text(encoding="utf-8").strip() == "owner_restart_no_resume":
-                    panic_compat_flag.unlink(missing_ok=True)
-            except FileNotFoundError:
-                pass
-            except Exception:
-                log.debug("Failed to consume owner restart compatibility flag", exc_info=True)
-            log.info("Owner restart flag detected — skipping auto-resume.")
-            if not (_pool().DRIVE_ROOT / "state" / "panic_stop.flag").exists():
-                return  # a kept Panic flag still owes its durable controls below
-
-        # Panic/owner-restart flags suppress auto-resume and are consumed — a Panic's
-        # only after the queue carrying its sleep holds is durable, like a Restart's.
-        panic_flag = _pool().DRIVE_ROOT / "state" / "panic_stop.flag"
-        if panic_flag.exists():
-            from supervisor.queue import persist_queue_snapshot
-
+            with schedule_transaction(root):
+                record_restart(root)
+                consume_owner_restart(root, restart)
+        identity = panic_input(root)
+        if identity:
+            if panic_received(root, identity):
+                remove_received_panic(root, identity)
+                return
             if persist_queue_snapshot(reason="panic_holds") is not True:
-                log.error("Panic holds are not durable yet; the panic marker is kept.")
+                log.error("Panic holds are not durable; its input is kept.")
                 return
             from ouroboros.server_control import PANIC_CONTROL_KEYS, _panic_controls
-            from supervisor.state import StateUnavailable, update_state
+            from supervisor.state import update_state
 
-            try:
-                update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS)
-            except StateUnavailable as exc:
-                log.warning("Panic flag kept: its disabled controls are not durable yet (%s)", exc)
-                return
-            panic_flag.unlink(missing_ok=True)
-            log.info("Panic flag detected — skipping auto-resume.")
+            update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS)
+            update_state(lambda state: state.update({PANIC_RECEIPT: identity}))
+            remove_received_panic(root, identity)
+            return
+        if restart:
             return
 
         from supervisor.state import control_value
@@ -749,22 +902,6 @@ def auto_resume_after_restart() -> None:
         if not restart_verify_path.exists():
             return
 
-        scratchpad_path = _pool().DRIVE_ROOT / "memory" / "scratchpad.md"
-        if not scratchpad_path.exists():
-            return
-
-        scratchpad = scratchpad_path.read_text(encoding="utf-8")
-        stripped = scratchpad.strip()
-        if not stripped or stripped == "# Scratchpad" or "(empty" in stripped.lower():
-            content_lines = [
-                ln.strip() for ln in stripped.splitlines()
-                if ln.strip() and not ln.strip().startswith("#") and ln.strip() != "- (empty)"
-            ]
-            content_lines = [ln for ln in content_lines if not ln.startswith("UpdatedAt:")]
-            if not content_lines:
-                return
-
-        time.sleep(2)  # Let everything initialize
         if not _pool().chat_turn_liveness():
             import threading
             threading.Thread(

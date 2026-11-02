@@ -387,12 +387,6 @@ def test_internal_retry_gets_distinct_attempt_but_stable_context_identity(data_r
             raise _Rejected("temperature unsupported")
         return _Response()
 
-    def retry_without_temperature(candidate, model, exc):
-        retry = copy.deepcopy(candidate)
-        retry.pop("temperature", None)
-        return retry
-
-    monkeypatch.setattr(client, "_retry_without_optional_sampling", retry_without_temperature)
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", lambda *args: None)
     payload = {
         "model": "gpt-5.2",

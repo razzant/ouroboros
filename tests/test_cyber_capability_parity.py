@@ -12,6 +12,7 @@ def test_protected_atomic_rewrite_and_unrelated_cleanup_remain_usable(tmp_path, 
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     reg = _registry(tmp_path)
     (tmp_path / "BIBLE.md").write_text("old")
     (tmp_path / "BIBLE.tmp").write_text("reformulated")
@@ -44,6 +45,7 @@ def test_cyber_acting_schema_and_scheduling_share_execution_authority(tmp_path, 
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     reg, ctx, worktree = _acting_registry(tmp_path)
     assert subagent_profile_satisfies("acting_subagent", ["review"]) == (True, [])
     assert not subagent_profile_satisfies("local_readonly_subagent", ["review"])[0]
@@ -66,6 +68,7 @@ def test_cyber_external_root_keeps_credential_shell_access(tmp_path, monkeypatch
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     repo, data, project = (tmp_path / name for name in ("repo", "data", "project"))
     for path in (repo, data, project):
         path.mkdir()
@@ -84,6 +87,7 @@ def test_cyber_self_configuration_requests_have_no_internal_veto(tmp_path, monke
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     reg = _registry(tmp_path)
     calls = []
 

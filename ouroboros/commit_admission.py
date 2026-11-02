@@ -120,13 +120,13 @@ def release_metadata_diagnostics(
 
     Two explicit forms, told apart by the diff itself (``report["form"]``): a
     ``numbered`` release touches VERSION and must sync every carrier in the same
-    diff; a ``neutral`` contribution (code with VERSION untouched) must leave every
+    diff; a ``neutral`` contribution (VERSION untouched) must leave every
     version carrier span byte-identical to HEAD, and takes no tag. P9 admits the
     neutral form for a contribution to the official line (the prepared index lane)
-    and for a commit prepared in a body candidate (``neutral_allowed``, passed by
-    the caller that knows the bound candidate); a serving-checkout commit remains a
-    numbered release. A partial carrier change is neither form and is reported as
-    such. Doc-only changes need no release metadata (``doc_only``).
+    and for a body candidate or authorized managed update (``neutral_allowed``,
+    passed by the caller that knows that authority); an ordinary serving commit remains a
+    numbered release, including documentation-only changes. A partial carrier
+    change is neither form and is reported as such.
     """
     from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, release_metadata_findings
 
@@ -136,34 +136,38 @@ def release_metadata_diagnostics(
         report.update(status="unavailable", unavailable=["source must be worktree or index"])
         return report
     touched = set(paths or []) if source == "worktree" or read_text else set()
+    removed = set(deleted or ())
     try:
         if source == "worktree":
             touched.update(changed_worktree_paths(repo_dir, paths=paths, strict=True))
+            if "VERSION" in touched and not (pathlib.Path(repo_dir) / "VERSION").exists():
+                removed.add("VERSION")
         elif read_text is None:
             result = subprocess.run(
-                ["git", "--no-optional-locks", "diff", "--cached", "--name-only", "--diff-filter=d", "-z"],
+                ["git", "--no-optional-locks", "diff", "--cached", "--name-status", "--no-renames", "-z"],
                 cwd=str(repo_dir),
                 capture_output=True, timeout=10, check=True,
             )
-            touched.update(filter(None, result.stdout.decode("utf-8").split("\0")))
+            fields = result.stdout.decode("utf-8").split("\0")
+            for status, path in zip(fields[::2], fields[1::2]):
+                touched.add(path)
+                if status == "D":
+                    removed.add(path)
+        touched |= removed
     except Exception as exc:
         unavailable.append(f"Changed {source} paths could not be read ({type(exc).__name__}).")
 
-    from ouroboros.tools.git_review_cycle import _diff_is_doc_only
-
-    version_in_scope = "VERSION" in touched
-    removed: set = set()
+    version_in_scope = "VERSION" in touched - removed
     neutral_ok = neutral_allowed if neutral_allowed is not None else source == "index"
-    if not version_in_scope and (neutral_ok or not touched or _diff_is_doc_only(sorted(touched))):
-        # Discovery above lists surviving paths; a carrier the diff deletes or renames
-        # away is still a carrier change. Other deletions keep their release semantics.
-        # Surviving code already refuses the neutral form where it is not allowed.
-        removed = (set(deleted or ()) & CARRIER_SPAN_PATHS if read_text else
-                   _removed_carriers(repo_dir, source, paths if source == "worktree" else None, unavailable))
+    if source == "worktree" and not version_in_scope and (neutral_ok or not touched):
+        # Worktree status may list only a rename destination; a carrier renamed
+        # away is still a carrier change. Index/read_text discovery includes deletions.
+        # Surviving changes already refuse the neutral form where it is not allowed.
+        removed |= _removed_carriers(repo_dir, source, paths, unavailable)
         touched |= removed
     if version_in_scope:
         report["form"] = "numbered"
-        if source == "index" and version_in_scope and "README.md" not in touched:
+        if source == "index" and version_in_scope and "README.md" not in touched - removed:
             findings.append("Missing from staged: README.md (badge + changelog). Stage all related files together.")
         texts = {}
         for path in sorted(CARRIER_SPAN_PATHS):
@@ -176,7 +180,7 @@ def release_metadata_diagnostics(
             except Exception as exc:
                 unavailable.append(f"{source}:{path} could not be read ({type(exc).__name__}).")
         findings.extend(release_metadata_findings(texts))
-    elif touched and not _diff_is_doc_only(sorted(touched)):
+    elif touched:
         report["form"] = "neutral"
         if neutral_ok:
             findings.extend(_neutral_carrier_findings(repo_dir, touched & set(CARRIER_SPAN_PATHS), source,
@@ -190,12 +194,8 @@ def release_metadata_diagnostics(
         if not findings:
             report["status"] = "not_applicable"
     else:
-        report["form"] = "doc_only" if touched else "none"
+        report["form"] = "none"
         report["status"] = "not_applicable"
-        # Documentation may carry release identity too. The prose exemption does
-        # not permit changing, introducing or removing a declared carrier span.
-        findings.extend(_neutral_carrier_findings(repo_dir, touched & set(CARRIER_SPAN_PATHS), source,
-                                                  read_text, unavailable, removed))
     if unavailable:
         report["status"] = "unavailable"
     elif findings:

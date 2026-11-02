@@ -80,6 +80,8 @@ function fixture(history = []) {
         checks: (id = TASK) => rows(id).filter((row) => /Check did not pass/.test(row.innerHTML)),
         titles: (id = TASK) => rows(id).map((row) => (row.innerHTML.match(/chat-live-line-title[^>]*>([^<]*)</) || [])[1]),
         meta: (id = TASK) => card(id)?.querySelector('[data-live-meta]')?.innerHTML || '',
+        // The card's labelled facts (the tool-call count among them) live in its details list.
+        facts: (id = TASK) => card(id)?.querySelector('[data-live-facts]')?.innerHTML || '',
         phase: (id = TASK) => card(id)?.querySelector('[data-live-phase]')?.textContent,
         open: (id = TASK) => {
             if (card(id) && card(id).dataset.expanded !== '1') card(id).querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });

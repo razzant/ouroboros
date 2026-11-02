@@ -2,7 +2,8 @@
  * One work, one card (FINAL_DESIGN D11; owner decision 16.10 Q1 = A): a Main card whose work lives in a
  * Project room is that work's PORTAL. It stays the same `.chat-live-card` node at the request's
  * position and only changes form: status chip + quiet fact, title, one latest narration line, the
- * meta line, the controls row ([Resume] [Stop…]; Reply is the row menu's), and the Project reference as its footer.
+ * meta line, then one action row: the Project reference first, the controls at its end ([Resume] [Stop…]; Reply is
+ * the row menu's) (owner 26.10, B).
  * The timeline, reviews and children live in the room's full card; nothing here appends rows, so Main
  * stays calm.
  *
@@ -40,19 +41,20 @@ export function bindWorkPortal(record, project = {}) {
     let changed = false;
     if (root.dataset.portal !== '1') { root.dataset.portal = '1'; changed = true; }
     if (root.dataset.projectId !== projectId) { root.dataset.projectId = projectId; changed = true; }
-    // In this form the card discloses nothing (the room holds what it would open): its "Show details"
+    // In this form the card discloses nothing (the room holds what it would open): its "Details"
     // button is hidden (style.css) and the summary stays reading content. The reference below is the one door.
-    // An unnamed Project reads `Project` (the reference's own rule), never its id.
+    // An unnamed Project reads `Project` (the reference's own rule), never its id; beside a title that already
+    // says the Project's name it reads `Project` too, its accessible name whole.
     const target = { id: projectId, name: key(project?.name) };
-    if (!record.portalRefEl || !record.portalRefEl.isConnected) {
-        record.portalRefEl = projectReference(target, { layout: 'footer', taskId: record.groupId });
-        root.appendChild(record.portalRefEl);
+    if (!record.portalRefEl) {
+        record.portalRefEl = projectReference(target, { layout: 'footer', taskId: record.groupId, beside: record.titleEl });
         changed = true;
     } else {
         nameProjectReference(record.portalRefEl, target);
     }
-    // The footer closes the card: anything mounted later (a children container) goes above it.
-    if (root.lastElementChild !== record.portalRefEl) { root.appendChild(record.portalRefEl); changed = true; }
+    // The reference leads the card's own action row, under the meta line; the controls stay at the row's end.
+    const row = record.footEndEl;
+    if (row && row.firstElementChild !== record.portalRefEl) { row.prepend(record.portalRefEl); changed = true; }
     return changed;
 }
 
@@ -83,12 +85,14 @@ export function reconcilePortalNotes(feed, scope = feed) {
     const notes = scope?.matches?.('.msg-routing-annotation') ? [scope]
         : [...(scope?.querySelectorAll?.('.msg-routing-annotation') || [])];
     let changed = false;
+    let portals = null;  // the works the feed shows as portals, read once when a note first asks
     for (const note of notes) {
         const [projectId, , taskId] = String(note.dataset.destinationKey || '').split('|');
         const represented = Boolean(projectId && taskId && !PASSED_ON.includes(note.dataset.annotationAction || '')
             && ['scheduled', 'delivered'].includes(note.dataset.annotationStatus)
-            && [...feed.querySelectorAll('.chat-live-card[data-portal="1"]')]
-                .some((card) => card.dataset.taskId === taskId && card.dataset.projectId === projectId));
+            && (portals ??= new Set([...feed.querySelectorAll('.chat-live-card[data-portal="1"]')]
+                .map((card) => JSON.stringify([card.dataset.taskId, card.dataset.projectId]))))
+                .has(JSON.stringify([taskId, projectId])));
         if (note.hidden !== represented) { note.hidden = represented; changed = true; }
         const actions = note.parentElement?.querySelector('.msg-routing-actions');
         if (actions && actions.hidden !== represented) { actions.hidden = represented; changed = true; }
@@ -135,8 +139,15 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         return renderCollapsedActivity(record, '');
     }
 
+    // A portal's title is renamed by its naming owner (task_episodes.js `renamed`), and any other writer is met at the
+    // next census: the Project reference names itself again, `Project` beside the same words.
+    function relabel(record) {
+        if (isPortal(record) && record.portalRefEl) nameProjectReference(record.portalRefEl);
+    }
+
     function present(record) {
         if (!isPortal(record) || record.finished) return false;
+        relabel(record);
         const row = census.get(record.groupId);
         if (!row) {
             const had = Boolean(record.portalActivity);
@@ -431,7 +442,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         if (!actions) return false;
         const btn = document.createElement('button');
         btn.type = 'button';
-        btn.className = 'btn btn-sm btn-default';
+        btn.className = 'btn btn-sm btn-default ui-hit-area';
         btn.dataset.turnIntoProject = '1';
         btn.textContent = liveCardLabel.turnIntoProject();
         btn.addEventListener('click', (event) => {
@@ -458,5 +469,5 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         return added;
     }
 
-    return { activity, bind, bindRow, follow, present, row, settle, sync, syncConvert, turnIntoProject };
+    return { activity, bind, bindRow, follow, present, relabel, row, settle, sync, syncConvert, turnIntoProject };
 }

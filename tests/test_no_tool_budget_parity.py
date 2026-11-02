@@ -132,7 +132,9 @@ def test_only_the_unfinished_no_tool_branch_arms_the_budget_tail():
                 and any(isinstance(op, ast.Is) for op in test.ops))
 
     def exhausted(test: ast.AST) -> bool:
-        return "llm_output_exhausted" in ast.unparse(test)
+        return any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                   and isinstance(node.func.value, ast.Name) and node.func.value.id == "output_recovery"
+                   and node.func.attr == "next_step" for node in ast.walk(test))
 
     for arming in armings:
         guards = [node for node in ast.walk(tree) if isinstance(node, ast.If) and arming in ast.walk(node)

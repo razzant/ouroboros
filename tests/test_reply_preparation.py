@@ -419,12 +419,12 @@ def test_a_held_delegated_run_prepares_while_observed_running_and_not_while_it_w
         assert _chats(world) == [6]
         path = world.root / "state" / "delegate_supervision" / "nanny.json"
         record = json.loads(path.read_text())
-        record["observation"]["at_unix"] -= _OBSERVATION_CURRENT_SEC + 1
+        record["runs"]["run-1"]["observation"]["at_unix"] -= _OBSERVATION_CURRENT_SEC + 1
         path.write_text(json.dumps(record))
         assert reply_preparation(world.root)["complete"] is False and _chats(world) == [], \
             "an observation older than a few ticks says nothing current"
-        record["observation"]["at_unix"] = time.time()
-        record["observation"]["attempt"] = "2"
+        record["runs"]["run-1"]["observation"]["at_unix"] = time.time()
+        record["runs"]["run-1"]["observation"]["attempt"] = "2"
         path.write_text(json.dumps(record))
         assert _chats(world) == [], "another attempt's observation is not this attempt's"
     finally:

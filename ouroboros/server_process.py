@@ -10,6 +10,7 @@ them without importing ``server`` back.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import pathlib
@@ -17,16 +18,17 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 from contextlib import nullcontext
 from typing import Callable
 
 import uvicorn
 
+from ouroboros.launch_roots import data_dir as _configured_data_dir
 from ouroboros.utils import read_json_dict, update_json_locked
 
 
-DATA_DIR = pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR",
-    pathlib.Path.home() / "Ouroboros" / "data"))
+DATA_DIR = _configured_data_dir()  # config's root; a direct entry has already settled and exported it (launch_roots)
 
 
 log = logging.getLogger("server")
@@ -352,9 +354,38 @@ def runtime_service_identity(drive_root: pathlib.Path, port: int,
     return _custodied_local_model(drive_root, port, host_matches)
 
 
+def serves_data_root(url: str, data_dir: pathlib.Path) -> bool:
+    """Whether DATA_DIR's own main server holds URL's port: its live service binding, or the
+    launcher's server record, proves it. A CLI asks this before it uses an endpoint nobody named,
+    since a shared or fallback port can belong to another installation."""
+    parsed = urllib.parse.urlparse(url)
+
+    def reaches(bind_host: str) -> bool:
+        try:
+            address = ipaddress.ip_address(bind_host)
+            target = ipaddress.ip_address(parsed.hostname or "127.0.0.1")
+        except ValueError:
+            return False
+        # A different loopback address can host a different installation on the same port.
+        # Wildcard includes the legacy any-local-interface sentinel of runtime_service_identity.
+        return address == target or (address.is_unspecified and target.is_loopback)
+
+    try:  # a URL without a port names the main server's default, 8765
+        return runtime_service_identity(data_dir, parsed.port or 8765, reaches) == "main"
+    except (OSError, ValueError):
+        return False
+
+
 def server_stop_source() -> str:
     """Diagnostic stop ingress; no effect on custody or restart policy."""
     return _stop_source
+
+
+def server_stop_cause(restart_requested: bool | None = None) -> str:
+    """The cause a shutdown records: ``restart_requested``, else the stop ingress; diagnostic only.
+    Doors read the live restart flag; the late row passes the one its custody write used."""
+    restart = _restart_requested.is_set() if restart_requested is None else restart_requested
+    return "restart_requested" if restart else _stop_source
 
 
 class _SignalStopServer(uvicorn.Server):
@@ -376,6 +407,10 @@ class _SignalStopServer(uvicorn.Server):
         _exit_signalled.set()
         _supervisor_stop.set()
         self.should_exit = True
+
+    async def on_tick(self, counter: int) -> bool:
+        """Observe a stop latched before Uvicorn installed its signal handler."""
+        return _exit_signalled.is_set() or await super().on_tick(counter)
 
     def handle_exit(self, sig: int, frame) -> None:
         # Let uvicorn see the previous should_exit value (repeated SIGINT forces exit).

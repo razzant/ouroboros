@@ -118,9 +118,10 @@ def test_contract_carries_the_derived_list_and_origin_helpers():
     assert task["task_contract"]["disabled_tools"] == ca.disabled_tools_for("observe")
     assert "toggle_evolution" in ca.task_disabled_tools(task)
     origin = ca.consciousness_origin_metadata(task["metadata"])
-    assert origin == {"initiator": "consciousness", "usage_category": "consciousness_task",
+    assert origin == {"work_kind": "consciousness", "consciousness_cause": "started",
+                      "initiator": "consciousness", "usage_category": "consciousness_task",
                       "consciousness_autonomy": "observe"}
-    assert ca.consciousness_origin_metadata({"client_message_id": "cm"}) == {}
+    assert ca.consciousness_origin_metadata({"origin_message_ref": "cm"}) == {"work_kind": "owner"}
     assert ca.is_consciousness_origin(origin) and not ca.is_consciousness_origin(None)
 
 
@@ -477,7 +478,7 @@ def test_schedule_subagent_event_names_the_origin():
     """The tool stamps ``origin_metadata`` on the schedule event beside the envelope:
     the consciousness origin and the owner's words that caused the tree, by value."""
     source = pathlib.Path("ouroboros/tools/control_scheduling.py").read_text(encoding="utf-8")
-    assert '"origin_metadata": {**consciousness_origin_metadata(metadata), **owner_origin},' in source
+    assert '"origin_metadata": {**consciousness_origin_metadata({**metadata, "task_id":' in source
     handler = pathlib.Path("supervisor/events_schedule_task.py").read_text(encoding="utf-8")
     assert '"origin_metadata": evt.get("origin_metadata"),' in handler
 
@@ -538,6 +539,7 @@ def test_request_file_and_pending_apply_carry_the_origin(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.config.get_post_task_evolution_budget_usd", lambda: 0.0)
     assert pte.apply_pending_request(tmp_path) is True
     assert calls == [("improve X", "post_task", {"origin": {
+        "work_kind": "consciousness", "consciousness_cause": "started",
         "initiator": "consciousness", "usage_category": "consciousness_task", "consciousness_autonomy": "full"}})]
 
 
@@ -584,6 +586,7 @@ def test_agent_tool_enable_without_an_owner_stop_starts_a_campaign_with_the_orig
            "usage_category": "consciousness_task", "consciousness_autonomy": "full"}
     events_mod._handle_toggle_evolution(evt, _toggle_ctx(state, sent))
     assert started == [("agent_tool", {"origin": {
+        "work_kind": "consciousness", "consciousness_cause": "started",
         "initiator": "consciousness", "usage_category": "consciousness_task", "consciousness_autonomy": "full"}})]
     live = state.load_state()
     assert live["evolution_mode_enabled"] is True and live["evolution_owner_stopped"] is False
@@ -624,10 +627,9 @@ def test_observe_does_without_the_work_starting_review_verb():
     """`request_deep_self_review` enqueues a ROOT: Observe starts nothing (В10')."""
     assert "request_deep_self_review" in ca.OBSERVE_DISABLED and "request_deep_self_review" not in ca.ACT_DISABLED
     # The GitHub write verbs change the world beyond the repository (PLAN §5.4: Observe keeps the reads only).
-    for verb in ("create_github_issue", "comment_on_issue", "comment_on_pr", "close_github_issue"):
+    for verb in ("github_write", "pr_merge"):
         assert verb in ca.OBSERVE_DISABLED and verb not in ca.ACT_DISABLED, verb
-    for verb in ("list_github_prs", "get_github_pr", "get_github_checks", "list_github_issues", "get_github_issue"):
-        assert verb not in ca.OBSERVE_DISABLED, verb
+    assert "github_read" not in ca.OBSERVE_DISABLED
     # The built-in execution verb (astra scope round 5): a skill's script.
     assert "skill_exec" in ca.OBSERVE_DISABLED and "skill_exec" not in ca.ACT_DISABLED
 
@@ -665,7 +667,8 @@ def test_deep_review_request_carries_the_origin_to_the_one_door(tmp_path, monkey
     handed: list = []
     sup = types.SimpleNamespace(queue_deep_self_review_task=lambda **kw: handed.append(kw))
     _handle_deep_self_review_request(evt, sup)
-    assert handed[0]["origin"] == {"initiator": "consciousness", "usage_category": "consciousness_task",
+    assert handed[0]["origin"] == {"work_kind": "consciousness", "consciousness_cause": "started",
+                      "initiator": "consciousness", "usage_category": "consciousness_task",
                                    "consciousness_autonomy": "act"}
     assert queue.queue_deep_self_review_task("look again", model="reviewer-x", origin=handed[0]["origin"])
     assert pending[0]["type"] == "deep_self_review" and pending[0]["metadata"]["initiator"] == "consciousness"
@@ -805,7 +808,7 @@ def test_the_owners_start_adopts_a_paused_consciousness_campaign(tmp_path):
     adopted = evolution_lifecycle.start_evolution_campaign("", source="owner_chat")
     assert adopted["status"] == "active" and adopted["adopted_by_owner_at"] and "pause_reason" not in adopted
     assert not any(key in adopted for key in origin)
-    assert ca.consciousness_origin_metadata(adopted) == {}
+    assert ca.consciousness_origin_metadata(adopted) == {"work_kind": "owner"}
     # The function's own default source is the owner too (grok round 4).
     campaign = evolution_lifecycle.start_evolution_campaign("Again", source="agent_tool", origin=origin)
     campaign["status"] = "paused"
@@ -821,7 +824,7 @@ def test_owner_campaign_carries_no_origin(tmp_path):
     queue.init(tmp_path)
     campaign = evolution_lifecycle.start_evolution_campaign("Improve", source="owner_chat")
     assert "initiator" not in campaign
-    assert ca.consciousness_origin_metadata(campaign) == {}
+    assert ca.consciousness_origin_metadata(campaign) == {"work_kind": "owner"}
 
 
 # --- what a wake may address: the host routing manifest (P3c) -------------------

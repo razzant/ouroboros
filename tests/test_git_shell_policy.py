@@ -126,7 +126,7 @@ ALLOWED_CASES = [
     pytest.param("echo 'git -C /Users/anton/Ouroboros/repo' > note.txt", id="echo_mentions_git_not_a_git_cmd"),
     pytest.param("grep -r 'git reset' .", id="grep_mentions_git"),
     # READ-ONLY git stays allowed even AT a runtime target (v4.5.1 / f14baf8f
-    # false-block line): inspection is the vcs_status-equivalent lane.
+    # false-block line): inspection is the vcs_read status lane.
     pytest.param("git -C /Users/anton/Ouroboros/repo status", id="readonly_minusC_repo_status"),
     pytest.param("git --git-dir=/Users/anton/Ouroboros/repo/.git log", id="readonly_git_dir_log"),
     pytest.param("cd /Users/anton/Ouroboros/repo && git status", id="readonly_cd_repo_status"),

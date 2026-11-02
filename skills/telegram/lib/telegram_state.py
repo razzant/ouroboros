@@ -83,12 +83,20 @@ def _owner_ingress_fields(api, chat_id: int, message: dict, update_id: int) -> d
     return {"client_message_id": client_id, **({"reply_to": address} if address else {})}
 
 
+def _is_routing_notice(event: dict) -> bool:
+    """A routing act's owner notice: its typed ACK, or the System row its receipt selected as carrier."""
+    return event.get("annotation_type") == "routing_ack" or (
+        event.get("role") == "system" and event.get("routing_notice_carrier") == "system")
+
+
 def _native_reply_id(api, chat_id: int, event: dict) -> int:
     """Join host-derived owner references to exact, same-chat Telegram ingress.
 
     A reply may arrive while /chat/inject is still awaiting its HTTP receipt.
     Bind pending ids here from the canonical acceptance index, never by text or
     chat order. The index already serves the shared ingress and reads only deltas.
+    An answer quotes only an earlier owner message; a routing notice also quotes
+    the latest one, since it says what became of that very message.
     """
     reply = event.get("reply_to")
     if not isinstance(reply, dict) or reply.get("role") != "user" or reply.get("unresolved"):
@@ -114,8 +122,19 @@ def _native_reply_id(api, chat_id: int, event: dict) -> int:
                 record = {**record, "row_address": format_address(row_address(row))}
                 _remember_message(api, chat_id, mid, record)
         if record.get("row_address") == address and record.get("chat_id") == reply.get("chat_id"):
-            return mid if latest and mid != latest else 0
+            return mid if (latest and mid != latest) or _is_routing_notice(event) else 0
     return 0
+
+
+def _quiet_progress(event: dict) -> bool:
+    """A progress note Silent mode mutes and lets the next note of its episode replace: the
+    model's own narration, or the host's typed technical progress (``host_progress``). A
+    problem the host types as ``task_incident``, and every other System row, keeps its sound
+    and is never replaced."""
+    if event.get("is_progress") is not True:
+        return False
+    return event.get("role") != "system" or (
+        event.get("system_type") == "host_progress" and not event.get("task_incident"))
 
 
 def _mirror_options(api, event: dict, chat_id: int) -> dict:
@@ -134,20 +153,27 @@ def _mirror_options(api, event: dict, chat_id: int) -> dict:
               "task_id": task_id, "kind": kind,
               "reply_to": str(reply.get("address") or "") if isinstance(reply, dict) else "",
               "native_reply_id": native_reply_id}
+    if _quiet_progress(event) and kind not in ("work_card", "question"):
+        record["progress"] = True  # the type fact Silent mode's replacement requires
     return {"on_message": lambda chat, mid: _remember_message(api, chat, mid, record),
             "reply_to_message_id": native_reply_id}
 
 
-def _same_silent_episode(api, chat_id: int, message_id: int, event: dict) -> bool:
-    """Silent mode edits thoughts within an episode, never a Continue predecessor.
+def _replaceable_progress(api, chat_id: int, message_id: int, event: dict) -> bool:
+    """Whether Silent mode may replace ``message_id`` with this progress note.
 
-    Telegram cannot change a message's native reply anchor by editing its text.
-    A changed host reply origin therefore also starts a fresh bubble.
+    Only a technical progress note is ever replaced, and only by the next progress
+    note of its own episode: its reference must positively carry the progress fact.
+    The same task, reply origin or anchor alone never makes a reply, a final answer
+    or a reference saved by an older bridge replaceable. Telegram cannot change a
+    message's native reply anchor by editing its text, so a changed host reply
+    origin, like a Continue episode, starts a fresh bubble.
     """
     old = _message_ref(api, chat_id, message_id)
     reply = event.get("reply_to")
     address = str(reply.get("address") or "") if isinstance(reply, dict) else ""
-    return (str(old.get("task_id") or "") == str(event.get("task_id") or "")
+    return (old.get("progress") is True and event.get("is_progress") is True
+            and str(old.get("task_id") or "") == str(event.get("task_id") or "")
             and str(old.get("reply_to") or "") == address
             and int(old.get("native_reply_id") or 0) == _native_reply_id(api, chat_id, event))
 
@@ -267,8 +293,9 @@ def _load_settings(api) -> Dict[str, Any]:
 
 
 def _is_silent_mode_enabled(settings: Dict[str, Any]) -> bool:
-    """Silent mode replaces successive outbound thoughts via editMessageText
-    rather than spamming new messages. Default: off."""
+    """Silent mode sends replies, the final answer and progress without sound, and a
+    progress note replaces the progress note just before it (``_replaceable_progress``);
+    every authored message stays its own message. Default: off."""
     raw = str(settings.get("TELEGRAM_SILENT_MODE") or "off").strip().lower()
     return raw in ("on", "true", "1", "yes")
 
@@ -462,8 +489,10 @@ def _subagent_card_text(event: Dict[str, Any], sub_event: str, lang: str) -> str
     return header
 
 
-async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any], sub_event: str, lang: str) -> None:
-    """One Telegram message per subagent, edited in place across its lifecycle."""
+async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any], sub_event: str, lang: str,
+                                *, quiet: bool = False) -> None:
+    """One Telegram message per subagent, edited in place across its lifecycle; in Silent
+    mode (``quiet``) a new bubble is sent without sound, as other progress is."""
     child = str(event.get("subagent_task_id") or event.get("task_id") or "").strip()
     if not child:
         return
@@ -474,6 +503,6 @@ async def _render_subagent_card(api, client, chat_id: int, event: Dict[str, Any]
         if await client.edit_message_text(chat_id, msg_id, text, parse_mode=""):
             return
         # Edit failed (message too old / deleted) → post a fresh bubble below.
-    new_id = await client.send_message(chat_id, text, parse_mode="")
+    new_id = await client.send_message(chat_id, text, parse_mode="", **({"disable_notification": True} if quiet else {}))
     if new_id:
         _set_subagent_msg(api, chat_id, child, new_id)

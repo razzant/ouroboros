@@ -112,6 +112,12 @@ def get_gc_retention_days() -> int:
     return clamp_retention_days(_default_gc_days())
 
 
+def keep_until(report: dict, timestamp: float, days: int) -> None:
+    """Record the first age eligibility observed by this prune, in epoch seconds."""
+    due = float(timestamp) + max(0, int(days)) * 86400
+    report["next_due"] = min(report.get("next_due", due), due)
+
+
 def task_result_timestamp(result: Dict[str, Any], fallback: Optional[float] = None) -> Optional[float]:
     """The effective task-drive retention date, else the caller's layout-local fallback.
 

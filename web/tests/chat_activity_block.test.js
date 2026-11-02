@@ -91,6 +91,8 @@ function fixture(history = [], detail = { active_direct_turns: [] }, chatId = 1)
         card: (id = TASK) => walkCard(messages, id),
         rows: (id = TASK) => nodes(walkCard(messages, id)).filter((n) => n.classList?.contains('chat-live-line')),
         meta: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-meta]')?.innerHTML || '',
+        // The labelled facts beyond the compact line (tool calls, models, origin): the card's own details list.
+        facts: (id = TASK) => walkCard(messages, id)?.querySelector('[data-live-facts]')?.innerHTML || '',
         status: () => env.mount.querySelector('.status-badge')?.textContent,
         typingHidden: () => messages.children
             .find((node) => String(node.className || '').includes('typing-bubble'))?.style.display === 'none',
@@ -148,6 +150,7 @@ test('empty incomplete tool evidence stays visible and never reads as zero calls
         const text = f.rows().map(row => row.innerHTML).join(' ');
         assert.match(text, /Tool history incomplete/);
         assert.doesNotMatch(text, /0 tool calls/);
+        assert.doesNotMatch(f.facts(), /<dt>Tool calls/);
         f.census([{ activity_id: TASK, chat_id: 1, kind: 'managed_task', phase: 'working' }]);
         assert.equal(f.historyReads(), 1, 'census updates never replay tool history');
     } finally { f.close(); }
@@ -184,16 +187,69 @@ for (const archives of [0, 3, 4, 12]) test(`global tool read bounds preserve set
     } finally { f.close(); }
 });
 
-test('positive per-task missing counts and actual read gaps remain visible independently of outcomes', () => {
-    const coverage = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, shown: 0, matched: 0, archives_bounded: true };
-    const empty = noteToolHostMetrics({}, { calls: 2, evidence: { coverage, observations: [] } });
-    assert.match(empty.headline, /2 tool calls.*outcome unknown/);
-    assert.match(empty.fullBody, /incomplete/);
-    for (const fact of ['started', 'wait_ended']) {
-        const view = noteToolHostMetrics({}, { evidence: { coverage,
-            observations: [{ key: fact, tool: 'read_file', fact, status: 'unknown' }] } });
-        assert.match(view.headline, /outcome unknown/);
+// #2400: counted calls with no record read are unread behind a bound, missing after a failed or
+// complete read; only an observed start, wait end or legacy start makes an outcome unknown.
+test('host-counted calls without records stay counted, never unknown outcomes (#2400)', () => {
+    const whole = { source: 'logs/tools.jsonl', live_size: 10, live_window: 10, archives: 0, archives_available: 0,
+        shown: 0, matched: 0 };
+    const view = (coverage, host = { calls: 14, errors: 0 }, observations = [], legacy) =>
+        noteToolHostMetrics({}, { ...host, evidence: { coverage: { ...whole, ...coverage }, observations, legacy } });
+    const archived = { archives_bounded: true, archives: 3, archives_available: 40 };
+    for (const bound of [archived, { archives: 3, archives_available: 40 }, { live_size: 2000, live_window: 500 }]) {
+        const row = view(bound);
+        assert.deepEqual([row.headline, row.phase], ['14 tool calls', 'result'], JSON.stringify(bound));
+        assert.match(row.fullBody, /^Only recent tool history was read\. Source: logs\/tools\.jsonl\./);
     }
+    const newest = Array.from({ length: 200 }, (_, n) => ({ key: `c${n}`, tool: 'read_file', fact: 'settled', status: 'ok' }));
+    const listed = view({ shown: 200, matched: 230 }, { calls: 230, errors: 0 }, newest);
+    assert.equal(listed.headline, '230 tool calls', 'the newest listed calls are a bound, not unknown ones');
+    assert.match(listed.fullBody, /^Only recent tool history was read\./);
+    assert.equal(view(archived, { calls: 14, errors: 2 }).headline, '14 tool calls · 2 errors', 'host errors stay');
+    const some = view(archived, { calls: 14, errors: 1 }, [{ key: 'one', tool: 'read_file', fact: 'settled', status: 'ok' }]);
+    assert.equal(some.headline, '14 tool calls · 1 error', 'a partial read never retires the frozen error');
+    for (const failed of [{ gaps: ['torn_archive_line'] }, { live_size: undefined }, {}]) {
+        const row = view(failed);
+        assert.equal(row.headline, '14 tool calls', `${JSON.stringify(failed)}: no outcome from the deficit`);
+        assert.match(row.fullBody, /^Invocation evidence is incomplete\./);
+    }
+    assert.match(view({ ...archived, gaps: ['malformed_jsonl'] }).fullBody, /^Invocation evidence is incomplete\./,
+        'a bound never hides a read failure');
+    for (const fact of ['started', 'wait_ended']) {
+        const row = view(archived, { calls: 14 }, [{ key: fact, tool: 'read_file', fact, status: 'unknown' }]);
+        assert.match(row.headline, /outcome unknown/, `${fact} observed behind a bound`);
+    }
+    assert.match(view(archived, { calls: 14 }, [], { calls: 1, unknown: true }).headline, /outcome unknown/);
+});
+
+// The same reading on a real history response (tests/test_history_tool_carriers.py produces it):
+// reload and a reconnect re-read both rebuild the finished card from host totals.
+test('reload and reconnect keep a bounded card counted while a seen start stays unknown (#2400)', async () => {
+    const produced = process.env.OURO_TEST_BOUNDED_TOOL_HISTORY;
+    const bounded = { source: 'logs/tools.jsonl', live_size: 300, live_window: 300, archives: 3, archives_available: 5,
+        archives_bounded: true, shown: 0, matched: 0, gaps: [] };
+    const seen = { key: 'tool:started-run:s1', tool: 'read_file', fact: 'started', status: 'unknown', live: false };
+    const history = produced ? JSON.parse(readFileSync(produced, 'utf8')).messages : [
+        { task_id: 'archived-run', role: 'assistant', text: 'Health check done.', ts: TS, chat_id: 1 },
+        { task_id: 'archived-run', role: 'system', system_type: 'task_summary', text: 'Checked.', ts: TS, chat_id: 1,
+            tool_calls: 14, tool_errors: 0, tool_call_counts: { read_file: 10, run_command: 4 },
+            tool_evidence: { observations: [], legacy: { calls: 0 }, coverage: bounded } },
+        { task_id: 'started-run', role: 'system', system_type: 'task_summary', text: 'Stopped.', ts: TS, chat_id: 1,
+            tool_calls: 1, tool_errors: 0,
+            tool_evidence: { observations: [seen], legacy: { calls: 0 }, coverage: { ...bounded, shown: 1, matched: 1 } } },
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        for (const reconnect of [false, true]) {
+            if (reconnect) { f.emit('open', { previouslyConnected: true }); await new Promise(setImmediate); }
+            const archived = f.rows('archived-run').map(row => row.innerHTML).join(' ');
+            assert.match(archived, /14 tool calls/);
+            assert.doesNotMatch(archived, /outcome unknown|error/);
+            assert.match(f.meta('archived-run'), /14 tool calls/);
+            assert.match(f.rows('started-run').map(row => row.innerHTML).join(' '), /1 tool call · outcome unknown/);
+        }
+        assert.ok(f.historyReads() >= 2, 'the real reconnect handler refetched history');
+    } finally { f.close(); }
 });
 
 for (const chatId of [1, 1234]) test(`canonical owner wait settles without a Project-pointer dependency in room ${chatId}`, async () => {
@@ -412,6 +468,115 @@ test('a direct turn with two successful tools is the task card: ONE evidence row
     } finally { g.close(); }
 });
 
+const orderTime = seconds => `2026-10-25T07:12:${String(seconds).padStart(2, '0')}Z`;
+const feedOrder = f => f.messages.children.filter(node => node.classList.contains('chat-live-card')
+    || (node.classList.contains('chat-bubble') && !node.classList.contains('typing-bubble')))
+    .map(node => [node === f.card() ? 'card' : node.classList.contains('user') ? 'owner' : 'answer', Number(node.dataset.ts)]);
+
+for (const [name, followUp, narration] of [
+    ['speechless with intervening owner', true, null],
+    ['speechless without intervening owner', false, null],
+    ['root with earlier narration', true, 7],
+    ['root with later narration', true, 16],
+]) {
+    test(`the whole work card keeps its earliest evidence anchor: ${name} (#949)`, async () => {
+        const user = seconds => ({ role: 'user', text: `Owner at ${seconds}`, content: `Owner at ${seconds}`,
+            ts: orderTime(seconds), history_id: `chat:${seconds}`, history_position: { source: 'chat', offset: seconds } });
+        const answer = { ...final, ts: orderTime(41), history_id: 'chat:41', history_position: { source: 'chat', offset: 41 } };
+        const progress = { task_id: TASK, role: 'assistant', is_progress: true, narration: true, text: 'Reading the logs.',
+            content: 'Reading the logs.', ts: orderTime(narration), history_id: 'progress:1',
+            history_position: { source: 'progress', offset: 1 } };
+        const evidence = { observations: [
+            { key: `tool:${TASK}:host-c1`, tool: 'read_file', fact: 'started', ts: orderTime(9) },
+            { key: `tool:${TASK}:host-c1`, tool: 'read_file', fact: 'settled', status: 'ok', ts: orderTime(10) },
+        ] };
+        const carrier = toolCarrier(evidence, { ts: answer.ts, task_terminal_status: 'completed',
+            _is_direct_chat: narration === null });
+        const history = [user(5), ...(narration === null ? [] : [{ ...progress, tool_evidence: evidence }]),
+            ...(followUp ? [user(21)] : []), answer, ...(narration === null ? [carrier] : [])];
+        const expected = [['owner', Date.parse(orderTime(5))], ['card', Date.parse(orderTime(Math.min(narration ?? 9, 9)))],
+            ...(followUp ? [['owner', Date.parse(orderTime(21))]] : []), ['answer', Date.parse(answer.ts)]];
+        const live = fixture();
+        try {
+            live.emit('chat', user(5));
+            if (narration !== null && narration < 9) live.emit('chat', progress);
+            live.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'c1', ts: orderTime(9) });
+            live.log({ type: 'tool_call_finished', tool: 'read_file', tool_call_id: 'c1', ts: orderTime(10) });
+            if (narration !== null && narration > 9) live.emit('chat', progress);
+            if (followUp) live.emit('chat', user(21));
+            live.emit('chat', answer);
+            assert.deepEqual(feedOrder(live), expected, 'live chronological position');
+        } finally { live.close(); }
+        const replay = fixture(history);
+        try {
+            await replay.instance.refreshHistory({ revision: 1 });
+            assert.deepEqual(feedOrder(replay), expected, 'saved history keeps the whole card before the follow-up');
+            const card = replay.card();
+            const physicalPositions = () => replay.messages.children.filter(node => node.dataset.historyId)
+                .map(node => [node.dataset.historyId, node.dataset.historySource, node.dataset.historyOffset]);
+            const positions = physicalPositions();
+            history.reverse();
+            history.push(...history.slice());
+            await replay.instance.refreshHistory({ revision: 2 });
+            assert.deepEqual(feedOrder(replay), expected, 'duplicate and reordered replay stays chronological');
+            assert.equal(replay.card(), card, 'replay retains the mounted card');
+            assert.deepEqual(physicalPositions(), positions, 'source rows retain their physical history positions');
+        } finally { replay.close(); }
+    });
+}
+
+test('timestamp-free current work keeps page-end placement when its history is outside the page (#949)', async () => {
+    const carrier = toolCarrier({ observations: [
+        { key: 'old-call', tool: 'read_file', fact: 'started', ts: '2026-10-25T07:01:00Z' },
+    ] }, { ts: '', task_terminal_status: '' });
+    const history = [
+        { role: 'user', text: 'A later question.', ts: orderTime(5) },
+        { role: 'assistant', text: 'A later answer.', ts: orderTime(41) }, carrier,
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'answer', 'card']);
+        assert.equal(f.card().dataset.ts, undefined, 'no inferred history position for current work');
+        const card = f.card();
+        await f.instance.refreshHistory({ revision: 2 });
+        assert.equal(f.card(), card);
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'answer', 'card']);
+    } finally { f.close(); }
+});
+
+for (const delivery of ['history', 'live']) {
+test(`late earlier tool evidence reanchors a finished card without replacing it: ${delivery} (#949)`, async () => {
+    const carrier = toolCarrier({ observations: [
+        { key: 'later', tool: 'read_file', fact: 'started', ts: orderTime(26) },
+    ] }, { ts: orderTime(41), task_terminal_status: 'completed' });
+    const history = [
+        { role: 'user', text: 'Read the logs.', ts: orderTime(5) },
+        { role: 'user', text: 'Read the older log too.', ts: orderTime(21) },
+        { ...final, ts: orderTime(41) }, carrier,
+    ];
+    const f = fixture(history);
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        const card = f.card();
+        assert.equal(Number(card.dataset.ts), Date.parse(orderTime(26)));
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'owner', 'card', 'answer']);
+        if (delivery === 'history') {
+            carrier.tool_evidence.observations.push({ key: 'earlier', tool: 'read_file', fact: 'started', ts: orderTime(9) });
+            await f.instance.refreshHistory({ revision: 2 });
+        } else {
+            f.log({ type: 'tool_call_started', tool: 'read_file', tool_call_id: 'earlier', ts: orderTime(9) });
+        }
+        assert.equal(f.card(), card);
+        assert.equal(card.dataset.finished, '1');
+        assert.equal(Number(card.dataset.ts), Date.parse(orderTime(9)));
+        assert.deepEqual(feedOrder(f).map(([kind]) => kind), ['owner', 'card', 'owner', 'answer']);
+        assert.equal(f.rows().length, 1, 'late evidence updates the single folded row');
+        assert.match(f.meta(), /2 tool calls/);
+    } finally { f.close(); }
+});
+}
+
 test('a greeting with zero tools shows nothing live and nothing on reload', async () => {
     const f = fixture();
     try {
@@ -535,7 +700,8 @@ for (const replay of [false, true]) {
                 assert.ok(card, `child ${id} is rendered`);
                 const title = role === 'Subagent' ? `${role} (${id.slice(0, 8)})` : role;
                 assert.equal(card.querySelector('[data-live-title]').textContent, title);
-                assert.match(f.meta(id), /Agent model: gpt-5\.6-sol/);
+                assert.match(f.meta(id), /gpt-5\.6-sol/, 'the compact line names the model');
+                assert.match(f.facts(id), /<dt>Agent model<\/dt><dd>gpt-5\.6-sol<\/dd>/);
                 assert.equal(card.dataset.parentTaskId, TASK);
             }
         } finally { f.close(); }
@@ -914,13 +1080,74 @@ test('a timeout and a failure for one call are one error', () => {
 });
 
 test('a recycled card counts no invocation from the cycle before it', () => {
-    const record = {};
+    const record = { rounds: 8, toolCalls: 3 };
     noteToolCall(record, { key: 'a', status: 'ok', receipt: false, tool: 'read_file' });
     noteToolHostMetrics(record, { calls: 3, errors: 1, routing: 0, counts: { read_file: 3 } });
     clearStickyCardState(record);
     assert.equal(record.toolFold, null);
+    assert.equal(record.rounds, null);
     assert.deepEqual([toolEvidenceView(record.toolFold).headline, record.toolCalls, record.toolErrors],
         ['0 tool calls', null, null]);
+});
+
+for (const calls of [undefined, 0]) test(`rounds alone never manufacture tool evidence or a Done card: calls=${calls}`, async () => {
+    const metrics = { rounds: 4, ...(calls === undefined ? {} : { tool_calls: calls }) };
+    const f = fixture();
+    try {
+        f.log({ type: 'llm_round_finished', ...metrics });
+        assert.equal(Boolean(f.card()), false, 'rounds are not a row of tool evidence');
+        f.emit('chat', { ...final, ...metrics });
+        f.log({ type: 'task_done', ...final, status: 'completed', ...metrics });
+        assert.equal(Boolean(f.card()), false, 'a text-only Done leaves no card');
+    } finally { f.close(); }
+    const g = fixture([{ ...final, ...metrics, role: 'system', system_type: 'task_summary', ts: TS }]);
+    try {
+        await g.instance.refreshHistory({ revision: 1 });
+        assert.equal(Boolean(g.card()), false, 'cold text-only Done leaves no card');
+    } finally { g.close(); }
+});
+
+test('known zero stays in Details, missing counts stay absent, and replay cannot lower a current count', () => {
+    const f = fixture();
+    try {
+        f.emit('chat', { task_id: TASK, role: 'assistant', is_progress: true, content: 'Reading the complete source.' });
+        assert.doesNotMatch(f.facts(), /Tool calls|Rounds/);
+        f.log({ type: 'task_metrics_event', tool_calls: 0, rounds: 0 });
+        assert.doesNotMatch(f.meta(), /tool call|round/);
+        assert.match(f.facts(), /<dt>Tool calls<\/dt><dd>0<\/dd>/);
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>0/);
+        assert.equal(f.rows().some(n => /0 tool calls/.test(n.innerHTML)), false);
+        f.log({ type: 'task_metrics_event', tool_calls: 31, rounds: 9 });
+        f.log({ type: 'task_metrics_event', tool_calls: 3, rounds: 2, ts: '2026-09-15T11:00:00Z' });
+        f.log({ ...final, type: 'task_done', status: 'completed', tool_calls: 2, rounds: 1 });
+        assert.match(f.meta(), /31 tool calls/);
+        assert.doesNotMatch(f.meta(), /round/);
+        assert.match(f.facts(), /<dt>Rounds<\/dt><dd>9/);
+        assert.doesNotMatch(f.facts(), /<dt>Tool calls/);
+        assert.equal(f.card().querySelector('[data-live-counters]'), null);
+    } finally { f.close(); }
+});
+
+for (const session of [false, true]) test(`a child's counts remain its own, session=${session}`, () => {
+    const f = fixture();
+    try {
+        f.log({ type: 'task_metrics_event', tool_calls: 2, rounds: 1 });
+        f.emit('chat', { role: 'assistant', is_progress: true, content: 'Checking the source.', task_id: 'counter-child',
+            subagent_task_id: 'counter-child', parent_task_id: TASK, root_task_id: TASK,
+            delegation_role: 'subagent', subagent_role: 'Reviewer', subagent_event: 'progress',
+            model: 'coordinator', ...(session ? { executor_route: 'claude' } : {}) });
+        f.log({ type: 'task_metrics_event', task_id: 'counter-child', tool_calls: 31, rounds: 9 });
+        assert.match(f.meta(), /2 tool calls/);
+        assert.doesNotMatch(f.meta(), /31 tool calls/);
+        if (session) {
+            assert.doesNotMatch(f.meta('counter-child'), /tool call|round/);
+            assert.match(f.facts('counter-child'), /<dt>Supervision<\/dt><dd>9 rounds · 31 tool calls/);
+            assert.doesNotMatch(f.facts('counter-child'), /<dt>Tool calls|<dt>Rounds/);
+        } else {
+            assert.match(f.meta('counter-child'), /31 tool calls/);
+            assert.match(f.facts('counter-child'), /<dt>Rounds<\/dt><dd>9/);
+        }
+    } finally { f.close(); }
 });
 
 // Stationary row (owner decision): the evidence stays at the first call's place

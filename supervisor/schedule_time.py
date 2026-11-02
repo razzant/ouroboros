@@ -81,6 +81,7 @@ def prune_consumed_once_records(tasks: list, cutoff_epoch: float, *, work_settle
     kept, pruned = [], 0
     for record in tasks:
         if (isinstance(record, dict) and not record.get("enabled", True)
+                and not record.get("delete_requested_at")
                 and record.get("completed_at") and not isinstance(record.get("occurrence"), dict)):
             trigger = record.get("trigger") if isinstance(record.get("trigger"), dict) else {}
             if str(trigger.get("type") or "") == "once":

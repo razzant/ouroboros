@@ -45,7 +45,8 @@ test('replacing an unknown mirror releases its material listeners and reader whi
         enhanceMarkdown: node => () => markdownDisposed.push(node),
         renderMaterial: fx.controller.buildDocumentBubble,
         releaseMaterials: node => { released.push(node); fx.controller.release(node); },
-        frameNode: (_msg, card) => { const bubble = document.createElement('div'); bubble.append(card); return bubble; },
+        // The production frame: a copy's Project reference joins its voice line, its host facts its time line.
+        frameNode: fx.controller.bubbleFrameNode,
     });
     t.after(() => decision.destroy());
     const rows = [question('recover', 'unknown'), question('draft')];
@@ -169,7 +170,7 @@ test('a question whose original chat is unknown leaves no card and no sentence a
 
 // Such gaps can last for good, so an incomplete census still speaks for every question they do
 // not name: Main's copies and its navigator move on instead of freezing.
-test('through the real Main wiring, a gap withholds only what it names: other omitted copies leave, its own stays unknown', async t => {
+test('through the real Main wiring, a gap withholds only what it names: an omitted copy waits for its read, its own stays unknown', async t => {
     const original = ElementStub.prototype.querySelector;
     ElementStub.prototype.querySelector = function(selector) {
         return original.call(this, selector) || this.children.map(child => child.querySelector(selector)).find(Boolean) || null;
@@ -204,8 +205,12 @@ test('through the real Main wiring, a gap withholds only what it names: other om
         pointer(leaving); pointer(kept);
         census([leaving, kept]);
         assert.deepEqual([card('leaving').dataset.state, card('kept').dataset.state, count()], ['open', 'open', '2']);
+        const leavingCard = card('leaving');
         census([kept], { current_questions_complete: false, current_questions_gaps: [elsewhere] });
-        assert.equal(card('leaving'), null, 'vouched for and omitted: its Main copy is retired');
+        await settle();
+        // Vouched for and omitted: no longer counted, but absence is no outcome. Its exact read decides;
+        // this unreadable one leaves the same copy withheld (#1993).
+        assert.deepEqual([card('leaving') === leavingCard, card('leaving')?.dataset.state, count()], [true, 'unknown', '1']);
         assert.deepEqual([card('kept').dataset.state, count()], ['open', '1']);
         pointer(leaving);
         census([leaving, kept]);

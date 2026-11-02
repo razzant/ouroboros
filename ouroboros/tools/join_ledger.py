@@ -475,11 +475,15 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     # SSOT cost projection (C2): a missing/unknown cost says "unknown", never a
     # confident $0.00, and an open amount is labelled as the upper bound it is.
     from ouroboros.cost_projection import cost_display
+    from ouroboros.work_stop import stop_for_reader
 
     parts = [
         f"Task {tid} [{status}] cost={cost_display(data)} (peek — NOT absorbed)",
         f"child_result_sha256={_child_result_sha256(data)}",
     ]
+    # A queued status is no permission to run: what holds the task now, and who may release it.
+    if stop := stop_for_reader(data.get("current_stop") or {}, data, str(getattr(ctx, "task_id", "") or "")):
+        parts.append("current_stop=" + json.dumps(stop, ensure_ascii=False, sort_keys=True))
     # Latest beacons this child posted to the shared ledger (partial_finding / blocker /
     # question / milestone), newest last.
     try:
@@ -639,10 +643,12 @@ def _resume_child_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     return (
         f"Resume requested for {tid}{note}. This is a REQUEST: the supervisor validates money, "
         "Stop/cancel intent, deadline, finite lifetime and the child's checkpoint through the same "
-        "seam the owner's Resume uses, then records a budget_resume_child_outcome event. When granted, "
-        "the child's status changes from paused to scheduled under its SAME task id; a refusal "
-        "(budget_still_exhausted, cancel_intent_active, deadline_passed, lifetime_exhausted, "
-        "root_still_paused, pause_record_missing, ...) leaves it paused. Check with peek_task."
+        "seam the owner's Resume uses, then records a budget_resume_child_outcome event. A grant "
+        "removes the child's current_stop: its SAME task id then waits in the queue for a worker "
+        "(status stays scheduled, execution_observation.dispatch=queued) and reads running once a "
+        "worker takes it. A refusal (budget_still_exhausted, cancel_intent_active, deadline_passed, "
+        "lifetime_exhausted, root_still_paused, pause_record_missing, ...) leaves its current_stop in "
+        "place. Check with peek_task or get_task_result."
     )
 
 
@@ -830,9 +836,10 @@ def get_tools() -> list[ToolEntry]:
                            "Nothing resumes automatically and no fan-out happens: you name each child you still "
                            "need, with a reason. The supervisor validates money, Stop/cancel intent, deadline and "
                            "finite lifetime through the same seam the owner's Resume uses; the typed outcome is "
-                           "recorded as a budget_resume_child_outcome event and the child's status changes from "
-                           "paused to scheduled when granted. Cancelled, completed or otherwise-stopped children "
-                           "are never revived; a child under a root that is itself still paused is refused.",
+                           "recorded as a budget_resume_child_outcome event. A held child reads status scheduled "
+                           "with a current_stop whose door is this tool; a grant removes that current_stop, so "
+                           "the child waits for a worker, then runs. Cancelled, completed or otherwise-stopped "
+                           "children are never revived; a child under a root that is itself still paused is refused.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "reason": {"type": "string", "default": "", "description": "Why this child is still needed (recorded)."},
@@ -856,7 +863,8 @@ def get_tools() -> list[ToolEntry]:
         }, _cancel_task),
         ToolEntry("peek_task", {
             "name": "peek_task",
-            "description": "Look at a child task's CURRENT status, its latest coordination beacons "
+            "description": "Look at a child task's CURRENT status (with the current_stop that holds it, if any), "
+                           "its latest coordination beacons "
                            "(partial_finding/blocker/question/milestone) and a tail of its result — "
                            "a PURE READ. Use this to check intermediate findings or decide whether to keep "
                            "waiting / steer / cancel, without committing to a finalization decision. It "

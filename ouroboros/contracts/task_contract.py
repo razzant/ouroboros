@@ -135,8 +135,36 @@ def normalize_attachment_manifest(value: Any) -> list[Dict[str, Any]]:
         row["status"] = status if status in {"staged", "rejected"} else "rejected"
         row["reason"] = str(row.get("reason") or "")
         row["label"] = str(row.get("label") or f"attachment {index + 1}")
+        receipts = normalize_engine_import_receipts(item.get("engine_imports"), row)
+        if receipts:  # additive: a row without receipts keeps its historical shape
+            row["engine_imports"] = receipts
         rows.append(row)
     return rows
+
+
+def normalize_engine_import_receipts(value: Any, row: Mapping[str, Any]) -> list[Dict[str, Any]]:
+    """Store-bound document import receipts bound to exactly ROW's bytes and semantics.
+
+    A receipt carries one ready engine import of this input across tasks
+    (``ouroboros.delegate_documents``): the store id, the saved key and exact request,
+    and the resource id. Its request must declare ROW's bytes and the same kind (``file``),
+    MIME and file name the row would declare; anything else is dropped, so a copied row
+    never selects a resource admitted as other bytes or under another MIME or name.
+    """
+    content = {"sizeBytes": row.get("size"), "sha256": f"sha256:{row.get('sha256')}"}
+    semantics = {"kind": "file", "mime": row.get("mime"), "name": str(row.get("relpath") or "").rsplit("/", 1)[-1]}
+    receipts: list[Dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        request = item.get("request") if isinstance(item, Mapping) else None
+        if (isinstance(request, Mapping) and request.get("content") == content
+                and request.get("expectedStoreId") == item.get("store_id")
+                and all(isinstance(item.get(name), str) and item[name] for name in ("store_id", "import_key", "resource_id"))
+                and all(request.get(name) == expected for name, expected in semantics.items())
+                and isinstance(request.get("source", ""), str)):
+            receipts.append({"store_id": item["store_id"], "import_key": item["import_key"], "resource_id": item["resource_id"],
+                             "request": {name: copy.deepcopy(request[name]) for name in
+                                         ("expectedStoreId", "kind", "mime", "name", "source", "content") if name in request}})
+    return receipts[:8]
 
 
 def _opt_nonneg_int(value: Any) -> Any:
@@ -878,4 +906,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_input_sources", "normalize_resource_policy", "task_input_sources"]
+__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "effective_acceptance_claims", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_allowed_origins", "normalize_browser_origin", "normalize_answer_protocol", "normalize_attachment_manifest", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_depth_provenance", "normalize_disabled_tools", "normalize_engine_import_receipts", "normalize_input_sources", "normalize_resource_policy", "task_input_sources"]

@@ -117,7 +117,7 @@ export function createMainWaiting({ page, messagesDiv, toolbar = page?.querySele
         if (row.cancelable === true && !record.stop) {
             const button = document.createElement('button');
             button.type = 'button';
-            button.className = 'btn btn-xs btn-default';
+            button.className = 'btn btn-xs btn-default ui-hit-area';
             button.textContent = tx(TASK_CONTROL_TRIGGER_LABEL);
             button.addEventListener('click', () => {
                 if (!connected || !record.available || record.row.cancelable !== true) return;

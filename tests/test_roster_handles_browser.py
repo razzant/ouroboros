@@ -88,10 +88,10 @@ def test_duplicate_is_a_draft_whose_card_names_its_twin_until_the_engine_changes
     assert cards.nth(0).get_attribute("data-invalid") is None
     roles.capture(page, "roster-handles-duplicate-draft")
 
-    posts_before = len([1 for path, _ in ui["posts"] if path == "/api/settings"])
+    posts_before = len(ui["posts"])
     page.locator("#btn-save-settings").click()
     assert "runs the same engine as Subagent 1" in page.locator("#settings-status").text_content()
-    assert len([1 for path, _ in ui["posts"] if path == "/api/settings"]) == posts_before, "a twin is never sent"
+    assert len(ui["posts"]) == posts_before, "a twin is never sent"
 
     copy.locator('[data-subagent-field="effort"]').select_option("low")
     assert "same engine" not in (copy.locator("[data-subagent-meta]").text_content() or "")
@@ -188,6 +188,8 @@ def test_an_empty_pool_is_refused_until_the_owner_saves_without_reviewers(role_u
     page.locator("[data-review-pool-allow-empty]").check()
     with page.expect_response("**/api/settings"):
         page.locator("#btn-save-settings").click()
+    # The roster travels in the owner checker transaction; the generic body keeps neither it nor its pool flag.
     body = [body for path, body in ui["posts"] if path == "/api/settings"][-1]
-    assert body["allow_empty_review_pool"] is True
-    assert not any(row.get("review_eligible") for row in body["OUROBOROS_SUBAGENTS"]["items"])
+    assert "OUROBOROS_SUBAGENTS" not in body and "allow_empty_review_pool" not in body
+    saved = roles.settings_saves(ui)[-1]
+    assert not any(row.get("review_eligible") for row in saved["OUROBOROS_SUBAGENTS"]["items"])

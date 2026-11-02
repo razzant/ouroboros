@@ -159,39 +159,47 @@ def test_docker_popen_no_start_is_positive_no_effect(tmp_path, monkeypatch, serv
     _consumers(tmp_path, registry, queue, workers, False)
 
 
+def _fake_vcs_git(monkeypatch, run):
+    """Answer every Git dispatch of the VCS tools with ``run(cmd)``: the facade's run_cmd, and the
+    byte read behind diff's displayed text."""
+    from ouroboros.tools import git, git_vcs_ops
+
+    monkeypatch.setattr(git, "run_cmd", lambda cmd, **_kw: run(cmd))
+    monkeypatch.setattr(git_vcs_ops, "_git_display_text", lambda cmd, _repo: (run(cmd), ""))
+
+
 @pytest.mark.parametrize("args", [{"head": "HEAD"}, {"base": "HEAD", "head": "HEAD", "staged": True}])
 def test_vcs_argument_refusal_and_corrected_retry_settle_only_their_claims(tmp_path, monkeypatch, args):
-    from ouroboros.tools import git
     from ouroboros.task_results import load_task_result
 
     registry, queue, workers = _registry(tmp_path, monkeypatch)
     dispatched = []
-    monkeypatch.setattr(git, "run_cmd", lambda cmd, **_kw: dispatched.append(cmd) or "")
-    refused = registry.execute_result("vcs_diff", {"root": "active_workspace", **args})
+    _fake_vcs_git(monkeypatch, lambda cmd: dispatched.append(cmd) or "")
+    refused = registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace", **args})
     assert refused.code == "TOOL_ARG_ERROR"
     assert dispatched == []
     assert refused.meta.get("operation_outcome") == "completed_no_effect"
     assert not load_task_result(tmp_path, "root").get("launch_handoffs")
-    retry = registry.execute_result("vcs_diff", {"root": "active_workspace"})
+    retry = registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"})
     assert retry.code == "OK" and dispatched == [["git", "diff"]]
     _consumers(tmp_path, registry, queue, workers, False)
 
 
 def test_joined_git_error_does_not_survive_corrected_retry(tmp_path, monkeypatch):
-    from ouroboros.tools import git
     from ouroboros.task_results import load_task_result
 
     registry, queue, workers = _registry(tmp_path, monkeypatch)
-    def unknown(*_a, **_kw):
+    def unknown(_cmd):
         raise subprocess.TimeoutExpired("git diff", 1)
-    monkeypatch.setattr(git, "run_cmd", unknown)
-    result = registry.execute_result("vcs_diff", {"root": "active_workspace"})
+    _fake_vcs_git(monkeypatch, unknown)
+    result = registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"})
     assert result.code == "GIT_ERROR" and not result.meta.get("operation_outcome")
+    assert "timed out" in result.text, result.text  # the faked dispatch, not a missing repository
     claim = load_task_result(tmp_path, "root").get("launch_handoffs", {})
     assert claim == {}
-    monkeypatch.setattr(git, "run_cmd", lambda *_a, **_kw: "")
-    registry.execute_result("vcs_diff", {"root": "active_workspace", "head": "HEAD"})
-    registry.execute_result("vcs_diff", {"root": "active_workspace"})
+    _fake_vcs_git(monkeypatch, lambda _cmd: "")
+    registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace", "head": "HEAD"})
+    registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"})
     assert load_task_result(tmp_path, "root").get("launch_handoffs", {}) == claim
     _consumers(tmp_path, registry, queue, workers, False)
 
@@ -203,19 +211,19 @@ def test_joined_git_error_does_not_survive_corrected_retry(tmp_path, monkeypatch
     ("vcs_revert", {"sha": " "}),
 ])
 def test_vcs_validation_family_never_dispatches_git(tmp_path, monkeypatch, name, args):
-    from ouroboros.tools import git, review_helpers
+    from ouroboros.tools import review_helpers
     from ouroboros.task_results import load_task_result
 
     registry, queue, workers = _registry(tmp_path, monkeypatch)
     dispatched = []
     monkeypatch.setattr(review_helpers, "list_changed_paths_from_git_status",
                         lambda *_a, **_kw: dispatched.append("status") or ["ordinary.txt"])
-    monkeypatch.setattr(git, "run_cmd", lambda cmd, **_kw: dispatched.append(cmd) or "")
+    _fake_vcs_git(monkeypatch, lambda cmd: dispatched.append(cmd) or "")
     refused = registry.execute_result(name, {"root": "active_workspace", **args})
     assert refused.meta.get("operation_outcome") == "completed_no_effect", refused
     assert dispatched == []
     assert not load_task_result(tmp_path, "root").get("launch_handoffs")
-    assert registry.execute_result("vcs_diff", {"root": "active_workspace"}).code == "OK"
+    assert registry.execute_result("vcs_read", {"action": "diff", "root": "active_workspace"}).code == "OK"
     _consumers(tmp_path, registry, queue, workers, False)
 
 

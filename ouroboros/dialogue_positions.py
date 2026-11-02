@@ -15,6 +15,7 @@ never a count over other rooms' history; an absolute count that is not settled y
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional
 
@@ -64,18 +65,22 @@ _ORDINALS = ("SELECT seq, ordinal + (SELECT ordinal_base FROM import_ledger WHER
 
 def ordinals_of(root: Any, stream: str, seqs: Iterable[int]) -> Dict[int, Ordinals]:
     """The absolute ``Ordinals`` of the rows at ``seqs`` (a page's ``line`` numbers in one
-    statement per 500 rows; an absent coordinate is absent). Each row's unit answers through
-    its own base: never another room's history. Raises ``StoreMigrating``/``StoreError`` while
-    the counts below the cutover are not settled: an unknown ordinal is never a number."""
+    statement and ONE step per 500 rows, as ``dialogue_store._page`` reads a page; an absent
+    coordinate is absent). Each row's unit answers through its own base: never another room's
+    history. Raises ``StoreMigrating``/``StoreError`` while the counts below the cutover are not
+    settled: an unknown ordinal is never a number."""
     wanted = sorted({int(seq) for seq in seqs})
     found: Dict[int, Ordinals] = {}
     with ds.transaction(root, write=False) as conn:
         for start in range(0, len(wanted), 500):
             chunk = wanted[start:start + 500]
-            for record in conn.execute(f"{_ORDINALS} WHERE stream=? AND seq IN ({','.join('?' * len(chunk))})", (stream, *chunk)):
-                if record["unknown"]:
+            listed = conn.execute(f"SELECT json_group_array(json_array(seq, ordinal, pos, unknown)) FROM ({_ORDINALS} "
+                                  f"WHERE stream=? AND seq IN ({','.join('?' * len(chunk))}))",
+                                  (stream, *chunk)).fetchone()[0]
+            for seq, ordinal, pos, unknown in json.loads(listed or "[]"):
+                if unknown:
                     raise _uncovered(conn, stream)
-                found[record["seq"]] = Ordinals(int(record["ordinal"]), record["pos"])
+                found[seq] = Ordinals(int(ordinal), pos)
     return found
 
 
@@ -123,6 +128,19 @@ def row_at_position(root: Any, pos: int) -> Optional[Row]:
         if record is None and not _settled(conn, "chat"):
             raise _uncovered(conn, "chat")
     return None if record is None else ds._row(record)
+
+
+def last_stream_position(root: Any) -> int:
+    """The chat projection's current head, excluding A2A, or -1 for an empty stream; no history scan."""
+    ds.require_imported(root, "chat")
+    with ds.transaction(root, write=False) as conn:
+        row = conn.execute("SELECT next_pos, pos_base FROM streams JOIN import_ledger ON id=live "
+                           "WHERE streams.stream='chat'").fetchone()
+        if row is None:
+            return -1
+        if row["pos_base"] is None:
+            raise _uncovered(conn, "chat")
+        return int(row["pos_base"]) + int(row["next_pos"]) - 1
 
 
 def generation_row(root: Any, gen: str, offset: int) -> Optional[Row]:

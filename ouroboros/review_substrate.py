@@ -59,7 +59,8 @@ from ouroboros.usage_accounting import (
     last_physical_attempt_capture,
     usage_scope,
 )
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.utils import truncate_review_artifact  # noqa: F401 -- facade: review_verdict reads this at call time
 from ouroboros._outcome_receipts import disclosed_list_projection  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 
 
@@ -319,6 +320,7 @@ class ReviewCoordinator:
             usage_meta=usage_meta,
             review_usage_scope=review_usage_scope,
             run_slot=_run_slot_with_usage,
+            settle_actor=lambda slot, actor: self._settle_actor(request, slot, actor),
             error_actor=lambda slot, error, operation_id="", operation_state="settled": self._error_actor(
                 request, slot, error, operation_id=operation_id,
                 operation_state=operation_state,
@@ -327,27 +329,11 @@ class ReviewCoordinator:
         slot_order = {slot.slot_id: idx for idx, slot in enumerate(slots)}
         slots_by_id = {slot.slot_id: slot for slot in slots}
         actors.sort(key=lambda actor: slot_order.get(actor.slot_id, len(slot_order)))
-        try:
-            # «Выполняется как» (D22): beside each saved row the UI shows what
-            # the row REALLY ran as last time. Disclosure only; best-effort.
-            from ouroboros.reviewer_slot_config import record_reviewer_slot_executions
+        from ouroboros.review_seat_outcome import aggregate_outcomes
 
-            # The wave keeps its OWN rows on its ctx for its ledger record (``keep_on``).
-            record_reviewer_slot_executions(request.surface, actors, slots_by_id, keep_on=self.usage_ctx)
-        except Exception:
-            log.debug("reviewer-slot last-execution write failed", exc_info=True)
-
-        from ouroboros.review_actor_aggregation import aggregate_review_actors
-
-        aggregate = aggregate_review_actors(
-            request=request,
-            slots=slots,
-            actors=actors,
-            slots_by_id=slots_by_id,
-            actor_projection=_review_actor_projection,
-        )
-        # #1578: every surface's reviewer failures reach the canonical log once.
-        emit_review_run_errors(self.usage_ctx, request, actors, drive_root=self.drive_root)
+        for actor in actors:
+            self._settle_actor(request, slots_by_id[actor.slot_id], actor, producer=False)
+        aggregate = aggregate_outcomes(request, slots, actors)
         return ReviewRunResult(
             request=asdict(request),
             actors=[asdict(actor) for actor in actors],
@@ -394,6 +380,13 @@ class ReviewCoordinator:
         except Exception:
             prompt_projection = {}
         response_ref: Dict[str, Any] = {}
+        if prompt_ref is None and operation_id:
+            from ouroboros.observability import read_call_payload
+            try:
+                prompt_ref = read_call_payload(self._custody_drive_root(), task_id=request.task_id or "review",
+                                               call_id=f"{operation_id}_prompt")[2]
+            except (OSError, ValueError):
+                pass  # No retained assignment: disclose only the synthetic failure prompt.
         if prompt_ref is None:
             prompt_ref = {}
             try:
@@ -451,6 +444,9 @@ class ReviewCoordinator:
             dispatch_stamp=self._review_paid_stamp,
         )
         executor = _review_route_executor(assignment, llm=self.llm)
+        from ouroboros.review_seat_outcome import answer_received
+
+        executor.answer_observer = lambda: answer_received(self.usage_ctx, request, slot)
         executor.usage_observer = lambda usage: self._emit_usage(request, slot, usage, prompt_chars=executor.prompt_chars())
         executor._logical_deadline_monotonic = logical_deadline_monotonic
         # The physical session and the logical waiter must share this exact
@@ -584,6 +580,8 @@ class ReviewCoordinator:
                         break
                     if actor_attempt + 1 >= actor_attempts:
                         break
+            if raw_text.strip() and not slot.retrieves:
+                executor.answer_observer()
             actor = ReviewActorRecord(
                 slot_id=slot.slot_id, model=slot.model,
                 status="ok" if raw_text.strip() else "empty", raw_text=raw_text,
@@ -592,11 +590,14 @@ class ReviewCoordinator:
                 recovery_binding={**binding, "pending_invocation_id": invocation["id"]},
             )
             finalize_review_actor(actor, operation_id=call_id)
+            self._finalize_outcome(request, slot, actor)
             actor.response_ref = self._persist_producer_outcome(
                 request, actor, call_id, base_call_type, {"message": msg, "usage": usage})
             return actor
         except Exception as exc:
-            error_msg = truncate_review_artifact(str(exc), limit=4000)
+            # Preserve the complete safe cause before any presentation bound.
+            # A measurement after a long engine sentence must remain recoverable.
+            error_msg = sanitize_tool_result_for_log(str(exc))
             (
                 failure_custody, _capture_state, http_status,
                 operation_state, failure_code,
@@ -613,6 +614,7 @@ class ReviewCoordinator:
                 failure_code=failure_code,
                 reset_at=str(getattr(exc, "reset_at", "") or ""),
                 reported_cause=str(getattr(exc, "reported_cause", "") or ""),
+                failure_details=redact_projection(getattr(exc, "failure_details", {}) or {}).value,
                 http_status=http_status if isinstance(http_status, int) and http_status else None,
                 usage=failure_custody,
                 prompt_ref=prompt_ref,
@@ -622,13 +624,43 @@ class ReviewCoordinator:
                 recovery_binding={**binding, "pending_invocation_id": invocation["id"]},
             )
             finalize_review_actor(actor, operation_id=call_id)
+            self._finalize_outcome(request, slot, actor)
             actor.response_ref = self._persist_producer_outcome(
                 request, actor, call_id, base_call_type,
                 {"error_type": type(exc).__name__, "error": actor.error})
             return actor
 
+    def _finalize_outcome(self, request, slot, actor):
+        from ouroboros.review_seat_outcome import finalize_seat_outcome
+
+        finalize_seat_outcome(request, slot, actor)
+        emit_review_run_errors(self.usage_ctx, request, [actor], drive_root=self.drive_root)
+
+    def _settle_actor(self, request, slot, actor, *, producer=True):
+        """Outer worker failures take the same durable path before custody advertises readiness."""
+        from ouroboros.review_seat_outcome import ensure_producer_prompt, publish_seat_execution
+
+        complete = bool(actor.outcome and actor.response_ref)
+        self._finalize_outcome(request, slot, actor)
+        if producer and not complete:
+            actor.prompt_ref = ensure_producer_prompt(self._custody_drive_root(), request, slot, actor)
+            actor.response_ref = self._persist_producer_outcome(
+                request, actor, actor.operation_id, request.call_type or f"{request.surface}_review",
+                getattr(actor, "_producer_payload", {"message": {"content": actor.raw_text}, "error": actor.error}))
+            if not actor.response_ref:
+                raise OSError(f"Review producer outcome is not durable: {actor.operation_id}")
+        if producer or not actor.late_result_pending:
+            publish_seat_execution(request, slot, actor, self.usage_ctx, fallback_root=self._custody_drive_root())
+        else:
+            from ouroboros.subagent_metric_events import review_execution
+            try:  # a measurement never decides a pending drain
+                review_execution(request, slot, actor, self.usage_ctx, fallback_root=self._custody_drive_root())
+            except Exception:
+                log.debug("review measurement unavailable", exc_info=True)
+
     def _persist_producer_outcome(self, request, actor, call_id, call_type, payload):
         """Stamp the completed producer beside its existing full response body."""
+        actor._producer_payload = payload
         outcome = {key: value for key, value in asdict(actor).items()
                    if key not in {"raw_text", "usage", "prompt_ref", "response_ref"}}
         try:

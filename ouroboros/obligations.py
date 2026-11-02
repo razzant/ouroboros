@@ -29,8 +29,32 @@ BOOT_SETS = ("nonterminal", "synthesis", "terminal_projection", "delegated_runs"
              "promotions", "custody_open", "pending_drives", "upgrade_notices", "unknowns",
              "pause_notices", "pause_notice_receipts", "owner_questions")
 REST_SET = "duty_rest"  # the typed outcomes of ``DutyRest``: kept facts of a duty's pass, never debt
+COST_ARRIVALS = "cost_projection_arrivals"
 ObligationsUnavailable = store.StoreError  # the sets are rows: unavailable exactly when the store is
 _FACT_COLUMNS = ("task_id", "headless_child_drive_root", "child_drive_root", "drive_root")
+
+
+def task_written(txn, task_id, columns=None):
+    """Publish duty inputs in the task writer's transaction. The terminal-write counter moves on
+    closing/closed writes, never on a live task's writes, and stamps the row's ``terminal_seq`` with
+    its new value, so a pass keyed on the counter reads only the rows written since (``task_store``)."""
+    from ouroboros.task_status import SETTLED_STATUSES
+    if columns is None:
+        row = txn.conn.execute("SELECT status, write_seq, updated_at, plan_collection_pending, drive_retention_at "
+                               "FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        columns = dict(row) if row is not None else {}
+    if columns.get("status") in SETTLED_STATUSES:
+        txn.set_meta(store.TERMINAL_WRITES, count := int(txn.meta(store.TERMINAL_WRITES) or 0) + 1)
+        txn.conn.execute("UPDATE tasks SET terminal_seq=? WHERE task_id=?", (count, task_id))
+    if columns and txn.conn.execute("SELECT 1 FROM obligations WHERE set_name=? AND id=? "
+                        "AND json_type(facts, '$.signature')='null'",
+                        (REST_SET, "cost_projection:" + task_id)).fetchone():
+        txn.set_meta(COST_ARRIVALS, int(txn.meta(COST_ARRIVALS) or 0) + 1)
+        txn.delete_row(REST_SET, "cost_projection:" + task_id)  # later live writes are no longer arrivals
+    from ouroboros.plan_collection_job import task_written as plan_written
+    plan_written(txn, task_id, columns)
+    from ouroboros.maintenance_retirement import task_written as retirement_written
+    retirement_written(txn, task_id, columns)
 
 
 def review_collection_pending(row: dict) -> bool:
@@ -68,7 +92,10 @@ def members_in(txn: store.Txn, name: str) -> dict[str, dict]:
     if name in store.FLAG_COLUMNS:
         where = f"{store.FLAG_COLUMNS[name]}=1"
     elif name == "nonterminal":
-        where = "status IN ('running', 'interrupted')"
+        # The few live tasks among the whole history: ``unlikely`` keeps the read on the status index, which the
+        # maintenance child's ANALYZE statistics would otherwise trade for a walk of every task in task_id order
+        # (any SQLite, by the table's shape: tests/test_store_capture_readers.py).
+        where = "unlikely(status IN ('running', 'interrupted'))"
     else:
         return rows
     for record in txn.conn.execute(f"SELECT {','.join(_FACT_COLUMNS)} FROM tasks WHERE {where} ORDER BY task_id"):
@@ -83,7 +110,8 @@ def owner_held_rows(name: str, rows: dict[str, dict]) -> dict[str, dict]:
     import nothing; ``delegated_runs`` keeps its closing receipts, ``pending_drives`` the rows a
     pool handoff published (both retire by their own owner); every other set is owner-held."""
     if name == "delegated_runs":
-        return {identity: facts for identity, facts in rows.items() if isinstance(facts, dict) and facts.get("closed_runs")}
+        return {identity: facts for identity, facts in rows.items() if isinstance(facts, dict)
+                and (facts.get("closed_runs") or facts.get("cost_revision"))}
     if name == "nonterminal" or (name in store.FLAG_COLUMNS and name != "pending_drives"):
         return {}
     return rows
@@ -233,14 +261,16 @@ class DutyRest:
     """
 
     def __init__(self, root: Any, duty: str, candidates: dict | None = None, *, name: str = "",
-                 inputs: dict | None = None, now: str | None = None, wake: Iterable[str] = ()) -> None:
+                 inputs: dict | None = None, now: str | None = None, wake: Iterable[str] = (),
+                 partial: bool = False) -> None:
         from ouroboros.utils import utc_now_iso
 
         self.root, self.duty, self.inputs = Path(root), _check_name(duty), dict(inputs or {})
         prefix = self.duty + ":"
         self.candidates = {str(tid): dict(facts or {}) for tid, facts in (candidates or {}).items()}
-        self.signatures: dict[str, list] = {}
+        self.signatures: dict[str, list | None] = {}
         self.marks: dict[str, dict] = {}
+        self.readable = False
         try:
             with store.open_store(self.root, write=False) as txn:
                 if name:
@@ -248,8 +278,13 @@ class DutyRest:
                 self.signatures = {record["task_id"]: [record["write_seq"], record["updated_at"]] for record in
                                    txn.conn.execute("SELECT task_id, write_seq, updated_at FROM tasks WHERE task_id IN "
                                                     "(SELECT value FROM json_each(?))", (json.dumps(sorted(self.candidates)),))}
+                # A partial pass owns only its addressed members; other rests stay untouched.
+                where, params = ("id IN (SELECT value FROM json_each(?))",
+                                 (json.dumps([prefix + tid for tid in self.candidates]),)) if partial else (
+                                     "id>=? AND id<?", (prefix, self.duty + ";"))
                 self.marks = {record["id"][len(prefix):]: json.loads(record["facts"]) for record in txn.conn.execute(
-                    "SELECT id, facts FROM obligations WHERE set_name=? AND id>=? AND id<?", (REST_SET, prefix, self.duty + ";"))}
+                    "SELECT id, facts FROM obligations WHERE set_name=? AND " + where, (REST_SET, *params))}
+                self.readable = True
         except StoreError:
             if name:
                 raise  # the set's members are unknown: the duty cannot pass
@@ -263,40 +298,54 @@ class DutyRest:
     def _holds(self, tid: str, mark: dict, now_at: datetime.datetime | None, wake: set) -> bool:
         current = {**self.inputs, **self.candidates[tid]}
         due = _instant(mark.get("due_at")) if mark.get("due_at") else None
-        return (mark.get("signature") == self.signatures.get(tid) and not wake & set(mark.get("waits_on") or ())
+        return (self.readable and mark.get("signature") == self.signatures.get(tid) and not wake & set(mark.get("waits_on") or ())
                 and all(current.get(key) == value for key, value in (mark.get("inputs") or {}).items())
                 and (not mark.get("due_at") or (due is not None and now_at is not None and due > now_at)))
 
     def wait(self, task_id: str, *waits_on: str, due_at: str | None = None, inputs: Iterable[str] = (),
-             report: dict | None = None) -> None:
+             report: dict | None = None, absent: bool = False) -> None:
         """TASK_ID, examined this pass, cannot progress until what it WAITS_ON changes; ``inputs``
         names the pass's external stamps the outcome depends on (a member's own always count);
-        ``report`` is what the duty states about the member while it rests."""
+        ``report`` is what the duty states while it rests. ``absent`` requires a successful
+        read that found no row, never a failed/unavailable read."""
         tid = str(task_id)
-        if tid not in self.candidates or self.signatures.get(tid) is None or not waits_on:
+        if (not self.readable or tid not in self.candidates or not waits_on
+                or (self.signatures.get(tid) is None) != absent):
             return
         stamps = {**{key: self.inputs[key] for key in inputs if key in self.inputs}, **self.candidates[tid]}
-        self._outcomes[tid] = {"task_id": tid, "signature": self.signatures[tid], "waits_on": sorted(set(waits_on)),
+        self._outcomes[tid] = {"task_id": tid, "signature": self.signatures.get(tid), "waits_on": sorted(set(waits_on)),
                                **({"inputs": stamps} if stamps else {}), **({"due_at": str(due_at)} if due_at else {}),
                                **({"report": dict(report)} if report else {})}
 
-    def commit(self) -> None:
+    def commit(self, *, confirm: Iterable[str] = ()) -> int | None:
         """Write the pass's new outcomes and drop the rests of members that left, in one write
         transaction; an outcome whose task was written after its selection is not recorded (that
         write already puts the member back). Nothing new: nothing is written. A rest is never
-        authority, so a store that cannot take it leaves the members to the next pass."""
+        authority, so a store that cannot take it leaves the members to the next pass.
+        ``confirm`` revalidates selected signatures and returns the absent-owner arrival marker
+        for a process input latch; a racing write or unreadable store returns None."""
         import logging
 
         outcomes = {tid: facts for tid, facts in self._outcomes.items() if self.marks.get(tid) != facts}
         departed = [tid for tid in self.marks if tid not in self.candidates]
-        if not outcomes and not departed:
+        confirm = tuple(confirm)
+        if not outcomes and not departed and not confirm:
             return
         try:
-            with store.open_store(self.root, write=True) as txn:
+            with store.open_store(self.root, write=bool(outcomes or departed)) as txn:
+                valid = self.readable
+                signatures = {row["task_id"]: [row["write_seq"], row["updated_at"]] for row in txn.conn.execute(
+                    "SELECT task_id, write_seq, updated_at FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sorted(set(confirm) | set(outcomes))),))}
+                for tid in confirm:
+                    valid = valid and signatures.get(tid) == self.signatures.get(tid)
                 for tid in departed:
                     txn.delete_row(REST_SET, f"{self.duty}:{tid}")
                 for tid, facts in outcomes.items():
-                    if list(txn.row(tid, "write_seq", "updated_at") or ()) == facts["signature"]:
+                    if signatures.get(tid) == facts["signature"]:
                         txn.put_row(REST_SET, f"{self.duty}:{tid}", facts)
+                    else:
+                        valid = False
+                return int(txn.meta(COST_ARRIVALS) or 0) if valid else None
         except StoreError:
             logging.getLogger(__name__).debug("Duty %s rests not recorded this pass", self.duty, exc_info=True)

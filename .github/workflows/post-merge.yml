@@ -1,0 +1,179 @@
+# Post-merge check: after merges land on `ouroboros`, the tests they affect run here.
+#
+# Owner decision 3A (2026-10-21): nobody waits before a merge. After merged changes a small check
+# of the affected tests starts by itself, and several merges in a row are checked by one run: the
+# concurrency group keeps one run going and one pending, every newer push replaces the pending
+# one, and its base (the head of the last completed check) still covers the merges in between.
+# Owner decision 3A (2026-10-28): the same tests also run on Windows, on setup-python's interpreter,
+# whose SQLite keeps the stores in PERSIST as an install updated in place does (the Linux leg runs
+# the shipped interpreter and WAL, as fresh installs do). The Linux leg alone runs what does not
+# depend on the system: the release's lint gate (`ruff check --select F`, owner decision 2A,
+# 2026-10-22), its size check (`pytest -m size_ratchet` against the base) and the cost contract.
+# A lint finding or a red size test is red without a retry. A red test runs once more (passing
+# then = flaky: reported, never handed over); a red again is bisected over the first-parent merges
+# to the merge that broke it and handed to that pull request's author (one comment) and to
+# Ouroboros (an issue labelled `post-merge-red` for that leg's system, which a later run of the
+# same leg closes once the tests pass and the findings are gone). The check blocks nothing,
+# reverts nothing, runs on no schedule and uses no secret: only this workflow's own GITHUB_TOKEN
+# with the permissions below. scripts/post_merge_check.py documents each step.
+
+name: Post-merge check
+
+on:
+  push:
+    branches:
+      - ouroboros
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: post-merge-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  post-merge:
+    # Only the official repository hands reds to the authors of its merges.
+    if: github.repository == 'razzant/ouroboros'
+    name: post-merge (${{ matrix.leg }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, leg: linux, interpreter: shipped, journal: WAL, gates: --lint --size}
+          - {os: windows-latest, leg: windows, interpreter: setup-python, journal: PERSIST, gates: ''}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 165
+    defaults:
+      run:
+        shell: bash
+    env:
+      # This job provisions pytest-xdist/pytest-timeout and node 22, so the gate's real-spawn
+      # tests run here instead of skipping, as in ci.yml's test jobs.
+      OUROBOROS_PREFLIGHT_REQUIRE_PLUGINS: "1"
+      OUROBOROS_PREFLIGHT_REQUIRE_NODE: "1"
+      # As in ci.yml's full-test-runs: Windows runners report two physical cores for four vCPUs,
+      # and the workload waits on storage, not the CPU.
+      OUROBOROS_PREFLIGHT_TEST_WORKERS: ${{ matrix.os == 'windows-latest' && '4' || '' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0  # the base and every commit a bisection probes
+      # Test temp on the runner's work disk (D:, beside the checkout), as in ci.yml's Windows legs.
+      - name: Put Windows test temp on the work disk
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      # Dependencies only, never the project: an installed checkout would let a probe's test
+      # processes import the head's code instead of the probed commit's (scripts/post_merge_check.py).
+      - uses: ./.github/actions/setup-python-env
+        id: setup_python
+        with:
+          interpreter: ${{ matrix.interpreter }}
+          install-project: 'false'
+      # A drifted runner image is loud here (an annotation on the run) but no verdict on the code: the
+      # update letter of every install reads this run's conclusion. The tests still check this system.
+      - name: The stores run ${{ matrix.journal }} here
+        continue-on-error: true
+        run: python -c "import pathlib, sys, tempfile; from ouroboros import store; probe = pathlib.Path(tempfile.mkdtemp()) / 'probe.sqlite'; probe.touch(); mode = store._journal_mode(probe, store.TIER_ENFORCED); print('stores run', mode); mode == sys.argv[1] or print(f'::error title=Post-merge journal mode::this leg runs the stores in {mode}, not {sys.argv[1]}, so it no longer checks what it claims'); sys.exit(mode != sys.argv[1])" ${{ matrix.journal }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: ${{ !cancelled() }}
+        id: setup_node
+        with:
+          node-version: '22'
+      # The POSIX utilities the Windows legs of ci.yml give the same tests (rsync among them).
+      - name: Set up Windows POSIX test utilities
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        id: posix_tools
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: MSYS
+          release: false
+          update: true
+          install: rsync
+      - name: Select Windows POSIX test utilities
+        id: select_posix_tools
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.posix_tools.outcome == 'success' }}
+        shell: pwsh
+        run: '"${{ steps.posix_tools.outputs.msys2-location }}\usr\bin" >> $env:GITHUB_PATH'
+      - name: Choose the base (the head of the last completed check)
+        id: base
+        if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: python scripts/post_merge_check.py base --evidence-dir "$RUNNER_TEMP/post-merge"
+      # What the size check measures books with: the owner's `book-growth` label on a merged pull
+      # request of this window, read for each merge as its own push would be (book_growth_mode.py).
+      - name: Decide the reference-book growth mode of the merges
+        id: growth
+        if: ${{ !cancelled() && steps.base.outcome == 'success' && contains(matrix.gates, '--size') }}
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          BASE: ${{ steps.base.outputs.base }}
+        run: python scripts/post_merge_check.py growth --evidence-dir "$RUNNER_TEMP/post-merge" --base "$BASE" --head "$GITHUB_SHA"
+      # Red here is not the verdict: the retry below separates FAILED from FLAKY. One Windows runner
+      # cannot finish a full escalation (ci.yml runs it in eight shards): it runs the contract floor
+      # and what the changes that did not escalate select by themselves.
+      - name: Run the affected tests (contract floor + affected modules and the complete Node lane)
+        id: selected
+        if: >-
+          ${{ !cancelled() && steps.base.outcome == 'success' && steps.setup_node.outcome == 'success'
+          && (runner.os != 'Windows' || steps.select_posix_tools.outcome == 'success') }}
+        timeout-minutes: 95
+        continue-on-error: true
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+          DEFER_FULL: ${{ runner.os == 'Windows' && '--defer-full' || '' }}
+        run: python scripts/run_tests.py --selected --base "$BASE" --sequential --keep-going $DEFER_FULL --evidence-dir "$RUNNER_TEMP/post-merge"
+      - name: Run each red once more (FAILED or FLAKY)
+        id: classify
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: python scripts/post_merge_check.py classify --evidence-dir "$RUNNER_TEMP/post-merge" ${{ matrix.gates }} --base "$BASE"
+      - name: Find the merge that broke each FAILED test
+        id: attribute
+        if: ${{ !cancelled() && steps.classify.outcome == 'success' }}
+        timeout-minutes: 20
+        env:
+          BASE: ${{ steps.base.outputs.base }}
+        run: python scripts/post_merge_check.py attribute --evidence-dir "$RUNNER_TEMP/post-merge" --base "$BASE" --head "$GITHUB_SHA"
+      # Also after a retry or bisection cut short by its timeout: what they recorded is handed over,
+      # and only a finished bisection ever names a pull request.
+      - name: Hand each red to its author and to Ouroboros; close this system's issues that are green again
+        id: route
+        if: ${{ !cancelled() && steps.base.outcome == 'success' }}
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/post_merge_check.py route --evidence-dir "$RUNNER_TEMP/post-merge" --run-url "$RUN_URL" --os ${{ matrix.leg }}
+      # Independent of affected-module selection: every merge exercises the complete
+      # k=30 cost contract, including rest, scale shapes and producer boundaries. Measured on Linux.
+      - name: Cost contract (rest law, scale shapes and producer boundaries; k=30)
+        id: cost_contract
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.setup_python.outcome == 'success' && steps.setup_node.outcome == 'success' }}
+        timeout-minutes: 8
+        run: python -m pytest -q -o addopts="" -m "scale and not integration" tests/test_cost_contract.py --ci-evidence-dir "$RUNNER_TEMP/post-merge/cost-contract"
+      - name: Upload the evidence
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: post-merge-evidence-${{ matrix.leg }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/post-merge/
+          retention-days: 14
+          if-no-files-found: ignore
+      # The leg is red when a test failed again on its retry or the check could not finish.
+      - name: Publish the result
+        if: ${{ !cancelled() }}
+        run: python scripts/post_merge_check.py summary --evidence-dir "$RUNNER_TEMP/post-merge" --os ${{ matrix.leg }}

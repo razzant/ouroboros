@@ -1,7 +1,7 @@
 ---
 name: windows_computer_use
 description: Windows desktop reading and element actions through the UI Automation text tree (roles, labels, states, coordinates) - no screenshots, no coordinate clicks.
-version: 0.1.0
+version: 0.1.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -84,6 +84,10 @@ licence and attribution; the contribution's licensing is a separate matter.
   pre-call refusal; a worker that did not answer in time also leaves
   `action_call_made=unknown`. A host timeout/kill may prevent that receipt entirely;
   it proves no outcome. Check the window before retrying, never retry blindly.
+- A completed mutating act (all but `focus` and `scroll_into_view`) carries
+  `observed_effect: true`: its pattern call returned on that window, which is
+  not proof that the goal was met; unknown outcomes and refusals never carry it.
+  `delivered_to` names that window (`hwnd`, `title`, `pid`) whenever the call was made.
 - A field the window failed to report is listed in the node's `unread`, not
   shown as missing.
 - All four tools fit the host's JSON-string relay. Oversized displays name

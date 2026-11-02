@@ -84,10 +84,14 @@ def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> 
     assert "modelRolesHost('settings-model-roles')" in ui
     assert "modelRoles.load(s," in host
     assert "slot.note" in _read(MODULES / "model_roles.js")
-    assert "data-provider-test" in ui
-    assert "PROVIDER_TEST_INPUTS" in ui
-    assert "apiClient.providerTest({ provider_id: provider, overrides })" in host
-    assert "providerTestResultIsCurrent" in host
+    # Every API key row carries its Test; the probe runs against that row's draft only.
+    connections = _read(MODULES / "settings_connections.js")
+    # Button presence belongs to the rendered page, regardless of which module
+    # owns its markup: web/tests/provider_test.test.js exercises every key row.
+    assert "apiClient.providerTest(body)" in connections
+    assert "{ provider_id: card.kind, connection: names(card.kind).get(row), overrides }" in connections
+    assert "providerTestResultIsCurrent" in connections
+    assert "createConnectionsEditor" in host
 
 
 def test_onboarding_previews_and_commits_the_visible_owner_draft() -> None:

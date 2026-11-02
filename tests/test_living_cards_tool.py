@@ -243,3 +243,25 @@ def test_a_malformed_card_id_never_reaches_the_filesystem(tmp_path):
     assert load_card(tmp_path, "../state/state") is None
     assert load_card(tmp_path, "card_ABC") is None
     assert read_app_bytes(tmp_path, "../x") is None
+
+
+def test_a_work_turned_into_a_project_replaces_its_own_card_there_and_no_other_room_can(tmp_path):
+    """A card a work showed in Main lives in its Project once the work moves there (its row does too):
+    the same work, readmitted in the Project, may replace it; a work of an unrelated Project may not."""
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+    from ouroboros.task_results import write_task_result
+
+    nova, other = create_project(tmp_path, "nova", name="Nova"), create_project(tmp_path, "other", name="Other")
+    write_task_result(tmp_path, "task-1", "running", chat_id=1, title="task-1")
+    card_id = json.loads(_show_card(_ctx(tmp_path), title="Plan", fallback_text="v1",
+                                    components=[{"type": "markdown", "text": "v1"}]))["card_id"]
+    bind_task_to_project(tmp_path, "task-1", nova["id"], nova["chat_id"], origin={"absent": "system"})
+    moved = json.loads(_show_card(_ctx(tmp_path, chat_id=nova["chat_id"]), title="Plan", fallback_text="v2",
+                                  components=[{"type": "markdown", "text": "v2"}], replace=card_id))
+    assert moved["revision"] == 2 and load_card(tmp_path, card_id)["fallback_text"] == "v2"
+    stranger = _ctx(tmp_path, chat_id=other["chat_id"])
+    stranger.task_id = "stranger"
+    write_task_result(tmp_path, "stranger", "running", chat_id=other["chat_id"], title="stranger")
+    refused = _show_card(stranger, title="Plan", fallback_text="hijack", components=[{"type": "markdown", "text": "x"}],
+                         replace=card_id)
+    assert refused.startswith("⚠️ CARD_REPLACE_OTHER_CHAT") and load_card(tmp_path, card_id)["revision"] == 2

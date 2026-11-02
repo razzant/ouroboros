@@ -52,6 +52,55 @@ def test_native_explicit_output_in_scratch_retains_it(tmp_path, monkeypatch, key
     marker.unlink()
 
 
+@pytest.mark.parametrize("fault", ["injected", "real"])
+def test_failed_export_keeps_the_producers_tree_not_the_whole_run(tmp_path, monkeypatch, fault):
+    """#1908: a test's injected export fault never holds the battery; a real one still keeps it."""
+    import tests.skill_smoke_author as author
+    from ouroboros.safe_test_supervisor import release_scratch
+    from ouroboros.test_environment import RETENTION_MARKER, declare_scratch
+    from tests._shared import retire_synthetic_retention
+
+    run = tmp_path / "run"  # the launcher's root of a whole battery
+    (run / "b0").mkdir(parents=True)
+    declare_scratch(run / "b0", "pytest-basetemp")
+    producer = run / "b0" / "t" / "author"  # one test's own tree
+    producer.mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(run))
+    monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+    if fault == "injected":
+        def fail(*_args):
+            raise OSError("synthetic export failure")
+        monkeypatch.setattr(author, "write_record", fail)
+    else:  # the durable destination is a file, so the export cannot be created
+        (tmp_path / "evidence").write_text("not a directory", encoding="utf-8")
+    errors = author.persist_author_evidence(producer, {"task_id": "probe"}, "credential")
+    reasons = [f"test diagnostics incomplete: {error}" for error in errors]
+    try:
+        assert errors and (producer / RETENTION_MARKER).read_text(encoding="utf-8").splitlines() == reasons
+        assert not (run / RETENTION_MARKER).exists(), "the producer kept the whole run"
+        if fault == "injected":
+            # What the test that injected it does; nothing else may be left holding the run.
+            assert retire_synthetic_retention(producer, *reasons)
+        released = release_scratch(run)
+        assert released["retained"] == ([] if fault == "injected" else [str(run)]), released
+        assert run.exists() is (fault == "real")
+    finally:
+        retire_synthetic_retention(producer, *reasons)  # this test is the real producer's only consumer
+
+
+def test_a_producer_whose_own_tree_cannot_be_marked_keeps_the_run(tmp_path, monkeypatch):
+    from ouroboros.test_environment import RETENTION_MARKER
+    from ouroboros.test_evidence import diagnostics_incomplete
+
+    run = tmp_path / "run"
+    run.mkdir()
+    monkeypatch.setenv("OUROBOROS_TEST_TEMP_ROOT", str(run))
+    diagnostics_incomplete("export: OSError: disk full", tmp_path / "vanished")
+    marker = run / RETENTION_MARKER
+    assert marker.read_text(encoding="utf-8") == "test diagnostics incomplete: export: OSError: disk full\n"
+    marker.unlink()  # this test's own synthetic run root
+
+
 def test_explicit_destination_wins_over_the_shared_channel(tmp_path, monkeypatch):
     chosen = (tmp_path / "chosen").resolve()
     monkeypatch.setenv("OUROBOROS_TEST_EVIDENCE_ROOT", str(tmp_path / "channel"))

@@ -172,6 +172,29 @@ def test_normal_release_joins_guardian(tmp_path, owned, sentinel):
     assert _live(sentinel)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no guardian process: its Job handle is the lifeline")
+@pytest.mark.parametrize("tree", ["reaped", "unconfirmed"])
+def test_a_guardian_stopped_from_outside_does_not_unconfirm_the_owners_own_reap(owned, sentinel, monkeypatch, tree):
+    """#1908: a harness ending the whole tree also ends the guardian; the owner's reap still decides.
+
+    Its release met EPIPE, and close() re-raised it on the buffered release: "lifeline release
+    unconfirmed: [Errno 32] Broken pipe" then kept the run's whole scratch although the owner
+    had confirmed its tree gone. A tree the owner could not confirm stays unconfirmed."""
+    container, proc = owned("import time; time.sleep(45)", lifeline=True)
+    root = _identity(proc.pid)
+    guardian = container._lifeline._proc
+    guardian.kill()
+    guardian.wait(timeout=10)
+    if tree == "unconfirmed":
+        monkeypatch.setattr(container, "_reap", lambda: "pid 4242 still alive")
+    error = container.reap()
+    assert (error == "") is (tree == "reaped"), error
+    assert "Broken pipe" not in error and "lifeline release unconfirmed" not in error, error
+    _until(lambda: not _live(root))  # the owner's own stop ended the workload either way
+    assert guardian.stdin.closed and guardian.stdout.closed
+    assert _live(sentinel)
+
+
 def test_local_runner_reaps_descendant_after_successful_root(tmp_path, sentinel):
     import importlib.util
     from pathlib import Path

@@ -19,13 +19,13 @@ import stat
 
 import pytest
 
-from ouroboros import skill_loader
+from ouroboros import skill_loader, skill_peer_inventory
 from ouroboros.skill_loader import (
     discover_skills,
     save_enabled,
     skill_conflict_status,
 )
-from ouroboros.skill_peer_inventory import SkillPeer, discover_skill_peers
+from ouroboros.skill_peer_inventory import SkillPeer, discover_conflict_peers, discover_skill_peers
 
 BUCKETS = ("native", "clawhub", "external", "ouroboroshub")
 
@@ -163,6 +163,38 @@ def test_peer_projection_matches_full_discovery_over_every_shape(differential_ro
                 path.chmod(stat.S_IRUSR | stat.S_IWUSR)
             except OSError:
                 pass
+
+
+def test_conflict_projection_reaches_the_full_verdict_without_off_manifests(differential_root, monkeypatch):
+    """The execution projection keeps every verdict and opens only ON, unique peers' manifests."""
+    drive = differential_root["drive"]
+    checkout = str(differential_root["checkout"])
+    skills = differential_root["skills"]
+    restricted = [skills / "external" / "unreadable_manifest" / "SKILL.md",
+                  skills / "external" / "unreadable_payload" / "data.bin"]
+    _make_unreadable(restricted)
+    opened, real = [], skill_peer_inventory._manifest_text_for_dir
+    monkeypatch.setattr(skill_peer_inventory, "_manifest_text_for_dir",
+                        lambda path: opened.append(path.name) or real(path))
+    try:
+        full = discover_skills(drive, repo_path=checkout)
+        everything = list(discover_skill_peers(drive, repo_path=checkout))
+        assert {"in_clawhub", "in_ouroboroshub"} <= set(opened)  # the identity scan reads OFF peers
+        for subject in full:
+            opened.clear()
+            projected = discover_conflict_peers(drive, subject.name, repo_path=checkout)
+            assert skill_conflict_status(subject, list(projected)) == skill_conflict_status(subject, full), subject.name
+            assert skill_conflict_status(subject, list(projected)) == skill_conflict_status(subject, everything)
+            # Enabled, unique, readable-or-not manifests of others: never the subject, an OFF
+            # peer or a collision placeholder; the other-platform seed is read, then hidden.
+            assert sorted(opened) == sorted({"in_native", "in_external", "loose_pkg", "repo_pkg", "malformed_pkg",
+                                             "unreadable_payload", "elsewhere_seed"} - {subject.name}), subject.name
+            assert all(peer.enabled and not peer.manifest_error and peer.name != subject.name for peer in projected)
+            assert {peer.name for peer in projected} == {"in_native", "in_external", "loose_pkg", "repo_pkg",
+                                                         "unreadable_payload"} - {subject.name}
+    finally:
+        for path in restricted:
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
 def test_peer_projection_writes_nothing_into_the_root_it_reads(differential_root):

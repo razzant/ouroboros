@@ -13,6 +13,7 @@ import pytest
 
 from tests._shared import producer_evidence_dir
 from tests._work_projection_shared import with_work_fields
+from tests.ui_console_errors import PageErrors
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -29,8 +30,6 @@ window.chat=createChatInstance({ws,state:{activePage:'chat',projectChatIds:new S
     mountEl:document.getElementById('content'),stateSnapshots:{begin:()=>({generation:1,requestedAt:Date.now()}),
     gate(){return Promise.resolve(this.begin());},isCurrent:()=>true,
     apply(request,data){window.chat?.hydrateStateSnapshot(data);}}});
-document.getElementById('reconnect-overlay').hidden=true;
-document.getElementById('reconnect-overlay').style.display='none';
 window.addEventListener('ouro:open-project',event=>{window.openedProject=event.detail;});
 </script>"""
 
@@ -69,7 +68,8 @@ def project_chat(request):
                   "last_line": "Comparing the reviewer verdicts across the last three runs.",
                   "last_line_at": "2026-10-08T14:05:00Z", "tool_calls": 41, "cancelable": True},
                  {"activity_id": "transfer", "project_id": "beta", "chat_id": 8, "kind": "managed_task",
-                  "phase": "budget_paused", "pause_cause": "owner", "started_at": 1791467880},
+                  "phase": "budget_paused", "pause_cause": "owner", "started_at": 1791467880,
+                  "stop": {"cause": "pause", "scope": "tree", "release": "resume"}},
              ]}
     conversions, details, requests, continues = {}, {}, [], {}
     history = {"messages": rows, "progress": [], "has_more": False, "page_cursor": "work-cards",
@@ -122,8 +122,7 @@ def project_chat(request):
                 page.add_init_script("""Object.defineProperty(navigator, 'clipboard', {
                     value: {writeText: async text => {window.copiedText = text;}}});""")
                 page.route("**/api/**", respond)
-                errors = []
-                page.on("pageerror", lambda error: errors.append(str(error)))
+                errors = PageErrors(page, engine)
                 page.goto(f"http://127.0.0.1:{server.server_port}/")
                 if chat_id == 1:
                     page.wait_for_function("() => window.chat && document.querySelector('#chat-messages .chat-bubble')")
@@ -131,7 +130,7 @@ def project_chat(request):
                 yield {"page": page, "expect": playwright.expect, "rows": rows, "state": state, "conversions": conversions,
                        "details": details, "requests": requests, "continues": continues, "history": history,
                        "engine": engine, "theme": theme, "width": width}
-                assert not errors
+                assert not errors.unexpected(), errors
             finally:
                 browser.close()
     finally:
@@ -154,14 +153,61 @@ def _card(page, task_id):
     return page.locator(f'#chat-messages > .chat-live-card[data-task-id="{task_id}"]')
 
 
+# The portal's Project reference leads its own action row, under the meta line, its controls at the row's end
+# (owner 26.10, "вариант B"): never a strip closing the card.
+DOOR = ':scope > .chat-live-foot > .chat-live-foot-end > .chat-live-bound-pointer'
+LEADS = "c => c.querySelector(':scope > .chat-live-foot > .chat-live-foot-end')?.firstElementChild?.classList.contains('chat-live-bound-pointer')"
+# The B composition as laid out: boxes relative to the card, the capsule's hit area under a finger, the name's cut.
+_PORTAL_ROW = """card => {
+    const c = card.getBoundingClientRect();
+    const box = (el) => { if (!el) return null; const r = el.getBoundingClientRect();
+        return {top: r.top - c.top, bottom: r.bottom - c.top, left: r.left - c.left, right: c.right - r.right,
+            width: r.width, height: r.height, mid: (r.top + r.bottom) / 2 - c.top}; };
+    const door = card.querySelector(':scope > .chat-live-foot > .chat-live-foot-end > .chat-live-bound-pointer');
+    const name = door?.querySelector('.chat-live-project-name');
+    const after = door ? getComputedStyle(door, '::after') : null;
+    const coarse = matchMedia('(pointer: coarse)').matches;
+    return {card: box(card), summary: box(card.querySelector(':scope > .chat-live-summary-button')),
+        lines: [...card.querySelectorAll(':scope > .chat-live-summary-button > *')].filter(e => e.getClientRects().length).map(box),
+        meta: box(card.querySelector(':scope > .chat-live-foot > .chat-live-meta')), door: box(door),
+        row: box(card.querySelector(':scope > .chat-live-foot > .chat-live-foot-end')),
+        buttons: [...card.querySelectorAll(':scope > .chat-live-foot > .chat-live-foot-end > .chat-live-actions > button')].map(box),
+        shown: name?.textContent, cut: name ? name.scrollWidth > name.clientWidth + 1 : null,
+        hit: coarse && after && after.content !== 'none' ? door.getBoundingClientRect().height - parseFloat(after.top) - parseFloat(after.bottom) : null,
+        closing: c.bottom - parseFloat(getComputedStyle(card).borderBottomWidth) - card.querySelector(':scope > .chat-live-foot > .chat-live-foot-end').getBoundingClientRect().bottom,
+        overflow: card.scrollWidth > card.clientWidth + 1 || document.documentElement.scrollWidth > innerWidth + 1};
+}"""
+
+
+def _assert_b_row(geo, buttons):
+    """One action row under the meta line: the capsule at the meta line's left edge, the controls at the row's end,
+    all on one line; nothing wider than the card."""
+    assert not geo["overflow"], geo
+    door, meta, row = geo["door"], geo["meta"], geo["row"]
+    assert meta["bottom"] <= row["top"] + 0.5, "the meta line keeps its own line above the action row"
+    assert abs(door["left"] - meta["left"]) <= 1, "the capsule starts on the meta line's left edge"
+    assert abs(row["height"] - door["height"]) <= 1 and door["height"] >= 24, "one row at the controls' height"
+    assert len(geo["buttons"]) == buttons, geo["buttons"]
+    for button in geo["buttons"]:
+        assert abs(button["mid"] - door["mid"]) <= 1, "the controls share the capsule's line"
+    if geo["buttons"]:
+        assert abs(geo["buttons"][-1]["right"] - door["left"]) <= 1, "the row ends on the inset it starts on"
+        assert door["left"] + door["width"] + 8 <= geo["buttons"][0]["left"] + 0.5, "the capsule stops before the controls"
+    if geo["hit"] is not None:
+        assert geo["hit"] >= 44 - 0.5, "a finger's target"
+
+
 def test_project_rows_bind_the_works_own_cards_never_an_entry(project_chat, tmp_path):
     page, expect = project_chat["page"], project_chat["expect"]
     creation, transfer = _card(page, "creation"), _card(page, "transfer")
     for card, name in ((creation, "Project Alpha"), (transfer, "Project Beta")):
         expect(card).to_have_attribute("data-portal", "1")
-        footer = card.locator(':scope > .chat-live-bound-pointer')
-        expect(footer).to_have_attribute("aria-label", f"Open project {name}")
-        assert card.evaluate("c => c.lastElementChild.classList.contains('chat-live-bound-pointer')"), "the footer closes the card"
+        door = card.locator(DOOR)
+        expect(door).to_have_attribute("aria-label", f"Open project {name}")
+        # Named apart from its work, the Project shows its own name on the capsule.
+        expect(door.locator('.chat-live-project-name')).to_have_text(name)
+        assert card.evaluate(LEADS), "the reference leads the card's action row"
+        assert card.locator('[data-intent="open-project"]').count() == 1, "one door, no second footer"
     assert page.locator('.project-handoff, [data-system-type="project_started"], [data-system-type="project_handoff"]').count() == 0
     # The room's present: chip, the latest line, tool calls and time; [Stop…] while it runs (Reply is the row menu's).
     expect(creation.locator('.chat-live-phase').first).to_have_text("Working")
@@ -175,15 +221,13 @@ def test_project_rows_bind_the_works_own_cards_never_an_entry(project_chat, tmp_
     # The summary is reading content in a portal: no disclosure, no stop.
     assert creation.locator(':scope > [data-live-summary-button]').evaluate("e=>['role','tabindex','aria-expanded'].map(n=>e.getAttribute(n))") == [None, None, None]
     expect(creation.locator('[data-live-disclosure]')).to_be_hidden()
-    geometry = creation.evaluate("""card => { const c = card.getBoundingClientRect();
-        const box = (sel) => { const r = card.querySelector(sel).getBoundingClientRect(); return {l: r.left - c.left, r: c.right - r.right, h: r.height}; };
-        return {overflow: card.scrollWidth > card.clientWidth + 1, footer: box(':scope > .chat-live-bound-pointer'),
-            buttons: [...card.querySelectorAll('.chat-live-actions > button')].map((b) => b.getBoundingClientRect().height)}; }""")
-    assert not geometry["overflow"]
-    assert geometry["footer"]["l"] <= 1 and geometry["footer"]["r"] <= 1, "the footer strip spans the card"
-    assert geometry["footer"]["h"] >= 36, "a full pointer target"
-    assert min(geometry["buttons"]) >= 24
-    creation.locator(':scope > .chat-live-bound-pointer').click()
+    geometry = creation.evaluate(_PORTAL_ROW)
+    _assert_b_row(geometry, buttons=1)
+    _assert_b_row(transfer.evaluate(_PORTAL_ROW), buttons=2)
+    # Compact (B): the meta line follows the summary at the summary's own 8px gap, the row closes the card at 12px.
+    assert abs(geometry["meta"]["top"] - geometry["lines"][-1]["bottom"] - 8) <= 1, geometry
+    assert abs(geometry["closing"] - 12) <= 0.5, geometry
+    creation.locator(DOOR).click()
     assert page.evaluate("[openedProject.project.id, openedProject.task_id]") == ["alpha", "creation"]
     creation.screenshot(path=_evidence(tmp_path, project_chat, "portal"), animations="disabled")
 
@@ -208,14 +252,92 @@ def test_turn_into_project_keeps_the_card_as_its_portal(project_chat):
     expect(card).to_have_attribute("data-portal", "1")
     assert page.evaluate("n => n.isConnected && n === document.querySelector('[data-task-id=\"local\"]')", node), "the SAME node"
     expect(card.locator('[data-turn-into-project]')).to_have_count(0)
-    expect(card.locator(':scope > .chat-live-bound-pointer')).to_have_attribute("aria-label", "Open project Project Gamma")
+    expect(card.locator(DOOR)).to_have_attribute("aria-label", "Open project Project Gamma")
+    assert card.evaluate(LEADS), "the converted card's row leads with its Project"
+    expect(card.locator(':scope > .chat-live-foot > .chat-live-foot-end > .chat-live-actions > button')).to_have_text(["Stop…"])
     assert project_chat["requests"][-1]["task_id"] == "local"
+
+
+SAME = "Release checklist — signing and notarization"
+LONG_TITLE = ("Narrow screen — the scrollbar disappears after the WebKit rollback, a second check and a comparison with "
+              "Chromium on the same frames")
+LONG_PROJECT = "Interface check after the rendering engine update and the frame comparison"
+
+
+# Every observer pointed at a card title (DEVELOPMENT "UI resources carry a disposer": the capsule keeps no watch there).
+_TITLE_WATCHES = """(() => { const observe = MutationObserver.prototype.observe; window.titleWatches = 0;
+    MutationObserver.prototype.observe = function (target, options) {
+        const el = target && (target.nodeType === 1 ? target : target.parentElement);
+        if (el?.closest?.('[data-live-title]')) window.titleWatches += 1;
+        return observe.call(this, target, options); }; })();"""
+
+
+def test_portal_row_says_a_same_named_project_once_and_keeps_a_long_name_on_one_line(project_chat, tmp_path):
+    """Owner 26.10, "вариант B": beside a title that already says its Project's name the capsule reads `Project`
+    (its accessible name, tooltip and press keep the Project) and follows the title when its naming owner renames it,
+    with no observer on the title; a long, differently named Project beside [Resume] [Stop…] ellipsizes inside the one
+    row at desktop and phone width, the controls whole, nothing wider than the card."""
+    page, expect, state = project_chat["page"], project_chat["expect"], project_chat["state"]
+    page.add_init_script(_TITLE_WATCHES)
+    page.reload()
+    page.wait_for_function("() => window.chat && document.querySelector('#chat-messages .chat-bubble')")
+    page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields(state))
+    for task, project, name, title, at in (("same", "delta", SAME, SAME, "14:20"),
+                                           ("long", "epsilon", LONG_PROJECT, LONG_TITLE, "14:21")):
+        page.evaluate("""r => emit('chat', {...r, content: r.text})""", {
+            "role": "system", "system_type": "project_started", "chat_id": 1, "task_id": task, "project_id": project,
+            "project_name": name, "task_name": title, "text": f"{name} › {title} · Started",
+            "ts": f"2026-10-08T{at}:00Z"})
+        state["task_bindings"][task] = {"project_id": project, "chat_id": 9}
+        state["projects"].append({"id": project, "name": name, "chat_id": 9})
+    state["active_chat_activities"] += [
+        {"activity_id": "same", "project_id": "delta", "project_name": SAME, "chat_id": 9, "kind": "managed_task",
+         "phase": "working", "started_at": 1791469200, "tool_calls": 12, "cancelable": True},
+        {"activity_id": "long", "project_id": "epsilon", "project_name": LONG_PROJECT, "chat_id": 9,
+         "kind": "managed_task", "phase": "budget_paused", "pause_cause": "owner", "started_at": 1791469260,
+         "last_line": "Paused by the owner while the rollback finishes; the last check showed the scrollbar gone on the "
+                      "390 px frame only after the second reload, so the next step compares both engines.",
+         "last_line_at": "2026-10-08T14:25:00Z", "tool_calls": 41,
+         "stop": {"cause": "pause", "scope": "tree", "release": "resume"}}]
+    page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields(state))
+    same, long = _card(page, "same"), _card(page, "long")
+    expect(same.locator(".chat-live-actions > button")).to_have_text(["Stop…"])
+    expect(long.locator(".chat-live-actions > button")).to_have_text(["Resume", "Stop…"])
+    door = same.locator(DOOR)
+    expect(door.locator(".chat-live-project-name")).to_have_text("Project")
+    expect(door).to_have_attribute("aria-label", f"Open project {SAME}")
+    expect(door).to_have_attribute("title", f"Open project {SAME}")
+    _assert_b_row(same.evaluate(_PORTAL_ROW), buttons=1)
+    # The title renamed after the binding (a coined name): the capsule says the Project's name again, and back.
+    page.evaluate("() => emit('task_named', {task_id: 'same', suggested_name: 'Release checklist, second pass'})")
+    expect(same.locator("[data-live-title]")).to_have_text("Release checklist, second pass")
+    expect(door.locator(".chat-live-project-name")).to_have_text(SAME)
+    page.evaluate("name => emit('task_named', {task_id: 'same', suggested_name: name})", SAME)
+    expect(door.locator(".chat-live-project-name")).to_have_text("Project")
+    # The long name stays one capsule on the controls' line; at phone width it ellipsizes, its speech whole.
+    long_door = long.locator(DOOR)
+    expect(long_door).to_have_attribute("aria-label", f"Open project {LONG_PROJECT}")
+    expect(long_door.locator(".chat-live-project-name")).to_have_text(LONG_PROJECT)
+    geometry = long.evaluate(_PORTAL_ROW)
+    _assert_b_row(geometry, buttons=2)
+    assert min(button["width"] for button in geometry["buttons"]) >= 48, "the controls keep their words"
+    if project_chat["width"] < 600:
+        assert geometry["cut"], "the name gives way first"
+    long.screenshot(path=_evidence(tmp_path, project_chat, "portal-long"), animations="disabled")
+    same.screenshot(path=_evidence(tmp_path, project_chat, "portal-same-name"), animations="disabled")
+    long_door.click()
+    assert page.evaluate("[openedProject.project.id, openedProject.project.name, openedProject.task_id]") == [
+        "epsilon", LONG_PROJECT, "long"]
+    door.click()
+    assert page.evaluate("[openedProject.project.id, openedProject.task_id]") == ["delta", "same"]
+    expect(page.locator('#chat-messages > .chat-live-card[data-portal="1"]')).to_have_count(4)
+    assert page.evaluate("window.titleWatches") == 0, "no portal watches its title"
 
 
 def test_the_row_menu_opens_by_pointer_keyboard_and_touch_and_gives_focus_back(project_chat, tmp_path):
     page, expect = project_chat["page"], project_chat["expect"]
     card = _card(page, "creation")
-    menu = page.locator('.chat-row-menu')
+    menu = page.locator('.chat-row-menu:not([data-leaving])')
     card.locator('[data-live-title]').click(button="right")
     expect(menu.locator('[role="menuitem"]')).to_have_text(["Reply", "Copy", "Open project", "Pause", "Stop…"])
     expect(menu.locator('[role="menuitem"]').first).to_be_focused()
@@ -273,7 +395,7 @@ def test_a_reply_sends_only_the_quoted_rows_address(project_chat, tmp_path):
     expect(echo.locator('.chat-quote .chat-quote-author')).to_have_text("Ouroboros")
     # A work card's Reply is its row menu's (owner 17.10, Q9 B); it quotes the work by its task address.
     _card(page, "creation").locator('[data-live-title]').click(button="right")
-    page.locator('.chat-row-menu [data-row-action="reply"]').click()
+    page.locator('.chat-row-menu:not([data-leaving]) [data-row-action="reply"]').click()
     page.fill('#chat-input', "Stop after the third run")
     page.locator('#chat-send').click()
     assert page.evaluate("() => sentFrames.at(-1).reply_to") == "task:creation"
@@ -328,7 +450,7 @@ def _visible_cards(page):
 def test_main_portal_follows_a_continue_made_in_the_project_room(project_chat, journey, tmp_path):
     """Owner QB = A and 16.10 Q1 = A: a Main request moved into Project Alpha, interrupted, then continued in the room.
     Main's ONE card for that work shows the admitted successor as its current episode (chip, line, meta, its Stop…),
-    keeps the work's place, first name and Project footer, and folds the ended episode into one meta line: live
+    keeps the work's place, first name and Project reference, and folds the ended episode into one meta line: live
     (the census arrives while Main is open) and after a Main reload."""
     page, expect = project_chat["page"], project_chat["expect"]
     creation = _card(page, "creation")
@@ -358,9 +480,10 @@ def test_main_portal_follows_a_continue_made_in_the_project_room(project_chat, j
     expect(card.locator('[data-live-activity]')).to_have_text("Continuing the audit")
     expect(card.locator('[data-live-meta]')).to_contain_text("3 tool calls")
     expect(card.locator('.chat-live-actions > button')).to_have_text(["Stop…"])
-    footer = card.locator(':scope > .chat-live-bound-pointer')
-    expect(footer).to_have_attribute("aria-label", "Open project Project Alpha")
-    assert card.evaluate("c => c.lastElementChild.classList.contains('chat-live-bound-pointer')"), "the footer closes the card"
+    door = card.locator(DOOR)
+    expect(door).to_have_attribute("aria-label", "Open project Project Alpha")
+    assert card.evaluate(LEADS), "the reference leads the action row"
+    _assert_b_row(card.evaluate(_PORTAL_ROW), buttons=1)
     episodes = card.locator('.chat-live-episode')
     expect(episodes).to_have_count(2)
     expect(episodes.nth(0)).to_contain_text(_episode(1, "13:57–14:09", "Failed", name=WORK))
@@ -463,29 +586,37 @@ _MARK_MATERIAL = """buttons => {
     const probe = document.body.appendChild(document.createElement('i'));
     probe.style.color = 'var(--bg-primary)';
     const page = rgba(getComputedStyle(probe).color);
-    probe.style.color = 'var(--project)';
-    const ink = getComputedStyle(probe).color;
-    probe.remove();
+    // The Project ink where the reference lies: inside the dark Ouroboros voice, that voice's own (ui.css materials).
+    const inkAt = node => { probe.style.color = getComputedStyle(node).getPropertyValue('--project').trim(); return getComputedStyle(probe).color; };
+    const dark = document.documentElement.dataset.theme !== 'light';
     const painted = node => {
         const layers = [];
-        for (let el = node; el; el = el.parentElement) layers.unshift(rgba(getComputedStyle(el).backgroundColor));
+        for (let el = node; el; el = el.parentElement) {
+            const style = getComputedStyle(el);
+            // The shared tint is painted over its optional opaque backing (the answer fade passes behind it).
+            if (el.classList.contains('chat-live-project-card-btn')) layers.unshift(rgba(style.getPropertyValue('--project-reference-fill')));
+            layers.unshift(rgba(style.backgroundColor));
+        }
         return layers.reduce((base, layer) => ({...over(layer, base), a: 1}), page);
     };
     const lum = c => ['r', 'g', 'b'].map(k => c[k] / 255).map(v => v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
         .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
     const contrast = (a, b) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
-    return buttons.map(button => {
+    const marks = buttons.map(button => {
         const icon = button.querySelector('.chat-live-project-icon'), name = button.querySelector('.chat-live-project-name');
         const fill = painted(button), beneath = painted(button.parentElement);
         return {host: button.classList.contains('chat-live-bound-pointer') ? 'footer'
-                : button.closest('.msg-routing-annotation') ? 'receipt' : 'capsule', ink,
+                : button.closest('.msg-routing-annotation') ? 'receipt' : 'capsule', ink: inkAt(button),
+            voice: dark && Boolean(button.closest('.chat-bubble.assistant, .chat-live-card')),
             tile: rgba(getComputedStyle(icon).backgroundColor).a,
-            fill: rgba(getComputedStyle(button).backgroundColor).a,
+            fill: rgba(getComputedStyle(button).getPropertyValue('--project-reference-fill')).a,
             glyph: getComputedStyle(icon).color, name: getComputedStyle(name).color,
             glyph_on_fill: contrast(rgba(getComputedStyle(icon).color), fill),
             fill_on_beneath: contrast(fill, beneath),
             name_on_fill: contrast(rgba(getComputedStyle(name).color), fill)};
     });
+    probe.remove();
+    return marks;
 }"""
 
 
@@ -494,7 +625,8 @@ def test_project_reference_is_one_tinted_fill_with_no_tile_behind_its_glyph(proj
     fill. The Project reference (owner 17.10, Q2 C: one chip in two forms) is the Project's tint with the glyph, the
     name and the arrow in project ink on it, readable in each theme; the glyph stands on that fill with no tile of its
     own (a second fill read as a second button), and the tint stays far quieter than the name. Its hosts after one
-    bubble per request: a moved work's portal footer, the capsule of a mirrored answer and of a System lifecycle row,
+    bubble per request: a moved work's portal (its action row's capsule), the capsule of a mirrored answer and of a
+    System lifecycle row,
     and the owner's routing receipt line (the retired Project entries are gone)."""
     page, expect = project_chat["page"], project_chat["expect"]
     for answer in ("The review runner reports every reviewer in words.", None):
@@ -514,12 +646,13 @@ def test_project_reference_is_one_tinted_fill_with_no_tile_behind_its_glyph(proj
             project_chat_id: 7, target: 'creation', target_titles: ['Review runner › integration']});
     }""")
     expect(page.locator('.msg-routing-annotation [data-intent="open-project"]')).to_have_count(1)
-    expect(page.locator('#chat-messages > .chat-live-card > .chat-live-bound-pointer')).to_have_count(2)
+    expect(page.locator('#chat-messages > .chat-live-card > .chat-live-foot > .chat-live-foot-end > .chat-live-bound-pointer')).to_have_count(2)
     marks = page.locator('[data-intent="open-project"]').evaluate_all(_MARK_MATERIAL)
     assert sorted(mark["host"] for mark in marks) == ["capsule", "capsule", "footer", "footer", "receipt"]
     for mark in marks:
         assert mark["tile"] == 0, mark
-        assert 0 < mark["fill"] < 1, mark
+        # A tint on the room and on white; inside the dark Ouroboros voice the voice's own opaque capsule step.
+        assert mark["fill"] == 1 if mark["voice"] else 0 < mark["fill"] < 1, mark
         assert mark["glyph"] == mark["name"] == mark["ink"], mark
         assert mark["glyph_on_fill"] >= 3, mark
         assert mark["fill_on_beneath"] * 2 < mark["name_on_fill"], mark
@@ -530,7 +663,7 @@ def test_main_portal_follows_a_successor_that_already_finished(project_chat, jou
     """Astra W2 R2: a moved work fails, is continued in its room, and the successor finishes before Main's next census
     (or Main is opened after it finished). The census lists neither ended work; the predecessor's record names the
     admitted successor and the successor's own record holds its outcome. Main's ONE card still follows it: the work's
-    place, first name and Project footer, the ended episode as one line, the current episode settled from its record."""
+    place, first name and Project reference, the ended episode as one line, the current episode settled from its record."""
     page, expect = project_chat["page"], project_chat["expect"]
     expect(_card(page, "creation")).to_be_visible()
     quick = "creation-cquick"
@@ -562,8 +695,11 @@ def test_main_portal_follows_a_successor_that_already_finished(project_chat, jou
     expect(card.locator('[data-live-title]')).to_have_text("Review runner › integration")
     expect(card.locator('.chat-live-phase').first).to_have_text("Done")
     expect(card.locator('.chat-live-actions > button')).to_have_count(0)
-    footer = card.locator(':scope > .chat-live-bound-pointer')
-    expect(footer).to_have_attribute("aria-label", "Open project Project Alpha")
+    door = card.locator(DOOR)
+    expect(door).to_have_attribute("aria-label", "Open project Project Alpha")
+    # A settled work has no control: its row still stands for the door, which keeps the row's start.
+    expect(door).to_be_visible()
+    _assert_b_row(card.evaluate(_PORTAL_ROW), buttons=0)
     episodes = card.locator('.chat-live-episode')
     expect(episodes).to_have_count(2)
     expect(episodes.nth(0)).to_contain_text(_episode(1, "13:57–14:09", "Failed", name=WORK))
@@ -613,10 +749,72 @@ def test_an_already_failed_portal_follows_a_later_fast_continue(project_chat, jo
     expect(card.locator('[data-live-title]')).to_have_text("Review runner › integration")
     expect(card.locator('.chat-live-phase').first).to_have_text("Done")
     expect(card.locator('.chat-live-actions > button')).to_have_count(0)
-    expect(card.locator(':scope > .chat-live-bound-pointer')).to_have_attribute("aria-label", "Open project Project Alpha")
+    expect(card.locator(DOOR)).to_have_attribute("aria-label", "Open project Project Alpha")
+    expect(card.locator(DOOR)).to_be_visible()
     episodes = card.locator('.chat-live-episode')
     expect(episodes).to_have_count(2)
     expect(episodes.nth(0)).to_contain_text(_episode(1, "13:57–14:09", "Failed", name=WORK))
     expect(episodes.nth(1)).to_have_text(_episode(2, "14:10–14:12"))
     assert page.locator('#chat-messages [data-continue-task]:visible').count() == 0, "no Continue stands as its action"
     card.screenshot(path=_evidence(tmp_path, project_chat, f"later-continue-{journey}"), animations="disabled")
+
+
+def test_empty_output_recovery_preserves_failed_card_and_continue(project_chat, tmp_path):
+    """The new terminal cause uses the real card/replay/Continue consumers, not a new UI."""
+    from ouroboros.owner_continue import continuation_offer
+    from ouroboros.project_dialogue import TASK_CAUSE_PHRASES
+    page, expect, state = project_chat["page"], project_chat["expect"], project_chat["state"]
+    reason = "output_recovery_exhausted"
+    record = _interrupted(reason_code=reason, root_task_id="creation",
+        outcome_axes={"execution": {"status": "infra_failed"}, "objective": {"status": "not_evaluated"}})
+    record["continuation_offer"] = continuation_offer(record, "creation")
+    assert record["continuation_offer"]["eligible"]
+    project_chat["details"]["creation"] = record
+    state["active_chat_activities"] = [r for r in state["active_chat_activities"] if r["activity_id"] != "creation"]
+    for replay in (False, True):
+        if replay:
+            page.reload()
+            page.wait_for_function("() => window.chat && document.querySelector('#chat-messages .chat-bubble')")
+        page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields(state))
+        card = _card(page, "creation")
+        expect(card.locator('.chat-live-phase').first).to_have_text("Failed", timeout=15000)
+        expect(card.locator('[data-continue-task]')).to_have_text("Continue")
+        expect(card).to_contain_text(TASK_CAUSE_PHRASES[reason])
+    card.screenshot(path=_evidence(tmp_path, project_chat, "output-recovery"), animations="disabled")
+    admitted = []
+
+    def admit(route):
+        # An accepted Continue persists its link before replying; the portal immediately rereads that record.
+        payload = route.request.post_data_json
+        assert route.request.method == "POST" and payload["action_nonce"], payload
+        admitted.append(payload)
+        binding = {"project_id": "alpha", "chat_id": 7}
+        record["continued_by"] = {"state": "admitted", "successor_task_id": SUCCESSOR,
+                                  "action_nonce": payload["action_nonce"], "binding": binding}
+        record["continuation_offer"] = continuation_offer(record, "creation")
+        project_chat["details"][SUCCESSOR] = {"task_id": SUCCESSOR, "status": "pending", **binding}
+        state["task_bindings"][SUCCESSOR] = binding
+        state["active_chat_activities"].append({"activity_id": SUCCESSOR, "kind": "managed_task", "phase": "queued",
+                                                "started_at": 1791468600, "cancelable": True, **binding})
+        route.fulfill(json={"ok": True, "successor_task_id": SUCCESSOR, "status": "scheduled"})
+
+    page.route("**/api/tasks/creation/continue", admit)
+    with page.expect_response(lambda r: r.url.endswith('/api/tasks/creation/continue')) as accepted:
+        card.locator('[data-continue-task]').click()
+    assert accepted.value.json()["ok"]
+    for replay in (False, True):
+        if replay:
+            page.reload()
+            page.wait_for_function("() => window.chat && document.querySelector('#chat-messages .chat-bubble')")
+        page.evaluate("s => chat.hydrateStateSnapshot(s)", with_work_fields(state))
+        successor = _card(page, SUCCESSOR)
+        expect(successor).to_be_visible(timeout=15000)
+        expect(successor.locator('.chat-live-phase').first).to_have_text("Queued")
+        expect(card).to_be_hidden()
+        assert _visible_cards(page) == [SUCCESSOR, "transfer"], "Continue keeps one card for the work"
+        episodes = successor.locator('.chat-live-episode')
+        expect(episodes).to_have_count(2)
+        expect(episodes.first).to_contain_text(_episode(1, "13:57–14:09", "Failed", name=WORK))
+        expect(episodes.first).to_contain_text(TASK_CAUSE_PHRASES[reason])
+        expect(successor.locator('[data-continue-task]')).to_have_count(0)
+    assert len(admitted) == 1 and not record["continuation_offer"]["eligible"], admitted

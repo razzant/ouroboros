@@ -28,7 +28,7 @@ from ouroboros.skill_loader import (
 )
 from ouroboros.skill_review import review_skill
 
-from tests._skill_review_shared import _make_actor, _make_ctx, _pass_array_for_script_skill
+from tests._skill_review_shared import _make_ctx
 
 log = logging.getLogger(__name__)
 
@@ -66,14 +66,6 @@ def _build_extension_payload(
     return skill_dir
 
 
-def _pass_panel():
-    canned = json.dumps({"results": [
-        _make_actor("reviewer-a", _pass_array_for_script_skill()),
-        _make_actor("reviewer-b", _pass_array_for_script_skill()),
-    ]})
-    return patch("ouroboros.tools.review._handle_multi_model_review", return_value=canned)
-
-
 def _refuse_dispatch():
     return patch(
         "ouroboros.tools.review._handle_multi_model_review",
@@ -95,7 +87,7 @@ def test_fieldless_extension_artifact_is_refused_a_new_pass_before_dispatch(
         outcome = review_skill(ctx, "noapifield")
     assert outcome.status == "pending"
     assert "PluginAPI 2.0 admission" in outcome.error
-    assert outcome.paid is False and outcome.wave_id == ""
+    assert outcome.paid is False and outcome.record_id == ""  # refused before any wave: no record
     assert [f["item"] for f in outcome.findings] == ["plugin_api_admission"]
     persisted = load_review_state(ctx.drive_root, "noapifield")
     assert persisted.status == "pending"
@@ -107,9 +99,12 @@ def test_declared_2_0_extension_artifact_still_earns_a_pass(tmp_path, monkeypatc
     _build_extension_payload(skills_root, "withapifield", plugin_api_line='plugin_api: "2.0"\n')
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     ctx = _make_ctx(tmp_path)
-    with _pass_panel():
-        outcome = review_skill(ctx, "withapifield")
+    from tests.test_skill_review_persist_guard import _clean_wave
+
+    sends = _clean_wave(monkeypatch)  # the fold's physical seam: every seat answers clean through custody
+    outcome = review_skill(ctx, "withapifield")
     assert outcome.status == "clean", outcome.error
+    assert sends, "a declared 2.0 extension earns its PASS from a real wave"
     assert load_review_state(
         ctx.drive_root, "withapifield", skill_type="extension"
     ).status == "clean"

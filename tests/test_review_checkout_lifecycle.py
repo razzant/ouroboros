@@ -213,9 +213,10 @@ def test_a_late_capture_of_an_old_turn_never_touches_the_newer_turn(tmp_path, mo
         assert _thread(root, source, "turn-2") == area  # turn 1's failed copy moved under its own seat
     (area / "turn-2.log").write_bytes(b"newer turn\n")
     late = rc.capture_seat_evidence(root, TASK, "turn-1")
-    assert late["status"] == "capture_failed" and "no longer belongs" in late["error"]
+    assert late["status"] == "retained"
     assert (area / "turn-2.log").read_bytes() == b"newer turn\n"
-    assert (rc.seat_dir(root, TASK, "turn-1") / "area" / "check.py").read_bytes() == EDIT
+    assert not (rc.seat_dir(root, TASK, "turn-1") / "area.noindex").exists()
+    assert (Path(late["evidence_dir"]) / "files" / "check.py").read_bytes() == EDIT
 
 
 def test_captures_of_one_seat_wait_for_its_lock(tmp_path):

@@ -87,21 +87,23 @@ def _payload_from_row(row: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return skill, validate_delivery(payload)
 
 
-def _verified_task(data_dir: Path, skill: str, origin: dict[str, str]) -> tuple[str, dict[str, str]]:
+def _verified_task(data_dir: Path, skill: str, origin: dict[str, str]) -> tuple[str, dict[str, str], dict]:
     task_id = origin.get("task_id", "")
     if not task_id:
-        return "", {}
+        return "", {}, {}
     from ouroboros.dialogue_provenance import presence_provenance_from_task
     from ouroboros.task_results import load_task_result
 
     try:
         task = load_task_result(data_dir, task_id, strict=True) or {}
     except (OSError, ValueError, StoreError):
-        return "", {}
+        return "", {}, {}
     provenance = presence_provenance_from_task(task)
     if provenance.get("transport_skill") != skill:
-        return "", {}
-    return task_id, provenance
+        return "", {}, {}
+    metadata = task.get("metadata") or {}
+    focus = (metadata.get("focus") or {}) if metadata.get("wake_cause") == "focus" else {}
+    return task_id, provenance, focus
 
 
 class PresenceDeliveryRecorder:
@@ -162,6 +164,8 @@ class PresenceDeliveryRecorder:
             if previous is not None:
                 if previous != digest:
                     raise PresenceDeliveryConflict("presence delivery identity already has different facts")
+                from ouroboros.place_reply import record_late_delivery
+                record_late_delivery(self.data_dir, skill, payload, client_id)
                 return {"ok": True, "recorded": True, "duplicate": True,
                         "history_coverage": "gapped" if self._history_gapped else "indexed"}
 
@@ -169,7 +173,7 @@ class PresenceDeliveryRecorder:
             from ouroboros.presence_runner import _stable_numeric_id
             from supervisor.message_bus import log_chat
 
-            task_id, provenance = _verified_task(self.data_dir, skill, payload["origin"])
+            task_id, provenance, focus = _verified_task(self.data_dir, skill, payload["origin"])
             conversation_key = presence_conversation_key(*(payload[key] for key in (
                 "provider", "account_id", "conversation_id", "thread_id",
             )))
@@ -186,6 +190,9 @@ class PresenceDeliveryRecorder:
                 )},
                 "conversation_key": conversation_key, "delivery": delivery,
             }
+            sends_as = (focus.get("identity") or {}).get("sends_as")
+            if sends_as:
+                transport.update(sends_as=dict(sends_as), sends_as_owner=bool(focus.get("identity_owner")))
             try:
                 # log_chat owns the append/rotation lock; never acquire it here.
                 log_chat(
@@ -201,6 +208,8 @@ class PresenceDeliveryRecorder:
                 self._index = None
                 self._history_gapped = False
                 raise
+            from ouroboros.place_reply import record_late_delivery
+            record_late_delivery(self.data_dir, skill, payload, client_id)
             self._index[key] = digest
             return {"ok": True, "recorded": True, "duplicate": False,
                     "history_coverage": "gapped" if self._history_gapped else "indexed"}

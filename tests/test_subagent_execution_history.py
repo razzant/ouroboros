@@ -42,10 +42,14 @@ def test_api_failure_fallback_and_retry_reach_next_task_context(tmp_path, monkey
     usage["llm_call_refs"].append({"model": "openai::fallback", "usable_solve_response": True})
     _store_task_result(SimpleNamespace(drive_root=tmp_path), task, "Fallback answered", usage, {"tool_calls": []})
     assert result_exists(tmp_path, "task-history")
-    row = _delegation_capability_fact()["subagents_last_executions"][0]
-    assert row["outcome"] == "failed" and row["occurred_at"] == failure["ts"]
-    assert row["task_id"] == task["id"] and row["fallback"]["model"] == "openai::fallback"
-    assert row["applied_model"] == ""
+    fact = _delegation_capability_fact()
+    row = fact["subagents_last_executions"][0]
+    assert row["outcome"] == "failed" and row["task_id"] == task["id"]
+    assert "fallback" not in row and "applied_model" not in row
+    reader = next(item for item in fact["readers"] if item["arguments"]["path"].endswith("subagent_last_delegation.json"))
+    saved = json.loads((tmp_path / reader["arguments"]["path"]).read_text(encoding="utf-8"))
+    assert saved["occurred_at"] == failure["ts"] and saved["fallback"]["model"] == "openai::fallback"
+    assert saved["applied_model"] == ""
     monkeypatch.setattr("ouroboros.provider_models.model_has_credentials", lambda *_: True)
     assert resolve_configured_actor_dispatch(task, task_type="task").executor == "native"
     provider.broken = False

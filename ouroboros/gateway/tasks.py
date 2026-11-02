@@ -38,8 +38,9 @@ from ouroboros.gateway.task_pause import api_task_pause, owner_tree_control_rout
 from ouroboros.gateway.task_decision import api_decision_answer  # noqa: F401
 from ouroboros.gateway.task_archive import (
     chat_media_identity, directory_archives, plain_segments, serve_directory_archive, serve_task_file,
-    task_artifact_location, recorded_identity, serve_task_source,
+    task_artifact_location, recorded_identity, serve_task_source, serve_wrap_up_document,
 )
+from ouroboros.confined_files import root_spellings
 from ouroboros.task_custody import task_artifact_stores
 from ouroboros.headless import (
     ARTIFACTS_DIR,
@@ -61,6 +62,7 @@ from ouroboros.contracts.task_contract import (
 )
 from ouroboros.outcomes import public_task_result
 from ouroboros import artifacts as artifact_store
+from ouroboros.artifacts import render_attachment_lines as _render_attachment_lines
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.task_results import (
     STATUS_FAILED,
@@ -87,6 +89,8 @@ from ouroboros.workspace_executor import normalize_executor_ref
 log = logging.getLogger(__name__)
 
 _RESERVED_METADATA_KEYS = frozenset({
+    "work_diagnostic",
+    "work_kind", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
     "task_id",
     "parent_task_id",
     "root_task_id",
@@ -105,10 +109,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     "executor_ref",
     "workspace_executor",
     "project_id",
-    # The owner door's stamp (read as ``run_origin.owner_ingress`` by the corpus
-    # label and the routing issuer) belongs to owner routing, never to a caller.
+    # Owner provenance (and its recorded absence) belongs to the host, never to a caller.
     "origin_message_ref",
-    "origin_suppressed",
+    "origin_suppressed", "origin_message_absent",
 })
 
 
@@ -258,7 +261,11 @@ def _admission_rejection_response(
             admission_cleanup={"child_drive_removed": bool(removed)},
         )
     try:
-        shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
+        from ouroboros.owner_keep import gate
+
+        with gate(drive_root, task_id, timeout_sec=0) as kept:  # the owner's keep holds a rejected task's artifacts too
+            if not kept:
+                shutil.rmtree(task_artifacts_dir(drive_root, task_id, create=False), ignore_errors=True)
     except Exception:
         log.warning("Failed to clean rejected task artifacts for %s", task_id, exc_info=True)
     return JSONResponse(
@@ -326,10 +333,12 @@ def _complete_api_task_admission(
     metadata: Dict[str, Any],
 ) -> JSONResponse:
     """Publish one API admission; retain custody when persistence is unknown."""
+    from ouroboros.model_wait import execution_opening
+
     result_fields = {
         **({"created_at": task["created_at"]} if task.get("created_at") else {}),
         **{key: task.get(key) for key in (
-            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role",
+            "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role", "depth",
             "chat_id", "title", "suggested_name", "context", "expected_output", "constraints",
             "task_contract", "workspace_root",
         )},
@@ -347,6 +356,7 @@ def _complete_api_task_admission(
         "metadata": metadata,
         **{key: task[key] for key in ("attachment_manifest", "attachment_manifest_ref", "reasoning_effort",
                                       "execution_timeout_sec") if key in task},
+        **execution_opening(task),  # #939: nothing of it ran yet; a Continue before its first start reads 0
         "api_admission": {"token": admission_token, "status": "accepted"},
         "result": "Task accepted and durably scheduled.",
     }
@@ -624,7 +634,8 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
         return attachment_error
     from ouroboros.artifacts import attachment_manifest_projection
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
-    metadata.setdefault("actor_id", str(body.get("actor_id") or "cli"))
+    metadata.setdefault("actor_id", str(body.get("actor_id") or "cli")); metadata["work_kind"] = "owner"
+    metadata.pop("subagents_mode", None)  # The queue stamps admission; an API caller supplies no prior host fact.
     metadata.setdefault("source", str(body.get("source") or "api_task"))
     # Owner Surface Fact: assembled at its PRODUCER. An external admission
     # carries no browser observables, and a caller-built descriptor must not
@@ -774,24 +785,12 @@ def _tasks_list_payload(
 ) -> Dict[str, Any]:
     """Assemble the /api/tasks response off the event loop.
 
-    Unfiltered requests slice BEFORE projection (v6.9x P2): sort raw filenames
-    by the creation-stable raw ts, decode/project only the top-`limit` files,
-    then re-sort that slice by EFFECTIVE ts (a child-drive merge can replace ts
-    with the child's). Residual, disclosed: top-N membership is decided on raw
-    ts, so an old task freshly completed through its child can fall outside the
-    slice until its raw file is rewritten. Status-filtered requests keep the
-    full projection path — filtering needs every row's effective status (the
-    child-drive promotion contract pinned by test_headless_cli).
-
-    Admission at the slice boundary (ABI-2): a MALFORMED candidate discovered
-    by the sort scan reaches the admission reader even when it lies beyond
-    the slice window (the scan had to read its bytes anyway), so it is
-    quarantined and counted in the same ONE batched scan event. Disclosed
-    residual: a PARSEABLE but inadmissible row (unstamped/future stamp)
-    beyond the window is not classified by this sliced request — its raw ts
-    is all the sort reads — and is quarantined by the next scan that
-    actually reaches it (a filtered request, ``limit=0``, or any
-    list_task_results caller)."""
+    Filtered requests overlay every uncertain row plus the newest matching
+    stable rows, then take the global effective top N. Only the returned page
+    pays the public deep clone. Unfiltered requests retain their raw-ts slice
+    followed by effective sorting within it: a child can still move an older
+    task outside that slice until copy-back rewrites its raw ts.
+    """
     if queue_only:
         return {"tasks": [], "queue": _queue_snapshot(drive_root)}
     # One shared events-tail parse for every stale-running orphan check in this
@@ -800,22 +799,17 @@ def _tasks_list_payload(
     # List view is a status/cost projection: never materialize artifacts (no child
     # rebase copies, no artifact-dir scans, no disposition/sha claims) on a GET list.
     if wanted:
-        # The stored status is the WHERE prefilter; the filter below runs on the EFFECTIVE status
-        # (the overlay may rename a stored status), so the prefilter admits every row whose stored
-        # status could project into a wanted one: the wanted ones themselves plus the live rows.
-        from ouroboros.task_store import list_documents
-        stored = list_documents(drive_root, statuses=wanted | _OVERLAY_SOURCE_STATUSES)
-        rows = [
-            _compact_list_row(public_task_result(effective_task_result(
-                drive_root, row, materialize_artifacts=False, _events_index=events_index,
-            )))
-            for row in stored
-        ]
+        from ouroboros.task_store import filtered_list_candidates
+        stored = filtered_list_candidates(drive_root, wanted, limit)
+        rows = [effective_task_result(
+            drive_root, row, materialize_artifacts=False, _events_index=events_index,
+        ) for row in stored]
         rows = [row for row in rows if str(row.get("status") or "").lower() in wanted]
         rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
         if limit is not None:
             rows = rows[:limit]
-        return {"tasks": rows, "queue": _queue_snapshot(drive_root)}
+        return {"tasks": [_compact_list_row(public_task_result(row)) for row in rows],
+                "queue": _queue_snapshot(drive_root)}
     from ouroboros.task_store import documents_by_ids, newest_ids
     # The unfiltered list keeps the raw-``ts`` slice: the newest ``limit`` stored rows, read whole.
     ids = newest_ids(drive_root, limit)
@@ -827,11 +821,6 @@ def _tasks_list_payload(
     # ts, and the response order is the displayed order.
     rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
     return {"tasks": rows, "queue": _queue_snapshot(drive_root)}
-
-
-# Stored statuses the effective overlay can still project into another status (a live or
-# interrupted row may read as scheduled/running/failed): a filtered list prefilters them in too.
-_OVERLAY_SOURCE_STATUSES = frozenset({"running", "interrupted", "scheduled", "requested", "cancel_requested"})
 
 
 async def api_tasks_list(request: Request) -> JSONResponse:
@@ -916,6 +905,9 @@ def _task_get_response(request: Request) -> JSONResponse:
     if isinstance(payload.get("artifacts"), list):  # what ``?archive=<dir>`` would stream now, per top-level dir
         payload["artifact_archives"] = directory_archives(task_artifact_stores(drive_root, task_id),
                                                           payload["artifacts"], anchor=drive_root)
+    from ouroboros.owner_stop_receipt import wrap_up_document_view  # named only: written on ``?wrap_up=``
+    if document := wrap_up_document_view(data):
+        payload["wrap_up_document"] = document
     breakdown_view = _task_cost_breakdown_view(drive_root, data)
     if breakdown_view is not None:
         payload["cost_breakdown"] = breakdown_view
@@ -926,32 +918,40 @@ def api_task_artifact(request: Request):
     """Serve one task file read-only from its canonical or OWN child store (``task_archive``): a bare
     name selects only a top-level file (several nested matches: 409 ``artifact_name_ambiguous`` naming
     their ``relpaths``), ``?relpath=a/b/{name}`` is exact, ``?archive=<dir>`` with ``{name}`` =
-    ``<basename>.zip`` streams a recorded directory; bytes leave only through ``serve_task_file``."""
+    ``<basename>.zip`` streams a recorded directory, ``?wrap_up=<Stop request>`` writes the detail's
+    ``wrap_up_document`` on read; a file's bytes leave only through ``serve_task_file``."""
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
     name = str(request.path_params.get("name") or "").strip()
-    if not name or "/" in name or "\\" in name or name in {".", ".."} or ".." in pathlib.PurePosixPath(name).parts:
+    if plain_segments(name) != [name]:
         return json_error("artifact name must be a simple filename", 400)
     source, relpath = request.query_params.get("source"), request.query_params.get("relpath")
+    if source and not plain_segments(source):
+        return json_error("task source is unavailable or does not match its recorded identity", 404)
     if relpath is not None and (source or plain_segments(relpath)[-1:] != [name]):
         return json_error("relpath must be store-relative plain segments ending in the name, without source",
                           400, reason_code="artifact_relpath_invalid", task_id=task_id, artifact=name)
     drive_root = request_drive_root(request)
-    if (archive := request.query_params.get("archive")) is not None:
-        return serve_directory_archive(drive_root, task_id, name, archive,
-                                       other_selectors=source is not None or relpath is not None)
-    stores = task_artifact_stores(drive_root, task_id)
+    # One selector per request: ``archive`` and ``wrap_up`` refuse each other and relpath/source.
+    archive, stop = request.query_params.get("archive"), request.query_params.get("wrap_up")
+    if archive is not None:
+        return serve_directory_archive(drive_root, task_id, name, archive, other_selectors=(
+            source is not None or relpath is not None or stop is not None))
+    if stop is not None:
+        return serve_wrap_up_document(drive_root, task_id, name, stop,
+                                      other_selectors=source is not None or relpath is not None)
+    stores, spellings = task_artifact_stores(drive_root, task_id), root_spellings(drive_root)
     path = None if relpath is not None else artifact_store.resolve_chat_media_path(drive_root, task_id, name)
     if path is not None:  # content-addressed chat media: the canonical store, bytes that hash to the name
-        media = task_artifact_location(stores[:1], path)
+        media = task_artifact_location(stores[:1], path, spellings)
         return (serve_task_file(drive_root, stores[0], media[2], name, chat_media_identity(name), task_id=task_id)
                 if media else json_error("artifact not found", 404, task_id=task_id, artifact=name))
     registered = artifact_store.registered_task_artifact(drive_root, task_id, name) if relpath in (None, name) else None
     # A registered immutable top-level file needs one identity check, not a result projection.
     fast = bool(not source and registered and registered.get("immutable")
-                and (at := task_artifact_location(stores, registered.get("path"))) and at[2] == name)
+                and (at := task_artifact_location(stores, registered.get("path"), spellings)) and at[2] == name)
     result = {} if fast else (load_effective_task_result(drive_root, task_id) or {})
     if not result and not registered:
         return json_error("task not found", 404)
@@ -960,7 +960,7 @@ def api_task_artifact(request: Request):
     rows = [] if fast else [row for row in result.get("artifacts") or [] if isinstance(row, dict) and (
         relpath is not None or str(row.get("name") or pathlib.Path(str(row.get("path") or "")).name) == name)]
     located = [(at, order, row) for order, row in enumerate(rows + ([registered] if registered else []))
-               if (at := task_artifact_location(stores, row.get("path")))]
+               if (at := task_artifact_location(stores, row.get("path"), spellings))]
     matches = [item for item in located if item[0][2] == (relpath or name)]
     nested = sorted({item[0][2] for item in located if "/" in item[0][2]})
     if relpath is None and not matches and len(nested) > 1:
@@ -1026,16 +1026,21 @@ def _cascade_waits_only_on_runs(task_id: str) -> bool:
 
     Their cancel is in flight (an engine confirms a cancel asynchronously), refused (a containment fault,
     critical until a verified terminal) or not sent (the engine is unreachable: pending until it answers).
-    The Stop stays pending and the cancel-intent watchdog settles it once custody records them settled;
-    none of these is a cascade that cancelled nothing. An unreadable answer proves nothing, so the
-    incident stays.
+    A witnessed live inline Presence root waits the same way: its runner observes the open intent at its
+    next stop check and writes the terminal itself (#2012). The Stop stays pending and the cancel-intent
+    watchdog settles it once custody records them settled; none of these is a cascade that cancelled
+    nothing. An unreadable answer, an unreadable author census included, proves nothing, so the incident
+    stays; only a Presence root's own row reads that census.
     """
     try:
         from ouroboros.delegate_custody_reconcile import tree_open_runs
+        from ouroboros.presence_runner import presence_execution_witness
+        from supervisor.cancel_publication import live_presence_row
         from supervisor.queue import DRIVE_ROOT, task_subtree_is_live
 
-        return bool(tree_open_runs(DRIVE_ROOT, task_id)) and not task_subtree_is_live(
-            task_id, ignore_intents=True, count_runs=False)
+        waits = tree_open_runs(DRIVE_ROOT, task_id) or (live_presence_row(load_task_result(DRIVE_ROOT, task_id))
+                                                         and presence_execution_witness(task_id, drive_root=DRIVE_ROOT) is True)
+        return bool(waits) and not task_subtree_is_live(task_id, ignore_intents=True, count_runs=False)
     except Exception:
         log.debug("Cascade liveness read failed for %s", task_id, exc_info=True)
         return False
@@ -1098,8 +1103,9 @@ def _record_stop(task_id: str, *, cascade: bool, stop_action_id: str) -> Optiona
         from supervisor.cancel_publication import live_presence_row
 
         row = load_task_result(DRIVE_ROOT, task_id, strict=True)
-        # A live Presence turn is its runner's (as on the single Stop's miss lane).
-        if live_presence_row(row) or (not row and not still_owned()):
+        # A Presence row is its runner's: only a turn the shared owner still holds takes the Stop (#2012).
+        if (live_presence_row(row) and not task_has_live_ownership(task_id)
+                or not row and not still_owned()):
             return None
     source = "http_cascade" if cascade else "http_single"
     record = functools.partial(
@@ -1346,16 +1352,26 @@ async def api_task_resume(request: Request) -> JSONResponse:
     revocation, an acceptance fence at restore) is granted by the same call once
     its durable authority validates again; a fence-lifted zero-dispatch sibling
     is released by this same call as an explicit selection. A paused direct
-    owner-chat turn is resumed here too, under its own task id.
+    owner-chat turn is resumed here too, under its own task id. The optional
+    body (``TaskResumeRequest``) names held calls whose outcome is unknown that
+    the owner goes on past (a refusal's ``acceptable_unknown``), never re-run.
     """
     try:
         task_id = validate_task_id(request.path_params.get("task_id"))
     except ValueError as exc:
         return json_error(str(exc), 400)
+    body = await request_json_or(request, {}) or {}
+    named = body.get("accept_unknown", []) if isinstance(body, dict) else None
+    if (not isinstance(named, list) or set(body) - {"accept_unknown", "reason"}
+            or not all(isinstance(value, str) for value in named)):
+        return json_error('resume accepts only {"accept_unknown", "reason"}', 400, task_id=task_id,
+                          reason_code="unexpected_fields")
     try:
+        from ouroboros.control_actor import accepting_unknown
         from supervisor.queue import resume_budget_paused_task
 
-        result = resume_budget_paused_task(task_id)
+        with accepting_unknown(named, str(body.get("reason") or "")):
+            result = resume_budget_paused_task(task_id)
     except Exception as exc:
         return json_exception(exc, 503)
     if result.get("ok"):
@@ -1373,7 +1389,7 @@ async def api_task_resume(request: Request) -> JSONResponse:
         # exact-continuation refusals (#1196): the task stays paused
         "budget_still_exhausted", "root_hard_cap_exhausted", "cancel_intent_active",
         "deadline_passed", "lifetime_exhausted", "root_still_paused", "resume_already_granted",
-        "restart_no_resume", "pause_record_missing", "pause_source_missing", "pause_source_unreadable",
+        "restart_no_resume", "update_in_progress", "pause_record_missing", "pause_source_missing", "pause_source_unreadable",
         "pause_record_unreadable", "grant_not_recorded", "snapshot_not_persisted",
         "monetary_authority_unavailable", "cancellation_authority_unavailable", "task_terminal",
         # holds and root-grant refusals (#1196, owner Q9): the row stays paused/held
@@ -1387,8 +1403,9 @@ async def api_task_resume(request: Request) -> JSONResponse:
         # a held Continue's observed blockers (#1721): an existing successor, never Not Found
         "predecessor_writers_unsettled", "selection_owner_held",
     } else 404
-    return json_error(error, status, task_id=task_id, **{key: result[key] for key in ("action", "blockers")
-                                                          if result.get(key)})
+    return JSONResponse({"error": error, "task_id": task_id, **{key: result[key] for key in (
+                             "action", "blockers", "message", "acceptable_unknown") if result.get(key)}},
+                        status_code=status)
 
 
 # The task-event SSE endpoint and its follower live in gateway/task_events.py
@@ -1463,55 +1480,6 @@ def _compose_task_text(
     if rendered:
         parts.append(f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]")
     return "".join(parts)
-
-
-def _render_attachment_lines(attachments: Any) -> str:
-    """Render the complete staged/rejected attachment report.
-
-    v6.52.0 (P1): each line is a ready-to-use read_file call against the canonical
-    artifact_store root — NEVER a bare absolute host path. ``attachments`` is the
-    manifest returned by ``stage_task_attachments``.  Legacy staged-only rows
-    remain readable; new rows carry ordinal/status/reason and rejected rows are
-    rendered without source paths or secret contents."""
-    ref = attachments.get("attachment_manifest_ref") if isinstance(attachments, dict) else None
-    if isinstance(attachments, dict):
-        attachments = attachments.get("attachment_manifest")
-    if not isinstance(attachments, list):
-        return ""
-    lines: List[str] = []
-    if ref:
-        lines.append(f"Complete input manifest ({ref.get('count')} declarations): read_file(root='artifact_store', path='{ref.get('path')}'). Inline rows below are a preview.")
-    for item in attachments:
-        if not isinstance(item, dict):
-            continue
-        try:
-            ordinal = int(item.get("ordinal"))
-        except (TypeError, ValueError):
-            ordinal = len(lines)
-        status = str(item.get("status") or "staged")
-        label = str(item.get("label") or f"attachment {ordinal + 1}").strip()
-        if status == "rejected":
-            reason = str(item.get("reason") or "staging_failed").strip()
-            lines.append(f"- {label}: rejected (reason={reason}, ordinal={ordinal})" + (f" rule: {rule}" if (rule := str(item.get("rule") or "").strip()) else ""))
-            continue
-        relpath = str(item.get("relpath") or "").strip()
-        root = str(item.get("root") or "artifact_store").strip() or "artifact_store"
-        label = label or pathlib.Path(relpath).name
-        if not relpath:
-            continue
-        kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
-        # v6.54.3: also surface the REAL staged path for process tools — scripts
-        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
-        # models GUESS wrong absolute paths that tripped light-mode path guards.
-        # The staged path lives inside this task's own artifact_store, so both
-        # forms address the same file.
-        abs_path = str(item.get("abs_path") or "").strip()
-        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
-        lines.append(
-            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
-            f"{script_hint} [status=staged, ordinal={ordinal}]"
-        )
-    return "\n".join(lines)
 
 
 def _queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:

@@ -10,7 +10,7 @@ import { installDom, restoreDom } from './chat_dom_fixture.js';
 import { installDomDouble } from './dom_double.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-const SUFFIXES = ['input-area', 'attachment-preview', 'composer-pills', 'swarm', 'context-mode', 'plus', 'file-input',
+const SUFFIXES = ['input-area', 'attachment-preview', 'subagents-mode', 'context-mode', 'plus', 'file-input',
     'input', 'send'];
 
 function fetchStub(history = []) {
@@ -66,12 +66,13 @@ test('"+" stands where the paperclip stood; the voice and chips slots are empty,
     assert.doesNotMatch(markup, /chat-attach-btn|id="chat-attach"/, 'no paperclip beside it');
     assert.match(markup, /<span class="chat-voice-slot" data-composer-voice hidden><\/span>/);
     assert.match(markup, /<span class="chat-composer-chips" data-composer-chips hidden><\/span>/);
-    // Text row: "+", the file input, the field, the voice slot, Send. Capsule row: pills, Context, then the chips
-    // slot (Effort mounts between them; Main's questions pill joins after).
+    // Text row: "+", the file input, the field, the voice slot, Send. Capsule row: Subagents, Context, then the chips
+    // slot (Effort mounts between them; Main's questions pill joins after). No one-shot Swarm pill anywhere.
+    assert.doesNotMatch(markup, /chat-swarm|chat-composer-pills|data-armed/);
     const order = (names) => names.map((name) => markup.indexOf(name));
     const rising = (list) => list.every((value, i) => value >= 0 && (i === 0 || value > list[i - 1]));
     assert.ok(rising(order(['chat-plus-btn', 'chat-file-input', 'id="chat-input"', 'data-composer-voice', 'chat-send-group'])));
-    assert.ok(rising(order(['chat-composer-pills', 'chat-context-mode', 'data-composer-chips', 'chat-text-row'])));
+    assert.ok(rising(order(['chat-subagents-mode', 'chat-context-mode', 'data-composer-chips', 'chat-text-row'])));
 });
 
 test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopened room restores it, Send clears it', async () => {

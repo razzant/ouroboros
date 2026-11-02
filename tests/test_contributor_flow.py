@@ -68,7 +68,8 @@ def test_manual_ci_keeps_readonly_test_jobs_and_explicit_release_permissions():
     assert "github.event_name != 'schedule'" in workflow.partition(
         "\n  integration-test:\n")[2].partition("\n    uses:")[0]
     assert "permissions:\n  contents: read" in workflow
-    assert "github.event_name == 'pull_request' && github.base_ref == 'ouroboros'" in workflow
+    # No job keeps a predicate for the removed pull-request trigger.
+    assert "github.base_ref == 'ouroboros'" not in workflow
     assert "secrets." not in quick_job
     assert "release:\n" in workflow
     assert "      contents: write" in workflow
@@ -84,9 +85,7 @@ def test_trusted_provider_ci_wires_full_secret_policy_and_release_dependency():
     integration_job = workflow.partition("\n  integration-test:\n")[2].partition(
         "\n  # ──────────────────────────────────────────────────────────────────"
     )[0]
-    release_preflight = workflow.partition("\n  release-preflight:\n")[2].partition(
-        "\n  build:\n"
-    )[0]
+    release = workflow.partition("\n  release:\n")[2]
 
     assert integration_job
     assert "uses: ./.github/workflows/provider-canary.yml" in integration_job
@@ -111,7 +110,8 @@ def test_trusted_provider_ci_wires_full_secret_policy_and_release_dependency():
             assert f"{secret}: ${{{{ secrets.{secret} }}}}" in text
 
     assert " -rs " in shared
-    assert "needs: [full-test, integration-test, system-e2e-mock]" in release_preflight
+    # The release job itself requires the canaries (the preflight checks only the tag).
+    assert "needs.integration-test.result == 'success'" in release
 
 
 def test_repository_has_explicit_mit_license_holder():

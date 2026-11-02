@@ -61,7 +61,8 @@ def test_quiz_provenance_mailbox_and_attachment_names_are_complete(tmp_path):
     assert "MUST_NOT_ATTACH_BINARY" not in source["text"]
 
 
-def test_unknown_room_is_an_explicit_gap_and_chat_selectors_use_redaction(tmp_path):
+def test_unknown_room_is_an_explicit_gap_and_chat_selectors_keep_the_room_text(tmp_path):
+    import json
     from ouroboros.dialogue_evidence import chat_evidence_reader, read_room_source
     from ouroboros.tools.plan_evidence import resolve_evidence
 
@@ -73,7 +74,8 @@ def test_unknown_room_is_an_explicit_gap_and_chat_selectors_use_redaction(tmp_pa
     [row] = manifest["attached"]
     assert row["kind"] == "chat" and row["selection_bytes"] > 0
     assert row["attached_bytes"] == len(row["text"].encode())
-    assert "x" * 48 not in row["text"]
+    assert json.loads(row["text"].split("\n")[1])["text"] == "OPENAI_API_KEY=sk-" + "x" * 48
+    assert "secrets_redacted" not in row and "secrets_redacted" not in read_room_source(tmp_path, 1)
 
 
 def test_explicit_hidden_room_keeps_its_address_and_never_becomes_main(tmp_path):

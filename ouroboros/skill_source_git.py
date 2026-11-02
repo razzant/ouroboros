@@ -132,6 +132,37 @@ def _origin_text(url: str) -> str:
     return url if "://" in url or "@" in url else pathlib.Path(url).as_uri()
 
 
+def _checkout_source(target: pathlib.Path, revision: str) -> None:
+    """Materialize a disposable source cache without host-default newline conversion.
+
+    A pending retry restores the current HEAD's index before changing revisions so
+    checkout still removes tracked files absent from the target, including attributes.
+    Initial preparation then empties the index and checks out again to repair stat-clean
+    CRLF files: config plus a forced checkout alone can leave them untouched. Payload
+    files stay in place until checkout; a partially completed checkout is not rolled back.
+    Repository-authored attributes still apply; release hashes remain authoritative.
+    Callers hold the source lock (or own a fresh private probe directory).
+    """
+    policy = _git(["config", "--local", "--default", "", "--get",
+                   "ouroboros.sourceCheckoutPolicy"], cwd=target).strip()
+    if policy != "1":
+        _git(["config", "--local", "ouroboros.sourceCheckoutPolicy", "pending"], cwd=target)
+        _git(["config", "--local", "core.autocrlf", "false"], cwd=target)
+        _git(["config", "--local", "core.eol", "lf"], cwd=target)
+    if policy == "pending":
+        try:
+            head = _git(["rev-parse", "--verify", "HEAD"], cwd=target).strip()
+        except SkillSourceFetchError:  # A fresh cache may have failed before its first checkout.
+            head = ""
+        if head:
+            _git(["read-tree", head], cwd=target)
+    _git(["checkout", "--quiet", "--force", "--detach", revision], cwd=target)
+    if policy != "1":
+        _git(["read-tree", "--empty"], cwd=target)
+        _git(["checkout", "--quiet", "--force", "--detach", revision], cwd=target)
+        _git(["config", "--local", "ouroboros.sourceCheckoutPolicy", "1"], cwd=target)
+
+
 def fetch_tree(target: pathlib.Path, url: str, selector: str, *, depth: int = 1) -> str:
     """Make ``target`` a shallow checkout of ``selector`` (branch, commit or '' for the default branch)
     holding its last ``depth`` commits."""
@@ -144,7 +175,7 @@ def fetch_tree(target: pathlib.Path, url: str, selector: str, *, depth: int = 1)
     else:
         _git(["remote", "set-url", "origin", _origin_text(url)], cwd=target)
     _git(["fetch", "--depth", str(depth), "--no-tags", "--quiet", "origin", selector or "HEAD"], cwd=target, url=url)
-    _git(["checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"], cwd=target)
+    _checkout_source(target, "FETCH_HEAD")
     _git(["clean", "-ffdxq"], cwd=target)
     return _git(["rev-parse", "HEAD"], cwd=target).strip()
 
@@ -162,8 +193,8 @@ def update_clone(drive_root: pathlib.Path, row: Dict[str, Any], *, wait_sec: flo
 
     ``after_fetch(clone_dir, commit)`` runs under the same lock, so a caller can derive a snapshot from
     exactly this commit before another refresh moves the files. A busy cache (another process is
-    fetching it) returns the current meta with ``busy: true``; a failed fetch keeps the previous clone
-    and records the error.
+    fetching it) returns the current meta with ``busy: true``; a failure retains the cache and records
+    the error, but a partially completed checkout is not rolled back.
     """
     from ouroboros.platform_layer import release_exclusive_file_lock
 
@@ -183,7 +214,7 @@ def update_clone(drive_root: pathlib.Path, row: Dict[str, Any], *, wait_sec: flo
             if after_fetch is not None:
                 after_fetch(cache / "repo", commit)
             meta.update({"commit": commit, "fetched_at": utc_now_iso(), "error": "", "error_at": ""})
-        except Exception as exc:  # the previous clone and snapshot stay readable
+        except Exception as exc:  # retain the cache; a failed checkout may have partially changed it
             meta.update({"error": str(exc)[:500] or type(exc).__name__, "error_at": utc_now_iso()})
             log.info("Skill source fetch failed for %s: %s", row.get("id"), meta["error"])
         atomic_write_json(cache / "meta.json", meta)
@@ -266,10 +297,17 @@ def checkout_at_commit(drive_root: pathlib.Path, url: str, commit: str) -> pathl
     try:
         if (target / ".git").is_dir():
             try:
-                if _git(["rev-parse", "HEAD"], cwd=target, timeout=30).strip() == commit:
-                    return target
+                current = _git(["rev-parse", "HEAD"], cwd=target, timeout=30).strip()
             except SkillSourceFetchError:
-                pass
+                current = ""
+            if current == commit:
+                # Matching pointers are immutable once prepared: consumers keep
+                # reading after this lock is released. Publish only after success.
+                policy = _git(["config", "--local", "--default", "", "--get",
+                               "ouroboros.sourceCheckoutPolicy"], cwd=target).strip()
+                if policy != "1":
+                    _checkout_source(target, commit)
+                return target
         if fetch_tree(target, url, commit) != commit:
             raise SkillSourceFetchError(f"the repository did not serve commit {commit}")
         return target

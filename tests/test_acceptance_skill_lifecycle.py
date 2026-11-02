@@ -9,6 +9,7 @@ They are facts, never a gate on the execution route.
 from __future__ import annotations
 
 import json
+
 import pathlib
 
 from ouroboros.skill_loader import find_skill
@@ -31,17 +32,20 @@ def _write_skill(drive_root: pathlib.Path, name: str) -> pathlib.Path:
     return skill_dir
 
 
-def _write_history(drive_root: pathlib.Path, name: str, root_task_id: str) -> None:
-    path = drive_root / "state" / "skills" / name / "review_history.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"ts": "2026-09-03T00:00:00+00:00", "status": "pass",
-                    "root_task_id": root_task_id}) + "\n",
-        encoding="utf-8",
-    )
-    projection = drive_root / "state" / "skill_review_root_tasks.jsonl"
-    with projection.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"root_task_id": root_task_id, "skill": name}) + "\n")
+def _write_record(drive_root: pathlib.Path, name: str, root_task_id: str) -> str:
+    """One settled ``surface="skill"`` ledger record of ``name`` under ``root_task_id`` (the wave merges the
+    frozen subject's own identity before writing, as ``review_change._finish_record`` does)."""
+    from ouroboros import review_ledger
+    from tests.test_review_ledger import _answer, _facts, _raw
+
+    rows = [_raw("s1", "openai/gpt-5", parts=("skill",), answers={"skill": _answer("skill")})]
+    subject = {"root_kind": "skill_payload", "root": f"/skills/external/{name}", "kind": "skill", "base": "", "head": "",
+               "tree_sha": "h" * 64, "diff_sha": "d" * 64, "checkout": ""}
+    record = review_ledger.build_wave_record(_facts(rows, task_id=root_task_id, subject=subject), surface="skill",
+                                             drive_root=drive_root)
+    record.subject = {**dict(record.subject), "skill": name, "content_hash": "h" * 64}
+    review_ledger.write_record(drive_root, record)
+    return record.record_id
 
 
 def test_the_lifecycle_scan_joins_trace_edits_and_this_root_task_history(tmp_path):
@@ -50,8 +54,8 @@ def test_the_lifecycle_scan_joins_trace_edits_and_this_root_task_history(tmp_pat
     _write_skill(drive_root, "edited")
     _write_skill(drive_root, "child_authored")
     _write_skill(drive_root, "someone_elses")
-    _write_history(drive_root, "child_authored", "root-1")
-    _write_history(drive_root, "someone_elses", "root-other")
+    _write_record(drive_root, "child_authored", "root-1")
+    _write_record(drive_root, "someone_elses", "root-other")
 
     trace = {"tool_calls": [
         {"tool": "write_file", "args": {"path": "data/skills/external/edited/SKILL.md"}},
@@ -158,30 +162,46 @@ def test_no_touched_skill_yields_no_lifecycle_rows(tmp_path):
 
 
 def test_bounded_history_projection_discloses_both_omission_limits(tmp_path):
+    """The root task's skills come from the ledger's HOT index alone (one bounded read); rows of other roots are
+    skipped, and rotated index segments the hot read never opens are disclosed as truncation."""
+    from ouroboros import review_ledger
+
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     _write_skill(drive_root, "visible")
-    projection = drive_root / "state" / "skill_review_root_tasks.jsonl"
-    projection.parent.mkdir(parents=True, exist_ok=True)
-    rows = [
-        json.dumps({
-            "root_task_id": "other", "skill": f"skill-{index}",
-            "padding": "x" * 1500,
-        })
-        for index in range(800)
-    ]
-    rows.append(json.dumps({"root_task_id": "root-1", "skill": "visible"}))
-    projection.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    for index in range(3):
+        _write_record(drive_root, f"skill-{index}", "other")
+    _write_record(drive_root, "visible", "root-1")
 
     history = _skill_names_from_review_history(drive_root, "root-1")
     assert history["names"] == ["visible"]
-    assert history["coverage"]["rows_scanned"] <= 512
-    assert history["coverage"]["truncated"] is True
-    assert set(history["coverage"]["gap_reasons"]) >= {
-        "tail_bytes_truncated", "max_entries_truncated",
-    }
+    assert history["coverage"]["rows_scanned"] == 1 and history["coverage"]["truncated"] is False  # the root's own rows
+    assert history["coverage"]["complete"] is True and history["coverage"]["gap_reasons"] == []
     assert history["coverage"]["source_ref"] == {
-        "kind": "canonical_jsonl",
-        "path": "state/skill_review_root_tasks.jsonl",
-        "reader": "read_file",
+        "kind": "review_ledger_index", "path": "state/review_ledger/index.jsonl", "reader": "read_file",
     }
+
+    # An archived segment beside the hot index: older records live where the bounded read never looks — a cut
+    # for a task whose start is unknown or precedes the index's newest rotation (opus R1-8 / R2-3, subagent 2);
+    # a task that started after that rotation has every row of its own in the hot index, and says so. The
+    # rotation's time is the segment's name: a row carried into the fresh hot index (its record no longer
+    # resolves) can be far older than the rows the rotation archived, so the hot index's first row says nothing.
+    (review_ledger.ledger_dir(drive_root) / "index.20260101T000000.jsonl").write_text("", encoding="utf-8")
+    assert review_ledger.newest_rotation_ts(drive_root) == "2026-01-01T00:00:00+00:00"
+    history = _skill_names_from_review_history(drive_root, "root-1")
+    assert history["names"] == ["visible"] and history["coverage"]["truncated"] is True
+    assert history["coverage"]["complete"] is False and history["coverage"]["gap_reasons"] == ["tail_bytes_truncated"]
+    before = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2000-01-01T00:00:00+00:00")
+    assert before["coverage"]["truncated"] is True and before["coverage"]["complete"] is False
+    since = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2026-01-02T00:00:00+00:00")
+    assert since["names"] == ["visible"] and since["coverage"]["truncated"] is False
+    assert since["coverage"]["complete"] is True and since["coverage"]["gap_reasons"] == []
+    # A later rotation archived rows of a task that started before it: a cut, whatever the hot head holds —
+    # here an old commit row carried into the fresh hot index ahead of everything (its record no longer resolves).
+    (review_ledger.ledger_dir(drive_root) / "index.20261021T000000.jsonl").write_text("", encoding="utf-8")
+    hot = review_ledger.index_path(drive_root)
+    carried = json.dumps({"record_id": "rl-carried", "surface": "commit_gate", "state": "settled",
+                          "ts": "2025-01-01T00:00:00+00:00", "subject": {}}) + "\n"
+    hot.write_text(carried + hot.read_text(encoding="utf-8"), encoding="utf-8")
+    spanning = _skill_names_from_review_history(drive_root, "root-1", task_started_at="2026-06-01T00:00:00+00:00")
+    assert spanning["coverage"]["truncated"] is True and spanning["coverage"]["complete"] is False

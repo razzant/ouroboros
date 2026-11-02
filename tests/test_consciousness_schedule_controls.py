@@ -1,15 +1,14 @@
 """Owner schedule controls: one audited seam, one lifecycle truth.
 
 ``supervisor/queue_schedules.py`` owns ``state/scheduled_tasks.json``. Every
-read-modify-write — the supervisor tick, the skill resync, the gateway, the
+read-modify-write — the supervisor tick, the gateway, the
 follow-up tool and ``manage_schedules`` — takes the queue lock and then the
 table's own sidecar lock, so the file has exactly one writer at a time. A
 mutation announces its INTENT to the existing events log before it changes
 anything and records its OUTCOME after; an unreadable table refuses the write
 instead of replacing real rows with an empty document. Disable/delete govern
-FUTURE dispatch only: a skill row is retained as a suppressed record the
-lifecycle resync may not re-arm, a fired one-shot stays history, and restore
-re-evaluates the skill rather than enabling it.
+FUTURE dispatch only: admitted work retains its existing occurrence receipts.
+A fired one-shot stays history until a fresh instant is authored.
 """
 
 from __future__ import annotations
@@ -80,187 +79,7 @@ def _skill_row(schedule_id="skill-demo-daily", **extra):
             **extra}
 
 
-# --- the suppressed skill row ------------------------------------------------------
-
-
-def test_disable_skill_schedule_survives_resync_and_is_audited(tmp_path, monkeypatch):
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row()])
-    result = schedule_lifecycle.mutate_scheduled_task(
-        "disable", "skill-demo-daily", reason="owner pause", actor="agent", drive_root=tmp_path)
-    assert result["ok"] and result["changed"] and result["audit"] == "recorded"
-    row = _rows(tmp_path)[0]
-    assert row["enabled"] is False and row["manual_override"] == "disabled"
-    _ready(monkeypatch)
-    queue_schedules.sync_skill_schedules([_skill()], drive_root=tmp_path)
-    row = _rows(tmp_path)[0]
-    assert row["enabled"] is False and row["manual_override"] == "disabled"
-    intent, outcome = _events(tmp_path)[-2:]
-    assert [e["type"] for e in (intent, outcome)] == ["schedule_mutation"] * 2
-    assert intent["phase"] == "intent" and outcome["phase"] == "outcome"
-    assert intent["operation_id"] == outcome["operation_id"] == result["operation_id"]
-    assert outcome["reason"] == "owner pause" and outcome["result"] == "updated"
-    # A private objective is not audit material, and would be unbounded.
-    assert "task" not in outcome["before"] and "task" not in outcome["after"]
-
-
-def test_deleting_a_skill_row_suppresses_it_rather_than_letting_resync_resurrect_it(tmp_path, monkeypatch):
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row()])
-    _ready(monkeypatch)
-    result = schedule_lifecycle.mutate_scheduled_task(
-        "delete", "skill-demo-daily", reason="owner removed it", actor="agent", drive_root=tmp_path)
-    assert result["ok"] and result["status"] == "suppressed"
-    queue_schedules.sync_skill_schedules([_skill()], drive_root=tmp_path)
-    row = _rows(tmp_path)[0]
-    assert row["manual_override"] == "deleted" and row["enabled"] is False
-    # The public boolean seam means the same thing and audits the same way.
-    _write(tmp_path, [_skill_row(), {"id": "manual-1", "name": "manual", "enabled": True,
-                                     "trigger": {"type": "cron", "expr": "0 * * * *"},
-                                     "task": {"type": "task", "text": "run"}}])
-    assert schedule_lifecycle.remove_scheduled_task("manual-1", drive_root=tmp_path) is True
-    assert [r["id"] for r in _rows(tmp_path)] == ["skill-demo-daily"]
-    assert schedule_lifecycle.remove_scheduled_task("skill-demo-daily", drive_root=tmp_path) is True
-    assert _rows(tmp_path)[0]["manual_override"] == "deleted"
-    assert [e["action"] for e in _events(tmp_path)][-2:] == ["delete", "delete"]
-
-
-def test_same_id_suppression_survives_a_manifest_content_change(tmp_path, monkeypatch):
-    """The owner's decision is keyed by the schedule id, not by the row's bytes."""
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row()])
-    _ready(monkeypatch)
-    schedule_lifecycle.mutate_scheduled_task("disable", "skill-demo-daily", reason="paused",
-                                          actor="agent", drive_root=tmp_path)
-    # The skill is edited: new content hash, new cron, new description — same id.
-    queue_schedules.sync_skill_schedules(
-        [_skill(tasks=(("daily", "30 * * * *"),), content_hash="hash-2")], drive_root=tmp_path)
-    row = _rows(tmp_path)[0]
-    assert row["trigger"]["expr"] == "30 * * * *"  # content reconciled
-    assert row["skill_content_hash"] == "hash-2"
-    assert row["manual_override"] == "disabled" and row["enabled"] is False  # decision kept
-
-
-def test_restore_re_evaluates_the_skill_instead_of_enabling_it(tmp_path, monkeypatch):
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="deleted")])
-    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
-
-    # 1. The skill is gone: there is no manifest schedule to restore INTO, so the
-    #    suppression is KEPT and the action is a typed no-change refusal (claim_5:
-    #    restore clears suppression only for an extant manifest).
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda *_a, **_k: [])
-    gone = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="bring it back",
-                                                 actor="agent", drive_root=tmp_path)
-    assert gone["ok"] is False and gone["status"] == "manifest_absent"
-    assert gone["detail"].startswith("skill_absent") and gone["changed"] is False
-    row = _rows(tmp_path)[0]
-    assert row["enabled"] is False and row["manual_override"] == "deleted"
-    assert _events(tmp_path)[-1]["result"] == "manifest_absent"
-
-    # 2. The skill is installed but not review-ready: still refused, named honestly.
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="disabled")])
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda *_a, **_k: [_skill()])
-    _ready(monkeypatch, ready=False)
-    unready = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="again",
-                                                    actor="agent", drive_root=tmp_path)
-    assert unready["status"] == "restored_not_ready" and unready["detail"] == "skill_not_ready"
-    assert _rows(tmp_path)[0]["enabled"] is False
-
-    # 3. The skill lost the supervised_task permission: the schedule cannot dispatch.
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="disabled")])
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills",
-                        lambda *_a, **_k: [_skill(permissions=())])
-    _ready(monkeypatch)
-    ungranted = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="again",
-                                                      actor="agent", drive_root=tmp_path)
-    assert ungranted["detail"] == "skill_permission_missing"
-
-    # 4. The manifest no longer declares this schedule at all.
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="disabled")])
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills",
-                        lambda *_a, **_k: [_skill(tasks=(("weekly", "0 0 * * 0"),))])
-    dropped = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="again",
-                                                    actor="agent", drive_root=tmp_path)
-    assert dropped["status"] == "manifest_absent" and dropped["changed"] is False
-    assert dropped["detail"].startswith("schedule_absent_from_manifest")
-    assert _rows(tmp_path)[0]["manual_override"] == "disabled"
-
-    # 5. Everything is in place: the row comes back and the suppression is gone.
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="disabled")])
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda *_a, **_k: [_skill()])
-    restored = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="again",
-                                                     actor="agent", drive_root=tmp_path)
-    assert restored["ok"] and restored["status"] == "updated"
-    row = _rows(tmp_path)[0]
-    assert row["enabled"] is True and "manual_override" not in row
-
-
-def test_a_kept_suppression_survives_reinstall_and_resync_until_restored_again(tmp_path, monkeypatch):
-    """Restore over an absent skill keeps the marker; a later reinstall's resync
-    reconciles content but stays suppressed; only a restore with the manifest
-    present lifts it."""
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="deleted")])
-    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda *_a, **_k: [])
-    _ready(monkeypatch)
-    refused = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="try",
-                                                    actor="agent", drive_root=tmp_path)
-    assert refused["status"] == "manifest_absent" and refused["changed"] is False
-    # The skill is uninstalled: the sync drops nothing it was told about, and the
-    # suppressed row is still there for the reinstall to honor.
-    queue_schedules.sync_skill_schedules([], drive_root=tmp_path)
-    assert _rows(tmp_path)[0]["manual_override"] == "deleted"
-    # Reinstalled with new content: reconciled, still suppressed.
-    queue_schedules.sync_skill_schedules([_skill(content_hash="hash-2")], drive_root=tmp_path)
-    row = _rows(tmp_path)[0]
-    assert row["skill_content_hash"] == "hash-2"
-    assert row["manual_override"] == "deleted" and row["enabled"] is False
-    # Now the manifest declares it again: restore lifts the marker.
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda *_a, **_k: [_skill()])
-    restored = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="back",
-                                                     actor="agent", drive_root=tmp_path)
-    assert restored["ok"] and restored["changed"] is True
-    assert "manual_override" not in _rows(tmp_path)[0]
-
-
-def test_restore_on_a_readiness_held_skill_row_lifts_nothing_and_says_so(tmp_path, monkeypatch):
-    """A skill row disabled WITHOUT the owner's marker is held by readiness and
-    re-arms on resync. Restore has nothing to lift: typed no-change, no audit
-    outcome pretending a suppression was removed, row bytes untouched."""
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row(enabled=False)])
-    monkeypatch.setattr("ouroboros.config.get_skills_repo_path", lambda: "")
-    monkeypatch.setattr("ouroboros.skill_loader.discover_skills", lambda *_a, **_k: [_skill()])
-    _ready(monkeypatch, ready=False)
-    before = dict(_rows(tmp_path)[0])
-    outcome = schedule_lifecycle.mutate_scheduled_task("restore", "skill-demo-daily", reason="enable",
-                                                    actor="agent", drive_root=tmp_path)
-    assert outcome["ok"] is False and outcome["changed"] is False
-    assert outcome["status"] == "not_suppressed" and "skill_not_ready" in outcome["detail"]
-    assert _rows(tmp_path)[0] == before
-    assert _events(tmp_path)[-1]["result"] == "not_suppressed"
-
-
-def test_restore_probes_readiness_under_the_transaction(tmp_path, monkeypatch):
-    """The readiness probe runs inside the held transaction, so a skill that
-    became unready after the caller's read is still seen: the row is never
-    re-armed from a stale pre-lock answer (triad finding on the off-lock probe)."""
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="disabled")])
-    observed = []
-
-    def probe(_root, _record):
-        observed.append(getattr(_Queue._queue_lock, "_is_owned", lambda: False)())
-        return False, "skill_not_ready"
-
-    monkeypatch.setattr(schedule_lifecycle, "_skill_schedule_dispatchable", probe)
-    outcome = schedule_lifecycle.mutate_scheduled_task(
-        "restore", "skill-demo-daily", reason="resume", actor="agent", drive_root=tmp_path)
-    assert outcome["status"] == "restored_not_ready" and outcome["changed"] is True
-    assert observed == [True]
-    assert _rows(tmp_path)[0]["enabled"] is False and "manual_override" not in _rows(tmp_path)[0]
+# --- lifecycle controls -----------------------------------------------------------
 
 
 # --- the consumed one-shot ---------------------------------------------------------
@@ -479,8 +298,6 @@ def test_a_corrupt_table_refuses_every_mutation_instead_of_erasing_it(tmp_path, 
     with pytest.raises(queue_schedules.ScheduleStoreUnreadable):
         schedule_lifecycle.upsert_scheduled_task({"id": "new", "trigger": {"type": "cron", "expr": "0 * * * *"}},
                                               drive_root=tmp_path)
-    with pytest.raises(queue_schedules.ScheduleStoreUnreadable):
-        queue_schedules.sync_skill_schedules([_skill()], drive_root=tmp_path)
     queue_schedules.check_scheduled_tasks()  # the tick skips the pass rather than rewriting
     assert path.read_text(encoding="utf-8") == contents
     # The agent's own read says unavailable rather than reporting an empty table.
@@ -738,8 +555,6 @@ def test_a_malformed_row_is_refused_not_dropped_by_a_write_about_another_row(tmp
     with pytest.raises(queue_schedules.ScheduleStoreUnreadable):
         schedule_lifecycle.upsert_scheduled_task({"id": "new", "trigger": {"type": "cron", "expr": "0 * * * *"}},
                                               drive_root=tmp_path)
-    with pytest.raises(queue_schedules.ScheduleStoreUnreadable):
-        queue_schedules.sync_skill_schedules([_skill()], drive_root=tmp_path)
     queue_schedules.check_scheduled_tasks()
     assert path.read_text(encoding="utf-8") == contents
     # The lenient READ projection still renders what it can understand.
@@ -801,14 +616,14 @@ def test_the_projection_names_one_lifecycle_word_per_row(tmp_path, monkeypatch):
     _write(tmp_path, [
         {"id": "a", "enabled": True, "trigger": {"type": "cron", "expr": "* * * * *"}},
         {"id": "b", "enabled": False, "trigger": {"type": "cron", "expr": "* * * * *"}},
-        _skill_row("c", enabled=False, manual_override="deleted"),
+        _skill_row("c", enabled=False),
         _once_row(),
     ])
     rows = queue_schedules.schedule_activity_projection(
         queue_schedules.list_scheduled_tasks(tmp_path))["tasks"]
-    assert [r["status"] for r in rows] == ["active", "disabled", "suppressed", "consumed"]
-    assert [r["retained"] for r in rows] == [False, False, True, True]
-    assert [r["restorable"] for r in rows] == [False, False, True, False]
+    assert [r["status"] for r in rows] == ["active", "disabled", "disabled", "consumed"]
+    assert [r["retained"] for r in rows] == [False, False, False, True]
+    assert [r["restorable"] for r in rows] == [False, False, False, False]
     for row in rows:
         assert queue_schedules.schedule_lifecycle_status(row) == row["status"]
 
@@ -834,25 +649,6 @@ def test_upsert_merges_stale_gateway_record_without_clobbering_runtime_history(t
     # and skill in the body cannot relabel which lifecycle owns this row.
     assert stored["source"] == "skill_manifest" and stored["skill"] == "demo"
     assert stored["name"] == "edited" and stored["enabled"] is True
-
-
-def test_an_edit_cannot_change_a_skill_rows_enabled_state(tmp_path, monkeypatch):
-    """That state is reconciled from the skill; only the lifecycle action is durable."""
-    _bind(monkeypatch, tmp_path)
-    _write(tmp_path, [_skill_row(enabled=False, manual_override="disabled")])
-    edit = {"id": "skill-demo-daily", "name": "demo/daily", "enabled": True,
-            "trigger": {"type": "cron", "expr": "0 * * * *"}, "task": {"type": "task", "text": "run"}}
-    with pytest.raises(queue_schedules.ScheduleRefused) as refusal:
-        schedule_lifecycle.upsert_scheduled_task(edit, drive_root=tmp_path)
-    assert refusal.value.status == "lifecycle_action_required"
-    row = _rows(tmp_path)[0]
-    assert row["enabled"] is False and row["manual_override"] == "disabled"
-    # The surviving positive path: an edit that leaves the lifecycle alone lands,
-    # and the suppression rides through it untouched.
-    stored = schedule_lifecycle.upsert_scheduled_task(
-        {**edit, "enabled": False, "description": "edited"}, drive_root=tmp_path)
-    assert stored["description"] == "edited"
-    assert stored["enabled"] is False and stored["manual_override"] == "disabled"
 
 
 def test_a_timing_edit_recomputes_the_next_run(tmp_path, monkeypatch):

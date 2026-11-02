@@ -669,7 +669,6 @@ def test_an_attachment_frame_lost_after_send_is_recoverable_exactly_once(direct_
             # no row, the same message is back in doubt with its two manual actions; nothing resends.
             page.reload(wait_until="domcontentloaded")
             page.wait_for_function(open_socket, timeout=30_000)
-            page.wait_for_function("() => !document.querySelector('#reconnect-overlay.visible')", timeout=30_000)
             doubt.wait_for(timeout=30_000)
             assert doubt.locator("[data-unconfirmed-action]").all_inner_texts() == ["Send again", "Discard"]
             assert page.locator(_BUBBLE).count() == 1 and len(seen) == 1 and inbound(seen[0]) == []

@@ -1,8 +1,8 @@
 """#1741 receptive commit review (and review_change) through the real handlers, stage cycle,
 wave, substrate, custody drain and frozen checkout over a real Git repository.
 
-The only stand-ins are a scripted two-seat retrieving reviewer (whose physical rounds
-cross the attempt ledger), the tests preflight and publication. An addressed message
+The stand-ins are a scripted two-seat retrieving reviewer (whose physical rounds
+cross the attempt ledger), release metadata, the tests preflight and publication. An addressed message
 ends the author's wait while launched AND unsent reviewers continue over the frozen
 subject; the old handler never reaches Git; one whole-wave notice follows; the same
 unchanged call rejoins at $0; only an explicit continuation commits.
@@ -123,7 +123,8 @@ def author(tmp_path, monkeypatch):
     ctx.owner_wait_callback = lambda *_a, **_k: "parked"  # an interactive author's continuation owner
     ctx.task_lifecycle_bound = True  # as the agent binds a task's context: Pause and budget scope apply
     monkeypatch.setattr(review_helpers, "check_worktree_readiness", lambda *a, **kw: [])
-    monkeypatch.setattr(commit_admission, "release_metadata_preflight", lambda *a, **kw: "")
+    monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git, "_managed_candidate_needs_proof", lambda ctx: False)
     monkeypatch.setattr(git, "_run_review_preflight_tests", lambda *a, **k: None)
     monkeypatch.setattr(git, "_post_commit_result", lambda *a, **k: None)
@@ -731,6 +732,9 @@ def test_a_left_wave_that_settles_after_its_author_ended_stays_in_its_room_once(
     assert sorted(a.reviewer.rounds) == ["m1", "m2"] and _commit_count(a) == 1 and not a.pushes
     record = _left_record(a, wait)
     assert review_pause.ended_left_review(record) == "unchanged"
+    enriched = {**record, "selection": {"tasks": ["child"]}, "seen_helpers": ["task:child"],
+                "seen_outcomes": ["same-wave:operation:outcome"], "review_reference": {"record_id": wait["record_id"]}}
+    assert review_pause.ended_left_review(enriched) == "unchanged"
     assert _release(a.data, mark["id"], direct=True)["ok"]
     assert review_pause.ended_left_review(record) == "unchanged" and _late_marks(a.data) == []
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "composition collects at $0 only"
@@ -824,10 +828,12 @@ def test_a_failed_settled_duty_write_recovers_from_retained_seats_while_controll
 
 
 def test_a_duty_whose_controller_died_before_settlement_keeps_what_was_recorded(author):
-    """The process that owned the left wave dies before its settlement notice (the duty landed when the
-    author left): once the task ended, maintenance composes the wave from its attempt row at $0, every
-    seat without a retained outcome told unknown, never a second send. Those seats can never answer, so the
-    wave's record settles as a failed quorum: an unknown seat is a failed seat, never a pass."""
+    """A dead notice controller cannot erase positive live producer custody.
+
+    The fixture's reviewers still run in this process. Losing only the duty's
+    controller must keep them pending; actual API custody loss is tested at the
+    collector boundary in test_review_operation_collection and test_review_waiting.
+    """
     import subprocess
     import sys
 
@@ -843,19 +849,19 @@ def test_a_duty_whose_controller_died_before_settlement_keeps_what_was_recorded(
         txn.put_row(OWED_SET, duty_id, {**row, "controller": {"pid": int(gone), "birth": "gone", "session": "gone"}})
     assert replay_owed_late_reviews(a.data)["waiting"] == 1, "a running author can still collect its wave"
     write_task_result(a.data, TASK, "failed", chat_id=1, result="The worker ended abnormally.")
-    assert replay_owed_late_reviews(a.data) == {"settled": 1, "waiting": 0, "retired": 0, "failed": 0}
-    [mark] = _late_marks(a.data)
-    text = mark["text"]
-    assert "2 seat(s) have no retained outcome and stay unknown; nothing is sent again." in text
-    assert "- m1 (seat first): outcome unknown" in text and "- m2 (seat second): outcome unknown" in text
-    assert "has settled" not in text and "answered" not in text and "Its record now reads QUORUM_FAILED" in text
+    assert replay_owed_late_reviews(a.data) == {"settled": 0, "waiting": 1, "retired": 0, "failed": 0}
     from ouroboros import review_ledger
 
-    lost = review_ledger.load_record(a.data, wait["record_id"])
-    assert lost["state"] == "settled" and lost["verdict"]["aggregate"] == "QUORUM_FAILED"
-    assert all(row["operation_state"] == "custody_lost" for row in lost["rows"]), "unknown is a failed seat, never a pass"
-    assert _owed_left_rows(a) == {} and sorted(a.reviewer.rounds) == ["m1"] and _commit_count(a) == 1
-    assert "kept here because its author's task ended" in text and wait["retry_key"] == mark["review"]["subject"]["retry_key"]
+    pending = review_ledger.load_record(a.data, wait["record_id"])
+    assert pending["state"] == "pending" and _late_marks(a.data) == []
+    a.reviewer.release()
+    [mark] = until(lambda: _late_marks(a.data))
+    assert "outcome unknown" not in mark["text"] and "Its record now reads PASS" in mark["text"]
+    until(lambda: _owed_left_rows(a) == {})  # the owed row retires right after the mark, not in the same write
+    assert sorted(a.reviewer.rounds) == ["m1", "m2"]
+    assert _commit_count(a) == 1 and not a.pushes
+    assert replay_owed_late_reviews(a.data)["settled"] == 0
+    assert wait["retry_key"] == mark["review"]["subject"]["retry_key"]
 
 
 def test_an_unreadable_or_unknown_left_record_never_claims_a_settled_seat(tmp_path, monkeypatch):

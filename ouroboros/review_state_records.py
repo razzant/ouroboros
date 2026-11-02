@@ -1,6 +1,6 @@
 """Record types of the review ledger and the pure rules that shape them.
 
-The obligation, readiness-debt, advisory-run and commit-attempt records, the
+The obligation, readiness-debt and commit-attempt records, the
 retention and TTL bounds they are trimmed to, the repo-scope filter that keeps a
 multi-repo ledger honest, obligation fingerprinting and id allocation, attempt
 identity/ordering and merging, and the timestamp helpers. Every rule here is a
@@ -61,9 +61,6 @@ def _rs():
 _STATE_SCHEMA_VERSION = 3
 
 
-_MAX_RUN_HISTORY = 10
-
-
 _MAX_ATTEMPT_HISTORY = 50
 
 
@@ -71,9 +68,6 @@ _MAX_COMMIT_READINESS_DEBTS = 50
 
 
 _DEFAULT_TOOL_NAME = "commit_reviewed"
-
-
-_DEFAULT_ADVISORY_TOOL_NAME = "advisory_review"
 
 
 _LEGACY_CURRENT_REPO_KEY = "__legacy_current_repo__"
@@ -159,13 +153,27 @@ def _commit_readiness_debts_view(state: Any) -> List["CommitReadinessDebtItem"]:
     return debts
 
 
+def _is_archived_advisory_debt(row: Any) -> bool:
+    """A stored debt row of the retired advisory lane: one minted from an old run's
+    readiness warning (``source=advisory_review`` with a ``readiness_warning:advisory:``
+    fingerprint) or an ``advisory_stale`` copy of the stale marker, which nothing derives
+    any more (the marker is the one freshness fact, read against the preflight look).
+
+    That lane is an archive (owner decision): the row is kept exactly as stored,
+    never current debt, never verified for no longer being observed, never pruned,
+    its id never reused.
+    """
+    if not isinstance(row, dict):
+        return False
+    fingerprint = str(row.get("fingerprint") or "")
+    return fingerprint == "advisory_stale" or (
+        row.get("source") == "advisory_review" and fingerprint.startswith("readiness_warning:advisory:"))
+
+
 _OBLIGATION_STR_DEFAULTS = {"obligation_id": "", "item": "", "severity": "critical", "reason": "", "source_attempt_ts": "", "source_attempt_msg": "", "status": "still_open", "resolved_by": "", "repo_key": _LEGACY_CURRENT_REPO_KEY}
 
 
 _DEBT_STR_DEFAULTS = {"debt_id": "", "category": "", "summary": "", "severity": "warning", "status": "detected", "repo_key": _LEGACY_CURRENT_REPO_KEY, "fingerprint": "", "title": "Commit readiness debt", "source": "review_state", "first_seen_at": "", "last_seen_at": "", "updated_at": "", "verified_at": ""}
-
-
-_RUN_STR_DEFAULTS = {"snapshot_hash": "", "commit_message": "", "status": "stale", "snapshot_summary": "", "raw_result": "", "reason_kind": "", "bypass_reason": "", "bypassed_by_task": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_ADVISORY_TOOL_NAME, "phase": "advisory", "model_used": "", "session_id": "", "review_rebuttal": ""}
 
 
 _ATTEMPT_STR_DEFAULTS = {"commit_message": "", "snapshot_hash": "", "block_reason": "", "block_details": "", "task_id": "", "repo_key": _LEGACY_CURRENT_REPO_KEY, "tool_name": _DEFAULT_TOOL_NAME, "pre_review_fingerprint": "", "post_review_fingerprint": "", "fingerprint_status": "", "scope_model": "", "block_class": "", "rebuttal_sha256": "", "review_contract_fingerprint": "", "review_retry_key": "", "root_task_id": "", "review_owner_session_id": "", "review_record_id": "", "review_budget_repo_key": ""}
@@ -175,9 +183,6 @@ _ATTEMPT_MERGE_INCOMING_FIRST = ("ts", "commit_message", "status", "snapshot_has
 
 
 _ATTEMPT_MERGE_INCOMING_LISTS = ("critical_findings", "advisory_findings", "obligation_ids", "readiness_warnings")
-
-
-_RUN_STATUS_ICONS = {"fresh": "✅", "stale": "⚠️", "bypassed": "⏭️", "skipped": "⏭️", "parse_failure": "🔴"}
 
 
 def _filter_lifecycle_records(
@@ -199,7 +204,9 @@ def _filter_lifecycle_records(
 
 
 def _allocate_prefixed_id(items: List[Any], attr: str, next_seq: int, prefix: str) -> tuple[str, int]:
-    used = {str(getattr(item, attr, "") or "").strip() for item in items if str(getattr(item, attr, "") or "").strip()}
+    """The next free id; an item is a record or a stored row (an archived mapping)."""
+    values = (item.get(attr) if isinstance(item, dict) else getattr(item, attr, "") for item in items)
+    used = {str(value or "").strip() for value in values} - {""}
     seq = max(1, int(next_seq or 1))
     while True:
         candidate = f"{prefix}{seq:04d}"
@@ -208,20 +215,12 @@ def _allocate_prefixed_id(items: List[Any], attr: str, next_seq: int, prefix: st
             return candidate, seq
 
 
-def _append_finding_lines(
-    lines: List[str],
-    findings: List[Dict[str, Any]],
-    header: str,
-    *,
-    limit: int | None = None,
-    with_severity: bool = False,
-) -> None:
+def _append_finding_lines(lines: List[str], findings: List[Dict[str, Any]], header: str) -> None:
     lines.append(f"   {header} ({len(findings)}):")
     for finding in findings:
-        label = str(finding.get("item", "?") if with_severity else finding.get("item") or finding.get("reason") or "?")
-        reason = _rs()._truncate_review_reason(finding.get("reason", ""), limit=limit or 120)
-        prefix = f"[{str(finding.get('severity', 'advisory')).upper()}] " if with_severity else "- "
-        lines.append(f"     {prefix}{label}: {reason}")
+        label = str(finding.get("item") or finding.get("reason") or "?")
+        reason = _rs()._truncate_review_reason(finding.get("reason", ""), limit=160)
+        lines.append(f"     - {label}: {reason}")
 
 
 @dataclass
@@ -263,55 +262,6 @@ class CommitReadinessDebtItem:
     verified_at: str = ""
     occurrence_count: int = 0
     consecutive_observations: int = 0
-
-
-@dataclass
-class AdvisoryRunRecord:
-    """One advisory pre-review and its retained physical execution."""
-
-    snapshot_hash: str
-    commit_message: str
-    status: str
-    ts: str
-    items: List[Dict[str, Any]] = field(default_factory=list)
-    snapshot_summary: str = ""
-    raw_result: str = ""
-    # Typed cause for status="preflight_blocked" rows: "syntax" (a staged .py
-    # failed compile), "release_metadata" (defect); status="error" also carries
-    # "release_metadata_unavailable" when the required source could not be read.
-    # "" = unknown/legacy — guidance must then point at raw_result instead of
-    # asserting a specific problem class (H4, capinv-447).
-    reason_kind: str = ""
-    review_rebuttal: str = ""  # full argument delivered to this exact preflight
-    # Existing delegate invocation owns the immutable request; this row binds
-    # its intent/candidate and retains unresolved execution across a restart.
-    execution: Dict[str, Any] = field(default_factory=dict)
-    bypass_reason: str = ""
-    bypassed_by_task: str = ""
-    snapshot_paths: Optional[List[str]] = field(default=None)
-    repo_key: str = _LEGACY_CURRENT_REPO_KEY
-    tool_name: str = _DEFAULT_ADVISORY_TOOL_NAME
-    task_id: str = ""
-    attempt: int = 0
-    phase: str = "advisory"
-    created_ts: str = ""
-    updated_ts: str = ""
-    readiness_warnings: List[str] = field(default_factory=list)
-    prompt_chars: int = 0
-    model_used: str = ""
-    session_id: str = ""
-    duration_sec: float = 0.0
-
-    @property
-    def execution_pending(self) -> bool:
-        """Unresolved custody survives a failed response or a missing local meta update."""
-        return bool(self.status == "pending" or self.execution.get("pending_invocation_id")
-                    or self.execution.get("operation_state") in {"in_flight", "custody_lost"})
-
-    @property
-    def blocks_preflight(self) -> bool:
-        """An audited bypass releases admission, never the retained physical work."""
-        return self.execution_pending and not self.bypass_reason
 
 
 @dataclass

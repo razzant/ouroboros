@@ -1,4 +1,4 @@
-"""Windows file shards preserve both passes and cannot publish incomplete proof."""
+"""Whole-file shards of every OS preserve both passes and cannot publish incomplete proof."""
 from collections import Counter
 import json
 import os
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS
+from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR, PARALLEL_PASS_FLAGS, SERIAL_PASS_FLAGS
 from tests.ci_evidence import file_shards, reconcile_shards
 from ouroboros.test_parallelism import NESTED_WORKERS_ENV
 
@@ -20,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA, RUN = "a" * 40, "42"
 EXPRESSIONS = {name: f"{prefix}serial and {LANE_EXCLUSION_EXPR}"
                for name, prefix in (("parallel", "not "), ("serial", ""))}
+# The full-test matrix: runner image, `runner.os` (the artifacts' OS name) and its shard count.
+SHARDED = (("ubuntu-latest", "Linux", 4), ("macos-latest", "macOS", 4), ("windows-latest", "Windows", 8))
 
 
 def test_file_assignment_keeps_modules_and_balances_independent_of_input_order():
@@ -182,61 +184,106 @@ def _jobs():
     return yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]
 
 
-def test_windows_matrix_keeps_the_same_passes_and_once_per_os_checks(tmp_path):
+def test_every_os_runs_whole_file_shards_of_both_passes_and_its_checks_once(tmp_path):
     job = _jobs()["full-test-runs"]
     matrix = job["strategy"]["matrix"]
-    assert matrix["shard"] == [0]
-    assert matrix["include"] == [{"os": "windows-latest", "shard": i} for i in range(1, 9)]
+    assert matrix == {"include": [{"os": image, "shard": index, "shards": count}
+                                  for image, _, count in SHARDED for index in range(1, count + 1)]}
     assert job["strategy"]["fail-fast"] is False and "continue-on-error" not in job
     steps = {step["id"]: step for step in job["steps"] if "id" in step}
-    shard_option = "${{ runner.os == 'Windows' && format('--default-suite-shard={0}/8', matrix.shard) || '' }}"
     for label in EXPRESSIONS:
         run, collect = steps[f"tests_{label}"], steps[f"manifest_{label}"]
         assert f'-m "{EXPRESSIONS[label]}"' in run["run"] and f'-m "{EXPRESSIONS[label]}"' in collect["run"]
-        assert run["run"].endswith(shard_option)
+        # scripts/ci_retry.py wraps each pass; the shard option stays its last argument.
+        assert run["run"].startswith(
+            f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/{label}" '
+            "--accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ ")
+        assert run["run"].endswith("--default-suite-shard=${{ matrix.shard }}/${{ matrix.shards }}")
+        assert run["env"] == {"GH_TOKEN": "${{ github.token }}"}  # The accepted-failure check reads issues.
         assert "matrix.shard" not in run["if"]
-        assert "matrix.shard == 1" in collect["if"] and "runner.os == 'Windows'" in collect["if"]
-        assert "--default-suite-shard" not in collect["run"]
+        # Every OS witnesses its own two passes on its first shard.
+        assert "matrix.shard == 1" in collect["if"] and "runner.os == 'Windows'" not in collect["if"]
+        assert "--default-suite-shard" not in collect["run"] and "ci_retry" not in collect["run"]
         assert "--collect-only -q --default-suite-manifest" in collect["run"]
         assert "continue-on-error" not in run and "continue-on-error" not in collect
+        assert run["timeout-minutes"] == 90
     assert " ".join(PARALLEL_PASS_FLAGS) in steps["tests_parallel"]["run"]
-    assert all(flag not in steps["tests_serial"]["run"].split() for flag in PARALLEL_PASS_FLAGS)
-    assert steps["tests_parallel"]["timeout-minutes"] == 120
-    assert steps["tests_serial"]["timeout-minutes"] == 120
+    assert " ".join(SERIAL_PASS_FLAGS) in steps["tests_serial"]["run"]
+    assert all(flag not in steps["tests_serial"]["run"].split()
+               for flag in PARALLEL_PASS_FLAGS if flag not in SERIAL_PASS_FLAGS)
+    assert {"issues": "read"}.items() <= job["permissions"].items()
     for name in ("setup_node", "posix_tools", "select_posix_tools"):
         assert "matrix.shard" not in steps[name]["if"]  # Every runner needs the utilities and node.
     for name in ("book_mode", "tests_size", "attachment_browser_install", "attachment_browser", "composer_browser"):
-        assert "matrix.shard <= 1" in steps[name]["if"]
+        assert "matrix.shard == 1" in steps[name]["if"]
     for step in job["steps"]:
-        if ("run_tests.py --node" in step.get("run", "") or "lint:undef" in step.get("run", "")
-                or "test_no_core_a2a_telegram_imports.py" in step.get("run", "")):
-            assert "matrix.shard <= 1" in step["if"]
-    mandatory = [step for step in job["steps"] if step.get("name", "").startswith(("Require both Windows", "Upload the Windows"))]
-    assert len(mandatory) == 5  # Four proof steps plus the existing advisory composer upload.
-    mandatory = [step for step in mandatory if "message-field" not in step["name"]]
+        if "run_tests.py --node" in step.get("run", "") or "test_no_core_a2a_telegram_imports.py" in step.get("run", ""):
+            assert "matrix.shard == 1" in step["if"]
+    mandatory = {step["name"]: step for step in job["steps"] if step.get("name") in (
+        "Require both shard projections", "Upload the shard proof", "Require both manifest projections",
+        "Upload the manifests")}
     assert len(mandatory) == 4
-    for step in mandatory:
+    for step in mandatory.values():
         assert "continue-on-error" not in step and "!cancelled()" in step["if"]
+        assert ("matrix.shard == 1" in step["if"]) is ("manifest" in step["name"])
         if "Upload" in step["name"]:
             assert step["with"]["if-no-files-found"] == "error"
-            assert all(f"github.{key}" in step["with"]["name"] for key in ("sha", "run_id", "run_attempt"))
-        else:
-            assert step["run"].count("test -s ") == 2  # One lost export cannot fall back to an earlier attempt.
-            bash = shutil.which("bash")
-            if bash is None:
-                pytest.skip("workflow shell unavailable on this host")
-            command = step["run"].replace("${{ runner.temp }}", str(tmp_path))
-            files = [Path(line.split('"')[1]) for line in command.splitlines()]
-            for missing in (0, 1, None):
-                for index, path in enumerate(files):
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("" if index == missing else "{}", encoding="utf-8")
-                result = subprocess.run([bash, "-e", "-c", command], capture_output=True, timeout=10)
-                assert (result.returncode == 0) == (missing is None)
+            # The reconciliation sorts the artifacts by OS, then judges this commit, run and attempt.
+            assert all(f"{key}" in step["with"]["name"] for key in (
+                "runner.os", "github.sha", "github.run_id", "github.run_attempt"))
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("workflow shell unavailable on this host")
+    # A pass proves itself by its export, or, killed before it, by its journal and its retry verdict.
+    cases = [({}, True), ({"parallel": ("events.jsonl", "verdict.json")}, True),
+             ({"serial": ("events.jsonl",)}, False), ({"parallel": ("verdict.json",)}, False),
+             ({"serial": ()}, False), ({"parallel": ("results.json:empty",)}, False)]
+    for number, (changes, accepted) in enumerate(cases):
+        temp = tmp_path / f"shard-case-{number}"
+        for label in EXPRESSIONS:
+            for name in changes.get(label, ("results.json",)):
+                (temp / "ci-evidence" / label).mkdir(parents=True, exist_ok=True)
+                (temp / "ci-evidence" / label / name.split(":")[0]).write_text(
+                    "" if name.endswith(":empty") else "{}", encoding="utf-8")
+        command = mandatory["Require both shard projections"]["run"].replace("${{ runner.temp }}", str(temp))
+        # As `shell: bash` runs it: errexit stops the loop at the first pass without a proof.
+        result = subprocess.run([bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", command],
+                                capture_output=True, timeout=10)
+        assert (result.returncode == 0) is accepted, changes
+    command = mandatory["Require both manifest projections"]["run"]
+    assert command.count("test -s ") == 2  # Manifests are not retried: only their export proves them.
+    command = command.replace("${{ runner.temp }}", str(tmp_path))
+    files = [Path(line.split('"')[1]) for line in command.splitlines()]
+    for missing in (0, 1, None):
+        for index, path in enumerate(files):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("" if index == missing else "{}", encoding="utf-8")
+        result = subprocess.run([bash, "-e", "-c", command], capture_output=True, timeout=10)
+        assert (result.returncode == 0) == (missing is None)
+
+
+def _artifacts(proof, os_name, count):
+    """One OS's two passes as full-test downloads them: its manifest artifact and a proof per shard."""
+    files = [f"tests/test_{index:02}.py" for index in range(count + 1)]
+    owners = file_shards({path: 2 for path in files}, count)
+    identity = {"sha": SHA, "run_id": RUN, "run_attempt": "1"}
+    for label in EXPRESSIONS:
+        full = [f"{path}::test_{label}" for path in files]
+        block = {"full": full, "file_weights": [[path, 2] for path in files], "pass": label}
+        for shard in range(count + 1):
+            directory = (proof / "manifest" / f"default-ci-manifest-{os_name}-{SHA}-{RUN}-1" if shard == 0
+                         else proof / "shards" / f"default-ci-shard-{os_name}-{shard}-{SHA}-{RUN}-1")
+            lane = dict(block, **({"shard": [shard, count], "assigned": [
+                node for node in full if owners[node.split("::", 1)[0]] == shard]} if shard else {}))
+            (directory / label).mkdir(parents=True, exist_ok=True)
+            (directory / label / "results.json").write_text(json.dumps({
+                f"default_{label}": lane, "session_exit_code": 0, "github": identity,
+                "reports": [{"nodeid": node, "phase": "call", "outcome": "passed"} for node in lane.get("assigned", [])]}),
+                encoding="utf-8")
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", ""])
-def test_full_test_result_requires_the_matrix_and_both_reconciliations(tmp_path, outcome):
+def test_full_test_result_requires_the_matrix_and_every_os_reconciliation(tmp_path, outcome):
     jobs = _jobs()
     job = jobs["full-test"]
     assert job["needs"] == ["full-test-runs", "journal-persist"]
@@ -256,13 +303,29 @@ def test_full_test_result_requires_the_matrix_and_both_reconciliations(tmp_path,
         assert (result.returncode == 0) == (outcome == "success"), (matrix, persist)
     for step in steps:
         assert step["if"] == "${{ !cancelled() }}" and "continue-on-error" not in step
-    commands = [step["run"] for step in steps if "run" in step]
-    assert len(commands) == 2
-    for label, command in zip(EXPRESSIONS, commands):
-        assert command.startswith(f"python3 -I -S tests/ci_evidence.py reconcile-shards --lane default_{label}")
-        assert '--count 8 --sha "${{ github.sha }}" --run-id "${{ github.run_id }}"' in command
-    assert jobs["release-preflight"]["needs"] == ["full-test", "integration-test", "system-e2e-mock"]
-    assert jobs["build"]["needs"] == ["full-test", "release-preflight"]
+    (reconcile,) = [step for step in steps if "run" in step]
+    assert "full-test" in jobs["release"]["needs"], "nothing is published without the reconciled matrix"
+    if outcome != "success":
+        return  # The loop below is the same for every outcome of the matrix.
+    # Every OS of the matrix, with its own shard count, is reconciled in both passes: run the step itself.
+    assert f"for spec in {' '.join(f'{os_name}:{count}' for _, os_name, count in SHARDED)}; do" in reconcile["run"]
+    script = reconcile["run"].replace("python3 -I -S", f'"{sys.executable}" -I -S')
+    for missing in (None, ("macOS", 3)):
+        proof = tmp_path / f"proof-{missing is None}"
+        for _, os_name, count in SHARDED:
+            _artifacts(proof, os_name, count)
+        if missing:
+            shutil.rmtree(proof / "shards" / f"default-ci-shard-{missing[0]}-{missing[1]}-{SHA}-{RUN}-1")
+        summary = tmp_path / f"summary-{missing is None}.md"
+        result = subprocess.run([bash, "-c", script], cwd=ROOT, capture_output=True, text=True, timeout=120,
+                                env={**os.environ, "PROOF": str(proof), "SHA": SHA, "RUN_ID": RUN,
+                                     "GITHUB_STEP_SUMMARY": str(summary)})
+        text = summary.read_text(encoding="utf-8")
+        if missing is None:
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert text.count("reconciliation — complete") == 2 * len(SHARDED)
+        else:
+            assert result.returncode == 1 and text.count("**GAP** shard 3/4: no proof") == 2, text
 
 
 def test_each_journal_mode_is_proven_by_its_own_lane():
@@ -313,10 +376,14 @@ def test_the_persist_legs_select_real_modules_and_keep_the_gate_split(tmp_path):
     assert len(modules) >= 8 and all((repo / module).is_file() for module in modules), modules
     assert serial["if"] == "${{ !cancelled() && steps.select.outcome == 'success' }}"
     assert " ".join(PARALLEL_PASS_FLAGS) in parallel["run"]  # the gate's own split, as the matrix pins it
-    assert all(flag not in serial["run"].split() for flag in PARALLEL_PASS_FLAGS)
+    assert " ".join(SERIAL_PASS_FLAGS) in serial["run"]
+    assert all(flag not in serial["run"].split() for flag in PARALLEL_PASS_FLAGS if flag not in SERIAL_PASS_FLAGS)
     for step, lane in ((parallel, "parallel"), (serial, "serial")):
         assert f'-m "{EXPRESSIONS[lane]}"' in step["run"], lane
         assert f'--ci-evidence-dir="${{{{ runner.temp }}}}/ci-evidence/{lane}"' in step["run"], lane
+        # Named modules, no shard: scripts/ci_retry.py retries and continues from the crash record.
+        assert step["run"].startswith(f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/'
+                                      f'{lane}" --accepted tests/accepted_failures.json -- python scripts/run_tests.py ')
     publish = next(step for step in job_steps if step.get("uses") == "./.github/actions/test-evidence")
     assert publish["with"]["passes"] == ("parallel=${{ steps.tests_parallel.outcome }} "
                                          "serial=${{ steps.tests_serial.outcome }}")

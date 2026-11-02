@@ -90,6 +90,8 @@ def _reserve_parallel_review_roster(ctx, prepared) -> None:
         return
     ctx._review_reserved_operations = operations
     ctx._review_reserved_roster = {"multi_model_review": rows}
+    from ouroboros.review_waiting import bind_roster
+    bind_roster(ctx, rows)
     from ouroboros.config import get_finalization_grace_sec
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
 
@@ -152,23 +154,24 @@ def _format_coupling_advisory_msg(outcome) -> str:
 def _commit_review_retry_key(
     ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint="",
 ):
-    """Bind one logical review cycle to canonical staged material and intent."""
+    """Bind one logical review cycle to canonical staged material and intent (an author-named
+    ``since_review`` included, only when given; host observations never)."""
     material = str(binding_fingerprint or "").strip()
     if not material:
+        from ouroboros.tools.review_subject import staged_patch
+
         try:
-            diff_bytes = run_cmd(
-                ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
-                cwd=ctx.repo_dir,
-            ).encode()
+            _patch, diff_sha = staged_patch(ctx.repo_dir)
             tree_sha = run_cmd(["git", "write-tree"], cwd=ctx.repo_dir).strip()
         except Exception:
-            diff_bytes, tree_sha = b"", ""
-        material = hashlib.sha256(tree_sha.encode() + b"\0" + diff_bytes).hexdigest()
+            diff_sha, tree_sha = "", ""
+        material = hashlib.sha256(tree_sha.encode() + b"\0" + diff_sha.encode()).hexdigest()
     return "commit_review:" + hashlib.sha256(json.dumps({
         "binding": material, "commit_message": commit_message,
         "goal": goal, "scope": scope,
         "rebuttal": hashlib.sha256(str(review_rebuttal or "").encode()).hexdigest(),
         "contract": str(getattr(ctx, "_current_review_contract_fingerprint", "") or ""),
+        **({"since_review": ctx._review_since} if getattr(ctx, "_review_since", "") else {}),
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -283,13 +286,13 @@ def run_parallel_review(
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "") or review_retry_key(subject)
         ctx._current_review_retry_key = retry_key
     else:
+        from ouroboros.tools.review_subject import staged_patch
+
         try:
-            diff_bytes = run_cmd(
-                ["git", "diff", "--cached", "--binary", "--no-ext-diff"], cwd=ctx.repo_dir,
-            ).encode()
+            # The same identity a frozen gate subject reads: one patch keeps one history across both paths.
+            _patch, snapshot_digest = staged_patch(ctx.repo_dir)
         except Exception:
-            diff_bytes = b""
-        snapshot_digest = hashlib.sha256(diff_bytes).hexdigest()
+            snapshot_digest = hashlib.sha256(b"").hexdigest()
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "") or (
             _commit_review_retry_key(
                 ctx, commit_message, goal=goal, scope=scope,
@@ -309,14 +312,17 @@ def run_parallel_review(
     # ---- Phase 1 (Q25=A): prepare every seat; dispatch NOTHING yet. ----
     prepared, early, exited = None, None, True
     try:
-        if (subject is not None and str(getattr(subject.spec, "kind", "") or "") == "result"
-                and not bool(getattr(ctx, "_review_reconcile_only", False))):
-            # A result subject: the one result question for every seat (review_result); a rejoin
-            # restores its recorded plan through the gate's own reconcile path below.
-            from ouroboros.tools.review_result import prepare_result_review
+        kind = str(getattr(subject.spec, "kind", "") or "") if subject is not None else ""
+        if kind in ("result", "skill") and not bool(getattr(ctx, "_review_reconcile_only", False)):
+            # A single-question subject (a task result, a skill payload): its own module composes the
+            # one question for every seat; a rejoin restores its recorded plan through the gate's own
+            # reconcile path below.
+            if kind == "result":
+                from ouroboros.tools.review_result import prepare_result_review as prepare
+            else:
+                from ouroboros.tools.review_skill import prepare_skill_review as prepare
 
-            prepared, early, exited = prepare_result_review(
-                ctx, subject, goal=goal, scope=scope, review_rebuttal=review_rebuttal)
+            prepared, early, exited = prepare(ctx, subject, goal=goal, scope=scope, review_rebuttal=review_rebuttal)
         else:
             prepared, early, exited = _prepare_unified_review(
                 ctx, commit_message, review_rebuttal=review_rebuttal, goal=goal, scope=scope, subject=subject)
@@ -393,7 +399,9 @@ def run_parallel_review(
             else:
                 from ouroboros.review_history_view import queue_review_history_context
                 try:
-                    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                    from ouroboros.review_wave import review_wave_scope
+
+                    with review_wave_scope(), _cf.ThreadPoolExecutor(max_workers=1) as pool:
                         # The wave runs under a COPY of the admitting context
                         # (contextvars.copy_context, the loop_tool_execution and
                         # plan_review precedent): the usage scope the wave was

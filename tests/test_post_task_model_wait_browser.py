@@ -71,6 +71,7 @@ def test_answered_direct_task_waits_through_task_done_and_reload(subscription_ui
     assert page.locator('[data-wait-id="post-light"]').is_visible()
     if main_status == "failed":
         assert page.get_by_text("Failed", exact=True).count() > 0
+    ui["errors"].watch(page)  # the reloads may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
     page.wait_for_selector('[data-wait-id="post-light"]')
     # The wait card can rejoin before the independent history request finishes.

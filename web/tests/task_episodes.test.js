@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
 import { admittedSuccessor, createTaskEpisodes, episodeSpan, noteEpisodeFacts, renderEpisodes } from '../modules/task_episodes.js';
+import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 // The browser's text serializer, as utils.escapeHtmlText reads it back.
 let priorDocument;
@@ -32,10 +33,14 @@ test('one attempt\'s facts: when it started, when and how it ended, its cause in
     let episode = noteEpisodeFacts({}, { terminal_time: { attempt: { started_at: '2026-10-10T17:33:00Z' } } });
     assert.equal(episode.started, '2026-10-10T17:33:00Z');
     episode = noteEpisodeFacts(episode, { system_type: 'task_summary', status: 'failed', ts: '2026-10-10T18:15:00Z',
-        reason_code: 'model_provider_failed', terminal_time: { occurred_at: '2026-10-10T18:15:00Z' } });
+        reason_code: 'provider_failure', terminal_time: { occurred_at: '2026-10-10T18:15:00Z' } });
     assert.equal(episode.ended, '2026-10-10T18:15:00Z');
     assert.equal(episode.phase, 'error');
-    assert.ok(episode.cause, 'a failed episode names its cause');
+    assert.equal(episode.cause, 'The model provider failed to answer, so the task could not finish');
+    assert.deepEqual(episode.codes, [], 'a cause in words leaves nothing for the details');
+    // Owner 2A: a code no sentence describes yet reads neutrally; its exact code rides for the card's details.
+    const unknown = noteEpisodeFacts(episode, { system_type: 'task_summary', status: 'failed', reason_code: 'example_new_reason' });
+    assert.deepEqual([unknown.cause, unknown.codes], ['The recorded reason has no description yet.', ['example_new_reason']]);
     assert.equal(noteEpisodeFacts(episode, { suggested_name: 'Check totals' }).name, 'Check totals');
     assert.equal(noteEpisodeFacts({ name: 'Retained name' }, {}).name, 'Retained name');
 });
@@ -164,4 +169,71 @@ test('a bound claim never folds a card, even when the claimed successor\'s card 
     episodes.note(first, { status: 'failed', continued_by: { ...claim, state: 'admitted' } });
     assert.equal(first.root.hidden, true, 'admitted: the predecessor folds into the successor\'s card');
     assert.equal(next.titleEl.textContent, 'Audit the projects');
+});
+
+test('an unknown episode code is inside its disclosure, never in the summary, and updates without replacing content', () => {
+    const { prior } = installDom();
+    try {
+        const first = card('t-1', 1000, 'Audit the projects');
+        const next = card('t-2', 5000, 'Continue: Audit the projects');
+        first.timelineEl = document.createElement('div');
+        next.episodeHistoryEl = document.createElement('div');
+        const records = new Map([[first.groupId, first], [next.groupId, next]]);
+        const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null });
+        episodes.note(first, { status: 'failed', system_type: 'task_summary', reason_code: 'example_new_reason',
+            continued_by: { state: 'admitted', successor_task_id: next.groupId } });
+        const disclosure = first.episodeDisclosure;
+        assert.match(disclosure.firstElementChild.textContent, /The recorded reason has no description yet/);
+        assert.doesNotMatch(disclosure.firstElementChild.textContent, /example_new_reason/);
+        const codes = disclosure.querySelector('.chat-episode-codes');
+        assert.equal(codes.textContent, 'Recorded reason: example_new_reason');
+        assert.equal(codes.parentNode, disclosure);
+        assert.equal(codes.hidden, false);
+        assert.equal(first.timelineEl.parentNode, disclosure);
+        episodes.note(first, { status: 'failed', system_type: 'task_summary', reason_code: 'provider_failure' });
+        assert.equal(first.episodeDisclosure, disclosure);
+        assert.equal(disclosure.querySelector('.chat-episode-codes'), codes);
+        assert.equal(codes.hidden, true);
+        assert.equal(codes.textContent, '');
+        assert.equal(first.timelineEl.parentNode, disclosure);
+    } finally { restoreDom(prior); }
+});
+
+
+test('the original Reviews reading door follows its host, never the old work controls', () => {
+    const { prior } = installDom();
+    try {
+        const first = card('t-1', 1000, 'Audit');
+        const next = card('t-2', 5000, 'Continue: Audit');
+        const third = card('t-3', 9000, 'Continue: publish');
+        first.timelineEl = document.createElement('div');
+        first.reviewSummaryEl = document.createElement('button');
+        first.reviewsHostEl = document.createElement('div');
+        first.footEl = document.createElement('div');
+        const oldStop = document.createElement('button');
+        oldStop.dataset.cancelRun = 't-1';
+        first.footEl.append(first.reviewSummaryEl, oldStop);
+        next.episodeHistoryEl = document.createElement('div');
+        third.episodeHistoryEl = document.createElement('div');
+        const records = new Map([first, next, third].map(record => [record.groupId, record]));
+        const episodes = createTaskEpisodes({ records, reanchor: () => false, activity: () => null });
+        episodes.note(first, { status: 'failed', continued_by: { state: 'admitted', successor_task_id: next.groupId } });
+        const disclosure = first.episodeDisclosure;
+        const door = first.reviewSummaryEl;
+        const host = first.reviewsHostEl;
+        assert.deepEqual([...disclosure.children].slice(-3), [first.timelineEl, door, host]);
+        assert.equal(oldStop.parentNode, first.footEl, 'old work control remains in its hidden physical shell');
+        episodes.sync(next);
+        assert.deepEqual([...disclosure.children].slice(-3), [first.timelineEl, door, host], 'sync never reorders or copies them');
+        const late = document.createElement('p');
+        host.appendChild(late);
+        episodes.note(next, { status: 'failed', continued_by: { state: 'admitted', successor_task_id: third.groupId } });
+        assert.equal(first.episodeDisclosure, disclosure);
+        assert.equal(disclosure.parentNode, third.episodeHistoryEl);
+        assert.equal(first.reviewSummaryEl, door);
+        assert.equal(door.parentNode, disclosure);
+        assert.equal(first.reviewsHostEl, host);
+        assert.equal(late.parentNode, host, 'the original controller still owns late content');
+        assert.equal(oldStop.parentNode, first.footEl);
+    } finally { restoreDom(prior); }
 });

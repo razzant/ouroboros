@@ -94,7 +94,7 @@ def test_summary_write_failure_preserves_copy_and_original_outcome(
         evidence = caught.value.checking_evidence
     assert evidence["status"] == "capture_failed"
     assert "evidence summary volume unavailable" in evidence["error"]
-    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area"
+    area = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex"
     assert (area / rc.EVIDENCE_DIRNAME / "coverage.xml").read_bytes() == ThreadGateway.coverage(1)
     assert (area / "reviewer-test.txt").read_bytes() == b"reviewer turn 1\n"
     assert not (rc.seat_dir(drive, "task-1", "op-1") / "evidence" / "summary.json").exists()
@@ -259,7 +259,7 @@ def test_unlistable_named_output_keeps_one_shot_copy_without_complete_receipt(
 ):
     drive = tmp_path / "drive"
     source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
-    area = rc.seat_dir(drive, "task-1", "op-1") / "area"
+    area = rc.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     deep = area / rc.EVIDENCE_DIRNAME / "deep"
 
     def edit(copy):
@@ -283,7 +283,7 @@ def test_transient_named_output_listing_failure_never_loses_bytes(
 ):
     drive = tmp_path / "drive"
     source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
-    area = rc.seat_dir(drive, "task-1", "op-1") / "area"
+    area = rc.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     deep = area / rc.EVIDENCE_DIRNAME / "deep"
     real_scandir, failed = os.scandir, []
 
@@ -314,7 +314,7 @@ def test_unreadable_named_output_is_disclosed_and_keeps_the_copy(
 ):
     drive = tmp_path / "drive"
     source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
-    area = rc.seat_dir(drive, "task-1", "op-1") / "area"
+    area = rc.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     declared = area / rc.EVIDENCE_DIRNAME
 
     def edit(copy):
@@ -339,7 +339,7 @@ def test_unlistable_reviewer_folder_keeps_git_copy_without_complete_receipt(
 ):
     drive = tmp_path / "drive"
     source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
-    area = rc.seat_dir(drive, "task-1", "op-1") / "area"
+    area = rc.seat_dir(drive, "task-1", "op-1") / "area.noindex"
     locked = area / "scratch" / "locked"
 
     def edit(copy):
@@ -364,8 +364,8 @@ def test_unlistable_named_output_moves_with_its_turn_and_never_blocks_the_thread
 ):
     drive = tmp_path / "drive"
     source = rc.freeze_checking_source(author, data_root=drive, subject=rc.SUBJECT_INDEX)
-    deep = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area" / rc.EVIDENCE_DIRNAME / "deep"
-    kept = rc.seat_dir(drive, "task-1", "op-1") / "area"  # the failed turn's own seat
+    deep = rc.seat_dir(drive, "task-1", "thread:plan_review:t1") / "area.noindex" / rc.EVIDENCE_DIRNAME / "deep"
+    kept = rc.seat_dir(drive, "task-1", "op-1") / "area.noindex"  # the failed turn's own seat
     moved = kept / rc.EVIDENCE_DIRNAME / "deep"
 
     def lock_output(copy):

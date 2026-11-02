@@ -21,10 +21,12 @@ def test_globalized_project_promotion_keeps_the_origin(monkeypatch):
     pipeline._run_global_backlog_promotion_only(types.SimpleNamespace(), task, sealed, None)
     assert captured and captured[0]["metadata"] == {
         "globalized_from_project_task": True, "initiator": "consciousness",
-        "usage_category": "consciousness_task", "consciousness_autonomy": "full"}
+        "usage_category": "consciousness_task", "consciousness_autonomy": "full",
+        "work_kind": "consciousness", "consciousness_cause": "started"}
     captured.clear()
     pipeline._run_global_backlog_promotion_only(types.SimpleNamespace(), {"id": "p-2", "type": "task"}, sealed, None)
-    assert captured[0]["metadata"] == {"globalized_from_project_task": True}
+    assert captured[0]["metadata"] == {"globalized_from_project_task": True,
+        "work_kind": "consciousness", "consciousness_cause": "started"}
 
 
 # --- round 3: a consciousness-started deep review stays inside the allowance; a started root

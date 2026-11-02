@@ -211,7 +211,7 @@ def _followup(ctx, **kw):
 
 def test_schedule_followup_registers_a_one_shot_entry(tmp_path):
     ctx = _ctx(tmp_path)
-    out = _followup(ctx, context="plan review for root-1 was quorum-unreachable")
+    out = _followup(ctx, name="Review window", context="plan review for root-1 was quorum-unreachable")
     assert out.startswith("FOLLOWUP_SCHEDULED")
     from supervisor.queue import list_scheduled_tasks
 
@@ -224,20 +224,28 @@ def test_schedule_followup_registers_a_one_shot_entry(tmp_path):
     # the agent's own words ride verbatim — no host template
     assert record["task"]["text"] == "Re-run the plan panel once the reviewer window resets."
     assert record["task"]["context"] == "plan review for root-1 was quorum-unreachable"
+    assert record["name"] == "Review window"
+    assert "description" not in record and "description" not in record["task"]
+    assert "Next due: 2030-01-01T00:00:00+00:00." in out  # a one-shot names its own instant
 
 
-def test_schedule_followup_notify_leaves_a_note_in_the_one_table(tmp_path):
+@pytest.mark.parametrize("recurring", [False, True])
+def test_schedule_followup_notify_leaves_a_note_in_the_one_table(tmp_path, recurring):
     """notify=true writes a ``kind: "notify"`` row: the agent's words and when they were
     written, independent work, counted in the same cap; no future task text is stored."""
     from supervisor import queue
 
     ctx = _ctx(tmp_path)
-    out = _followup(ctx, notify=True, relation="related", objective="Call mother")
+    out = _followup(ctx, notify=True, relation="related", objective="Call mother", name="Family call",
+                   **({"cron": "0 9 * * *", "timezone": "Europe/Paris"} if recurring else {}))
     assert out.startswith("FOLLOWUP_SCHEDULED: note "), out
     assert "relation='related' ignored" in out, "a note carries no money or deadline"
     [record] = queue.list_scheduled_tasks(tmp_path / "data")["tasks"]
     assert record["kind"] == "notify" and record["source"] == "task_followup"
     assert record["notification"]["text"] == "Call mother" and record["notification"]["set_at"]
+    assert record["name"] == "Family call" and "description" not in record
+    assert f"Next due: {record['next_run_at'] or record['trigger']['run_at']}." in out
+    assert "not determined" not in out
     assert record["followup_relation"]["kind"] == "independent"
     assert record["followup_origin"]["task_id"] == "root-1"
     assert "text" not in record["task"], "a note has no future task objective"
@@ -369,6 +377,7 @@ def test_presence_recurring_followup_uses_existing_cron_and_preserves_authority(
     assert record["trigger"] == {"type": "cron", "expr": "15 9 * * 1-5"}
     assert record["timezone"] == "Europe/Moscow"
     assert record["next_run_at"]
+    assert f"Next due: {record['next_run_at']}" in out
     assert record["task"]["metadata"]["presence"] == ctx.task_metadata["presence"]
     assert record["task"]["task_contract"] == {"capability_ceiling": payload}  # the turn's objective is not the follow-up's
     scheduled = queue._task_from_schedule(record)
@@ -485,20 +494,24 @@ def test_schedule_followup_reports_a_missed_table_lock_as_a_typed_refusal(tmp_pa
     assert list_scheduled_tasks(tmp_path / "data")["tasks"] == []
 
 
-def test_schedule_followup_surfaces_a_corrupt_store_as_the_typed_refusal(tmp_path):
-    """The lenient pending read tolerates a corrupt table, the strict upsert refuses
-    it; that refusal must reach the caller typed, not as FOLLOWUP_PERSIST_FAILED."""
-    from supervisor.queue import list_scheduled_tasks
+def test_schedule_followup_surfaces_a_corrupt_store_as_the_typed_refusal(tmp_path, monkeypatch):
+    """The pending count refuses an unreadable table before attempting a write."""
+    from supervisor import queue
 
     ctx = _ctx(tmp_path)
     state = tmp_path / "data" / "state"
     state.mkdir(parents=True, exist_ok=True)
     (state / "scheduled_tasks.json").write_text("{not json", encoding="utf-8")
+    writes = []
+    upsert = queue.upsert_scheduled_task
+    monkeypatch.setattr(queue, "upsert_scheduled_task", lambda row, **kw: (writes.append(row), upsert(row, **kw))[1])
     text = _followup(ctx)
     assert text.startswith("⚠️ CAPABILITY_UNAVAILABLE: FOLLOWUP_STORE_UNAVAILABLE")
     assert "PERSIST_FAILED" not in text
     assert (state / "scheduled_tasks.json").read_text(encoding="utf-8") == "{not json"
-    assert list_scheduled_tasks(tmp_path / "data")["tasks"] == []
+    assert writes == []
+    (state / "scheduled_tasks.json").write_text('{"tasks":[]}', encoding="utf-8")
+    assert _followup(ctx).startswith("FOLLOWUP_SCHEDULED") and len(writes) == 1
 
 
 def test_schedule_followup_discloses_a_lost_audit_outcome_on_its_success_line(tmp_path, monkeypatch):
@@ -750,7 +763,9 @@ def test_scheduled_tasks_digest_projects_run_at_for_once_records(tmp_path):
     })
     env = SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
     digest = _scheduled_tasks_digest(env)
-    rows = {row["id"]: row for row in digest["active"]}
+    rows = {row["id"]: row for row in digest["standing"] + digest["one_shots"]}
+    assert [row["id"] for row in digest["standing"]] == ["cr"]
+    assert [row["id"] for row in digest["one_shots"]] == ["fu"]
     assert rows["fu"]["run_at"] == "2030-01-01T00:00:00+00:00"
     assert "cron" not in rows["fu"]
     assert rows["cr"]["cron"] == "0 3 * * *"
@@ -866,9 +881,9 @@ def test_schedule_followup_registration_surfaces():
     assert set(schema["required"]) == {"objective", "relation"}
     assert {"run_at", "cron"} <= set(schema["properties"])
     assert not ({"anyOf", "oneOf", "allOf"} & set(schema))
-    from ouroboros.safety import POLICY_SKIP, TOOL_POLICY
+    from ouroboros.safety import POLICY_SKIP, POLICY_CHECK, TOOL_POLICY
 
-    assert TOOL_POLICY["schedule_followup"] == POLICY_SKIP
+    assert TOOL_POLICY["schedule_followup"] == POLICY_CHECK
     from ouroboros.tool_capabilities import (
         ACTING_SUBAGENT_TOOL_NAMES,
         CORE_TOOL_NAMES,

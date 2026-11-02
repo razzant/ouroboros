@@ -48,7 +48,7 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
     # persisting cannot clobber a FRESH valid verdict: review.json absent, or its recorded
     # content_hash stale for the current payload bytes. A stale CLEAN is knowingly
     # superseded by a FAIL at the current hash (the fact about the CURRENT bytes wins;
-    # the prior verdict stays in review_history.jsonl). With a fresh verdict on file the
+    # the prior verdict stays on its review ledger record). With a fresh verdict on file the
     # failure still surfaces only through the endpoint (409) and leaves state as-is.
     persist_failed_preflight = load_review_state(
         drive_root, skill.name, skill_dir=getattr(skill, "skill_dir", None),
@@ -122,11 +122,6 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
         review_profile="owner_attested",
     )
     save_review_state(drive_root, skill.name, review_state)
-    if not getattr(ctx, "_skill_review_lifecycle_guard", False):
-        _sr._append_skill_review_history(
-            drive_root, skill.name, status=_sr.STATUS_CLEAN,
-            content_hash=content_hash, findings=findings,
-        )
     marker_path = skill_state_dir(drive_root, skill.name) / "owner_attestation.json"
     atomic_write_json(marker_path, with_schema_version(
         {"attested_at": utc_now_iso(), "content_hash": content_hash},

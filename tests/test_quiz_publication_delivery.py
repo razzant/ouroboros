@@ -40,6 +40,69 @@ def _due(publication):
     write_task_result(publication.root, "t", row["status"], owner_quiz=row["owner_quiz"])
 
 
+@pytest.mark.parametrize("end", ["terminal", "timeout"])
+@pytest.mark.parametrize("assumption", ["", "Continue reading only"])
+def test_required_publication_recovers_after_wait_end(tmp_path, monkeypatch, end, assumption):
+    import asyncio
+    from ouroboros import dialogue_store
+    from ouroboros.gateway.task_decision import recover_question_deliveries
+    from ouroboros.owner_wait import wait_after_tools
+    from tests.test_native_owner_wait import native_context
+
+    ctx = native_context(tmp_path)
+    ctx.current_chat_id = 1
+    origin = {"task_id": ctx.task_id, "binding_id": "source-place", "source_event_id": "external-event"}
+    owner_quiz.record_asked(tmp_path, ctx.task_id, quiz_id="q1", question="May I proceed?",
+        options=[], assumption=assumption, wait_for_answer=True, chat_id=1, presence_contact=origin)
+    bridge, frames = message_bus.LocalChatBridge({}), []
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_: None)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"owner_id": 1})
+    host = SimpleNamespace(DRIVE_ROOT=tmp_path, bridge=bridge, append_jsonl=append_jsonl)
+    event = {"type": "send_quiz", "task_id": ctx.task_id, "quiz_id": "q1", "chat_id": 1,
+             "question": "May I proceed?", "options": [], "assumption": assumption, "wait_for_answer": True}
+
+    def unavailable(*_a, **_kw):
+        raise dialogue_store.StoreError("fixture publication unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(dialogue_store, "append", unavailable)
+        handlers._handle_send_quiz(event, host)
+    before = owner_quiz.quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert before["delivery"]["state"] == "owed" and not before.get("published_at")
+    assert not frames
+    if end == "terminal":
+        write_task_result(tmp_path, ctx.task_id, "completed")
+        assert owner_quiz.reconcile_terminal(tmp_path, ctx.task_id) == ["q1"]
+    else:
+        ctx._owner_wait_deadline_at, ctx._owner_wait_max_minutes = "2000-01-01T00:00:00+00:00", 1
+        messages = []
+        wait_after_tools(ctx, messages, {}, {}, 1, [], set())
+        wait = load_task_result(tmp_path, ctx.task_id)["owner_wait"]
+        assert wait["state"] == "resumed" and wait["resume_reason"] == "timeout"
+        if not assumption:
+            assert "No assumption was recorded; no answer is not consent" in str(messages)
+    ended = owner_quiz.quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert ended["wait_ended_at"] and not ended.get("wait_for_answer")
+    assert not ended.get("published_at") and ended["assumption"] == assumption
+    def due(quizzes):
+        quizzes["q1"]["delivery"]["next_retry_at"] = ""
+        return True
+    owner_quiz._mutate_projection(tmp_path, ctx.task_id, due)
+    assert asyncio.run(recover_question_deliveries(tmp_path)) == {"attempted": 1, "delivered": 1, "pending": 0}
+    after = owner_quiz.quiz_states(tmp_path, ctx.task_id)["q1"]
+    assert after["published_at"] and after["delivery"]["state"] == "delivered"
+    assert after["assumption"] == assumption and owner_quiz.current_question(after)
+    assert after["state"] == ("expired_terminal" if end == "terminal" else "open")
+    [frame] = [row for row in frames if row["type"] == "quiz"]
+    assert frame["wait_for_answer"] is False and frame["assumption"] == assumption
+    assert frame["wait_ended_at"] == ended["wait_ended_at"]
+    assert frame["presence_contact"] == origin and frame["chat_id"] == 1
+    assert asyncio.run(recover_question_deliveries(tmp_path))["attempted"] == 0
+
+
 def test_strict_publication_failure_keeps_timed_debt_then_exposes_delivered_fact(publication, monkeypatch):
     from ouroboros import dialogue_store as ds
 

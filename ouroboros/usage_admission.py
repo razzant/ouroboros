@@ -27,8 +27,10 @@ bars the next admission; it was not prevented.
 
 from __future__ import annotations
 
-from ouroboros.store import StoreBusy
-from ouroboros.usage_ledger import BillingAuthorityUnavailable
+from ouroboros.store import StoreBusy, bounded_wait
+from ouroboros.usage_ledger import (
+    USAGE_LOCK_TIMEOUT_SEC, BillingAuthorityBusy, BillingAuthorityUnavailable, UsageLockUnavailable,
+)
 
 import logging
 import math
@@ -76,7 +78,8 @@ def ledger_billing_binding(budget_root: Any, root_task_id: str) -> Dict[str, Any
     from ouroboros import usage_store
 
     root = ua._drive_root(budget_root)
-    with usage_store.read(root) as txn:
+    # The money read probes without waiting inside a caller's sliced acquisition (``_usage_wait``).
+    with usage_store.hold(root, timeout_sec=bounded_wait(USAGE_LOCK_TIMEOUT_SEC), write=False) as txn:
         row = txn.binding("root", root_task_id)
     if row is None:
         return {}
@@ -188,6 +191,9 @@ def task_billing_fields(task: Dict[str, Any], root_task_id: str, root_limit: Opt
     except (StoreBusy, BillingAuthorityUnavailable):
         raise
     except Exception as exc:
+        if isinstance(exc, UsageLockUnavailable) and exc.reason == "contention":
+            # Positive money contention: still unreadable to every reader; a preparation's own wait retries it.
+            raise BillingAuthorityBusy(root_task_id, rollback_confirmed=getattr(exc, "rollback_confirmed", False)) from exc
         log.warning("Billing authority unavailable for %s", root_task_id, exc_info=True)
         raise authority_unavailable("unreadable", root_task_id, f"read_failed:{type(exc).__name__}") from exc
 

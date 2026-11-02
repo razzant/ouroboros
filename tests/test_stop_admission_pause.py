@@ -13,7 +13,7 @@ import pytest
 
 from ouroboros import server_restart
 from ouroboros.task_results import write_task_result
-from supervisor import queue, queue_schedules, schedule_occurrence, worker_assignment, workers
+from supervisor import queue, schedule_occurrence, worker_assignment, workers
 from supervisor import workspace_preparation as prep
 from tests.test_g1_followup_policy import BINDING, DEADLINE, ORIGIN
 from tests.test_launch_outside_q import hold_after
@@ -70,7 +70,7 @@ def test_planned_restart_and_quit_teardown_pause_admission_first(monkeypatch):
     assert server_restart._begin_task_teardown(False) == server_restart._shutdown_task_cleanup_args(False)
     assert calls == ["pause", "pause"]
     # Both server doors begin their teardown through it, before they read the queue or retire the pool.
-    assert "_begin_task_teardown(restart_requested=True)" in inspect.getsource(server._perform_supervisor_restart)
+    assert "_begin_task_teardown(restart_requested=True)" in inspect.getsource(server_restart._perform_supervisor_restart)
     assert inspect.getsource(server).count("_begin_task_teardown(restart_requested)") == 1
 
 
@@ -118,7 +118,6 @@ def retiring_worker(env, monkeypatch):
 def scheduled_followup(env, monkeypatch, relation):
     from ouroboros.tools.followup import _handle_schedule_followup
 
-    monkeypatch.setattr(queue_schedules, "resync_skill_schedules", lambda *_a: {})
     monkeypatch.setattr("ouroboros.config.get_bg_wakeup_min_sec", lambda: 0)
     write_task_result(env.data, ORIGIN, "completed", root_task_id=ORIGIN, billing_group=BINDING, deadline_at=DEADLINE)
     ctx = _ctx(env.data.parent)
@@ -141,7 +140,7 @@ def owner_restart_context(env, monkeypatch):
     monkeypatch.setattr(server_restart, "_safe_restart_serialized", lambda *_a, **_kw: (True, ""))
     monkeypatch.setattr(server_restart, "_managed_update_pending_kwargs", lambda: {})
     monkeypatch.setattr(server_restart, "_stop_owned_daemon", lambda *_a: None)
-    monkeypatch.setattr("ouroboros.owned_shutdown.begin_owned_stop", lambda *_a: None)
+    monkeypatch.setattr("ouroboros.owned_shutdown.begin_owned_stop", lambda *_a, **_kw: None)
     monkeypatch.setattr("ouroboros.owned_shutdown.stop_owned_work", lambda *_a: None)
     monkeypatch.setattr("ouroboros.delegate_custody.reconcile_orphaned_runs", lambda *_a, **_kw: [])
     monkeypatch.setattr("supervisor.active_activity.get_direct_activity_registry",
@@ -170,7 +169,8 @@ def test_owner_restart_hands_a_committed_followup_over_before_its_own_restrictio
     observed = {}
 
     def pause(timeout=None):
-        observed["flag_before_pause"] = (env.data / "state" / "owner_restart_no_resume.flag").exists()
+        from ouroboros.delegate_recovery import active_restart_transaction
+        observed["flag_before_pause"] = bool(active_restart_transaction(env.data))
         proceed.set()
         observed["drained"] = real_pause(timeout)
         observed["delivered"] = [item["id"] for item in delivered if "id" in item]

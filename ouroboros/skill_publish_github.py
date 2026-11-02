@@ -8,6 +8,7 @@ import re
 import urllib.parse
 from typing import Any, Dict, List, Tuple
 
+from ouroboros.github_pr_identity import pull_request_fields_from_rest, same_pull_request
 from ouroboros.secret_masking import redact_known_values
 from ouroboros.skill_publish_result import validate_skill_publish_receipt
 from ouroboros.skill_publish_client import GitHubError, MISSING_TOKEN_MESSAGE, request
@@ -396,16 +397,8 @@ def _lookup_open_pr_receipt(
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         return None
     row = rows[0]
-    head = row.get("head") if isinstance(row.get("head"), dict) else {}
-    base = row.get("base") if isinstance(row.get("base"), dict) else {}
-    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
-    head_owner = head_repo.get("owner") if isinstance(head_repo.get("owner"), dict) else {}
-    if (
-        str(head.get("sha") or "").casefold() != commit_sha.casefold()
-        or str(head.get("ref") or "") != branch
-        or str(head_owner.get("login") or "").casefold() != login.casefold()
-        or str(base.get("ref") or "") != base_branch
-    ):
+    if not same_pull_request(pull_request_fields_from_rest(row), head_owner=login, head_branch=branch,
+                             base_branch=base_branch, head_sha=commit_sha):
         return None
     receipt = _receipt_from_url(
         str(row.get("html_url") or ""),

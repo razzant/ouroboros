@@ -452,7 +452,7 @@ def test_member_resume_completion_needs_its_own_consumed_grant_and_fence(tmp_pat
 
 
 @pytest.mark.parametrize("returning", [False, True])
-@pytest.mark.parametrize("refusal", ["stop", "panic", "restart_no_resume"])
+@pytest.mark.parametrize("refusal", ["stop", "restart_no_resume"])
 def test_a_refused_owner_resume_never_completes_the_member_fence(tmp_path, monkeypatch, refusal, returning):
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.owner_pause import read_fence
@@ -463,9 +463,8 @@ def test_a_refused_owner_resume_never_completes_the_member_fence(tmp_path, monke
     if refusal == "stop":
         request_cancel(tmp_path, CHILD, reason="owner stop", source="owner", requested_by="owner")
     else:
-        (tmp_path / "state").mkdir(exist_ok=True)
-        flag = "panic_stop.flag" if refusal == "panic" else "owner_restart_no_resume.flag"
-        (tmp_path / "state" / flag).write_text("panic" if refusal == "panic" else "1")
+        from tests._work_stop_helpers import live_restart
+        live_restart(tmp_path, monkeypatch)
     before = read_fence(tmp_path, ROOT)
     answer = queue.resume_budget_paused_task(CHILD)
     assert not answer["ok"] and read_fence(tmp_path, ROOT) == before, answer
@@ -509,7 +508,7 @@ def _fail_member_release(monkeypatch, failure):
     published = []
 
     def fail_release(*_args, **_kwargs):
-        published.append(any((row.get("_budget_pause_hold") or {}).get("selected") for row in workers.PENDING))
+        published.append(any(row.get("_resume_selection") for row in workers.PENDING))
         raise failure
 
     monkeypatch.setattr(owner_pause, "select_member_resume", fail_release)

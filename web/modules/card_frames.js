@@ -7,14 +7,16 @@
    downloads — under a document policy that blocks every fetch, WebSocket and load (nothing from any URL). No policy
    covers a frame navigating itself (the host closes an app whose frame loads a second document) or WebRTC
    (WIDGET_HOST_PROTOCOL §9; the author is Ouroboros, which has the network anyway). Its one channel is a
-   nonce-bound three-message bridge, `window.OuroborosCard` inside the frame:
+   nonce-bound bridge, `window.OuroborosCard` inside the frame:
      resize(height)            the frame's content height (the bridge also reports it on its own);
      state.save(value)         JSON of at most 32 KiB, kept per card in this tab's sessionStorage and handed back
                                as `state.value` at the next mount;
      submit(value, summary)    the HOST puts one line into the owner's draft (`From «<title>»: <summary>` and the
                                value as compact JSON when it is small) and focuses the field. Nothing is sent: only
                                the owner's Send does that.
-   The host's theme reaches the frame as `--ouro-*` custom properties, `data-theme` and `OuroborosCard.onTheme`. */
+   The bridge also reports, on its own, a script error, an unhandled rejection or a policy refusal in the app (at most
+   ten, each once), which the card shows on its status line. The host's theme reaches the frame as `--ouro-*` custom
+   properties (the values of the material the frame lies on), `data-theme` and `OuroborosCard.onTheme`. */
 
 import { onThemeChange } from './theme_palette.js';
 import { WIDGET_FRAME_MAX_HEIGHT } from './widget_module.js';
@@ -81,11 +83,15 @@ export function cardSubmitLine(title, value, summary = '') {
     return `From «${String(title || 'card').replace(/\s+/g, ' ').trim()}»: ${[words, shown].filter(Boolean).join(' ') || '(no summary)'}`;
 }
 
-/** The host's theme as the frame reads it: `{name, css}` (a `:root` block of `--ouro-*` values). */
-export function cardThemeTokens(doc = globalThis.document) {
+/**
+ * The host's theme as the frame reads it: `{name, css}` (a `:root` block of `--ouro-*` values). The values are those of
+ * `material`, the element the transparent frame lies on: inside a dark voice its inks and surfaces are that voice's
+ * own (ui.css "voice materials"), so a card's host is passed; the document root otherwise.
+ */
+export function cardThemeTokens(doc = globalThis.document, material = doc?.documentElement) {
     const candidate = globalThis.ouroTheme?.theme || doc?.documentElement?.dataset?.theme;
     const name = candidate === 'light' ? 'light' : 'dark';
-    const computed = doc?.documentElement && globalThis.getComputedStyle ? globalThis.getComputedStyle(doc.documentElement) : null;
+    const computed = material && globalThis.getComputedStyle ? globalThis.getComputedStyle(material) : null;
     const values = Object.entries(THEME_TOKENS).map(([own, host]) => {
         const value = String(computed?.getPropertyValue(host) || '').trim().replace(/[<>{};]/g, '');
         return value ? `${own}: ${value};` : '';
@@ -122,6 +128,18 @@ function cardBridgeScript(nonce, theme, saved) {
         const schedule = () => { if (!frame) frame = requestAnimationFrame(report); };
         if (typeof ResizeObserver === 'function') new ResizeObserver(schedule).observe(document.documentElement);
         window.addEventListener('load', schedule);
+        // A script error, a rejection nobody caught or a policy refusal otherwise leaves a blank or stuck app with no
+        // word to the owner: each is reported once, ten at most, so a throwing animation loop cannot flood the host.
+        const seen = new Set();
+        const fault = (kind, message) => {
+            const text = String(message ?? '').slice(0, 300);
+            if (seen.size >= 10 || seen.has(kind + ':' + text)) return;
+            seen.add(kind + ':' + text);
+            post({ type: 'ouro-card-error', kind, message: text });
+        };
+        window.addEventListener('error', (event) => fault('error', event.message || event.error));
+        window.addEventListener('unhandledrejection', (event) => fault('rejection', event.reason));
+        window.addEventListener('securitypolicyviolation', (event) => fault('csp', event.violatedDirective || 'blocked'));
         window.OuroborosCard = Object.freeze({
             resize(height) {
                 const value = Number(height);
@@ -163,9 +181,10 @@ export function cardAppSrcdoc(html, { nonce, theme = cardThemeTokens(), saved = 
 
 /**
  * The parent side of the bridge: `handle(event)` acts only on a message from this frame's window carrying this
- * mount's nonce — `resize` (a positive height), `state` (JSON text of at most 32 KiB), `submit`. True when handled.
+ * mount's nonce — `resize` (a positive height), `state` (JSON text of at most 32 KiB), `submit`, `error` (one line
+ * for the card). True when handled.
  */
-export function createCardAppBridge({ nonce, source, resize, save, submit }) {
+export function createCardAppBridge({ nonce, source, resize, save, submit, fault = () => {} }) {
     return (event) => {
         const msg = event?.data;
         if (!msg || typeof msg !== 'object' || msg.nonce !== nonce || event.source !== source()) return false;
@@ -185,6 +204,11 @@ export function createCardAppBridge({ nonce, source, resize, save, submit }) {
             submit(msg.value, typeof msg.summary === 'string' ? msg.summary : '');
             return true;
         }
+        if (msg.type === 'ouro-card-error') {
+            const label = msg.kind === 'csp' ? 'Blocked by the card\'s policy' : 'App error';
+            fault(`${label}: ${String(msg.message || 'unknown').slice(0, 300)}`);
+            return true;
+        }
         return false;
     };
 }
@@ -196,19 +220,26 @@ function readState(storage, key) {
 }
 
 /**
- * Run one app inside `host`: `{cardId, title, sha256, html, fit, onSubmit(line), onLeave()}`; `fit` is the frame's
- * inline size policy (`createInlineFit`). The app's saved state (keyed by card and app bytes, so a replaced app starts
- * fresh) is handed back at mount. No policy stops a frame from navigating itself, so a second document loading in
- * the frame (the app left for a page) removes the frame at once and calls `onLeave`. Returns the disposer.
+ * Run one app inside `host`: `{cardId, title, sha256, html, fit, onSubmit(line), onLeave(), onFault(text), fresh}`;
+ * `fit` is the frame's inline size policy (`createInlineFit`). The app's saved state (keyed by card and app bytes, so a
+ * replaced app starts fresh) is handed back at mount unless `fresh`, which forgets it, so no later mount of this card
+ * hands it back either. No policy stops a frame from navigating itself,
+ * so a second document loading in the frame (the app left for a page) removes the frame at once and calls `onLeave`.
+ * Returns the disposer.
  */
-export function mountCardApp(host, { cardId, title, sha256, html, fit, onSubmit, onLeave = () => {}, storage = globalThis.sessionStorage }) {
+export function mountCardApp(host, { cardId, title, sha256, html, fit, onSubmit, onLeave = () => {}, onFault = () => {},
+    fresh = false, storage = globalThis.sessionStorage }) {
     const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     const key = stateKey(cardId, sha256);
     const iframe = document.createElement('iframe');
     iframe.className = 'widgets-frame chat-card-frame';
     iframe.setAttribute('sandbox', CARD_APP_SANDBOX);
     iframe.setAttribute('title', title || 'Card');
-    iframe.srcdoc = cardAppSrcdoc(html, { nonce, saved: readState(storage, key) });
+    // The frame is transparent over its host, so it reads the host's material, at mount and at every theme change;
+    // a host not in the document has none yet and the root stands in.
+    const theme = () => cardThemeTokens(document, host.isConnected ? host : document.documentElement);
+    if (fresh) { try { storage?.removeItem(key); } catch { /* blocked: nothing was kept to forget */ } }
+    iframe.srcdoc = cardAppSrcdoc(html, { nonce, theme: theme(), saved: fresh ? null : readState(storage, key) });
     host.replaceChildren(iframe);
     const handle = createCardAppBridge({
         nonce,
@@ -216,9 +247,10 @@ export function mountCardApp(host, { cardId, title, sha256, html, fit, onSubmit,
         resize: (height) => fit.fit(height),
         save: (text) => { try { storage?.setItem(key, text); } catch { /* the app keeps running; its state is not kept */ } },
         submit: (value, summary) => onSubmit(cardSubmitLine(title, value, summary)),
+        fault: onFault,
     });
     window.addEventListener('message', handle);
-    const stopTheme = onThemeChange(() => iframe.contentWindow?.postMessage({ type: 'ouro-card-theme', nonce, theme: cardThemeTokens() }, '*'));
+    const stopTheme = onThemeChange(() => iframe.contentWindow?.postMessage({ type: 'ouro-card-theme', nonce, theme: theme() }, '*'));
     let disposed = false;
     let loads = 0;
     const dispose = () => {

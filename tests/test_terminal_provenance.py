@@ -493,7 +493,7 @@ def test_a_non_provider_rail_with_a_complete_candidate_stays_model_final(tmp_pat
     answer = "Complete current model answer."
     loop._replace_delivery_candidate(registry, limit_ctx, trace, answer, control="replace")
     monkeypatch.setattr(
-        loop, "_force_plan_disclosure",
+        loop, "_plan_gate_disclosure",
         lambda *_a, **_k: "\n\nPlan review was left open.",
     )
 
@@ -519,7 +519,7 @@ def test_the_normal_rail_types_an_open_plan_review(tmp_path, monkeypatch):
         loop, registry, limit_ctx, trace = _forced_test_context(tmp_path / str(expected))
         monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
         monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-        monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_k: suffix)
+        monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_a, **_k: suffix)
         text, usage, _trace = loop._no_tool_final_answer(
             "Complete answer.", limit_ctx, trace, registry, queue.Queue(), set(), lambda _t: None)
         assert text == "Complete answer."
@@ -535,7 +535,7 @@ def test_a_candidateless_fallback_types_the_open_plan_review(tmp_path, monkeypat
 
     loop, _registry, limit_ctx, _trace = _forced_test_context(tmp_path)
     monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (None, 0.0))
-    monkeypatch.setattr(loop, "_force_plan_disclosure", lambda *_a, **_k: "\n\nPlan review is still open.")
+    monkeypatch.setattr(loop, "_plan_gate_disclosure", lambda *_a, **_k: "\n\nPlan review is still open.")
     _text, usage, _returned = loop._handle_round_limit(limit_ctx)
     assert usage["terminal_origin"] == loop.TERMINAL_ORIGIN_HOST_NOTICE
     assert usage["terminal_plan_review_open"] is True

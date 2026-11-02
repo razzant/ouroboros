@@ -3,6 +3,7 @@
 import json
 import time
 
+import httpx
 import pytest
 
 from ouroboros.llm import LocalContextTooLargeError
@@ -11,6 +12,7 @@ from ouroboros.loop_llm_call import (
     _LlmErrorContext,
     _is_context_overflow_error,
     _record_llm_call_error,
+    call_llm_with_retry,
     classify_llm_exception,
 )
 
@@ -36,6 +38,70 @@ def test_untyped_context_scan_excludes_rate_and_output_size_errors():
         "request body too large",
     ):
         assert classify_llm_exception(RuntimeError(text), text).kind == "request_too_large"
+
+
+@pytest.mark.parametrize("detail", [
+    "429000 tokens > 400000 maximum",
+    "100429 tokens > 100000 maximum",
+    "1004290 tokens > 1000000 maximum",
+    "250000 tokens > 200000 maximum (request id: xtpmx)",
+    "250000 tokens > 200000 maximum (request id: xrpmx)",
+    "250000 tokens > 200000 maximum (request id: req_1f429ab0)",
+])
+@pytest.mark.parametrize("body_error", [False, True], ids=["text", "http400-body"])
+def test_textual_overflow_does_not_match_embedded_rate_markers(detail, body_error):
+    text = f"prompt is too long: {detail}"
+    error = RuntimeError(text) if not body_error else httpx.HTTPStatusError(
+        "Error code: 400",
+        request=httpx.Request("POST", "https://provider.invalid/chat/completions"),
+        response=httpx.Response(400, json={"error": {"code": 400, "message": text}}),
+    )
+
+    classified = classify_llm_exception(error)
+
+    assert classified.kind == "context_overflow"
+    assert classified.retry_same_request is False
+
+
+@pytest.mark.parametrize("text", [
+    "Error code: 429", "HTTP 429: throttled", "(429)",
+    "TPM exceeded", "tpm exceeded", "RPM exceeded", "rpm exceeded",
+    "rate_limit_exceeded", "too many tokens per minute",
+    "HTTP_429", "tpm_limit_exceeded", "429 Too Many Requests",
+])
+def test_standalone_rate_markers_remain_retryable(text):
+    classified = classify_llm_exception(RuntimeError(text))
+
+    assert classified.kind == "provider_transient"
+    assert classified.retry_same_request is True
+
+
+@pytest.mark.parametrize("text", ["provider failure: 1004290", "provider failure: 429000", "provider failure: 100429"])
+def test_embedded_status_does_not_fall_back_to_transient_marker(text):
+    assert classify_llm_exception(RuntimeError(text)).kind == "provider_error"
+
+
+def test_textual_overflow_is_not_resent_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    usage = {}
+
+    class OverflowLLM:
+        calls = 0
+
+        def chat(self, **kwargs):
+            self.calls += 1
+            raise RuntimeError("prompt is too long: 1004290 tokens > 1000000 maximum")
+
+    llm = OverflowLLM()
+    message, _cost = call_llm_with_retry(
+        llm, [{"role": "user", "content": "hi"}], "provider/model", None,
+        "medium", 3, tmp_path, "task-overflow", 1, None, usage,
+    )
+
+    assert message is None
+    assert llm.calls == 1
+    assert usage["_last_llm_error_kind"] == "context_overflow"
+    assert usage["_last_llm_retry_same_request"] is False
 
 
 def test_structured_context_code_wins_over_output_wording():

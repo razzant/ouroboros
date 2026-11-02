@@ -58,6 +58,7 @@ class _CompactionRoundContext:
     emit_progress: Callable[[str], None]
     tool_schemas: Optional[List[Dict[str, Any]]] = None
     fit_candidate: Optional[Callable[[list, list], Dict[str, Any]]] = None
+    extra_tool_schemas: Tuple[Dict[str, Any], ...] = ()  # host-admitted feature schemas, under the same selection
 
 
 def _stamp_owner_delivery(
@@ -119,9 +120,10 @@ def _drain_incoming_messages(
     def ack_saved(entry: Dict[str, Any]) -> None:
         if not acknowledge_transcript_entry(drive_root, task_id, entry) or event_queue is None:
             return
-        if entry.get("relay") or entry.get("quiz_delivery"):
+        if entry.get("relay") or entry.get("quiz_delivery") or entry.get("card_delivery"):
             event_queue.put_nowait({"type": "owner_message_injected", "task_id": task_id,
-                                   "relay_ack": entry.get("relay"), "quiz_ack": entry.get("quiz_delivery")})
+                                   "relay_ack": entry.get("relay"), "quiz_ack": entry.get("quiz_delivery"),
+                                   "card_ack": entry.get("card_delivery")})
 
     def ack_content(entry: Dict[str, Any]) -> None:
         if defer_content_ack and owner_ctx is not None:
@@ -216,6 +218,9 @@ def _drain_incoming_messages(
                 # owner's messages supersede a reviewed answer). The typed provenance
                 # and the sender id ride the row, the injected event and the ack.
                 provenance = str(entry.get("provenance") or "ancestor_task")
+                if provenance == "place_event":
+                    from ouroboros.presence_continuation import note_place_delivery
+                    note_place_delivery(owner_ctx, entry, controls)  # context, never owner authority
                 if provenance not in CONTEXT_ONLY_TASK_PROVENANCES:
                     _loop()._record_owner_directive(
                         owner_ctx, content=dmsg, msg_id=str(entry.get("msg_id") or ""),
@@ -252,15 +257,15 @@ def _drain_incoming_messages(
                 continue
             if kind == KIND_QUIZ_ANSWER:
                 from ouroboros.owner_quiz import late_answer_owner_text
-                answer = (entry.get("quiz_delivery") or {}).get("answer_snapshot")
+                delivery = entry.get("quiz_delivery") or {}
+                answer = delivery.get("answer_snapshot")
                 owner_words = late_answer_owner_text(answer) if isinstance(answer, dict) else dmsg
                 if isinstance(answer, dict):
                     from ouroboros.owner_relay import retain_owner_message
                     retain_owner_message(owner_ctx, (answer.get("delivery") or {}).get("answer_row"))
-                _loop()._record_owner_directive(
-                    owner_ctx, source="owner_quiz_answer", content=owner_words,
-                    msg_id=str(entry.get("msg_id") or ""),
-                )
+                _loop()._record_owner_directive(  # the delivered card's identity: its question stays findable
+                    owner_ctx, source="owner_quiz_answer", content=owner_words, msg_id=str(entry.get("msg_id") or ""),
+                    origin={"source_task_id": delivery.get("task_id"), "quiz_id": delivery.get("quiz_id")})
                 deliver_quiz_answer(
                     entry, task_id, event_queue,
                     lambda text: _loop()._append_or_merge_user_message(messages, text, slot=owner_ctx,
@@ -279,6 +284,11 @@ def _drain_incoming_messages(
                     str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
                     entry.get("late_answer"), dmsg,
                 )
+            elif entry.get("card_press") is not None:  # a press on a finished author's card: its card frame
+                from ouroboros.gateway.card_decision import card_press_model_text
+
+                model_msg = card_press_model_text(str(getattr(owner_ctx, "budget_drive_root", "") or "") or drive_root,
+                                                  entry.get("card_press"), dmsg)
             owner_content = _owner_content({**entry, "text": model_msg}, drive_root, task_id)
             _loop()._record_owner_directive(
                 owner_ctx,
@@ -347,7 +357,8 @@ def _run_round_compaction(
     publish_pending_owner_dialogue(ctx.tools._ctx, messages)
     pending = getattr(ctx.tools._ctx, "_pending_compaction", None)
     selected_names = getattr(ctx.tools._ctx, "_pending_tool_schema_names", None)
-    if isinstance(pending, dict) or (pending is None and selected_names is not None):
+    authored = isinstance(pending, dict) or (pending is None and selected_names is not None)
+    if authored:
         messages = _run_authored_context_view(messages, ctx, pending, selected_names)
     elif pending is not None:
         # A count-only request saved by an earlier version named a helper summarizer that no longer exists.
@@ -361,10 +372,32 @@ def _run_round_compaction(
         updates, _ = review_context_updates(ctx.tools._ctx, messages=messages)
         messages = [*messages, *updates]
         ctx.tools._ctx._pending_review_context = {}
+    if not authored:  # an authored view retires host rows in its own checkpointed fold
+        messages = _retire_superseded_host_state(messages, ctx)
     maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
     from ouroboros.skill_context_snapshot import maybe_append_skill_snapshots
     maybe_append_skill_snapshots(ctx.tools._ctx, messages, ctx.drive_root)
     return messages
+
+
+def _retire_superseded_host_state(messages, ctx):
+    """Superseded host rows leave where this send already departs from the last one, before the
+    producers append, so a standing note whose full text left comes back current
+    (``context_source_view.retire_superseded_at_departure``)."""
+    from ouroboros import context_compaction  # noqa: F401 -- the public facade loads its source-view leaf first
+    from ouroboros.context_source_view import retire_superseded_at_departure
+
+    tool_ctx = ctx.tools._ctx
+    root = getattr(tool_ctx, "budget_drive_root", None) or ctx.drive_root
+    if ctx.tool_schemas is None or root is None:
+        return messages
+    rebuilt, fact = retire_superseded_at_departure(tool_ctx, messages, ctx.tool_schemas, drive_root=root,
+                                                   task_id=ctx.task_id)
+    if fact:
+        invalidate_task_cache_splits(ctx.task_id)
+        _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs,
+                                       {"checkpoint_kind": "host_state_retired", "round": ctx.round_idx, **fact})
+    return rebuilt
 
 
 def _run_authored_context_view(messages, ctx, pending, selected_names):
@@ -380,13 +413,19 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         ctx.emit_progress("Context view kept unchanged: active schema snapshot is unavailable.")
         return messages
     proposal = pending or {}
+    registry = ctx.tools
+    extra_tool_schemas = getattr(ctx, 'extra_tool_schemas', ())
+    if extra_tool_schemas:
+        from types import SimpleNamespace
+        registry = SimpleNamespace(schemas=lambda: [*ctx.tools.schemas(), *extra_tool_schemas],
+            policy_hidden_reason=getattr(ctx.tools, 'policy_hidden_reason', lambda name: None))
     review_pointer, review_capsule, review_transfers, expected_selection = None, None, [], None
     names = proposal.get("schema_names")
     if names is not None:
-        requested = request_tool_schema_selection(tool_ctx, ctx.tools, names,
+        requested = request_tool_schema_selection(tool_ctx, registry, names,
                                                   context_mode=mode, current_schemas=current_tools)
         selected_names = requested.selection.chosen if mode == "nano" else None
-    schemas = (list(select_tool_schemas(ctx.tools.schemas(), context_mode=mode, schema_names=selected_names).schemas)
+    schemas = (list(select_tool_schemas(registry.schemas(), context_mode=mode, schema_names=selected_names).schemas)
                if selected_names is not None else list(current_tools))
     fit_candidate = ctx.fit_candidate
     if fit_candidate is None:
@@ -396,6 +435,24 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             getattr(tool_ctx, "context_fit_plan", None), candidate, selected,
             mode, getattr(tool_ctx, "active_effort", "medium"), str(ctx.round_idx),
             usage=getattr(tool_ctx, "_accumulated_usage", None))
+    memory_plan, memory_price = None, None
+    addresses = proposal.get("view_address") or ()
+    if addresses:
+        from ouroboros.memory_floor import select_view, view_tokens
+        plan = getattr(tool_ctx, "context_fit_plan", None)
+        observed_core = proposal["observed"].get("memory_core_sha256")
+        try:
+            if plan is None or not observed_core or plan.core_sha256 != observed_core:
+                raise ValueError("memory snapshot changed; inspect the current view")
+            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()))
+        except ValueError as exc:
+            tool_ctx._pending_compaction = None
+            tool_ctx._context_view_receipt = {"status": "selection_failed", "reason": str(exc)}
+            return messages
+        memory_price = {"view_address": list(addresses), "re_read_input_tokens_estimate": view_tokens(json.dumps(
+            messages, ensure_ascii=False)), "basis": "system prefix changes; later cached input may be re-read"}
+        original_fit = fit_candidate
+        fit_candidate = lambda candidate, selected: original_fit(memory_plan.reproject_transcript(candidate, mode), selected)
     if pending is None:
         # Schema-only enablement uses the same candidate fit/publication. It
         # does not fabricate an authored note or rewrite existing history.
@@ -427,6 +484,9 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             exposed_units=observed.get("exposed_units"),
         )
         receipt = asdict(result)
+        from ouroboros.context_source_view import retire_host_rows_after_fold
+        candidate = retire_host_rows_after_fold(candidate, receipt, observed_messages=observed["messages"],
+                                                keep_unit_ids=request.keep_unit_ids)
         if receipt["status"] == "no_op" and (proposal.get("review_transfers") or proposal.get("review_notes")):
             from ouroboros.review_history_view import retain_transfer_only_checkpoint
             try:
@@ -446,6 +506,20 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
                 receipt.update(status="selection_failed", review_selection_error=f"{type(exc).__name__}: {exc}")
                 candidate = messages
                 ctx.emit_progress("Context view kept unchanged: review source/selection custody could not be retained.")
+    if memory_plan is not None and receipt["status"] in ("applied", "no_op"):
+        from ouroboros.memory_floor import owner_note_capsule
+        try:
+            note = owner_note_capsule(memory_plan, addresses, proposal.get("working_note", ""), request,
+                drive_root=ctx.drive_root or pathlib.Path(ctx.drive_logs).parent, task_id=ctx.task_id, mode=mode)
+            candidate = memory_plan.reproject_transcript(candidate, mode) + ([note] if note else [])
+            receipt.update(status="applied", memory_view=memory_price)
+        except ValueError as exc:
+            candidate, receipt = messages, {"status": "selection_failed", "reason": str(exc)}
+    # A manifest row a call carries stays true; a text turn names its tools in the connections map.
+    if receipt["status"] == "applied" and any(row.get('_host_context_kind') == 'tool_manifest' for row in candidate):
+        from ouroboros.tools.tool_discovery import update_resident_notice
+        candidate = copy.deepcopy(candidate)
+        update_resident_notice(ctx.tools, schemas, candidate)
     if receipt["status"] != "no_op":
         from ouroboros.artifacts import store_actor_source_bytes
         import hashlib
@@ -460,6 +534,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             notice = {"status": receipt["status"], "receipt_source": source}
         except (OSError, ValueError):
             notice = {"status": receipt["status"], "receipt_source": "unavailable"}
+        if memory_price:
+            notice["memory_view"] = memory_price
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]
@@ -480,6 +556,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             final_fit = {"accepted": False, "reason": type(exc).__name__}
         if final_fit.get("accepted") is True:
             candidate = with_receipt
+            receipt["fit_after"] = final_fit
         else:
             receipt.update(status="fit_rejected", fit=final_fit)
             candidate = messages
@@ -495,6 +572,12 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             candidate = messages
             ctx.emit_progress("Context view kept unchanged: the review selection was not durably published.")
     if receipt["status"] == "applied":
+        if memory_plan is not None:
+            tool_ctx.context_fit_plan = tool_ctx._authored_memory_plan = memory_plan
+            from ouroboros.loop_model_call import _adopt_view_facts
+            from ouroboros.primary_route_observation import hold_selection
+            _adopt_view_facts(tool_ctx, memory_plan, mode)
+            hold_selection(tool_ctx, addresses, owner_note=bool(proposal.get("working_note", "").strip()))
         receipt["view_revision"] = receipt["after_transcript_sha256"] = context_reclaim_transcript_sha256(candidate)
         from ouroboros.main_context_authority import publish_working_notes
 
@@ -675,10 +758,21 @@ def _handle_provider_unavailable(
     if control_reason is None:
         owner_ctx = getattr(ctx.tools, "_ctx", None)
         control_reason = str(getattr(owner_ctx, "_transport_repeat_control_reason", "") or "")
-    return _loop()._provider_unavailable_result(
+    result = _loop()._provider_unavailable_result(
         ctx, error_kind=error_kind, wait_cause=wait_cause, waited_sec=waited_sec,
         interactive=interactive, control_reason=control_reason,
     )
+    from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN, owner_stop_origin
+
+    if control_reason == REASON_OWNER_STOPPED_DIRECT_TURN and result[1].get("reason_code") == "provider_unavailable":
+        # This accepted Stop ended the wait. Keep the provider failure/UNKNOWN
+        # facts, carrying the control beside them on the existing stop origin.
+        owner_ctx = getattr(ctx.tools, "_ctx", None)
+        root = getattr(owner_ctx, "budget_drive_root", None) or ctx.drive_root
+        origin = owner_stop_origin(root, ctx.task_id) if root else {}
+        if origin.get("stop_policy") == "immediate":
+            result[1]["cancel_origin"] = {**origin, "control_reason": control_reason}
+    return result
 
 
 def _loop_exit_after_exception(
@@ -982,7 +1076,7 @@ def _finalize_limit_ctx(
 
 
 # ---------------------------------------------------------------------------
-# Model-free rungs of the refusal ladder (owner decision 7A; walked by
+# Model-free rungs of size recovery (provider refusal or a known-window prediction; walked by
 # ``loop_model_call._recover_context_overflow`` on the round-call context).
 # ---------------------------------------------------------------------------
 
@@ -999,7 +1093,8 @@ def _publish_reclaimed_transcript(ctx: Any, rebuilt: list, *, by: str = "compact
     prune_reclaim_trace_refs(ctx.tools._ctx, ctx.messages)
 
 
-def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_tokens: Optional[int] = None) -> Any:
+def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_tokens: Optional[int] = None,
+                                cause: str = "context_size") -> Any:
     """Publish a model-free source view, measuring the sealed candidate with its next facts line.
 
     ``goal_tokens`` is the refusal's measured target (``loop_model_call._refusal_target``); without
@@ -1034,16 +1129,18 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
         reclaim_goal_tokens=int(goal_tokens) if goal_tokens else WHOLE_CATEGORY, allow_partial_shrink=True,
     )
     rebuilt, receipt = emergency_address_view(
-        ctx.messages, request, rung=rung,
+        ctx.messages, request, rung=rung, cause=cause,
         observation=getattr(tool_ctx, "_last_context_observation", {}) or {},
         measure_candidate=measure_candidate,
         trace_refs_by_tool_call_id=reclaim_trace_refs(tool_ctx),
         drive_root=pathlib.Path(ctx.drive_root or ctx.drive_logs.parent), task_id=ctx.task_id,
+        usable_input=(measurement.capacity_total_tokens - measurement.response_reserve_tokens
+                      if measurement.capacity_total_tokens is not None else None),
     )
     if receipt.status == "applied":
-        _publish_reclaimed_transcript(ctx, rebuilt, by=f"refusal_pass:{rung}")
+        _publish_reclaimed_transcript(ctx, rebuilt, by=f"{'refusal_pass' if cause == 'context_size' else cause}:{rung}")
     _loop()._emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
-        "type": "context_reclaim", "checkpoint_kind": "context_reclaim_emergency", "rung": rung,
+        "type": "context_reclaim", "checkpoint_kind": "context_reclaim_emergency", "rung": rung, "cause": cause,
         "round": ctx.round_idx, "route_fp": measurement.route_fp, "round_id": measurement.round_id,
         "status": receipt.status, "reclaimed_tokens": receipt.reclaimed_tokens,
         "checkpoint_ref": receipt.checkpoint_ref, "selected_unit_ids": list(receipt.selected_unit_ids),
@@ -1054,7 +1151,7 @@ def _run_emergency_address_pass(ctx: Any, disposition: Any, *, rung: str, goal_t
 def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) -> bool:
     """Narrow memory beside the actual transcript without inventing a smaller route window.
 
-    The refusal is the evidence: the view saves the refusal's measured ``saving`` (else the capacity
+    The view saves the measured ``saving`` (else the capacity
     deficit, else at least one element) from the level it shows (no target or working margin
     reapplied, nothing addressed unfolds)."""
     plan = ctx.context_fit_plan
@@ -1066,13 +1163,16 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None) ->
     capacity = measurement.capacity_total_tokens
     rebound = plan.reproject_for_route(
         window_tokens=int(capacity or 0), known_window=capacity is not None,
-        ratio=float(plan.projection(mode).calibration_ratio or 1.0),
+        ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages,
         refused_tokens=max(1, int(saving or measurement.capacity_deficit_tokens or 0)),
     )
-    if rebound.projection(mode).system_content_json == before:
+    selected_mode = rebound.initial_mode
+    if selected_mode == mode and rebound.projection(mode).system_content_json == before:
         return False
+    mode = selected_mode
+    ctx.active_context_mode = ctx.tools._ctx.active_context_mode = mode
     ctx.context_fit_plan = rebound
     ctx.tools._ctx.context_fit_plan = rebound
     ctx.messages[:] = rebound.reproject_transcript(ctx.messages, mode)

@@ -441,9 +441,16 @@ def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
     pct = normalize_budget_profile(contract.get("budget_profile")).get("cost_hard_stop_pct")
     if pct is not None:
         return COST_STOP_EXPLICIT, float(pct)
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    producer = _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
+    producer = recorded_producer_ceiling(row)
     return (COST_STOP_PRODUCER, producer) if producer is not None else (COST_STOP_NONE, None)
+
+
+def recorded_producer_ceiling(row: Dict[str, Any]) -> Optional[float]:
+    """A task row's recorded producer allowance (``root_cost_ceiling_usd`` on the row, else in its metadata) when
+    strictly positive, else ``None``: what a member's root authored (``_root_cost_stop_authority``) and the TOTAL a
+    Continue hands on unchanged, its stop comparing the whole work's group spend (``loop_budget``)."""
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
 
 
 def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
@@ -747,7 +754,15 @@ def prospective_wrapup_attempt_request(
 
     processing_preference = resolve_processing_preference(model_role, override=processing_preference)
 
-    if not callable(getattr(llm, "_resolve_remote_target", None)):
+    resolved = None
+    if callable(getattr(llm, "_resolve_remote_target", None)):
+        from ouroboros.llm_attempt import ConnectionUnavailable
+
+        try:
+            resolved = llm._resolve_remote_target(model)
+        except ConnectionUnavailable:  # the send refuses it ($0) and walks the configured routes; the probe estimates
+            resolved = None
+    if resolved is None:
         return _merge_scope(AttemptRequest(
             model=model, provider=infer_provider_from_model(model),
             prompt_tokens_estimate=prompt_tokens,
@@ -756,7 +771,7 @@ def prospective_wrapup_attempt_request(
             force_unknown_reservation=bool(processing_preference),
         ))[0]
 
-    target = {**llm._resolve_remote_target(model), "processing_preference": processing_preference}
+    target = {**resolved, "processing_preference": processing_preference}
     if target.get("provider") == "claudexor":
         from ouroboros.llm_claudexor import _request, prepare_processing_target
 
@@ -798,6 +813,7 @@ def prepared_wrapup_candidate(
     from ouroboros.model_slots import task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.send_clock import MainSendClock, main_clock_policy
+    from ouroboros.transcript_prefix import append_reasoning_retirement_fact, retire_main_reasoning
 
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     waiter = current_model_wait()
@@ -806,6 +822,8 @@ def prepared_wrapup_candidate(
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)
 
+    retire_main_reasoning(ctx, messages)
+    append_reasoning_retirement_fact(ctx.accumulated_usage, getattr(ctx, "round_idx", None), messages)
     # Named residual: reads the task's refused-image memory, never recovers a first refusal (vision_routing).
     send_messages = _prepare_main_messages(
         messages, model=ctx.active_model, llm=ctx.llm,

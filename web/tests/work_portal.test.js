@@ -77,8 +77,11 @@ function fixture({ history = [], details = {}, continues = {}, chatId = 1 } = {}
 const room = (extra = {}) => ({ activity_id: 'w-1', chat_id: 7, kind: 'managed_task', phase: 'working',
     started_at: Date.parse('2026-10-10T12:00:00Z') / 1000, ...extra });
 const controls = (f, id) => (f.card(id)?.querySelector('.chat-live-actions')?.children || []).map((node) => node.textContent);
+// The Project reference leads the card's own action row, under its meta line (owner 26.10, B).
+const reference = (node) => node?.querySelector('[data-live-foot-end]')?.firstElementChild || null;
+const shownName = (node) => reference(node)?.querySelector('.chat-live-project-name')?.textContent;
 
-test('a bound card becomes its work\'s portal in place: footer reference, the room\'s present, Stop…', async () => {
+test('a bound card becomes its work\'s portal in place: Project reference, the room\'s present, Stop…', async () => {
     const f = fixture();
     try {
         f.narrate('w-1', 'Reading the logs before the audit.');
@@ -91,9 +94,11 @@ test('a bound card becomes its work\'s portal in place: footer reference, the ro
         assert.equal(f.card('w-1'), node, 'the SAME node, never a second card or an entry');
         assert.equal(node.dataset.portal, '1');
         assert.equal(node.dataset.projectId, 'p-1');
-        const footer = node.children.at(-1);
-        assert.ok(footer.classList.contains('chat-live-bound-pointer'), 'the Project reference closes the card');
-        assert.equal(footer.getAttribute('aria-label'), 'Open project Audit');
+        const door = reference(node);
+        assert.ok(door?.classList.contains('chat-live-bound-pointer'), 'the Project reference leads the card\'s action row');
+        assert.equal(door.getAttribute('aria-label'), 'Open project Audit');
+        assert.equal(shownName(node), 'Audit', 'a Project named apart from its work shows its name');
+        assert.equal(node.querySelectorAll('[data-intent="open-project"]').length, 1, 'one door, never a second footer');
         assert.equal(f.part('w-1', 'live-activity').textContent, 'Checking the third project.', 'the room\'s latest line');
         assert.match(f.part('w-1', 'live-meta').innerHTML, /41 tool calls/);
         assert.match(f.part('w-1', 'live-meta').innerHTML, /updated /);
@@ -120,7 +125,7 @@ test('an older census without the new facts leaves today\'s card: its own line, 
         const meta = f.part('w-1', 'live-meta').innerHTML;
         assert.doesNotMatch(meta, /tool call/, 'a count the host did not send is never shown');
         assert.match(meta, /(updated|started) /, 'an unfinished card always carries a time');
-        assert.equal(node.children.at(-1).getAttribute('aria-label'), 'Open project Project', 'an unnamed Project reads Project');
+        assert.equal(reference(node).getAttribute('aria-label'), 'Open project Project', 'an unnamed Project reads Project');
     } finally { f.close(); }
 });
 
@@ -133,9 +138,52 @@ test('a census row naming the work\'s Project binds it too; detached work says i
         await settle();
         const node = f.card('w-1');
         assert.equal(node.dataset.portal, '1');
-        assert.equal(node.children.at(-1).getAttribute('aria-label'), 'Open project Second room');
+        assert.equal(reference(node).getAttribute('aria-label'), 'Open project Second room');
         assert.equal(f.part('w-1', 'live-phase-secondary')?.textContent, 'in background');
     } finally { f.close(); }
+});
+
+test('beside a title that already says its name the reference reads Project; its accessible name stays whole (owner 26.10, B)', async () => {
+    const f = fixture();
+    try {
+        for (const id of ['w-1', 'w-2']) f.narrate(id, 'Reading the logs before the audit.');
+        f.emit('task_named', { task_id: 'w-1', suggested_name: 'Audit the projects' });
+        f.emit('task_named', { task_id: 'w-2', suggested_name: 'Audit the projects' });
+        f.state({ task_bindings: { 'w-1': { project_id: 'p-1', chat_id: 7 }, 'w-2': { project_id: 'p-2', chat_id: 8 } },
+            projects: [{ id: 'p-1', name: 'audit  the Projects' }, { id: 'p-2', name: 'Audit room' }],
+            active_chat_activities: [room(), room({ activity_id: 'w-2', chat_id: 8 })] });
+        await settle();
+        assert.equal(f.part('w-1', 'live-title').textContent, 'Audit the projects');
+        assert.equal(shownName(f.card('w-1')), 'Project', 'the same words (case and spacing aside) are not said twice');
+        assert.equal(reference(f.card('w-1')).getAttribute('aria-label'), 'Open project audit  the Projects');
+        assert.equal(reference(f.card('w-1')).title, 'Open project audit  the Projects', 'the tooltip names it too');
+        assert.equal(shownName(f.card('w-2')), 'Audit room', 'a differently named Project keeps its name on the capsule');
+        assert.equal(reference(f.card('w-2')).getAttribute('aria-label'), 'Open project Audit room');
+    } finally { f.close(); }
+});
+
+test('an unnamed portal relabels on narration and completion before the next census', async () => {
+    for (const [before, after] of [['Comparing the two runs.', 'Audit the projects'],
+        ['Audit the projects', 'Comparing the two runs.']]) {
+        const f = fixture();
+        try {
+            f.narrate('w-1', before);
+            const binding = { task_bindings: { 'w-1': { project_id: 'p-1', chat_id: 7 } },
+                projects: [{ id: 'p-1', name: 'Audit the projects' }] };
+            f.state({ ...binding, active_chat_activities: [room()] });
+            await settle();
+            f.narrate('w-1', after, 1);
+            const expected = after === 'Audit the projects' ? 'Project' : 'Audit the projects';
+            assert.equal(f.part('w-1', 'live-title').textContent, after);
+            assert.equal(shownName(f.card('w-1')), expected, 'narration changes both title and capsule immediately');
+            f.frame({ role: 'system', system_type: 'task_summary', task_id: 'w-1', status: 'completed',
+                outcome_axes: { lifecycle: { status: 'completed' } }, content: 'Finished.', ts: '2026-10-10T12:00:02Z' });
+            f.state({ ...binding, active_chat_activities: [] });
+            await settle();
+            assert.equal(shownName(f.card('w-1')), expected, 'settlement and a later census do not leave a stale label');
+            assert.equal(reference(f.card('w-1')).getAttribute('aria-label'), 'Open project Audit the projects');
+        } finally { f.close(); }
+    }
 });
 
 test('a project_started row binds its work\'s card at the request\'s place instead of drawing an entry', async () => {
@@ -225,7 +273,7 @@ function assertFollowed(f, node) {
     assert.equal(feed.filter((child) => child.classList.contains('chat-live-card') && !child.hidden).length, 1,
         'one visible card for the work');
     assert.equal(next.dataset.portal, '1');
-    assert.equal(next.children.at(-1).getAttribute('aria-label'), 'Open project Audit', 'the Project reference closes it');
+    assert.equal(reference(next).getAttribute('aria-label'), 'Open project Audit', 'the Project reference leads its action row');
     assert.equal(f.part('w-1-c1', 'live-title').textContent, 'Audit the projects', 'the work keeps its first name');
     assert.equal(f.part('w-1-c1', 'live-phase').textContent, 'Working', 'the current episode owns the chip');
     assert.equal(f.part('w-1-c1', 'live-activity').textContent, 'Continuing the audit.');
@@ -237,6 +285,36 @@ function assertFollowed(f, node) {
         'the ended episode is one meta line on the same card');
     assert.match(episodes.innerHTML, /data-episode="2" data-current="1"/);
 }
+
+// The capsule's words follow the card's title through the title's naming owner (task_episodes.js `renamed`), with no
+// watch of its own on the title (DEVELOPMENT "UI resources carry a disposer") and no census in between.
+test('the title\'s naming owner names the Project reference again: a rename and a Continue\'s first name (owner 26.10, B)', async () => {
+    const details = {};
+    const f = fixture({ details });
+    try {
+        f.narrate('w-1', 'Reading the logs before the audit.');
+        f.emit('task_named', { task_id: 'w-1', suggested_name: 'Audit the projects' });
+        f.state({ task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit the projects' }],
+            active_chat_activities: [room({ project_id: 'p-1', project_name: 'Audit the projects' })] });
+        await settle();
+        assert.equal(shownName(f.card('w-1')), 'Project');
+        f.emit('task_named', { task_id: 'w-1', suggested_name: 'Audit, second pass' });
+        assert.equal(f.part('w-1', 'live-title').textContent, 'Audit, second pass');
+        assert.equal(shownName(f.card('w-1')), 'Audit the projects', 'renamed apart: the capsule names its Project at once');
+        f.emit('task_named', { task_id: 'w-1', suggested_name: 'Audit the projects' });
+        assert.equal(shownName(f.card('w-1')), 'Project');
+        // Continued in its room: the successor's card is minted, then the chain gives it the work's first name.
+        details['w-1'] = failedDetail(continuedBy());
+        f.state({ task_bindings: bindings, active_chat_activities: [] });
+        await settle();
+        f.state({ task_bindings: bindings, active_chat_activities: [successorRow({ project_name: 'Audit the projects' })] });
+        await settle();
+        const next = f.card('w-1-c1');
+        assert.equal(f.part('w-1-c1', 'live-title').textContent, 'Audit the projects', 'the work keeps its first name');
+        assert.equal(shownName(next), 'Project', 'in the same census that minted it');
+        assert.equal(reference(next).getAttribute('aria-label'), 'Open project Audit the projects');
+    } finally { f.close(); }
+});
 
 test('a Continue made in the room: the successor\'s census row takes the work\'s card in Main, live; no row, no change', async () => {
     const details = {};
@@ -516,7 +594,7 @@ function assertSettledFollow(f, folded, { id = 'w-1-c1', episodes = 2 } = {}) {
     assert.equal(feed.filter((child) => child.classList.contains('chat-live-card') && !child.hidden).length, 1,
         'one visible card for the work');
     assert.equal(next.dataset.portal, '1');
-    assert.equal(next.children.at(-1).getAttribute('aria-label'), 'Open project Audit', 'the Project reference closes it');
+    assert.equal(reference(next).getAttribute('aria-label'), 'Open project Audit', 'the Project reference leads its action row');
     assert.equal(f.part(id, 'live-title').textContent, 'Audit the projects', 'the work keeps its first name');
     assert.equal(f.part(id, 'live-phase').textContent, 'Done', 'the current episode settles from its durable outcome');
     assert.ok(!controls(f, id).includes('Stop…') && !controls(f, id).includes('Continued'), 'a settled work offers no Stop');

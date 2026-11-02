@@ -9,6 +9,8 @@ history. The saved chat row is the receipt, recorded by notice id when the
 append lands (``ouroboros/notice_receipts.py``) and dropped once the task
 acknowledges it; it is never proof of external delivery. Resume and later
 pauses retain the duty. No separate outbox or lifecycle authority exists.
+Continue, cold sleep and Resume name an unattributed damaged record with the
+same bounded fact and words (``gap_fact``, ``gap_words``).
 """
 from __future__ import annotations
 
@@ -29,7 +31,8 @@ def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reaso
 
     ``fence`` is the owner Pause this episode confirms: the author it declared
     (``control_actor.pause_author``) is kept with the notice, so a later Pause
-    of the same task never rewords it.
+    of the same task never rewords it. So are the damaged records its census
+    settled without (``membership_gaps``): the owner reads them in this row.
     """
     from ouroboros.control_actor import pause_author
 
@@ -38,11 +41,39 @@ def notice_fields(current: dict, root: Any, task_id: str, episode_id: str, reaso
     identity = f"pause:{task_id}:{episode_id}"
     pending = dict(current.get("pause_notices") or {})
     by = {"by": pause_author(fence)} if fence is not None else {}
-    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by})
+    gaps = (fence or {}).get("membership_gaps")
+    gaps = {"membership_gaps": dict(gaps)} if isinstance(gaps, dict) and gaps.get("count") else {}
+    pending.setdefault(identity, {"reason": reason, "confirmed_at": utc_now_iso(), **by, **gaps})
     return {"pause_notices": pending}
 
 
 _RETAINED = "Its work is retained; Resume continues it."
+GAP_ROWS = 20  # a membership gap names this many unattributed rows and counts all of them
+
+
+def gap_fact(rows: list, prior: Any = None) -> dict:
+    """The damaged rows a tree census tied to no tree, as one bounded fact (``membership_gaps``). Joined to
+    ``prior`` (a closed Pause's fact, at its Resume) each row is named once, the Pause's first, and the count
+    never drops below the Pause's own, which may count rows it could not name."""
+    prior = prior if isinstance(prior, dict) and type(prior.get("count")) is int else {}
+    named: dict = {}
+    for row in [*(prior.get("rows") or ()), *rows]:
+        if isinstance(row, dict):
+            named.setdefault(str(row.get("task_id") or ""), row)
+    count = max(prior.get("count", 0), len(named))
+    return {"rows": list(named.values())[:GAP_ROWS], "count": count} if count > 0 else {}
+
+
+def gap_words(gaps: Any, lead: str = "The Pause did not wait for") -> str:
+    """The records an action did not wait for, named; never claimed to be another task's."""
+    count = gaps.get("count") if isinstance(gaps, dict) else None
+    if type(count) is not int or count <= 0:
+        return ""
+    names = [str(row["task_id"]) for row in gaps.get("rows") or () if isinstance(row, dict) and row.get("task_id")]
+    named = ", ".join(names) + (f" and {count - len(names)} more" if count > len(names) else "")
+    one = count == 1
+    return (f" {lead} {count} saved task record{'' if one else 's'} that could not be read and "
+            f"that nothing ties to this task ({named}); whether {'it belongs' if one else 'they belong'} here is unknown.")
 
 
 def notice_text(notice: dict) -> str:
@@ -51,13 +82,14 @@ def notice_text(notice: dict) -> str:
         by = notice.get("by") if isinstance(notice.get("by"), dict) else {}  # a notice saved before ``by``: nobody
         said = " ".join(str(by.get("text") or "").split())
         if by.get("actor") == "owner":
-            return f"You paused this task. {_RETAINED}"
-        if by.get("actor") == "ouroboros" and said:
-            ended = said if said.endswith((".", "!", "?", "…")) else f"{said}."
-            return f"Ouroboros paused this task: {ended} {_RETAINED}"
-        if by.get("actor") == "ouroboros":
-            return f"Ouroboros paused this task. {_RETAINED}"
-        return f"This task was paused. {_RETAINED}"
+            head = "You paused this task."
+        elif by.get("actor") == "ouroboros" and said:
+            head = "Ouroboros paused this task: " + (said if said.endswith((".", "!", "?", "…")) else f"{said}.")
+        elif by.get("actor") == "ouroboros":
+            head = "Ouroboros paused this task."
+        else:
+            head = "This task was paused."
+        return f"{head} {_RETAINED}{gap_words(notice.get('membership_gaps'))}"
     authority = notice.get("reason") == "authority"
     cause = ("a technical fault: its billing or control authority could not be read, which says nothing about "
              "money left") if authority else "its budget limit"

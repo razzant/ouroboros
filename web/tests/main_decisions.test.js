@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test, { mock } from 'node:test';
-import { NodeStub, fixture, turn } from './chat_decision_fixture.js';
+import { NodeStub, fixture, frameBubble, turn } from './chat_decision_fixture.js';
 import { fixture as mediaFixture, NodeStub as MediaNode } from './helpers/media_dom.js';
 import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 import { createChatInstance } from '../modules/chat.js';
@@ -21,13 +21,12 @@ const find = (node, predicate) => predicate(node) ? node
 function feedFixture(extra = {}) {
     const feed = new NodeStub();
     const inserted = [], recounts = [];
-    const fx = fixture({ isMain: true,
-        frameNode: (_msg, card) => { const bubble = new NodeStub(); bubble.append(card); return bubble; },
+    const fx = fixture({ isMain: true, frameNode: frameBubble,
         insertMessageNode: node => { inserted.push(node); feed.append(node); return true; },
         removeMessageNode: node => node.remove(),
         onQuestionsChanged: () => recounts.push(feed.children.length), ...extra });
     return { ...fx, feed, inserted, recounts, add: row => fx.decision.appendQuestionPointer(row),
-        cards: () => feed.children.map(bubble => bubble.children[0]) };
+        cards: () => feed.children.map(bubble => bubble.querySelector('.chat-quiz-card')) };
 }
 
 // Main's waiting navigator over a stub page: owner-action messages enter the feed, the pill the
@@ -124,7 +123,7 @@ test('a one-tap close losing an answer race displays the canonical answer and ca
     } finally { fx.decision.destroy(); fx.restore(); }
 });
 
-test('the census never mounts a copy: the feed places copies, and the census confirms or settles only those', () => {
+test('the census never mounts a copy: the feed places copies, and the census confirms or settles only those', async () => {
     const fx = feedFixture();
     try {
         const rows = Array.from({ length: 25 }, (_, id) => question(`q-${id}`,
@@ -156,13 +155,19 @@ test('the census never mounts a copy: the feed places copies, and the census con
         assert.equal(fx.cards()[1].querySelector('.chat-quiz-close').disabled, false, 'the canonical confirmation restores the ×');
         assert.equal(fx.cards()[0].querySelector('.chat-quiz-close').disabled, true, 'a restored draft still holds its ×');
         fx.decision.syncCurrentQuestions(rows.slice(1), true);
-        assert.deepEqual(fx.cards().map(card => card.dataset.quizId), ['q-1', 'q-2'],
-            'a complete census without a mounted copy removes it');
+        await turn();
+        // No longer current says nothing of its outcome (#1993): with no readable record the copy stays, withheld.
+        assert.deepEqual(fx.cards().map(card => [card.dataset.quizId, card.dataset.state]),
+            [['q-0', 'unknown'], ['q-1', 'expired_terminal'], ['q-2', 'open']]);
     } finally { fx.decision.destroy(); fx.restore(); }
 });
 
-test('a census vouching per question removes the unnamed copies it vouches for and leaves the rest unknown', () => {
-    const fx = feedFixture();
+test('a census vouching per question reads the unnamed copies it vouches for and leaves the rest unknown', async () => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    // The vouched copy's own record: closed elsewhere, its closure delivered.
+    const fx = feedFixture({ fetchDetail: async (taskId) => (taskId === 'task-1' ? { task_id: taskId, project_id: 'project-1',
+        owner_quiz: { left: { quiz_id: 'left', question: 'Question left?', options: ['Yes', 'No'], state: 'closed',
+            closed_reason: 'Not needed any more.', delivery: { kind: 'closure', state: 'delivered' } } } } : null) });
     try {
         const named = question('named', { task_id: 'task-3' });
         fx.add(question('left'));
@@ -174,11 +179,15 @@ test('a census vouching per question removes the unnamed copies it vouches for a
             asked.push([taskId, quizId]);
             return !(taskId === 'task-2' && quizId === 'withheld');
         });
+        await turn();
         assert.deepEqual(fx.cards().map(card => [card.dataset.quizId, card.dataset.state]),
-            [['withheld', 'unknown'], ['named', 'open']], 'the vouched copy left, the withheld one awaits proof');
+            [['left', 'closed'], ['withheld', 'unknown'], ['named', 'open']], 'the vouched copy shows what its read proved');
+        mock.timers.tick(5000);
+        assert.deepEqual(fx.cards().map(card => [card.dataset.quizId, card.dataset.state]),
+            [['withheld', 'unknown'], ['named', 'open']], 'then it leaves; the withheld one awaits proof');
         assert.deepEqual(asked, [['task-1', 'left'], ['task-2', 'withheld']], 'asked only about the unnamed copies');
         assert.equal(fx.cards()[0].querySelector('.chat-quiz-comment').disabled, true);
-    } finally { fx.decision.destroy(); fx.restore(); }
+    } finally { fx.decision.destroy(); fx.restore(); mock.timers.reset(); }
 });
 
 test('a history copy is the full form at once while nothing is forgotten; the census confirms it without a read', async () => {
@@ -190,7 +199,7 @@ test('a history copy is the full form at once while nothing is forgotten; the ce
         const card = fx.cards()[0];
         assert.equal(card.dataset.state, 'open');
         assert.ok(card.querySelector('.chat-quiz-comment'));
-        assert.ok(card.querySelector('.chat-live-project-name'));
+        assert.ok(card.parentNode.querySelector('.chat-live-project-name'), 'the voice line names the Project');
         assert.equal(reads, 0, 'only an evicted memory sends a copy to its canonical read');
         fx.decision.syncCurrentQuestions([question('old', { quiz_state: 'expired_terminal' })], true);
         assert.equal(card.dataset.state, 'expired_terminal');
@@ -325,9 +334,13 @@ test('a removal recorded by another client settles this Main copy and drops its 
 
 test('answer acknowledgement with pending delivery remains recorded and visible', async () => {
     mock.timers.enable({ apis: ['setTimeout'] });
+    // The exact read's canonical block, with its delivery as the server records it at that moment.
+    let delivery = { kind: 'answer', state: 'owed' };
     const fx = feedFixture({ fetchImpl: async () => ({ ok: true, json: async () => ({ ok: true,
         state: 'answered', answered_index: 0, answered_after_terminal: true, forwarded: false,
-        question_delivery: { kind: 'answer', state: 'owed' } }) }) });
+        question_delivery: { kind: 'answer', state: 'owed' } }) }),
+        fetchDetail: async (taskId) => ({ task_id: taskId, project_id: 'project-1', owner_quiz: { ack: {
+            quiz_id: 'ack', question: 'Question ack?', options: ['Yes', 'No'], state: 'answered', answered_index: 0, delivery } } }) });
     try {
         fx.add(question('ack'));
         fx.cards()[0].querySelector('.chat-quiz-option').click();
@@ -336,8 +349,17 @@ test('answer acknowledgement with pending delivery remains recorded and visible'
         assert.match(fx.toasts.at(-1).text, /delivery.*pending/);
         mock.timers.tick(60000);
         assert.equal(fx.cards().length, 1);
+        // Complete withdrawal proves no delivery (#1993): the copy's own exact read decides.
         fx.decision.syncCurrentQuestions([], true);
-        assert.equal(fx.cards().length, 0, 'complete canonical withdrawal discharges the visible copy');
+        await turn();
+        assert.equal(fx.cards().length, 1, 'an owed record never retires from absence');
+        assert.match(fx.cards()[0].querySelector('.chat-quiz-status-text').textContent, /delivery pending/);
+        delivery = { kind: 'answer', state: 'delivered' };
+        fx.decision.syncCurrentQuestions([], true);
+        await turn();
+        assert.equal(fx.cards()[0].querySelector('.chat-quiz-status-text').textContent, 'You answered');
+        mock.timers.tick(5000);
+        assert.equal(fx.cards().length, 0, 'the read that proves delivery shows the recorded answer, then the copy leaves');
     } finally { fx.decision.destroy(); fx.restore(); mock.timers.reset(); }
 });
 

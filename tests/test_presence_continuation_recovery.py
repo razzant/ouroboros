@@ -21,15 +21,16 @@ def test_current_process_author_remains_pending():
     assert pc.work_view(row, "turn")[1]["status"] == "pending"
 
 
-@pytest.mark.parametrize("field", ["birth", "session"])
+@pytest.mark.parametrize("fields", [("birth", "kernel_birth"), ("session",)], ids=["birth", "session"])
 @pytest.mark.parametrize("observer_missing", [False, True])
-def test_local_controller_with_incomplete_identity_remains_unknown(monkeypatch, field, observer_missing):
+def test_local_controller_with_incomplete_identity_remains_unknown(monkeypatch, fields, observer_missing):
     from ouroboros import review_operation
 
     identity = controller_identity()
-    incomplete = {key: value for key, value in identity.items() if key != field}
+    incomplete = {key: value for key, value in identity.items() if key not in fields}
     if observer_missing:
-        monkeypatch.setattr(review_operation, "controller_identity", lambda: {**incomplete, field: ""})
+        observer = {**incomplete, **dict.fromkeys(fields, "")}
+        monkeypatch.setattr(review_operation, "controller_identity", lambda: observer)
     else:
         identity = incomplete
     row = {"status": "running", "presence_continuation": {"initial": {}, "author_controller": identity}}
@@ -38,12 +39,13 @@ def test_local_controller_with_incomplete_identity_remains_unknown(monkeypatch, 
 
 
 def test_foreign_live_controller_without_birth_evidence_remains_unknown(monkeypatch):
-    from ouroboros import platform_layer, process_containment
+    from ouroboros import platform_layer, process_containment, process_identity
 
     identity = {**controller_identity(), "pid": controller_identity()["pid"] + 1, "session": "foreign"}
     monkeypatch.setattr(platform_layer, "pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(process_containment, "pid_is_zombie", lambda _pid: False)
     monkeypatch.setattr(platform_layer, "process_start_time", lambda _pid: "")
+    monkeypatch.setattr(process_identity, "process_kernel_birth", lambda _pid: None)
     row = {"status": "running", "presence_continuation": {"initial": {}, "author_controller": identity}}
     assert controller_state(identity) == "unknown"
     assert pc.continuation_status(row) == "running" and pc.work_view(row, "turn")[0] == 202

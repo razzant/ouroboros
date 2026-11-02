@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from ouroboros import dialogue_store, extension_loader, skill_review as review
+from ouroboros import dialogue_store, extension_loader
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.skill_loader import (
     compute_content_hash, find_skill, load_enabled, load_review_state, save_enabled,
@@ -15,9 +15,8 @@ from ouroboros.skill_repair_admission import record_repair_admission
 from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 from tests._extension_loader_shared import _write_ext_skill
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests._skill_review_shared import _make_actor, _pass_array_for_script_skill
 from tests.test_d16_skill_payload_authority import _registry
-from tests.test_skill_review import _mark_self_authored
+from tests._skill_review_shared import _mark_self_authored
 
 
 @pytest.fixture
@@ -28,16 +27,21 @@ def development(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     calls = []
 
-    def panel(_ctx, **kwargs):
-        calls.append(kwargs)
-        return json.dumps({"results": [
-            _make_actor("reviewer-a", _pass_array_for_script_skill()),
-            _make_actor("reviewer-b", _pass_array_for_script_skill()),
-            _make_actor("reviewer-c", _pass_array_for_script_skill()),
-        ]})
+    # The one wave over the golden pool with an offline seam: every seat answers the skill question clean
+    # (``[]`` + NO_FINDINGS, contract A); ``calls`` holds one entry per WAVE (its packet seat ``t1`` is in every panel).
+    import ouroboros.review_substrate as substrate
+    from tests import _contributor_packet_shared as shared
+    from tests.review_pool_rosters import set_review_pool
 
-    monkeypatch.setattr("ouroboros.tools.review._handle_multi_model_review", panel)
-    monkeypatch.setattr(review, "_review_wave_budget_block", lambda *a, **k: None)
+    set_review_pool(monkeypatch, shared.golden_pool())
+
+    def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        if slot.slot_id == "t1":
+            calls.append({"retry_key": request.retry_key, "surface": request.surface})
+        actor.raw_text = "[]\nNO_FINDINGS"
+        return actor
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam([], answer=answer))
     registry._ctx.task_id = "develop-demo"
     registry._ctx.current_chat_id = 42
     registry._ctx.task_constraint = TaskConstraint(
@@ -95,7 +99,7 @@ def test_free_replay_refreshes_disabled_auto_flow_without_another_panel(developm
     second = run_skill_review_lifecycle_blocking(registry._ctx, "demo")
     assert second["status"] == "clean" and second["deps_status"] == "not_required", second
     assert second["auto_flow"] is False and not load_enabled(drive, "demo")
-    assert "FREE REPLAY" in second["convergence_hint"] and len(panels) == 1
+    assert second["reused"] is True and second["record_id"] == first["record_id"] and len(panels) == 1
     assert (drive / "state" / "skills" / "demo" / "review.json").read_bytes() == before
 
 
@@ -152,7 +156,11 @@ def test_split_drive_attestation_and_history_stay_canonical(development, tmp_pat
                               owner_source={"kind": "chat", "ref": ref})
     assert result["ok"], result
     assert load_review_state(drive, "demo", skill_dir=payload).review_profile == "owner_attested"
-    assert (drive / "state" / "skills" / "demo" / "review_history.jsonl").exists()
+    # The attestation lands in the canonical drive (the owner marker beside review.json); it buys no wave and
+    # writes no ledger record.
+    assert (drive / "state" / "skills" / "demo" / "owner_attestation.json").exists()
+    from ouroboros import review_ledger
+    assert review_ledger.recent_records(drive, "", surface="skill") == []
     assert not (child / "state" / "skills").exists()
     assert not panels
 
@@ -175,7 +183,7 @@ def test_dependency_repair_replays_review_and_preserves_owner_disable(developmen
     second = run_skill_review_lifecycle_blocking(registry._ctx, "demo")
     assert second["status"] == "clean" and second["deps_status"] == "installed", second
     assert len(panels) == 1
-    assert "FREE REPLAY" in second["convergence_hint"]
+    assert second["reused"] is True and second["record_id"] == first["record_id"]
     assert (drive / "state" / "skills" / "demo" / "review.json").read_bytes() == before
     assert not load_enabled(drive, "demo")
     loaded = find_skill(drive, "demo")

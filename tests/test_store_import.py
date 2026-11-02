@@ -260,14 +260,19 @@ with store.open_store(sys.argv[1], write=True) as txn:
 """
 
 
+@pytest.mark.parametrize("boot", [False, True], ids=["first_touch", "boot"])
+@pytest.mark.parametrize("body_sha", [None, "b" * 40], ids=["no_body_sha", "body_sha"])
 @pytest.mark.parametrize("before, after", [(store.TIER_ENFORCED, store.TIER_NAME), (store.TIER_NAME, store.TIER_ENFORCED)],
                          ids=["enforced_to_name", "name_to_enforced"])
-def test_a_boot_retier_leaves_this_process_choosing_the_journal_its_siblings_choose(tmp_path, monkeypatch, before, after):
+def test_a_boot_retier_leaves_this_process_choosing_the_journal_its_siblings_choose(tmp_path, monkeypatch, before, after,
+                                                                                     boot, body_sha):
     """A lock-tier re-record converts the file the way an export hands it off, but this process keeps
-    running: its next write picks the journal mode a sibling process (a worker) picks, while this
-    process's cached connection stays open across the sibling's write. Left in the handed-off set it
-    wrote in DELETE mode for its whole life while the workers chose their own mode, and on Windows a
-    worker's open PERSIST journal then fails every DELETE commit of the server."""
+    running: its next write keeps the journal a sibling process (a worker) keeps, while this process's
+    cached connection stays open across the sibling's write. Without a boot that is the rollback
+    journal both open with connection-local PERSIST; a boot then chooses this runtime's journal for the
+    new tier (``store_journal``), and both use that. Left in the handed-off set it wrote in DELETE mode
+    for its whole life while the workers chose PERSIST, and on Windows a worker's open PERSIST journal
+    then fails every DELETE commit of the server."""
     import sys
 
     from ouroboros import platform_layer
@@ -279,7 +284,9 @@ def test_a_boot_retier_leaves_this_process_choosing_the_journal_its_siblings_cho
     identity = store_import._mount_identity(root / "state")
     monkeypatch.setattr(store_import, "_mount_identity", lambda path: {**identity, "st_dev": identity["st_dev"] + 1})
     monkeypatch.setattr(platform_layer, "kernel_file_locks_enforced", lambda path, **kw: after == store.TIER_ENFORCED)
-    assert ensure_current_store(root, with_children=False)["retiered_from"] == before  # the volume changed
+    report = ensure_current_store(root, with_children=False, body_sha=body_sha, initialize_journal=boot)
+    assert report["retiered_from"] == before  # the volume changed
+    expected = store._journal_mode(store.store_path(root), after).lower() if boot else "persist"
     with store.open_store(root, write=True) as txn:
         txn.set_meta("server_wrote", True)
         mine = txn.conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -289,10 +296,65 @@ def test_a_boot_retier_leaves_this_process_choosing_the_journal_its_siblings_cho
     finally:
         store.close_connections()
     assert sibling.returncode == 0, sibling.stdout + sibling.stderr
-    assert mine == sibling.stdout.strip().splitlines()[-1] == store._journal_mode(store.store_path(root), after).lower()
+    assert mine == sibling.stdout.strip().splitlines()[-1] == expected
 
 
 # ---- export -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("initialize_journal", [False, True], ids=["helper", "boot"])
+def test_raced_newer_publication_keeps_older_boot_journal_authority(tmp_path, monkeypatch, initialize_journal):
+    """A newer helper publishes after the old boot's absent probe, before its import lock.
+    Only the explicit boot may demote that WAL file before opening it.
+    """
+    import contextlib
+    import sqlite3
+    import sys
+
+    from tests.group_run import run_in_group
+
+    root = tmp_path / "raced"
+    path = store.store_path(root)
+    path.parent.mkdir(parents=True)
+    if store._journal_mode(path.parent, store.TIER_ENFORCED) != "WAL":
+        pytest.skip("requires a native WAL-eligible SQLite runtime and local filesystem")
+    real_lock = store.name_lock
+    publications = []
+    script = (
+        "import sys; from ouroboros import store, store_import; "
+        "store_import.ensure_current_store(sys.argv[1], with_children=False); "
+        "print(store.wal_file(store.store_path(sys.argv[1]))); store.close_connections()"
+    )
+
+    @contextlib.contextmanager
+    def lock(root_, name, **kwargs):
+        if name == store_import.IMPORT_LOCK_NAME and not publications:
+            result = run_in_group([sys.executable, "-c", script, str(root)], timeout=30,
+                                  cwd=str(pathlib.Path(__file__).resolve().parents[1]), env=dict(os.environ))
+            publications.append(result)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert result.stdout.strip().splitlines()[-1] == "True"
+            assert store.wal_file(path)
+        with real_lock(root_, name, **kwargs):
+            yield
+
+    monkeypatch.setattr(store, "name_lock", lock)
+    # The parent models the older opening runtime; its helper above keeps the
+    # actual eligible SQLite facts in an independent process.
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 50, 4))
+    if initialize_journal:
+        report = ensure_current_store(root, with_children=False, body_sha="raced-body",
+                                      initialize_journal=True)
+        assert report["journal_selected"] and not store.wal_file(path)
+        with store.open_store(root, write=True) as txn:
+            txn.set_meta("after_raced_boot", True)
+            assert txn.meta("last_store_body")["sha"] == "raced-body"
+            assert txn.conn.execute("PRAGMA journal_mode").fetchone()[0] == "persist"
+    else:
+        with pytest.raises(store.StoreError, match="journal is WAL"):
+            ensure_current_store(root, with_children=False, body_sha="raced-body", initialize_journal=False)
+        assert store.wal_file(path)
+    assert len(publications) == 1
 
 def test_the_export_reproduces_every_file_byte_for_byte(tmp_path):
     root = fixture_root(tmp_path)
@@ -446,9 +508,10 @@ def test_the_export_writes_the_whole_document_once_fields_live_in_rows(tmp_path)
         body = json.loads(txn.body_text("done1"))
         assert body["launch_handoffs"] == {} and body["model_waits"] == {}  # the keys keep their place, emptied
         assert txn.handoffs("done1") == {"launch_handoffs": {"op1": claim}, "model_waits": {},
-                                         "retired_model_consumers": {}}
+                                         "retired_model_consumers": {}, "swarm_fanouts": {}}
         assert txn.load("done1")["launch_handoffs"] == {"op1": claim}
         assert "retired_model_consumers" not in txn.load("done1")  # a key the file lacked stays absent
+        assert "swarm_fanouts" not in txn.load("done1")
     for task_id in ("root1", "child1", "done1"):
         task_result_path(root, task_id).unlink()
     export_facts(root)

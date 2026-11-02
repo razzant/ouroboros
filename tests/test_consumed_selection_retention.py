@@ -96,7 +96,7 @@ def test_consumed_retry_selection_survives_projection_read_failure(
             assert _row(host, CHILD) == before
     outcome = _select_child_as(host, actor)
     assert outcome["ok"], outcome
-    assert _row(host, CHILD)[eb.BUDGET_HOLD_KEY]["root_grant_id"] == grant_id
+    assert _row(host, CHILD)[eb.SELECTION_KEY]["root_grant_id"] == grant_id
     assert eb.budget_resume_dispatch_allowed(queue, _row(host, CHILD)) is True
 
 
@@ -134,7 +134,9 @@ def test_consumed_member_handoff_retires_and_the_member_continues(
     assert exact["state"] == bp.STATE_RESUMED and exact["grant"]["consumed_at"]
     assert exact["grant"]["root_grant_id"] == (root_grant["grant_id"] if by_model else "")
     if root_change == "newer_root_generation":
-        rows["saved-root"][eb.BUDGET_HOLD_KEY]["root_grant_id"] = "newer-root-resume"
+        if not by_model:  # This owner choice had no lender yet; publish the root's actual first grant.
+            assert q.resume_budget_paused_task("saved-root")["ok"]
+        rows["saved-root"][eb.SELECTION_KEY]["root_grant_id"] = "newer-root-resume"
     elif root_change == "root_held_again":
         eb.hold_budget_row(rows["saved-root"], reason=eb.HOLD_SAVED_WORK)
     index = next(i for i, row in enumerate(workers.PENDING) if row is member)
@@ -152,7 +154,8 @@ def test_consumed_member_handoff_retires_and_the_member_continues(
         workers.PENDING[index] = successor
         assert revoke_exact_budget_resume(successor, "restart_before_dispatch") is False
     assert "_budget_pause_resume" not in successor
-    assert successor.get(eb.BUDGET_HOLD_KEY) is None, "a member's spent handoff is no dispatch carrier"
+    assert successor.get(eb.SELECTION_KEY) is None, "a member's spent handoff is no dispatch carrier"
+    assert eb.BUDGET_HOLD_KEY not in successor, "retirement cannot manufacture a stop"
     assert bp.budget_pause_row(tmp_path, "first")["grant"] == exact["grant"], "nothing reissued or revoked"
     assert eb.budget_resume_dispatch_allowed(q, successor) is True
     sent = []
@@ -190,7 +193,7 @@ def test_budget_exact_after_warm_keeps_newer_selection_on_return(tmp_path, monke
     # Physical parking is a fixture; the budget grant and loop consumption run.
     workers.RUNNING.pop("saved-root")
     exact_task, _ = _parked(tmp_path, monkeypatch, task_id="saved-root")
-    exact_task[eb.BUDGET_HOLD_KEY] = copy.deepcopy(live[eb.BUDGET_HOLD_KEY])
+    exact_task[eb.SELECTION_KEY] = copy.deepcopy(live[eb.SELECTION_KEY])
     newer = q.resume_budget_paused_task("saved-root")
     assert newer["ok"] and newer["exact_continuation"], newer
     ctx, _ = _loop_ctx(tmp_path, "saved-root")

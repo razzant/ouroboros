@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.ui_chat_viewport_smoke import _OBSERVE_STATE_READS, _wait_state_reads_quiescent
+from tests.ui_chat_viewport_smoke import _OBSERVE_STATE_READS, _wait_state_reads_quiescent, wait_drawer_closed
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -347,14 +347,23 @@ def test_task_status_stays_factual_in_main_and_project_chat(
         assert failed.get_attribute("data-finished") == "1"
         assert phase_text(failed) == "Failed"
         assert_phase_accessibility(failed, "Task", "Failed")
-        # This synthetic code has no producer phrase. Unknown reasons remain
-        # visible verbatim; hiding them would discard the only available cause.
-        assert "provider_route_failed" in failed.locator(
+        # Unknown causes have an honest sentence; their exact recorded code remains
+        # accessible by keyboard in the terminal details (#2125).
+        assert failed.locator(
             ":scope > [data-live-summary-button] [data-live-activity]"
-        ).inner_text()
+        ).inner_text() == "The recorded reason has no description yet."
         assert "provider_route_failed" not in failed.locator(
             ":scope > [data-live-summary-button] [data-live-title]"
         ).inner_text()
+        disclosure = failed.locator(":scope > [data-live-summary-button] [data-live-disclosure]")
+        disclosure.focus()
+        disclosure.press("Enter")
+        assert failed.get_attribute("data-expanded") == "1"
+        reason = failed.locator(":scope > [data-live-timeline] .chat-live-line-body").last
+        reason.wait_for(state="visible")
+        assert "Recorded reason: provider_route_failed" in reason.inner_text()
+        disclosure.press("Space")
+        assert failed.get_attribute("data-expanded") == "0"
 
         status = room_status(page, status_selector)
         page.wait_for_function(
@@ -448,6 +457,9 @@ def test_task_status_stays_factual_in_main_and_project_chat(
                 page.wait_for_selector("#project-panel:not([hidden])", timeout=30_000)
                 project_scope = page.locator("#project-panel .chat-instance-panel")
                 project_scope.wait_for(state="visible", timeout=30_000)
+                # On a phone the arriving room stays inert until the drawer handoff settles.
+                if width <= 640:
+                    wait_drawer_closed(page)
                 page.evaluate(
                     "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
                 )

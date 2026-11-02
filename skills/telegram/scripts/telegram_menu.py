@@ -18,10 +18,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from platform_support import fsync_directory, path_is_link_or_reparse
-from telegram_settings import telegram_proxy
+from telegram_settings import TelegramSettingsError, telegram_api_base, telegram_proxy
 
 
-_API_ROOT = "https://api.telegram.org"
 _SNAPSHOT_NAME = "menu_button_snapshot.json"
 _SNAPSHOT_SCHEMA = 2
 _TUNNEL_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.trycloudflare\.com$")
@@ -116,7 +115,7 @@ class TelegramMenuManager:
         chat_id: int,
         state_dir: str | Path,
         *,
-        api_root: str = _API_ROOT,
+        api_root: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._token = str(token or "").strip()
@@ -127,8 +126,11 @@ class TelegramMenuManager:
             raise TelegramMenuError("Owner binding must be a positive private chat ID.")
         self.state_dir = Path(state_dir).expanduser().resolve()
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self._api_root = str(api_root).rstrip("/")
+        # None follows the skill's saved TELEGRAM_API_BASE at every call, as the bridge does,
+        # so install, checks and the rollback restore reach the server the bot now uses.
+        self._api_root = str(api_root).rstrip("/") if api_root else None
         self._client = client
+        self.last_rejected_api_root: str | None = None
 
     @property
     def snapshot_path(self) -> Path:
@@ -148,6 +150,10 @@ class TelegramMenuManager:
         *,
         request_timeout_sec: float | None = None,
     ) -> Any:
+        try:
+            api_root = self._api_root or telegram_api_base(self.state_dir)
+        except (TelegramSettingsError, ValueError):
+            raise TelegramMenuTransportError("Telegram Bot API settings are unavailable or invalid.") from None
         owned_client = self._client is None
         client = self._client or httpx.AsyncClient(
             timeout=12,
@@ -163,7 +169,7 @@ class TelegramMenuManager:
             request_options["timeout"] = timeout
         try:
             response = await client.post(
-                f"{self._api_root}/bot{self._token}/{method}",
+                f"{api_root}/bot{self._token}/{method}",
                 json=payload,
                 **request_options,
             )
@@ -185,6 +191,7 @@ class TelegramMenuManager:
         if response.status_code >= 400 or not isinstance(body, dict) or not body.get("ok"):
             # Telegram descriptions may echo the request URL, which contains the
             # token.  Deliberately expose no remote free text here.
+            self.last_rejected_api_root = api_root
             raise TelegramMenuRejectedError(f"Telegram API rejected {method}.")
         return body.get("result")
 

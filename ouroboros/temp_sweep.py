@@ -23,15 +23,24 @@ _ATOMIC_TEMP_PRUNED = (("state", "headless_tasks"), ("state", "review_checkouts"
 
 # A file name is at most 255 bytes on the filesystems Ouroboros runs on (a physical limit).
 _NAME_MAX_BYTES = 255
+_SIGNATURE = set("0123456789abcdef.")  # pid, tid and uuid after the final ``.tmp.``
 
 
-def atomic_temp_path(path: pathlib.Path) -> pathlib.Path:
+def is_atomic_temp(name: str) -> bool:
+    """The signature ``atomic_temp_path`` writes (hex digits and dots after the final ``.tmp.``), so a
+    user dotfile such as ``.config.tmp.backup`` never matches."""
+    suffix = name.rsplit(".tmp.", 1)
+    return name.startswith(".") and len(suffix) == 2 and bool(suffix[1]) and not set(suffix[1]) - _SIGNATURE
+
+
+def atomic_temp_path(path: pathlib.Path, *, tag: str = "") -> pathlib.Path:
     """The sibling temp name every atomic writer uses, ``.{name}.tmp.<pid>.<tid>.<uuid>``: the one
     signature this sweep reaps, so a hard kill's leftover is reclaimed instead of surviving beside
     the file it was meant to replace (and, in an artifact folder, being listed as a deliverable).
+    A writer's own ``tag`` (``.{name}.{tag}.tmp…``) lets it know its own siblings; it is never cut.
     A name too long to fit beside that suffix keeps a prefix and a digest of the whole name."""
     path = pathlib.Path(path)
-    suffix = f".tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
+    suffix = f"{'.' + tag if tag else ''}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
     stem = path.name
     room = _NAME_MAX_BYTES - 1 - len(suffix.encode("utf-8"))
     if len(stem.encode("utf-8")) > room:
@@ -80,7 +89,6 @@ def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0,
     root = pathlib.Path(root)
     if not root.is_dir():
         return 0
-    hex_chars = set("0123456789abcdef.")
     removed = 0
     now = time.time()
     try:
@@ -94,13 +102,8 @@ def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0,
         try:
             if not tmp.is_file():
                 continue
-            if not (tmp.parent == fallback_scripts and tmp.name.startswith("script_")):
-                # Require the post-".tmp." suffix to be the atomic signature
-                # (hex/dot only) so we never delete an unrelated dotfile that
-                # happens to match.
-                suffix = tmp.name.rsplit(".tmp.", 1)
-                if len(suffix) != 2 or not suffix[1] or set(suffix[1]) - hex_chars:
-                    continue
+            if not (tmp.parent == fallback_scripts and tmp.name.startswith("script_")) and not is_atomic_temp(tmp.name):
+                continue  # never an unrelated dotfile that happens to match
             if now - tmp.stat().st_mtime < min_age_sec:
                 continue
             tmp.unlink()

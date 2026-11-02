@@ -19,8 +19,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 CANARY, CANARY_PUSH = "provider-canary.yml", "provider-canary-push.yml"
+# OPENROUTER_PROVIDER_ROUTES_API_KEY: the OpenRouter routes to Google, Anthropic and OpenAI (tests/provider_contract_ci.py).
 PROVIDER_SECRETS = (
-    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY", "DEEPSEEK_API_KEY",
+    "OPENROUTER_API_KEY", "OPENROUTER_PROVIDER_ROUTES_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+    "MINIMAX_API_KEY", "DEEPSEEK_API_KEY",
     "CLOUDRU_FOUNDATION_MODELS_API_KEY", "CLOUDRU_FOUNDATION_MODELS_BASE_URL", "GIGACHAT_CREDENTIALS",
 )
 DOWNLOAD_ACTION = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
@@ -65,8 +67,10 @@ def test_provider_diagnostics_stay_outside_test_and_release_authority():
     assert summary["env"]["ARTIFACT_URL"] == "${{ steps.provider_evidence.outputs.artifact-url }}"
     assert "python -m tests.ci_evidence summarize" in summary["run"]
     assert list(steps).index("provider_evidence") < list(steps).index("provider_summary")
-    assert workflow["jobs"]["release-preflight"]["needs"] == ["full-test", "integration-test", "system-e2e-mock"]
+    # The preflight checks the tag alone (builds start beside the tests); the release requires the canaries.
+    assert "needs" not in workflow["jobs"]["release-preflight"]
     release = workflow["jobs"]["release"]
+    assert "integration-test" in release["needs"] and "needs.integration-test.result == 'success'" in release["if"]
     assert "needs.release-preflight.result == 'success'" in release["if"]
     optional = workflow["jobs"]["integration-optional"]
     assert "continue-on-error" not in optional
@@ -111,7 +115,7 @@ def _canary_wiring_faults(ci, shared, push):
         if caller.get("uses") != f"./.github/workflows/{CANARY}":
             faults.append(f"{label} does not call the shared job")
         if caller.get("secrets") != passed:
-            faults.append(f"{label} does not pass exactly the eight provider secrets by name")
+            faults.append(f"{label} does not pass exactly the nine provider secrets by name")
         if caller.get("permissions") != {"contents": "read"}:
             faults.append(f"{label} widens the called job's permissions")
         if caller.get("with", {}) != scope:
@@ -129,7 +133,10 @@ def _canary_wiring_faults(ci, shared, push):
     inputs = {"scope": {"description": "Canary subset: all, required or optional; failures remain visible",
                         "type": "string", "default": "all"}}
     if _triggers(shared) != {"workflow_call": {"secrets": declared, "inputs": inputs}}:
-        faults.append("the shared job is not call-only with scoped input and eight optional secrets")
+        faults.append("the shared job is not call-only with scoped input and nine optional secrets")
+    producer = next((step for step in shared["jobs"]["integration-test"]["steps"] if step.get("id") == "provider_tests"), {})
+    if {name: (producer.get("env") or {}).get(name) for name in PROVIDER_SECRETS} != passed:
+        faults.append("the pytest step does not receive every declared secret under its own name")
     if _triggers(push) != {"workflow_dispatch": None}:
         faults.append("the standalone provider wrapper must be manual-only")
     # Tags-only is not an unfiltered push: GitHub excludes the undefined branch ref type.
@@ -198,7 +205,12 @@ CANARY_DRIFTS = {
     "caller drops a secret": lambda w: w.push["jobs"]["integration-test"]["secrets"].pop("OPENAI_API_KEY"),
     "required secret": lambda w: _triggers(w.shared)["workflow_call"]["secrets"]["OPENAI_API_KEY"].update(
         required=True),
-    "undeclared ninth secret": lambda w: _triggers(w.shared)["workflow_call"]["secrets"].update(EXTRA={}),
+    "undeclared tenth secret": lambda w: _triggers(w.shared)["workflow_call"]["secrets"].update(EXTRA={}),
+    "pytest step drops the routes key": lambda w: next(step for step in w.shared["jobs"]["integration-test"]["steps"]
+                                                   if step.get("id") == "provider_tests")["env"].pop(
+                                                       "OPENROUTER_PROVIDER_ROUTES_API_KEY"),
+    "caller drops the routes key": lambda w: w.ci["jobs"]["integration-test"]["secrets"].pop(
+        "OPENROUTER_PROVIDER_ROUTES_API_KEY"),
     "shared job self-triggers": lambda w: _triggers(w.shared).update(push=None),
     "caller leaves the shared job": lambda w: w.ci["jobs"]["integration-test"].update(uses="./other.yml"),
     "shared job loses its read-only default": lambda w: w.shared.pop("permissions"),
@@ -346,6 +358,7 @@ def _run_shell(step, tmp_path, *, diagnostic="viewport", result=0, scope="all"):
         pytest.skip("workflow shell unavailable on this host")
     args = tmp_path / "args"
     command = step["run"].replace("${{ runner.temp }}", str(tmp_path)).replace("${{ matrix.shard }}", "2")
+    command = command.replace("${{ matrix.shards }}", "4")
     command = command.replace("${{ runner.os == 'Windows' && format('--default-suite-shard={0}/8', matrix.shard) || '' }}",
                               "--default-suite-shard=2/8")
     stub = 'python() { printf "%s\\n" "$@" > "$ARGV_FILE"; return "$PRODUCER_EXIT"; }\n'
@@ -413,11 +426,7 @@ def test_release_floor_is_the_last_canary_step_and_enforces_only_on_an_official_
     assert args[6:] == ([flag] if flag else [])
 
 
-EXACT = "refs/tags/v7.7.0"
-PREDICATE = "github.ref == 'refs/tags/v7.7.0' && github.repository == 'razzant/ouroboros'"
-
-
-def test_release_records_every_consumed_gate_and_names_one_exact_exception():
+def test_release_records_every_consumed_gate_and_waives_none():
     from tests.test_release_proof import release_proof
 
     release = _workflow("ci.yml")["jobs"]["release"]
@@ -426,22 +435,20 @@ def test_release_records_every_consumed_gate_and_names_one_exact_exception():
     assert assemble["env"]["RELEASE_GATE_RESULTS"] == " ".join(
         f"{name}=${{{{ needs.{name}.result }}}}" for name in release_proof.RELEASE_GATES)
     assert 'ARGS+=(--gate-result "$GATE")' in assemble["run"]
-    # One literal predicate, equal to the proof's own constants; no other ref names the tag.
+    assert "--test-verdict release-verdict/test-verdict.json" in assemble["run"]
+    # No tag is named anywhere: the v7.7.0 and v7.7.1 owner exceptions are gone with their constants.
     text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert text.count(EXACT) == text.count(PREDICATE) == 4
-    assert (release_proof.OWNER_EXCEPTION_REPOSITORY, f"refs/tags/{release_proof.OWNER_EXCEPTION_TAG}") == (OFFICIAL, EXACT)
-    assert release_proof.OWNER_WAIVABLE_GATES == ("full-test", "system-e2e-mock", "ui-smoke")
+    assert "refs/tags/v7" not in text and "OWNER_EXCEPTION" not in text
+    assert not any(name.startswith("OWNER_") for name in vars(release_proof))
 
 
-@pytest.mark.parametrize("ref,repository,exact", [
-    (EXACT, OFFICIAL, True), (EXACT, FORK, False), ("refs/tags/v7.7.1", OFFICIAL, False),
-    ("refs/tags/v7.7.0-rc.1", OFFICIAL, False), (TAG, OFFICIAL, False),
+@pytest.mark.parametrize("ref,repository", [
+    ("refs/tags/v7.7.1", OFFICIAL), ("refs/tags/v7.7.1", FORK), ("refs/tags/v7.7.2", OFFICIAL), (TAG, OFFICIAL),
 ])
-def test_only_the_exact_official_tag_passes_concluded_red_tests_and_it_stops_at_draft(ref, repository, exact):
+def test_no_tag_passes_a_red_or_skipped_required_lane(ref, repository):
     from tests.test_windows_signing_release import expression_value
 
-    jobs = _workflow("ci.yml")["jobs"]
-    release = jobs["release"]
+    release = _workflow("ci.yml")["jobs"]["release"]
     green = {"github.ref": ref, "github.repository": repository,
              **{f"needs.{name}.result": "success" for name in release["needs"]}}
 
@@ -450,46 +457,15 @@ def test_only_the_exact_official_tag_passes_concluded_red_tests_and_it_stops_at_
         return bool(expression_value(release["if"], context))
 
     assert admitted({}) and not admitted({}, cancelled=True)
-    for red in ({"full-test": "failure"}, {"system-e2e-mock": "cancelled"}, {"ui-smoke": "failure"},
-                {"full-test": "cancelled", "system-e2e-mock": "failure", "ui-smoke": "cancelled"}):
-        assert admitted(red) is exact and not admitted(red, cancelled=True)
-    for strict in ({"ui-smoke": "skipped"}, {"full-test": "skipped"}, {"system-e2e-mock": "skipped"},
-                   *({job: "failure"} for job in set(release["needs"]) - {"android-build", "full-test",
-                                                                           "system-e2e-mock", "ui-smoke"})):
-        assert not admitted({"full-test": "failure", **strict}), strict
+    # The experimental Android pair alone may be red: its assets are then left out, never faked.
+    assert admitted({"android-build": "failure"})
+    for job in set(release["needs"]) - {"android-build"}:
+        for result in ("failure", "cancelled", "skipped"):
+            assert not admitted({job: result}), (job, result)
     names = [step.get("name") for step in release["steps"]]
-    hold = release["steps"][names.index("Hold the v7.7.0 owner-exception release at its verified draft")]
     publish = release["steps"][names.index("Publish verified GitHub Release")]
-    assert names.index("Verify remote release tag before publish") < names.index(hold["name"]) < names.index(publish["name"])
-    assert bool(expression_value(hold["if"], green)) is exact
-    assert bool(expression_value(publish["if"], green)) is not exact
-    preflight = next(step for step in jobs["release-preflight"]["steps"]
-                     if step.get("name") == "Require test prerequisites for publication")
-    assert expression_value(preflight["env"]["V7_7_0_OWNER_EXCEPTION"], green) is exact
-
-
-@pytest.mark.parametrize("exception,full,integration,system,passes", [
-    ("true", "failure", "success", "cancelled", True), ("true", "cancelled", "success", "failure", True),
-    ("true", "success", "success", "success", True), ("true", "failure", "failure", "success", False),
-    ("true", "success", "cancelled", "success", False), ("true", "skipped", "success", "success", False),
-    ("true", "", "success", "success", False), ("true", "success", "success", "skipped", False),
-    ("false", "failure", "success", "success", False), (None, "success", "success", "failure", False),
-    ("false", "success", "success", "success", True),
-])
-def test_preflight_shell_admits_concluded_red_tests_only_under_the_exact_exception(
-        exception, full, integration, system, passes):
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("workflow shell unavailable on this host")
-    step = next(step for step in _workflow("ci.yml")["jobs"]["release-preflight"]["steps"]
-                if step.get("name") == "Require test prerequisites for publication")
-    env = {**os.environ, "FULL_TEST_RESULT": full, "INTEGRATION_RESULT": integration, "SYSTEM_E2E_RESULT": system}
-    env.pop("V7_7_0_OWNER_EXCEPTION", None)
-    if exception is not None:
-        env["V7_7_0_OWNER_EXCEPTION"] = exception
-    done = subprocess.run([bash, "-c", step["run"]], env=env, capture_output=True, text=True, timeout=10)
-    assert done.returncode == (0 if passes else 1), done.stderr
-    assert ("::warning::v7.7.0 owner exception" in done.stdout) is (passes and (full, system) != ("success", "success"))
+    assert names.index("Verify remote release tag before publish") < names.index(publish["name"])
+    assert "if" not in publish
 
 
 @pytest.mark.parametrize("selection,target", [
@@ -545,9 +521,12 @@ def test_full_lane_runs_as_eight_guarded_shards_under_step_ceilings(tmp_path):
     assert completed.returncode == 0, completed.stderr
     assert args[args.index("pytest") + 1:][:4] == ["tests/", "-m", "ui_browser", "--require-ui-browser"]
     assert "--ui-browser-shard=2/8" in args and "--session-timeout=4500" in args
-    # The session budget is cooperative; nothing kills a test mid-flight or narrows the lane.
-    assert not any(arg.startswith(("--timeout", "-k", "--deselect", "--ignore", "--lf", "-x", "-n"))
-                   for arg in args)
+    # A hung test fails alone at its per-test timeout (SIGALRM on this Linux runner); nothing narrows the lane.
+    assert [arg for arg in args if arg.startswith("--timeout")] == ["--timeout=900"]
+    assert not any(arg.startswith(("-k", "--deselect", "--ignore", "--lf", "-x", "-n")) for arg in args)
+    # The retry wrapper owns the evidence directory the lane exports into.
+    assert args[:6] == ["-I", "-S", "scripts/ci_retry.py", "--evidence-dir", f"{tmp_path}/ci-evidence/ui/host",
+                        "--accepted"]
     assert "--ui-browser-shard=${{ matrix.shard }}/8" in lane["run"]
     # Browser tools keep their manual/tag condition, independent of the host lane's outcome, on one shard.
     assert "matrix.shard == 1" in tools["if"] and "steps.ui_tests" not in tools["if"]
@@ -778,7 +757,7 @@ def _evidence_action():
 
 
 @pytest.mark.parametrize("jobname,artifact", [
-    ("quick-test", "quick-test"), ("full-test-runs", "full-test-${{ matrix.os }}${{ runner.os == 'Windows' && format('-shard-{0}', matrix.shard) || '' }}"),
+    ("quick-test", "quick-test-${{ matrix.shard }}"), ("full-test-runs", "full-test-${{ matrix.os }}-shard-${{ matrix.shard }}"),
 ])
 def test_ordinary_jobs_name_their_failures_without_owning_the_result(jobname, artifact):
     job = _workflow("ci.yml")["jobs"][jobname]
@@ -793,35 +772,24 @@ def test_ordinary_jobs_name_their_failures_without_owning_the_result(jobname, ar
     evidence = next(step for step in job["steps"] if step.get("uses") == EVIDENCE_ACTION)
     assert evidence["continue-on-error"] is True and "!cancelled()" in evidence["if"]
     assert evidence["with"] == {"name": artifact, "passes": " ".join(
-        f"{label}=${{{{ " + (f"github.event_name == 'pull_request' && (steps.tests_selected.outputs.{label}_outcome"
-                             " || steps.tests_selected.outcome) || "
-                             if jobname == "quick-test" and label != "size" else "")
-        + f"steps.tests_{label}.outcome }}}}" for label in PASSES)}
+        f"{label}=${{{{ steps.tests_{label}.outcome }}}}" for label in PASSES)}
     assert job["steps"].index(evidence) > max(job["steps"].index(steps[f"tests_{label}"])
                                               for label in PASSES)
 
 
-def test_pull_requests_run_the_selected_scope_on_windows_and_macos():
-    job = _workflow("ci.yml")["jobs"]["pr-selected-os"]
-    assert "pull_request" in job["if"] and job["strategy"]["matrix"]["os"] == ["windows-latest", "macos-latest"]
-    producer = _steps("ci.yml", "pr-selected-os")["tests_selected"]
-    assert "scripts/run_tests.py --selected --base ${{ github.event.pull_request.base.sha }} --sequential" in producer["run"]
-    # Unsharded Windows cannot finish a full escalation in its ceiling; its eight landed shards run it.
-    assert producer["run"].endswith("${{ runner.os == 'Windows' && '--defer-full' || '' }}")
-    evidence = next(step for step in job["steps"] if step.get("uses") == EVIDENCE_ACTION)
-    # A step killed before run_tests.py writes its outputs still reports through its own outcome.
-    assert evidence["with"]["passes"] == " ".join(
-        f"{label}=${{{{ steps.tests_selected.outputs.{label}_outcome || steps.tests_selected.outcome }}}}"
-        for label in ("parallel", "serial"))
-
-
 @pytest.mark.parametrize("job", ["quick-test", "full-test-runs"])
 def test_every_landed_test_producer_runs_under_the_owned_runner(job):
-    """One owner per test run: the full passes and the Node lane run through scripts/run_tests.py."""
+    """One owner per test run: the full passes and the Node lane run through scripts/run_tests.py,
+    each pass behind scripts/ci_retry.py, which exports into the pass's own evidence directory."""
     steps = _workflow("ci.yml")["jobs"][job]["steps"]
-    producers = [step["run"] for step in steps if step.get("id") in {"tests_parallel", "tests_serial"}]
+    producers = {step["id"]: step["run"] for step in steps if step.get("id") in {"tests_parallel", "tests_serial"}}
     node = [step["run"] for step in steps if step.get("name", "").startswith("Run browser-module tests")]
-    assert len(producers) == 2 and all(run.startswith("python scripts/run_tests.py tests/ -m ") for run in producers)
+    assert len(producers) == 2
+    for step_id, run in producers.items():
+        label = step_id.removeprefix("tests_")
+        assert run.startswith(f'python scripts/ci_retry.py --evidence-dir "${{{{ runner.temp }}}}/ci-evidence/{label}" '
+                              "--accepted tests/accepted_failures.json -- python scripts/run_tests.py tests/ -m "), run
+        assert f'--ci-evidence-dir="${{{{ runner.temp }}}}/ci-evidence/{label}"' in run
     assert node == ["python scripts/run_tests.py --node"]
 
 

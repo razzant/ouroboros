@@ -89,7 +89,8 @@ def engine(monkeypatch, tmp_path):
             return httpx.Response(200, json=WIRE["receipt"])
         if request.url.path == "/v2/credential-profiles":
             return httpx.Response(200, json={"profiles": [{"profile": {
-                "harness_id": "claude", "profile_id": "claude-default", "enabled": False}}], "harnessAccounts": []})
+                "harness_id": "claude", "profile_id": "claude-default", "enabled": False}}],
+                "harnessAccounts": [], "accountPools": []})
         if request.url.path in {"/v2/harnesses", "/v2/agent-capabilities"}:
             return httpx.Response(200, json={"harnesses": []})
         raise AssertionError(f"Unexpected engine call: {request.method} {request.url.path}")

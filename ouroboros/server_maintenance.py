@@ -8,10 +8,11 @@ import json
 import logging
 import os
 import pathlib
+import stat
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Dict
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
 
 from ouroboros.server_process import DATA_DIR, _restart_requested, _supervisor_stop, log
 from ouroboros.config import BODY_MAINTENANCE_INTERVAL_SEC
@@ -50,9 +51,11 @@ _LAST_COLD_CUSTODY_SWEEP = [0.0]
 _CUSTODY_SWEEP_LOCK = threading.Lock()
 _RECONCILE_SWEEP_LOCK = threading.Lock()
 _SCHEDULE_SWEEP_LOCK = threading.Lock()
+CUSTODY_SWEEP_SEC = 600  # the custody block's cadence (stamped at dispatch)
+RECONCILE_SWEEP_SEC = 300  # the reconcile block's cadence (stamped when its pass ends, issue #1230)
 
 
-def bind_body_lifespan(drive_root: Any, stop_event: Any):
+def bind_body_lifespan(drive_root: Any, stop_event: Any, *, collection_ready=None):
     """Return this lifespan's idempotent post-publication starter.
 
     A previous lifespan keeps its physical jobs until they return. Only that
@@ -67,7 +70,7 @@ def bind_body_lifespan(drive_root: Any, stop_event: Any):
         with lock:
             if stop_event.is_set() or handover:
                 return
-            runtime = start_body_runtime(drive_root, stop_event=stop_event)
+            runtime = start_body_runtime(drive_root, stop_event=stop_event, collection_ready=collection_ready)
             if runtime.active:
                 return
 
@@ -76,7 +79,7 @@ def bind_body_lifespan(drive_root: Any, stop_event: Any):
                 with lock:
                     handover.clear()
                     if not stop_event.is_set():
-                        start_body_runtime(drive_root, stop_event=stop_event)
+                        start_body_runtime(drive_root, stop_event=stop_event, collection_ready=collection_ready)
 
             thread = threading.Thread(target=after_close, name="body-lifespan-handover", daemon=True)
             handover.append(thread)
@@ -154,11 +157,13 @@ def _run_terminal_duty(drive_root: pathlib.Path, step: str, latch: Any,
             if outcomes:
                 log.info("Cancel-intent watchdog settled: %s", outcomes)
         elif step == "terminal_delivery_replay":
+            from ouroboros import custody_owed
             from ouroboros.dialogue_retry import drain, _requested
             from supervisor.terminal_delivery import replay_pending_deliveries
             _requested.clear()
             _DELIVERY_WAKE.clear()
             drain()
+            custody_owed.drain()  # local custody facts this server process knows but could not write yet
             replay_pending_deliveries(drive_root)
         elif step == "question_delivery_replay":
             import asyncio
@@ -264,6 +269,12 @@ def _duty_busy(latch: Any, cadence_sec: float) -> None:
             "cadence_sec": cadence_sec, **flags, **({"stack": stack} if stack else {})})
     except Exception:
         log.debug("host_duty_stall row failed", exc_info=True)
+    try:
+        from ouroboros.update_generation_facts import observe_duty_overrun
+
+        observe_duty_overrun(duty["name"])  # once per alerted pass: the after-update facts count it
+    except Exception:
+        log.debug("generation duty observation failed", exc_info=True)
 
 
 def _duty_ended(latch: Any, duty: Dict[str, Any]) -> None:
@@ -316,7 +327,8 @@ def _periodic_supervisor_maintenance(
     Each tick starts the schedule duty when its previous pass ended;
     the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
     plus the held-Continue re-check while a pending Continue waits under its writer hold; every 600 s
-    the custody block (reaping, delegated runs, then the working copies' retirers); every 300 s the reconcile
+    the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
+    retirers); every 300 s the reconcile
     block (zombie heal, the age-only retirers, drive settlement, then the maintenance dispatcher). The first
     two stamp here before handing off; the reconcile pass stamps when it ENDS (issue #1230). A due cadence
     whose latch is still held journals the duty's stall once, with its thread's stack (``_duty_busy``).
@@ -327,9 +339,11 @@ def _periodic_supervisor_maintenance(
         return
     now = time.time()
     from supervisor import queue
+    from ouroboros import custody_owed
     from ouroboros.dialogue_retry import bind_wake
 
     bind_wake(_DELIVERY_WAKE.set)
+    custody_owed.bind_wake(_DELIVERY_WAKE.set)
     if (now - _LAST_CANCEL_INTENT_SWEEP[0] <= BODY_MAINTENANCE_INTERVAL_SEC
             and _DELIVERY_WAKE.is_set() and _DELIVERY_SWEEP_LOCK.acquire(blocking=False)):
         _DELIVERY_WAKE.clear()
@@ -342,22 +356,13 @@ def _periodic_supervisor_maintenance(
         from supervisor.continuation_admission import held_continuation_predecessors
         # A writer hold installs no root fence: the held row itself is the cheap
         # scheduling hint, and the off-loop pass re-reads the queue under its lock.
-        held = (("held_continuation_recheck", _CONTINUATION_SWEEP_LOCK),) if held_continuation_predecessors(
-            queue.PENDING) else ()
-        for step, latch in (
-            ("cancel_intent_sweep", _CANCEL_INTENT_SWEEP_LOCK),
-            ("terminal_delivery_replay", _DELIVERY_SWEEP_LOCK),
-            ("question_delivery_replay", _QUESTION_SWEEP_LOCK),
-            ("pause_notice_replay", _PAUSE_NOTICE_SWEEP_LOCK),
-            ("abandoned_usage_reconciliation", _USAGE_SWEEP_LOCK),
-            ("post_task_synthesis_recovery", _SYNTHESIS_SWEEP_LOCK),
-            *held,
-        ):
-            if latch.acquire(blocking=False):
-                _start_maintenance_thread(latch, step, _run_terminal_duty,
-                                          (pathlib.Path(DATA_DIR), step, latch, stop_event))
+        held = (host_duty("held_continuation_recheck"),) if held_continuation_predecessors(queue.PENDING) else ()
+        for duty in (*TWENTY_SECOND_DUTIES, *held):  # the one 20 s group of HOST_DUTIES, dispatched together
+            if duty.latch.acquire(blocking=False):
+                _start_maintenance_thread(duty.latch, duty.name, duty.run,
+                                          (pathlib.Path(DATA_DIR), duty.name, duty.latch, stop_event))
             else:
-                _duty_busy(latch, BODY_MAINTENANCE_INTERVAL_SEC)
+                _duty_busy(duty.latch, BODY_MAINTENANCE_INTERVAL_SEC)
     # The host accepts a saved cold request while its actor is still RUNNING;
     # waiting for the park event would make release and acceptance wait on each other.
     from supervisor.active_activity import get_direct_activity_registry
@@ -375,17 +380,17 @@ def _periodic_supervisor_maintenance(
         _start_maintenance_thread(latch, "owner_pause_settlement", _run_terminal_duty,
                                   (pathlib.Path(DATA_DIR), "owner_pause_settlement", latch, stop_event))
     latch = _CUSTODY_SWEEP_LOCK  # a pass releases THIS object, never a later generation's
-    if now - last_custody_reap[0] > 600:
+    if now - last_custody_reap[0] > CUSTODY_SWEEP_SEC:
         if latch.acquire(blocking=False):
             last_custody_reap[0] = now
             _start_maintenance_thread(latch, "custody-maintenance", _run_periodic_custody_sweep,
                                       (stop_event, latch))
         else:
-            _duty_busy(latch, 600)
+            _duty_busy(latch, CUSTODY_SWEEP_SEC)
     latch = _RECONCILE_SWEEP_LOCK
-    if now - last_review_reconcile[0] > 300:
+    if now - last_review_reconcile[0] > RECONCILE_SWEEP_SEC:
         if not latch.acquire(blocking=False):
-            _duty_busy(latch, 300)
+            _duty_busy(latch, RECONCILE_SWEEP_SEC)
         elif not _start_maintenance_thread(latch, "reconcile-maintenance", _run_periodic_reconcile_sweep,
                                            (last_review_reconcile, stop_event, latch)):
             last_review_reconcile[0] = time.time()  # a start that failed still waits out a cadence
@@ -455,14 +460,23 @@ def _run_periodic_custody_sweep(stop_event: Any = None, latch: Any = None) -> No
             if _stop_requested(stop_event):
                 return
             _cursor_refresh_settled_terminals(_live_task_ids)
+            # The engine's per-route failure shares, after the runs above settled: attach-only, one row
+            # when they changed, so the Runtime vitals and deep self-review read them without a UI poll.
+            step = "refresh_route_health"
+            if _stop_requested(stop_event):
+                return
+            from ouroboros.claudexor_exit_facts import refresh_route_health
+
+            refresh_route_health()
             for name in ("reap_orphaned_processes", "settle_task_scopes", "reconcile_delegated_runs",
-                         "cursor_refresh_settled_terminals"):
+                         "cursor_refresh_settled_terminals", "refresh_route_health"):
                 _step_recovered(name)
         except Exception:
             _step_failed(step, "Periodic custody step %s failed")
-        # The working copies' and old engine programs' retirers, after the delegated runs above settled: a
-        # server that stays up for weeks retires them too (each keeps what a task, custody, review or daemon holds).
-        for prune in (_prune_worktrees, _prune_delegated_snapshots, _prune_engine_runtimes):
+        # The working copies', old engine programs' and finished tasks' scratch retirers, after the delegated
+        # runs above settled: a server up for weeks retires them too (each keeps what a task, custody, review
+        # or daemon holds).
+        for prune in (_prune_worktrees, _prune_delegated_snapshots, _prune_engine_runtimes, _release_finished_scratch):
             if not _stop_requested(stop_event):
                 prune()
         if not _stop_requested(stop_event):
@@ -498,7 +512,7 @@ def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None) 
     try:
         from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
         from ouroboros.delegate_custody import reconcile_orphaned_runs
-        from ouroboros.delegate_recovery import recoverable_task_ids
+        from ouroboros.delegate_recovery import recoverable_handles, continuation_handles
         from ouroboros.owner_wait import restore_owner_wait_allowed
         from supervisor.queue import PENDING, _queue_lock
 
@@ -515,7 +529,7 @@ def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None) 
             DATA_DIR, running_task_ids=running_task_ids,
             gateway_factory=lambda: (read_owned_gateway() if _stop_requested(stop_event)
                                      else ensure_owned_gateway(admission_wait_sec=0)),
-            recoverable_task_ids=recoverable_task_ids(DATA_DIR) | continued,
+            recoverable_handles=recoverable_handles(DATA_DIR) | continuation_handles(DATA_DIR, continued),
             replay_pending=lambda: not _stop_requested(stop_event),
         )
         if outcomes:
@@ -784,144 +798,71 @@ def _prune_engine_runtimes() -> None:
         log.debug("Engine runtime prune failed", exc_info=True)
 
 
-def prune_agent_media_uploads(
-    drive_root: pathlib.Path,
-    retention_days: "int | None" = None,
-    *,
-    now: "float | None" = None,
-) -> dict:
-    """Age-prune AGENT-generated media under uploads/ (CPL4-C21, owner 6A).
+def _release_finished_scratch() -> None:
+    """Session scratch of tasks proven over goes to the custody trash on this pass, not with the drive
+    a retention term later (#2586); the maintenance child deletes it. Unknown liveness keeps it."""
+    try:
+        from ouroboros.workspace_preflight import release_finished_scratch
+        from supervisor.queue import task_settlement_liveness
 
-    Only ``uploads/screenshots/`` (browser tool) and ``uploads/views/``
-    (view_image durable copies) follow GC retention — owner attachments live
-    in the uploads/ ROOT and are owner-explicit-delete only, untouched here.
-    Readers already skip missing files (the eviction placeholder only formats
-    a re-view hint), so a pruned screenshot degrades to a stale hint, never
-    an error. Fail-soft per file.
-
-    CONTAINED (audit #15-13): the sweep deletes only REGULAR FILES that live
-    inside the real family directory. ``is_file()``/``stat()`` follow symlinks,
-    so a symlinked ``uploads/screenshots`` — or a single symlink inside it —
-    made an age sweep of the drive unlink old files anywhere on the host. Both
-    shapes are now skipped by ``lstat`` and counted, never followed.
-    """
-    import stat as stat_module
-
-    from ouroboros.retention import age_cutoff, get_gc_retention_days
-
-    if retention_days is None:
-        retention_days = get_gc_retention_days()
-    cutoff = age_cutoff(retention_days, now)
-    report: dict = {"removed": 0, "kept": 0, "skipped": 0, "errors": 0}
-    for family in ("screenshots", "views"):
-        family_dir = pathlib.Path(drive_root) / "uploads" / family
-        try:
-            if family_dir.is_symlink():
-                report["skipped"] += 1  # the whole family points out of the drive
-                continue
-            entries = sorted(family_dir.iterdir())
-        except OSError:
-            continue
-        for path in entries:
-            try:
-                info = path.lstat()
-                if not stat_module.S_ISREG(info.st_mode):
-                    report["skipped"] += 1  # symlink, directory or special file
-                    continue
-                if info.st_mtime >= cutoff:
-                    report["kept"] += 1
-                    continue
-                path.unlink()
-                report["removed"] += 1
-            except OSError:
-                report["errors"] += 1
-    return report
+        _prune_event("session_scratch_release", ("released", "errors"),
+                     report=release_finished_scratch(DATA_DIR, task_settlement_liveness))
+    except Exception:
+        log.debug("Session scratch release failed", exc_info=True)
 
 
-# Memory only: startup recovery left a gap (unresolved rows, unknown ownership), so task trees and
-# service logs, which recovery may still need, wait for the next server generation.
+from ouroboros.maintenance_retirement import prune_agent_media_uploads as prune_agent_media_uploads
+
+
+# The server mirror of the durable startup_recovery gate; the child reads only the stored fact.
 _STARTUP_RECOVERY_GAPS = [False]
+# The full-text memory journals whose growth boot reports; the report never opens or rewrites them.
+_OBSERVED_JOURNALS = ("memory/identity_journal.jsonl", "memory/world_journal.jsonl",
+                      "memory/knowledge_history.jsonl", "memory/knowledge/patterns_history.jsonl")
+
+
+def _memory_journal_sizes(root: pathlib.Path) -> Dict[str, Any]:
+    """The ``memory_journal_observation`` report, from ``lstat`` alone. A missing journal is ``None``,
+    not a measured zero; a non-regular entry or another ``OSError`` is ``None`` with an error."""
+    sizes: Dict[str, Optional[int]] = {}
+    errors: list = []
+    for relative in _OBSERVED_JOURNALS:
+        try:
+            info = (root / relative).lstat()
+            sizes[relative] = info.st_size if stat.S_ISREG(info.st_mode) else None
+            if sizes[relative] is None:
+                errors.append(f"{relative}: not_regular")
+        except FileNotFoundError:
+            sizes[relative] = None
+        except OSError as exc:
+            sizes[relative] = None
+            errors.append(f"{relative}: {type(exc).__name__}")
+    return {"errors": errors, "journal_bytes": sizes}
 
 
 def _startup_prune_sweeps(*, preserve_task_sources=False, recovery_report=None):
     """Boot's housekeeping: note whether recovery left a gap, reap the fallback scripts (only before
-    intake, when none can be live) and observe the memory journals' sizes once per generation. The
-    retirers themselves run on their cadences (``_run_reconcile_prunes``, the custody pass)."""
+    intake, when none can be live) and observe the memory journals' sizes once per generation. History-sized
+    retirers run in the maintenance child; queue-owned copies stay on the custody pass."""
     _STARTUP_RECOVERY_GAPS[0] = bool(preserve_task_sources and (
         recovery_report is None or recovery_report.get("errors") or "*" in recovery_report.get("unresolved", [])))
+    from ouroboros.maintenance_retirement import record_startup
+    record_startup(DATA_DIR, gaps=_STARTUP_RECOVERY_GAPS[0])
     if not preserve_task_sources:  # the atomic-temp walk is the maintenance child's temp_sweep job
         from ouroboros.temp_sweep import sweep_stale_temp_files
         sweep_stale_temp_files(DATA_DIR, atomic_temps=False)
     try:
-        # TZ-3 11A/B5 supersedes old age-digestion: measure journal growth
-        # without touching historical or new full-text snapshots.
-        from ouroboros.memory_journal_compaction import compact_memory_journal_snapshots
-
         _prune_event("memory_journal_observation", ("journal_bytes", "errors"),
-                     report=compact_memory_journal_snapshots(DATA_DIR))
+                     report=_memory_journal_sizes(DATA_DIR))
     except Exception:
         log.debug("Memory journal observation failed", exc_info=True)
 
 
 def _run_reconcile_prunes(stop_event: Any = None):
-    """The age-only retirers of small planes, on every reconcile pass, so a server that stays up
-    for weeks retires them too. Task trees and service logs wait while startup recovery left a gap
-    and for a pass whose recovery links cannot be read (``startup_tree_exclusions``); every step
-    fails soft and the next pass tries again; a closed generation starts no further step."""
-    if not _STARTUP_RECOVERY_GAPS[0]:
-        try:
-            from ouroboros.headless import prune_task_trees
-            from ouroboros.startup_task_files import startup_tree_exclusions
-            from ouroboros.tools.services import prune_service_logs
-
-            exclusions = startup_tree_exclusions(DATA_DIR)
-            if exclusions is not None:
-                prune_task_trees(DATA_DIR, exclude_root_ids=exclusions)
-                _prune_event("runtime_artifact_prune", ("deleted_dirs", "deleted_files", "errors"),
-                             services=prune_service_logs(DATA_DIR))
-        except Exception:
-            log.debug("Task tree and service log prune failed", exc_info=True)
-    if _stop_requested(stop_event):
-        return
-    try:
-        from ouroboros.delegate_state_sweep import sweep_settled_delegate_state
-
-        _prune_event("delegate_state_sweep", ("removed", "errors", "skipped"),
-                     report=sweep_settled_delegate_state(DATA_DIR))
-    except Exception:
-        log.debug("Delegate state sweep failed", exc_info=True)
-    if _stop_requested(stop_event):
-        return
-    try:
-        # CPL4-C11 (owner batch 3A): clear owner state of tombstoned-uninstalled
-        # skills; grants survive as owner authority, reinstalls self-heal.
-        from ouroboros.skill_uninstall_state import sweep_uninstalled_skill_state
-
-        _prune_event("skill_uninstall_state_sweep", ("swept", "restored", "errors"),
-                     report=sweep_uninstalled_skill_state(DATA_DIR))
-    except Exception:
-        log.debug("Uninstalled-skill state sweep failed", exc_info=True)
-    if _stop_requested(stop_event):
-        return
-    try:
-        # CPL4-C14/C15: pure-cache and dead-marker age prunes (GC retention).
-        from ouroboros.code_intelligence import prune_stale_code_intel_roots
-        from ouroboros.extension_reconcile_queue import prune_failed_reconcile_markers
-
-        _prune_event("stale_cache_prune", ("removed", "errors"),
-                     code_intel=prune_stale_code_intel_roots(DATA_DIR),
-                     extension_reconcile_failed=prune_failed_reconcile_markers(DATA_DIR))
-    except Exception:
-        log.debug("Stale cache prune failed", exc_info=True)
-    if _stop_requested(stop_event):
-        return
-    try:
-        # CPL4-C21 (owner 6A): agent screenshots/views follow GC retention;
-        # owner attachments in the uploads/ root are never touched.
-        _prune_event("agent_media_prune", ("removed", "skipped", "errors"),
-                     report=prune_agent_media_uploads(DATA_DIR))
-    except Exception:
-        log.debug("Agent media prune failed", exc_info=True)
+    """Request a cheap child dispatch check; history-sized retirement lives there."""
+    if not _stop_requested(stop_event):
+        from ouroboros.maintenance import child
+        child.request()
 
 
 # Memory only: the views pass of the review checkout prune runs once per process, until done.
@@ -986,6 +927,18 @@ def _startup_custody_sweep() -> None:
             log.info("Process custody reaper killed %d orphaned process(es): %s", len(reaped), reaped)
     except Exception:
         log.debug("Process custody startup reap failed", exc_info=True)
+    try:  # after the reaper: open local custody whose owner positively ended (never by generation alone)
+        from ouroboros.local_custody_repair import reconcile_open_local_custody
+
+        retired = reconcile_open_local_custody(DATA_DIR)
+        if retired:
+            from supervisor.state import append_jsonl
+
+            log.info("Startup local custody retired %d ended owner row(s)", len(retired))
+            append_jsonl(DATA_DIR / "logs" / "events.jsonl",
+                         {"ts": utc_now_iso(), "type": "local_custody_retired", "phase": "startup", "retired": retired})
+    except Exception:
+        log.warning("Startup local custody reconcile failed; open custody stays held", exc_info=True)
     try:  # ended tasks' leftovers (abrupt death): settled on positive terminal evidence only
         from ouroboros.process_scope import settle_task_scopes
         settle_task_scopes(DATA_DIR, _live_task_ids)
@@ -1057,6 +1010,13 @@ def _prune_delegated_snapshots() -> None:
             return
         snapshot_report = _snap_worktrees.prune_execution_snapshots(
             _delegate_custody.open_snapshot_ids(DATA_DIR))
+        from ouroboros.copy_environments import prune_environments
+        from supervisor.queue import task_settlement_liveness
+
+        environments = prune_environments(DATA_DIR, task_settlement_liveness)
+        if environments["removed"] or environments["errors"]:
+            append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "copy_environment_prune", "report": environments})
         if snapshot_report.get("removed"):
             append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
@@ -1114,6 +1074,60 @@ def _tick_maintenance_child() -> None:
     child.tick(pathlib.Path(DATA_DIR), pathlib.Path(REPO_DIR))
 
 
+class HostDuty(NamedTuple):
+    """One recurring pass the supervisor tick starts off-loop: its journal name (``host_duty_stall``),
+    the single-flight latch the tick takes before starting it (``None``: the pass keeps its own slot)
+    and the function that runs ONE pass on the thread the tick starts. Its cadence is the due
+    condition beside its start in ``_periodic_supervisor_maintenance``, never a number of its own."""
+    name: str
+    latch: Optional[threading.Lock]
+    run: Callable[..., Any]
+
+
+# The reconciled duty inventory (ARCHITECTURE §5 "Maintenance and custody", invariant 24): every
+# recurring pass ``_periodic_supervisor_maintenance`` starts, with the latch it takes there; the
+# 20 s group is dispatched from this table, the others keep their own due conditions above and
+# are started under the latch named here. The delegated body's tick
+# (``delegate_collection.BodyRuntime``, the lifespan's own thread) and ``maintenance.JOBS`` (the
+# child's) are the two other recurring passes of a server process. tests/test_cost_contract.py B7
+# drives each of the three families twice over a scale root and requires the second pass to rest;
+# tests/test_duty_inventory.py fails when the tick starts a pass this table does not name, or a
+# row here names a pass the tick never starts.
+HOST_DUTIES: Tuple[HostDuty, ...] = (
+    HostDuty("cancel_intent_sweep", _CANCEL_INTENT_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("terminal_delivery_replay", _DELIVERY_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("question_delivery_replay", _QUESTION_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("pause_notice_replay", _PAUSE_NOTICE_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("abandoned_usage_reconciliation", _USAGE_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("post_task_synthesis_recovery", _SYNTHESIS_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("held_continuation_recheck", _CONTINUATION_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("owner_pause_settlement", _OWNER_PAUSE_SWEEP_LOCK, _run_terminal_duty),
+    HostDuty("cold-custody", _COLD_CUSTODY_SWEEP_LOCK, _run_cold_custody),
+    HostDuty("custody-maintenance", _CUSTODY_SWEEP_LOCK, _run_periodic_custody_sweep),
+    HostDuty("reconcile-maintenance", _RECONCILE_SWEEP_LOCK, _run_periodic_reconcile_sweep),
+    HostDuty("maintenance-child", None, _tick_maintenance_child),
+    HostDuty("schedule-admission", _SCHEDULE_SWEEP_LOCK, _run_schedule_duty),
+)
+TWENTY_SECOND_DUTIES = HOST_DUTIES[:6]  # the one cadence stamped by _LAST_CANCEL_INTENT_SWEEP
+
+
+def host_duty(name: str) -> HostDuty:
+    return next(duty for duty in HOST_DUTIES if duty.name == name)
+
+
+SETTLEMENT_VERDICTS = "drive_settlement_verdicts"  # meta: each retained drive's verdict with its basis (task_custody)
+
+
+def settlement_verdicts(root: pathlib.Path) -> Dict[str, Any]:
+    """The retained drives' durable verdicts (``task_custody.rested_verdict``): decoded by a settlement lap
+    that walks, never by a pass whose layouts rest."""
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        value = txn.meta(SETTLEMENT_VERDICTS)
+    return {key: dict(item) for key, item in value.items() if isinstance(item, dict)} if isinstance(value, dict) else {}
+
+
 def _run_drive_custody_pass(stop_event: Any = None) -> None:
     """The settled canonical mailboxes the loop thread's seam left (unread inputs to carry),
     then settle terminal child and direct drives past retention (a cancelled subagent's at
@@ -1121,15 +1135,22 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
     ownership interlock, at most ``DRIVE_SETTLEMENTS_PER_PASS`` attempts per layout and
     pass, continuing from the previous pass's cursor; crashed-settlement staging is swept
     first. Off the loop thread: each settlement may copy and hash a child store. It stays in
-    the server: the queue lock and the liveness probe are this process's. The cursor and the
-    verdicts of retained drives are the ``drive_settlement`` job row (written only when they
-    move), so a restart neither restarts the lap nor re-hashes an unchanged retained drive. A
-    drive kept because its custody is not proven is material evidence in the event. The moved
-    drives' deletion and the pending child-ref promotions are the maintenance child's jobs."""
-    from ouroboros import maintenance_jobs
-    from ouroboros.headless import DRIVE_SETTLEMENTS_PER_PASS, prune_headless_task_drives, prune_task_drives
+    the server: the queue lock and the liveness probe are this process's. The cursor and each
+    layout's rest (``task_custody.layout_basis``: the layout directory, the terminal-write counter,
+    the server generation, the retention setting, the release, plus the earliest retention instant
+    of a drive left young) are the ``drive_settlement`` job row; the verdicts of retained drives are
+    the ``drive_settlement_verdicts`` meta row, decoded only by a lap that walks. Both are written
+    only when they move, so a restart neither restarts the lap nor re-hashes an unchanged retained
+    drive, a layout whose inputs stand is not even listed, a task completing elsewhere costs one
+    indexed read of the rows written terminal since, and a new drive its creator published
+    (``task_custody.record_drive_arrival``) one look at that drive, its row forgotten here. A drive
+    kept because its custody is not proven is material evidence in the event. The moved drives'
+    deletion and the pending child-ref promotions are the maintenance child's jobs."""
+    from ouroboros import maintenance_jobs, store
+    from ouroboros.headless import (DRIVE_SETTLEMENTS_PER_PASS, HEADLESS_TASKS_DIR, TASK_DRIVES_DIR,
+                                    prune_headless_task_drives, prune_task_drives)
     from ouroboros.owner_mailbox import sweep_settled_owner_mailboxes
-    from ouroboros.task_custody import sweep_custody_leftovers
+    from ouroboros.task_custody import forget_arrivals, sweep_custody_leftovers
     from supervisor.queue import task_settlement_interlock, task_settlement_liveness
 
     def stop() -> bool:
@@ -1142,17 +1163,38 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
     mailboxes = sweep_settled_owner_mailboxes(root, stop=stop)
     row = maintenance_jobs.job(root, "drive_settlement") or {}
     cursors = {key: str(value or "") for key, value in (row.get("cursor") or {}).items()}
-    rested = {key: value for key, value in (row.get("retained") or {}).items() if isinstance(value, dict)}
-    before = json.dumps([cursors, rested], sort_keys=True)
-    reports = {}
-    for key, prune in (("headless", prune_headless_task_drives), ("direct", prune_task_drives)):
+    rests = {key: dict(value) for key, value in (row.get("rest") or {}).items() if isinstance(value, dict)}
+    before = json.dumps([cursors, rests], sort_keys=True)
+    legacy = row.get("retained")  # an older body kept the verdicts on this row: they move to their own once
+    loaded: Dict[str, Any] = {"map": dict(legacy), "before": ""} if isinstance(legacy, dict) else {}
+
+    def rested() -> Dict[str, Any]:
+        if "map" not in loaded:
+            loaded["map"] = settlement_verdicts(root)
+            loaded["before"] = json.dumps(loaded["map"], sort_keys=True)
+        return loaded["map"]
+
+    reports, looked = {}, {}
+    layouts = (("headless", prune_headless_task_drives, HEADLESS_TASKS_DIR), ("direct", prune_task_drives, TASK_DRIVES_DIR))
+    for key, prune, base in layouts:
         if stop():
             return
         reports[key] = prune(root, live=task_settlement_liveness, guard=lambda: task_settlement_interlock(stop=stop),
-                             stop=stop, budget=DRIVE_SETTLEMENTS_PER_PASS, after=cursors.get(key, ""), rested=rested)
+                             stop=stop, budget=DRIVE_SETTLEMENTS_PER_PASS, after=cursors.get(key, ""), rested=rested,
+                             rest=rests.setdefault(key, {}))
         cursors[key] = str(reports[key].get("cursor") or "")
-    if json.dumps([cursors, rested], sort_keys=True) != before:
-        maintenance_jobs.record(root, "drive_settlement", cursor=cursors, retained=rested)
+        looked[base.name] = list(reports[key].get("arrivals") or ())
+    moved_map = "map" in loaded and json.dumps(loaded["map"], sort_keys=True) != loaded["before"]
+    moved_row = json.dumps([cursors, rests], sort_keys=True) != before or "retained" in row
+    if moved_map or moved_row or any(looked.values()):
+        with store.open_store(root, write=True) as txn:  # one transaction: the lap's facts and its verdicts move together
+            if moved_map:
+                txn.set_meta(SETTLEMENT_VERDICTS, loaded["map"])
+            if "retained" in row:
+                maintenance_jobs.forget_in(txn, "drive_settlement", "retained")
+            maintenance_jobs.record_in(txn, "drive_settlement", cursor=cursors, rest=rests)
+            for base_name, task_ids in looked.items():
+                forget_arrivals(txn, base_name, task_ids)  # the published drives this lap looked at
     _prune_event("headless_task_drive_prune", ("pruned", "errors", "custody_pending", "removed"),
                  report=reports["headless"], task_drives=reports["direct"], mailboxes=mailboxes)
 

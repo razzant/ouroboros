@@ -178,12 +178,11 @@ def test_one_exhausted_credential_profile_does_not_take_the_harness_offline():
     while its siblings were live — an outage invented out of a healthy substrate, and
     the `harness` executor is a PIN, so the caller was refused rather than re-routed.
 
-    Readiness is per SNAPSHOT now — the engine emits one per credential subject, so in
-    practice one per account: the harness is usable while ANY of its snapshots is, and
-    when they are all spent the instant reported is the EARLIEST, because the first to
-    heal makes the harness usable again. The reader groups by `subject.harness` and
-    deliberately never interprets `subject.subject_id`: WHICH profile a run lands on
-    stays Claudexor's business, so no rotation moves into Ouroboros."""
+    Readiness is per credential SUBJECT now (OB1851: one subject's simultaneous rows are
+    constraints on it, never alternatives): the harness is usable while ANY subject is, and
+    when they are all spent the instant reported is the EARLIEST recheck, not a
+    promise that every constraint on an account has healed. The id groups rows; WHICH profile
+    a run lands on stays Claudexor's business, so no rotation moves into Ouroboros."""
     from ouroboros.subagents import _exhausted_window
 
     def _snap(profile, *, spent, reset="2099-08-03T12:00:00Z", harness="some-route",
@@ -222,11 +221,17 @@ def test_one_exhausted_credential_profile_does_not_take_the_harness_offline():
                       "availability": {"state": "exhausted", "resets_at": "2099-08-03T09:00:00Z"}}])
     assert _exhausted_window(single, "some-route") == (True, "2099-08-03T09:00:00Z")
 
-    # Another harness's exhaustion is not ours, and a STALE snapshot never blocks.
+    # Another harness's exhaustion is not ours. A stale row still carrying the
+    # engine's dated, unexpired block is a live cap (OB1851: the engine keeps it in
+    # its own admission ledger); an expired or undated one never blocks.
     other = _Quota([_snap("acct-a", spent=True, harness="other-route")])
     assert _exhausted_window(other, "some-route") == (False, "")
     stale = _Quota([_snap("acct-a", spent=True, freshness="stale")])
-    assert _exhausted_window(stale, "some-route") == (False, "")
+    assert _exhausted_window(stale, "some-route") == (True, "2099-08-03T12:00:00Z")
+    for reset in ("2000-01-01T00:00:00Z", None):
+        expired = _snap("acct-a", spent=True, freshness="stale")
+        expired["availability"]["resets_at"] = reset
+        assert _exhausted_window(_Quota([expired]), "some-route") == (False, "")
 
     # And the live sibling wins even when the spent one is listed second.
     reordered = _Quota([_snap("acct-b", spent=False), _snap("acct-a", spent=True)])

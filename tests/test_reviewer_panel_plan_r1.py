@@ -25,7 +25,7 @@ def _adviser(harness):
 
 @pytest.mark.parametrize("counted", [False, True])
 @pytest.mark.parametrize("dispatched", [False, True])
-def test_force_plan_requires_a_dispatched_ask_time_counted_participant(harness, counted, dispatched):
+def test_ask_dispatch_fact_keeps_its_counted_participant(harness, counted, dispatched):
     _adviser(harness)
     harness.state["slots"] = _slots(("critic" if counted else "s1", "m/a"))
     harness.install({"critic": CLEAN if dispatched else {"status": "not_dispatched", "operation_state": "not_dispatched"}})
@@ -35,8 +35,8 @@ def test_force_plan_requires_a_dispatched_ask_time_counted_participant(harness, 
     assert participant["owner_marked"] is counted and participant["dispatched"] is dispatched
     # A subsequent tick change must not promote or demote this ask's participant.
     harness.state["slots"] = _slots(("s1" if counted else "critic", "m/a"))
-    decision = owner_hurry.force_plan_decision(ctx, {}, enforcement="blocking")
-    assert decision["force_plan_met"] is (counted and dispatched)
+    decision = owner_hurry.plan_gate_decision(ctx, {}, enforcement="blocking")
+    assert decision["allow"] is True
     assert decision["asks_dispatched"] == int(counted and dispatched)
 
 

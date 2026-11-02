@@ -100,8 +100,8 @@ function withOwner(view, owner) {
     return { ...view, owner: true, tone: view.tone === 'neutral' ? 'owner' : view.tone };
 }
 
-function outcomeView(outcome) {
-    const presentation = taskPresentation(outcome || 'done');
+function outcomeView(outcome, quietEffective = false) {
+    const presentation = taskPresentation(outcome || 'done', quietEffective);
     return { ...phaseView(presentation.phase, presentation.headline, presentation.phase,
         { tone: outcomeTone(presentation.phase) || 'neutral' }), outcome: presentation.phase };
 }
@@ -143,8 +143,8 @@ export function modelActivityPresentation(activity) {
 export function taskActivityPresentation({ phase = 'working', outcome = '', ended = false,
     finalizing = false, ownerWait = '', modelWaiting = false, modelOwnerAction = false, resumeAction = false,
     ownerMove = false, hold = '', pauseCause = '', stopPolicy = '', finishingReviews = false, modelActivity = null,
-    workView = null, work = null } = {}) {
-    if (ended) return outcomeView(outcome);
+    workView = null, work = null, quietEffective = false } = {}) {
+    if (ended) return outcomeView(outcome, quietEffective);
     const theirs = Boolean(ownerMove || work?.owner);
     if (stopPolicy) {
         const moving = ['working', 'thinking', 'finalizing'].includes(phase) && !modelWaiting && !ownerWait && !hold;
@@ -202,7 +202,8 @@ export function censusTaskFacts(activity, detail = null) {
         ? { ...facts, root_phase_checkpoint: { post_task_synthesis: 'running' } } : facts);
     const finalizing = observedFinalizing || Boolean(!summary.terminal && summary.observedOutcome
         && facts.root_phase_checkpoint?.post_task_synthesis);
-    return { outcome: summary.observedOutcome || (ended ? summary.phase : ''), ended, finalizing };
+    return { outcome: summary.observedOutcome || (ended ? summary.phase : ''), ended, finalizing,
+        ...(typeof facts.quiet_effective === 'boolean' ? { quietEffective: facts.quiet_effective } : {}) };
 }
 
 // Current census facts supersede cached detail; a missing/disconnected census
@@ -230,6 +231,7 @@ function recordPhase(record = {}, terminalPhase = 'done') {
             : record.parkedPhase || record.censusPhase || 'working',
         outcome: record.finished ? terminalPhase || 'done' : record.observedOutcome,
         ended: Boolean(record.finished), finalizing: Boolean(record.finalizingHold),
+        quietEffective: record.quietEffective ?? record.historicalTerminal?.quiet_effective,
         ownerWait,
         modelWaiting: Boolean(record.modelWaiting), modelOwnerAction: Boolean(record.modelWaiting && record.modelOwnerAction),
         // The census's explicit Resume (main_waiting's rule): the owner's own Pause is not the owner's move.
@@ -252,7 +254,7 @@ export function desiredLiveCardPhase(record = {}, terminalPhase = 'done') {
         ...(secondary ? { secondary } : {}), ...(view.detail ? { detail: view.detail } : {}) };
 }
 
-// The look a chip's view carries to its painter (and to a Shade row that says a card's words).
+// The look a chip's view carries to its painter (and to a work-list row that says a card's words).
 function chipLook(view) {
     return { mark: view.mark, tone: view.tone, owner: Boolean(view.owner), ...(view.outcome ? { outcome: view.outcome } : {}) };
 }
@@ -396,8 +398,8 @@ export function setLiveCardPhase(record, phase = 'working', text = '', className
 }
 
 // One line of a card's OWN details block (a nested child card carries its own): what the
-// expanded card says about its chip or amount.
-function ownLiveDetail(record, key) {
+// expanded card says about its chip or amount, or its list of labelled facts.
+export function ownLiveDetail(record, key) {
     const own = node => Boolean(node?.dataset && key in node.dataset);
     for (const node of record?.root?.children || []) {
         if (own(node)) return node;

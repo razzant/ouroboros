@@ -88,19 +88,38 @@
     overflow: hidden;
 }
 
-.settings-provider-card summary {
-    list-style: none;
-    cursor: pointer;
+/* The card head: its disclosure (title and hint) and the card's own Add key, docked right
+   (docs/DESIGN.md §6: a section-level action belongs in its group's header). */
+.settings-provider-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: 16px 18px;
+}
+
+.settings-provider-toggle {
+    flex: 1 1 auto;
+    min-width: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 16px 18px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
-.settings-provider-card summary::-webkit-details-marker {
-    display: none;
+.settings-provider-toggle:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: 4px;
+    border-radius: var(--radius-xs);
 }
+
+.settings-provider-head > .btn { flex: 0 0 auto; }
 
 .settings-provider-title {
     display: flex;
@@ -128,6 +147,36 @@
     flex-direction: column;
     gap: var(--space-3);
     padding: 0 18px 18px;
+}
+
+/* Key rows: the account-row anatomy (name and status, meta line, actions docked right) with the
+   key's own fields and quiet result lines under the two lines (docs/DESIGN.md §6). */
+.connection-rows {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.harness-account-row.connection-row {
+    grid-template-areas: "main actions" "meta actions" "fields fields";
+}
+
+.connection-fields {
+    grid-area: fields;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-width: 0;
+    margin-top: var(--space-2);
+}
+
+.connection-fields > .settings-inline-status:empty { display: none; }
+
+.connection-note {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
 }
 
 /* Collapsed "More providers" wrapper: rarely used provider cards (Cloud.ru,
@@ -218,6 +267,18 @@
     gap: 10px;
 }
 
+/* Save, joined by Edit anyway while the stored values are unknown: one row that
+   wraps on a narrow card. A lone Save keeps the full width it always had. */
+.settings-extension-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.settings-extension-actions > .btn {
+    flex: 1 1 160px;
+}
+
 .settings-extension-checkbox {
     display: inline-flex;
     align-items: center;
@@ -227,7 +288,8 @@
     line-height: var(--line-body);
 }
 
-.settings-shell .form-row {
+.settings-shell .form-row,
+.connection-fields .form-row {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
     gap: 14px;
@@ -287,6 +349,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    min-width: 0;
 }
 
 .mcp-server-card-actions,
@@ -299,6 +362,9 @@
 
 .mcp-server-status {
     width: fit-content;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
     padding: 3px 8px;
     font-size: var(--type-meta);
     line-height: var(--line-meta);
@@ -926,37 +992,46 @@
     cursor: pointer;
 }
 
-/* Notifications: the soft app tone's level, under Sound in the same card. The label on its own line,
-   the slider and its value on one, then Preview tone and the note across the row. */
-.notify-tone-volume {
+/* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
+   its own line, the slider and its value on one, then its action and the note across the row. */
+.notify-tone-volume,
+.interface-size-range {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--space-3);
     padding-block: var(--space-2);
 }
+.interface-size-range[hidden] { display: none; }
 .notify-tone-volume > label,
 .notify-tone-volume > .settings-toolbar,
-.notify-tone-volume > .settings-inline-note {
+.notify-tone-volume > .settings-inline-note,
+.interface-size-range > label,
+.interface-size-range > .settings-toolbar {
     grid-column: 1 / -1;
 }
-.notify-tone-volume > .settings-toolbar {
+.notify-tone-volume > .settings-toolbar,
+.interface-size-range > .settings-toolbar {
     margin: 0;
 }
-.notify-tone-volume input[type="range"] {
+.notify-tone-volume input[type="range"],
+.interface-size-range input[type="range"] {
     min-width: 0;
     width: 100%;
     accent-color: var(--accent-light);
 }
-.notify-tone-volume input[type="range"]:disabled {
+.notify-tone-volume input[type="range"]:disabled,
+.interface-size-range input[type="range"]:disabled {
     opacity: var(--control-disabled-opacity);
     cursor: not-allowed;
 }
-.notify-tone-volume input[type="range"]:focus-visible {
+.notify-tone-volume input[type="range"]:focus-visible,
+.interface-size-range input[type="range"]:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: 2px;
 }
-.notify-tone-volume output {
+.notify-tone-volume output,
+.interface-size-range output {
     min-width: 4ch;
     text-align: right;
     font-size: var(--type-meta);
@@ -1008,13 +1083,22 @@
         padding: 0 14px 14px;
     }
 
+    .harness-account-row.connection-row {
+        grid-template-areas: "main" "meta" "fields" "actions";
+    }
+
     .settings-model-grid {
         grid-template-columns: 1fr;
     }
 }
 
 @media (max-width: 760px) {
-    .settings-provider-card summary,
+    .settings-provider-toggle {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--space-1);
+    }
+
     .settings-footer {
         align-items: stretch;
         flex-direction: column;
@@ -1084,7 +1168,7 @@
         padding: 14px;
     }
 
-    .settings-provider-card summary,
+    .settings-provider-head,
     .settings-more-providers > summary {
         padding: 14px 14px;
     }

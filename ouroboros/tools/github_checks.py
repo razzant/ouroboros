@@ -1,4 +1,4 @@
-"""Reader of one commit's GitHub checks for ``get_github_checks``: facts and unavailable sources, never a verdict.
+"""Reader of one commit's GitHub checks for ``github_read(method="checks")``: facts and unavailable sources, never a verdict.
 
 Not a tool module: ``github.py`` registers the tool and owns the transport this reader calls.
 """
@@ -190,7 +190,7 @@ def _render(head: List[str], groups: List[tuple], lists: List[tuple], closing: L
     state. What is left admits, in this order, the rollup entries, a line per run, then the detail lines."""
     more = "- {} more of these: {}"
     spare = [len(more.format(len(checks), _state_counts(checks))) + 1 for _title, checks in lists]
-    room = (tool_result_limit("get_github_checks") - _CHECKS_MARGIN - _cost(head + closing) - 1 - sum(spare)
+    room = (tool_result_limit("github_read") - _CHECKS_MARGIN - _cost(head + closing) - 1 - sum(spare)
             - sum(len(title) + 1 + _cost(_compact_runs([run for run, _block, _detail in runs])) for title, runs in groups)
             - sum(len(title) + 1 for title, _checks in lists))
     tail: List[str] = []

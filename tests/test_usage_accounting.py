@@ -141,10 +141,10 @@ def test_a_bucket_whose_rows_disclosed_no_token_counts_reports_absence_not_zero(
     # The row itself is still counted — absence of TOKENS is not absence of the row.
     assert silent["subscription_sessions"] == 1
 
-    ua.record_subscription_session(
+    ua.record_subscription_session(  # a session's input axes are its normalized split
         "sess-reporting", drive_root=data_root, route="codex", task_id="t1",
-        prompt_tokens=120, completion_tokens=None, cached_tokens=None,
-        spend_usd=0.0, spend_estimated=False,
+        prompt_tokens=120, completion_tokens=None, cached_tokens=None, spend_usd=0.0, spend_estimated=False,
+        input_token_usage={"total_tokens": 120, "cache_read_tokens": None, "cache_write_tokens": None},
     )
     mixed = ua.usage_breakdown(data_root)
     assert mixed["prompt_tokens"] == 120           # the one that reported
@@ -154,12 +154,32 @@ def test_a_bucket_whose_rows_disclosed_no_token_counts_reports_absence_not_zero(
     # And a MEASURED zero stays a zero: the fix must not turn every 0 into absence.
     ua.record_subscription_session(
         "sess-real-zero", drive_root=data_root, route="codex", task_id="t1",
-        prompt_tokens=0, completion_tokens=0, cached_tokens=0,
-        spend_usd=0.0, spend_estimated=False,
+        prompt_tokens=0, completion_tokens=0, cached_tokens=0, spend_usd=0.0, spend_estimated=False,
+        input_token_usage={"total_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0},
     )
     measured = ua.usage_breakdown(data_root)
     assert measured["completion_tokens"] == 0
     assert measured["cached_tokens"] == 0
+
+
+def test_status_prints_a_token_sum_no_row_reported_as_unknown_never_zero(tmp_path, monkeypatch):
+    """A model reached only through sessions without an input split has no known input sum; /status and
+    its per-model line say so instead of printing 0, and a known sum still prints as a number."""
+    from supervisor import state
+
+    prior = state.DRIVE_ROOT, state.TOTAL_BUDGET_LIMIT
+    state.init(tmp_path, 0)
+    try:
+        state.save_state({})
+        bucket = {"physical_calls": 3, "accounted_usd": 0.0, "settled_usd": 0.0, "prompt_tokens": None,
+                  "completion_tokens": 45, "cached_tokens": None}
+        ledger = {**bucket, "by_model": {"agy-model": dict(bucket), "api-model": {**bucket, "prompt_tokens": 7}}}
+        monkeypatch.setattr(ua, "usage_breakdown", lambda *_a, **_k: dict(ledger))
+        text = state.status_text({}, [], {})
+    finally:
+        state.init(*prior)
+    assert "prompt_tokens: unknown, completion_tokens: 45, cached_tokens: unknown" in text
+    assert "agy-model: $0.00 (3 calls, ?p/45c tok)" in text and "api-model: $0.00 (3 calls, 7p/45c tok)" in text
 
 
 def test_breakdown_uses_final_rows_and_keeps_unattributed_explicit(data_root):
@@ -680,7 +700,6 @@ def test_llm_retry_machine_does_not_classify_budget_rail_as_provider_failure(dat
     def forbidden(*args, **kwargs):
         raise AssertionError("local accounting rail reached provider retry logic")
 
-    monkeypatch.setattr(client, "_retry_without_optional_sampling", forbidden)
     monkeypatch.setattr(client, "_openrouter_signature_retry_kwargs", forbidden)
     monkeypatch.setattr(client, "_reroute_kwargs_for_body_error", forbidden)
     target = {

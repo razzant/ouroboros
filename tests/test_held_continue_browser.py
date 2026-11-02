@@ -93,13 +93,14 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
 
             page.click('[data-nav-page="dashboard"]')
             page.click('[data-dashboard-tab="activity"]')
-            row = page.locator('[data-activity-section="queue"] .activity-row').filter(has_text="held: earlier work")
+            row = page.locator('[data-activity-section="queue"] .activity-row').filter(
+                has=page.locator(f'[data-act="task-control"][data-id="{successor}"]'))
             row.wait_for()
             meta = row.locator(".activity-sub").inner_text().strip()
-            assert meta.startswith(f"held: earlier work not proven settled · {UNBOUND}"), meta
+            assert meta.startswith("Waiting · Continue starts when the earlier attempt's work is confirmed finished"
+                                   f" · {UNBOUND}"), meta
             assert "paused (budget)" not in row.inner_text()
             control = row.locator('[data-act="task-control"]')
-            assert control.get_attribute("data-budget-paused") == "1", "a held row offers no second Pause"
             assert control.get_attribute("data-resume") is None, "it starts by itself: no Resume is offered"
             _toasts_gone(page)
             for theme in ("dark", "light"):
@@ -131,7 +132,7 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
             menu = page.locator("body > .task-control-menu")
             menu.wait_for()
             items = menu.evaluate("n => [...n.querySelectorAll('.task-control-item')].map(i => i.dataset.taskControl)")
-            assert "stop_now" in items and "resume" not in items, items
+            assert items == ["stop_now"], "a held Continue offers neither Pause nor Resume: " + str(items)
             page.screenshot(path=str(evidence / f"{engine}-3-held-row-menu-390.png"), full_page=True)
             page.keyboard.press("Escape")
             menu.wait_for(state="detached")

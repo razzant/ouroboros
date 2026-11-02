@@ -211,6 +211,7 @@ class _ArrayReviewTruthLLM:
             "content": json.dumps([{
                 "verdict": "FAIL",
                 "item": "missing_visual_evidence",
+                "severity": "critical",
                 "evidence": "No inspected screenshot is attached.",
                 "recommendation": "Inspect the captured consumer flow.",
             }]),

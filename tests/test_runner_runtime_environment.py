@@ -18,7 +18,8 @@ from tests.test_run_tests_script import run_tests as run_tests
 
 pytestmark = pytest.mark.serial
 REPO = Path(__file__).resolve().parents[1]
-DARWIN = pytest.mark.skipif(sys.platform != "darwin", reason="macOS AF_UNIX temp-path regression")
+SHORT_TEMP = pytest.mark.skipif(sys.platform != "darwin" and not sys.platform.startswith("linux"),
+                                reason="the short AF_UNIX temp-root default is macOS and Linux")
 POSIX = pytest.mark.skipif(os.name == "nt", reason="the deliberate bad PATH executable is a POSIX shell fixture")
 
 
@@ -77,10 +78,10 @@ def test_path_fallback_keeps_virtualenv_tools_before_the_node_directory(tmp_path
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
-def test_temp_parent_changes_only_the_macos_default(monkeypatch, tmp_path, platform):
+def test_temp_parent_is_short_on_macos_and_linux_and_the_platform_default_elsewhere(monkeypatch, tmp_path, platform):
     monkeypatch.setattr(test_environment.sys, "platform", platform)
     monkeypatch.setattr(test_environment.tempfile, "gettempdir", lambda: str(tmp_path))
-    assert test_environment.default_temp_parent() == (Path("/tmp") if platform == "darwin" else tmp_path)
+    assert test_environment.default_temp_parent() == (tmp_path if platform == "win32" else Path("/tmp"))
 
 
 def test_fingerprint_environment_projection_creates_no_directories(tmp_path):
@@ -90,7 +91,7 @@ def test_fingerprint_environment_projection_creates_no_directories(tmp_path):
     assert not root.exists()
 
 
-@DARWIN
+@SHORT_TEMP
 @requires_node
 def test_real_gate_runs_nested_node_and_manager_despite_bad_path_and_long_temp(tmp_path, monkeypatch):
     selected = _preferred_node_over_broken_path(tmp_path, monkeypatch)
@@ -140,6 +141,33 @@ def test_real_manager():
     assert Path(facts["tmpdir"]).is_relative_to(Path("/tmp").resolve())
 
 
+@SHORT_TEMP
+def test_a_gate_rooted_in_the_inherited_long_temp_fails_its_nested_manager(tmp_path, monkeypatch):
+    """The negative of the short default: the same real gate rooted where the old non-macOS rule
+    put it (the inherited TMPDIR) gives its nested multiprocessing manager a socket path past the
+    AF_UNIX limit (#2110: the reporter's Linux fence and saved-pause failures)."""
+    repo = _tiny_repo(tmp_path)
+    (repo / "tests/test_serial.py").write_text(
+        "import multiprocessing, pytest\n\n\n@pytest.mark.serial\ndef test_real_manager():\n"
+        "    with multiprocessing.Manager() as manager:\n        assert manager.Queue() is not None\n",
+        encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a nested manager")
+    ambient = tmp_path / ("long-parent-" * 12)
+    ambient.mkdir()
+    for key in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.setenv(key, str(ambient))
+    monkeypatch.setattr(tempfile, "tempdir", str(ambient))
+    monkeypatch.setattr(preflight_runner, "default_temp_parent", lambda: Path(tempfile.gettempdir()))
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
+    monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+    monkeypatch.delenv("PYTEST_XDIST_TESTRUNUID", raising=False)
+    error = preflight_runner.run_hermetic_pytest(repo, timeout=120, max_output=12000)
+    assert error and "AF_UNIX path too long" in error, error
+
+
 @POSIX
 @requires_node
 def test_feedback_runner_real_python_child_inherits_the_selected_node(tmp_path, monkeypatch, run_tests):
@@ -155,7 +183,7 @@ def test_feedback_runner_real_python_child_inherits_the_selected_node(tmp_path, 
     assert os.environ["PATH"] == original_path, "the runner must not mutate its caller's environment"
 
 
-@DARWIN
+@SHORT_TEMP
 @pytest.mark.parametrize("explicit", [False, True], ids=["default-short", "explicit-parent"])
 def test_safe_launcher_default_is_short_and_explicit_parent_still_wins(tmp_path, explicit):
     ambient = tmp_path / ("long-parent-" * 12)

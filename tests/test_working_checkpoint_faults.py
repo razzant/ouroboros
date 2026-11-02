@@ -112,8 +112,8 @@ def test_candidate_is_saved_before_a_later_finalization_failure(
     def finalization_failure(*args, **kwargs):
         raise RuntimeError("finalization interrupted")
 
-    real_gate = loop._enforce_swarm_actions
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", finalization_failure)
+    real_gate = loop._enforce_plan_gate
+    monkeypatch.setattr(loop, "_enforce_plan_gate", finalization_failure)
     monkeypatch.setattr("ouroboros.llm.LLMClient.chat", lambda *a, **k: pytest.fail("no provider call"))
     with pytest.raises(RuntimeError, match="finalization interrupted"):
         loop.run_llm_loop(**_loop_kwargs(tmp_path, registry, []))
@@ -139,7 +139,7 @@ def test_candidate_is_saved_before_a_later_finalization_failure(
         handoff = wc.prepare_recovery(tmp_path, task_id, from_attempt=2, cause="worker_crash")
         registry = _registry(tmp_path, monkeypatch, task_id, 3)
         registry._ctx.working_recovery = handoff
-    monkeypatch.setattr(loop, "_enforce_swarm_actions", real_gate)
+    monkeypatch.setattr(loop, "_enforce_plan_gate", real_gate)
     calls = []
     def resumed_generation(call, *args, **kwargs):
         assert owner_changed, "saved complete candidate must finalize before any replacement author generation"

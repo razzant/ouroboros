@@ -48,3 +48,20 @@ def test_invalid_state_is_refused(tmp_path):
     store_import.ensure_current_store(tmp_path)
     with pytest.raises(ValueError):
         maintenance_jobs.record(tmp_path, "x", state="almost")
+
+
+def test_named_rows_are_read_without_decoding_the_others(tmp_path):
+    """The dispatcher's look names its jobs: a row another owner keeps proportional to its own inventory
+    (the drive settlement's verdicts once lived on ``job:drive_settlement``) is neither returned nor
+    decoded for it; the unnamed read still returns every job row."""
+    from tests._cost_meter import CostMeter, tagged
+
+    store_import.ensure_current_store(tmp_path)
+    maintenance_jobs.record(tmp_path, "small", state="done")
+    maintenance_jobs.record(tmp_path, "wide", state="done", verdicts={f"drive-{index}": "x" * 100 for index in range(300)})
+    with CostMeter(tmp_path) as meter:
+        named = tagged("named", lambda: maintenance_jobs.jobs(tmp_path, ["small", "absent"]))
+        every = tagged("every", lambda: maintenance_jobs.jobs(tmp_path))
+    assert set(named) == {"small"} and {"small", "wide"} <= set(every)
+    assert meter.snapshot("named")["counts"]["json_chars"] < 1000 < meter.snapshot("every")["counts"]["json_chars"]
+    assert maintenance_jobs.jobs(tmp_path, []) == {}

@@ -191,7 +191,8 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 # The reviewer's actual findings are readable, not just counted.
                 assert "Browser evidence missing for the checkout flow" in chat_text
                 assert "fix: Capture the payment page state" in chat_text
-                assert "Reviewer fable findings omitted: 1" in chat_text
+                assert card.locator('dt', has_text='Reviewer fable findings omitted').inner_text() == 'Reviewer fable findings omitted'
+                assert card.locator('dt', has_text='Reviewer fable findings omitted').locator('+ dd').inner_text() == '1'
                 assert "observability call call-fable-1" in chat_text
                 no_summary = page.locator('.chat-live-card[data-task-id="review-no-summary"]')
                 no_summary.wait_for(state="attached", timeout=30_000)
@@ -215,7 +216,7 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 acceptance_toggle.click()
                 no_summary.locator(
                     '[data-review-group="task_acceptance:review-no-summary"]'
-                    ' [data-review-attempt-toggle]',
+                    ' [data-review-facts] > summary',
                 ).first.click()
                 assert "Review panel panel_visual_truth" in no_summary.inner_text()
                 page.wait_for_timeout(900)  # cover the routine background history sync
@@ -306,14 +307,16 @@ def test_ui_smoke_action_only_author_finish_keeps_the_reviewer_fail(direct_serve
                 author = card.locator("[data-review-author-decision]")
                 author.wait_for(state="visible", timeout=10_000)
                 author_text = author.inner_text()
-                assert "Task author decision" in author_text and "Author finish" in author_text
-                assert "reviewer signal=FAIL" in author_text
-                # An action-only finish carries no rationale of its own: the record's default is the stated act.
-                assert "Explicit completion selection." in author_text and "source=finish_task" in author_text
+                assert author_text == "Author finish"
                 assert not re.search(r"accepted|partial|solved|Author finish:", author_text, re.I), author_text
                 group = card.locator(f'[data-review-group="task_acceptance:{task_id}"]')
-                assert "FAIL" in group.locator(".chat-review-group-meta").inner_text()
-                assert "FAIL" in group.locator("[data-review-attempt] .chat-review-attempt-meta").first.inner_text()
+                facts_text = group.locator('[data-review-attempt-detail]').inner_text()
+                assert "reviewer signal=FAIL" in facts_text
+                # The compact author line keeps its act; Record facts keeps the complete original decision.
+                assert "Explicit completion selection." in facts_text and "source=finish_task" in facts_text
+                assert not re.search(r"accepted|partial|solved|Author finish:", facts_text, re.I), facts_text
+                assert "rejected" in group.locator(".review-check-head .review-state").inner_text()
+                assert "FAIL" in facts_text
                 assert not re.search(r"\bsolved\b", card.inner_text(), re.I)
                 card.scroll_into_view_if_needed()
                 card.screenshot(path=str(diagnostic_directory(data_dir.parent, "review-checkpoint") / "c4-action-only-author-finish.png"))

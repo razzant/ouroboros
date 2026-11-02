@@ -6,9 +6,11 @@ re-resolves every output, so a link swapped during the run is refused at the end
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -100,6 +102,43 @@ def test_relative_and_absolute_spellings_of_one_location_get_one_answer(project)
     assert not (active / "site" / "marker.txt").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="backslash is a native filename character only on POSIX")
+def test_directory_output_keeps_native_backslash_member(project):
+    import zipfile
+
+    from ouroboros.artifacts import collect_task_artifact_records
+
+    registry, active, _ = project
+    name = r"part\name.txt"
+    result = _run(registry, "run_command", active, ["bundle"],
+                  "Path('bundle').mkdir()", f"Path('bundle', {name!r}).write_text('native-name')")
+    print(result.text)
+    assert result.code == "OK" and result.meta["artifact_registered"], result.text
+    rows = collect_task_artifact_records(registry._ctx.drive_root, registry._ctx.task_id, require_registered=True)
+    manifest = json.loads(next(pathlib.Path(row["path"]) for row in rows if row["name"].endswith(".manifest.json")).read_text())
+    assert [row["path"] for row in manifest["files"]] == [name]
+    with zipfile.ZipFile(next(row["path"] for row in rows if row["name"].endswith(".zip"))) as archive:
+        assert archive.namelist() == [name] and archive.read(name) == b"native-name"
+
+
+@pytest.mark.parametrize("names", [["/absolute.txt"], ["nested/../escape.txt"], ["same.txt", "same.txt"]])
+def test_directory_archive_refuses_absolute_traversal_and_duplicate_members(project, names):
+    from ouroboros import artifacts
+
+    registry, active, _ = project
+    source = active / "bundle"
+    source.mkdir()
+    member = source / "ordinary.txt"
+    member.write_text("source-bytes")
+    with pytest.raises(OSError, match="invalid or duplicate directory member"):
+        artifacts.copy_directory_to_task_artifacts(
+            registry._ctx, source, member_sources=[(name, member) for name in names],
+        )
+    assert not artifacts.collect_task_artifact_records(
+        registry._ctx.drive_root, registry._ctx.task_id, require_registered=True,
+    )
+
+
 def _directory_link(link, target):
     try:
         os.symlink(target, link, target_is_directory=True)
@@ -123,6 +162,79 @@ def test_parent_spelling_keeps_its_physical_meaning_through_a_symlink(project):
         else:
             assert result.code == "RESOURCE_POLICY_BLOCKED" and refusal in result.text, (output, result.text)
             assert not (site / "marker.txt").exists()
+
+
+# #1797 behind an explicit local executor. Its process runs in this host cwd
+# (workspace_executor.execute), so a relative output keeps the host meaning it has without
+# an executor; Docker filesystem behavior is covered by test_docker_declared_outputs_live.py.
+@pytest.fixture
+def local_project(project, monkeypatch):
+    from ouroboros import workspace_executor
+
+    registry, active, outside = project
+    registry._ctx.executor_ref = {"type": "local", "id": "local-fixture",
+                                  "workspace_host_path": str(active), "workspace_backend_path": "/workspace/project"}
+    launched, real = [], workspace_executor._execute_local
+    monkeypatch.setattr(workspace_executor, "_execute_local", lambda executor, cmd, cwd, *a, **k: (
+        launched.append((executor.kind, pathlib.Path(cwd))) or real(executor, cmd, cwd, *a, **k)))
+    return registry, active, outside, launched
+
+
+def _registered(registry, text):
+    """Artifact-store bytes per registered source, read back from the store itself."""
+    store = pathlib.Path(registry._ctx.drive_root) / "task_results" / "artifacts" / registry._ctx.task_id
+    found = {}
+    for source, name, digest in re.findall(r"registered output (.+?) -> artifact_store:(\S+) sha256=([0-9a-f]{12})", text):
+        raw = (store / name).read_bytes()
+        assert hashlib.sha256(raw).hexdigest().startswith(digest)
+        found[pathlib.Path(source)] = raw
+    return found
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script"])
+def test_a_local_executor_registers_the_parent_output_its_host_process_wrote(local_project, tool):
+    registry, active, _outside, launched = local_project
+    escaped = _run(registry, tool, active / "site", ["../../escaped.txt"], "Path('../../escaped.txt').write_text('x')")
+    assert escaped.code == "RESOURCE_POLICY_BLOCKED", escaped.text
+    assert escaped.meta.get("operation_outcome") == "completed_no_effect"
+    assert "output escapes allowed artifact roots: ../../escaped.txt" in escaped.text
+    assert launched == [] and not (active / "site" / "marker.txt").exists() and not (active.parent / "escaped.txt").exists()
+
+    result = _run(registry, tool, active / "site", ["../report.txt"], "Path('../report.txt').write_text('local ok')")
+    assert result.code == "OK", result.text
+    assert launched == [("local", (active / "site").resolve())], "the executor's host process ran the command"
+    assert _registered(registry, result.text) == {(active / "report.txt").resolve(): b"local ok"}
+
+
+def test_a_local_executor_parent_output_keeps_its_physical_meaning_through_a_symlink(local_project):
+    registry, active, outside, launched = local_project
+    site = active / "site"
+    (active / "deep" / "dir").mkdir(parents=True)
+    _directory_link(site / "inner", active / "deep" / "dir")
+    _directory_link(site / "alias", outside / "deep" / "er")
+    (site / "x.txt").write_text("decoy")  # where a lexical collapse of inner/../x.txt would point
+    physical = pathlib.Path(os.path.realpath(site / "inner" / ".." / "x.txt"))
+    result = _run(registry, "run_command", site, ["inner/../x.txt"], "Path('inner/../x.txt').write_text('physical')")
+    assert result.code == "OK", result.text
+    assert _registered(registry, result.text) == {physical: b"physical"}
+    if physical != (site / "x.txt").resolve():  # POSIX resolves the link before '..'
+        assert (site / "x.txt").read_text() == "decoy"
+    (site / "marker.txt").unlink()
+    if not pathlib.Path(os.path.realpath(site / "alias" / ".." / "decoy.txt")).is_relative_to(active.resolve()):
+        escaped = _run(registry, "run_command", site, ["alias/../decoy.txt"])
+        assert escaped.code == "RESOURCE_POLICY_BLOCKED" and "escapes allowed artifact roots" in escaped.text, escaped.text
+        assert not (site / "marker.txt").exists() and len(launched) == 1
+
+
+def test_a_local_executor_keeps_the_mapper_for_an_absolute_backend_spelling(local_project):
+    registry, active, _outside, launched = local_project
+    traversal = _run(registry, "run_command", active / "site", ["/workspace/project/x/../report.txt"])
+    assert traversal.code == "RESOURCE_POLICY_BLOCKED" and "not a usable backend path" in traversal.text, traversal.text
+    assert launched == []
+    mapped = _run(registry, "run_command", active / "site", ["/workspace/project/report.txt"],
+                  "Path('../report.txt').write_text('mapped')")
+    assert mapped.code == "OK", mapped.text
+    assert _registered(registry, mapped.text) == {(active / "report.txt").resolve(): b"mapped"}
 
 
 def test_absent_and_unchanged_tracked_outputs_are_judged_after_the_run(project, tmp_path):
@@ -322,6 +434,34 @@ def test_start_refuses_a_refused_output_before_launch_and_exports_a_parent_spell
     assert stopped["artifact_output_failed"] is False and "ARTIFACT_OUTPUTS" in stopped["artifact_outputs"]
     artifact = drive / "task_results" / "artifacts" / "task-early-output" / "qualification.html"
     assert artifact.read_text(encoding="utf-8") == "<p>ok</p>"
+
+
+@pytest.mark.serial
+def test_a_local_executor_service_refuses_an_escape_before_launch_and_exports_its_parent_output(local_project):
+    registry, active, _outside, _launched = local_project
+    site = active / "site"
+    body = ("from pathlib import Path; Path('marker.txt').touch(); Path('../qualification.html').write_text('<p>local</p>'); "
+            "print('READY', flush=True); import time; time.sleep(30)")
+    refused = registry.execute_result("start_service", {
+        "name": "local-early", "cmd": [sys.executable, "-c", body], "cwd": str(site),
+        "outputs": ["../../outside.html"], "readiness": {"timeout_sec": 1}})
+    assert refused.code == "RESOURCE_POLICY_BLOCKED", refused.text
+    assert refused.meta.get("operation_outcome") == "completed_no_effect"
+    assert not (site / "marker.txt").exists() and not (active.parent / "outside.html").exists()
+    assert registry.execute("service_status", {"name": "local-early"}).startswith("⚠️ SERVICE_NOT_FOUND")
+
+    started = json.loads(registry.execute("start_service", {
+        "name": "local-early", "cmd": [sys.executable, "-c", body], "cwd": str(site),
+        "outputs": ["../qualification.html"], "readiness": {"log_contains": "READY", "timeout_sec": 10}}))
+    try:
+        assert started["state"] == "running" and started["ready"] is True, started
+        assert started["executor"]["type"] == "local", started
+        assert pathlib.Path(started["host_cwd"]).resolve() == site.resolve(), started
+        assert (site / "marker.txt").exists(), "the service ran in this host cwd"
+    finally:
+        stopped = json.loads(registry.execute("stop_service", {"name": "local-early"}))
+    assert stopped["artifact_output_failed"] is False, stopped.get("artifact_outputs")
+    assert _registered(registry, stopped["artifact_outputs"]) == {(active / "qualification.html").resolve(): b"<p>local</p>"}
 
 
 @pytest.mark.serial

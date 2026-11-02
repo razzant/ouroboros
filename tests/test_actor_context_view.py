@@ -116,9 +116,25 @@ def test_real_task_seal_wrapper_preserves_the_observed_source_binding(tmp_path):
     observed = [{"role": "system", "content": "rules"}, {"role": "user", "content": "Owner task"}, *_unit("source")]
     current = copy.deepcopy(observed)
     seal_task_transcript(current)
-    assert current[1]["content"] == [{"type": "text", "text": "Owner task", "cache_control": {"type": "ephemeral"}}]
+    assert current[1] == {**observed[1], "cache_control": {"type": "ephemeral"}}  # the content is untouched
     candidate, receipt = _apply(observed, current, tmp_path)
     assert receipt.status == "applied" and candidate[1] is current[1]
+
+
+def test_the_seal_mark_moving_between_later_rows_keeps_the_observed_binding(tmp_path):
+    """Host and owner rows carry the boundary now; its move is cache presentation, not source."""
+    from ouroboros.context_fit import seal_task_transcript
+
+    observed = [{"role": "system", "content": "rules"}, {"role": "user", "content": "Owner task"}, *_unit("source"),
+                {"role": "user", "content": "[Host clock at this request: 2026-10-21T00:00:00Z UTC]"}]
+    seal_task_transcript(observed, min_prefix_tokens=0)
+    assert "cache_control" in observed[-1]
+    current = copy.deepcopy(observed) + _unit("request", names=("compact_context",)) + [
+        {"role": "user", "content": "A later owner line."}]
+    seal_task_transcript(current, min_prefix_tokens=0)
+    assert "cache_control" not in current[len(observed) - 1] and "cache_control" in current[-1]
+    _candidate, receipt = _apply(observed, current, tmp_path)
+    assert receipt.status == "applied"
 
 
 @pytest.mark.parametrize("position,extra", [(0, {"citation": "keep this meaning"}), (1, {})])

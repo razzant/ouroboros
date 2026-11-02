@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -42,11 +44,18 @@ def checking_run(tmp_path):
     run = _session_run()
     run["request"]["checking_source"] = source
     run["slot_roster"][0]["session_access"] = "full"
-    binding = review_operation_binding(
-        ReviewRequest(**run["request"]), ReviewSlot(**run["slot_roster"][0]), OPERATION)
+    from ouroboros.review_dispatch import review_reconciliation_identity
+    request, slot = ReviewRequest(**run["request"]), ReviewSlot(**run["slot_roster"][0])
+    request.reconciliation_identity = review_reconciliation_identity(request, [slot], root_task_id=TASK)
+    run["request"] = dataclasses.asdict(request)
+    binding = review_operation_binding(request, slot, OPERATION)
     run["actors"][0].update(
         pending_invocation_id=INVOCATION,
         recovery_binding={**binding, "pending_invocation_id": INVOCATION})
+    from ouroboros.observability import persist_call
+    persist_call(root, task_id=TASK, call_id=OPERATION + "_prompt", call_type="review_prompt",
+                 payload={"request": run["request"], "slot": run["slot_roster"][0]},
+                 manifest={"review_operation_binding": binding})
     return root, subject, area, run
 
 
@@ -60,19 +69,23 @@ def _collect(root, run):
 
 
 def _assert_receipt(actor, area):
+    assert "checking_evidence" in actor["usage"], actor.get("error")
     receipt = actor["usage"]["checking_evidence"]
     assert receipt["status"] == "retained" and receipt["gaps"] == []
     assert not area.exists(), "a terminal run's copy goes once its receipt is written"
     assert not {"area", "refresh_safe", "retention_reason", "release_basis", "process_scope"} & set(receipt)
     evidence = Path(receipt["evidence_dir"])
     assert (evidence / "files" / "check.py").read_bytes() == REVIEWER_EDIT
-    assert (evidence / "files" / checking.EVIDENCE_DIRNAME / "coverage.xml").read_bytes() == COVERAGE
+    coverage = evidence / "files" / checking.EVIDENCE_DIRNAME / "coverage.xml"
+    assert coverage.read_bytes() == COVERAGE
+    # A reviewer's copy keeps its source's mode, so the receipt names the mode the retained file
+    # carries (a writable file reads 0o666 on Windows), never a POSIX default.
     assert receipt["named_evidence"] == [{
         "path": f"{checking.EVIDENCE_DIRNAME}/coverage.xml", "size": len(COVERAGE),
-        "sha256": hashlib.sha256(COVERAGE).hexdigest(),
+        "sha256": hashlib.sha256(COVERAGE).hexdigest(), "mode": stat.S_IMODE(coverage.stat().st_mode),
     }]
     assert "check.py" in receipt["changed"]
-    assert json.loads((evidence / "summary.json").read_text()) == receipt
+    assert json.loads((evidence / "summary.json").read_text(encoding="utf-8")) == receipt
     assert actor["operation_id"] == OPERATION
     assert actor["usage"]["invocation_id"] == INVOCATION
     assert not actor["usage"].get("pending_invocation_id"), "a terminal token must not create a new live wait"
@@ -120,7 +133,7 @@ def test_repeat_attach_collection_reuses_the_retained_receipt_without_recreating
     again, _fact = _collect(root, run)  # an old pending checkpoint observes the same paid run
     assert _assert_receipt(again, area) == receipt
     assert summary.read_bytes() == summary_bytes and summary.stat().st_mtime_ns == summary_mtime
-    assert calls == [("handshake",), ("get_run", RUN), ("close",)] * 2
+    assert calls == [("handshake",), ("get_run", RUN), ("close",)]  # S3: the second read uses producer CAS
 
 
 @pytest.mark.parametrize("verdict", ["PASS", "FAIL"])
@@ -159,7 +172,7 @@ def test_a_receipt_captured_before_an_engine_upgrade_is_reused_as_stored(
     again = _collect(root, run)[0]
     assert _assert_receipt(again, area) == receipt and _verdict(again) == "PASS"
     assert summary.read_bytes() == summary_bytes and summary.stat().st_mtime_ns == summary_mtime
-    assert calls == [("handshake",), ("get_run", RUN), ("close",)]
+    assert calls == []  # S3: a complete retained producer needs no new engine observation
 
 
 @pytest.mark.parametrize("gap", ["special_entry", "capture_error"])

@@ -12,14 +12,16 @@ monkeypatch ``context._STRAY_PROBE_CACHE``) keeps working unchanged.
 from __future__ import annotations
 
 import logging
+import json
 import pathlib
 import re
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from ouroboros.context_budget import SCRATCHPAD_BLOAT_WARN_CHARS
-from ouroboros.utils import iter_jsonl_objects, read_json_dict, read_text
+from ouroboros.jsonl_tail import cached_tail_objects
+from ouroboros.utils import read_json_dict, read_text
 from ouroboros.store import StoreError
+from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +42,8 @@ def safe_read(path: pathlib.Path, fallback: str = "") -> str:
 
 
 def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
-    yield from iter_jsonl_objects(path, tail_bytes=max_bytes)
+    """The log's bounded tail, read once per file identity and shared with the Runtime section's body fact."""
+    yield from cached_tail_objects(path, max_bytes)
 
 
 def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
@@ -66,22 +69,17 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
         if dupes:
             checks.append(f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}")
-        else:
-            checks.append("OK: no duplicate message processing detected")
     except Exception:
         pass
 
-    try:
-        hit_rate = _compute_cache_hit_rate(env)
-        if hit_rate is not None:
-            if hit_rate < 0.30:
-                checks.append(f"WARNING: LOW CACHE HIT RATE — {hit_rate:.0%} cached. Context structure may be degrading prompt caching efficiency.")
-            elif hit_rate >= 0.50:
-                checks.append(f"OK: cache hit rate ({hit_rate:.0%})")
-            else:
-                checks.append(f"INFO: cache hit rate moderate ({hit_rate:.0%})")
+    try:  # who changed sent history under the running code; a provider's cache share is not a health verdict
+        from ouroboros.transcript_prefix import history_changes_line
+
+        line = history_changes_line(getattr(env, "budget_drive_root", None) or getattr(env, "drive_root", None))
+        if line:
+            checks.append(line)
     except Exception:
-        pass
+        log.debug("sent-history change fact unavailable", exc_info=True)
 
     try:
         events_path = env.drive_path("logs/events.jsonl")
@@ -100,13 +98,9 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
             checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
-        else:
-            checks.append("OK: no recent provider/routing errors")
         if local_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in local_overflow_models.most_common(3))
             checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}). Local context may need more compaction or a larger window.")
-        else:
-            checks.append("OK: no recent local context overflows")
         if remote_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in remote_overflow_models.most_common(3))
             checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}). Switch to low context mode or reduce the prompt footprint before retrying the same request.")
@@ -204,44 +198,19 @@ def _plan_review_note(env: Any, task_id: str) -> str:
         return ""
 
 
-def _memory_health_lines(env: Any) -> List[str]:
-    """Own-memory maintenance signals for the two authored files, identity and scratchpad.
-
-    The old dialogue writer's state lines (unreadable cursor, open nominations, a failed
-    run, a withheld era) left with that writer: its pending nominations are imported as
-    marks the mind releases, and an unreadable cursor is the import's ``cursor_gap``.
-    """
+def _identity_age_line(env: Any) -> str:
+    """When ``identity.md`` was last written, as a fact; whether that is long is the mind's reading
+    (the STALE/THIN identity and EMPTY/BLOATED scratchpad verdicts and their OK lines left with the
+    owner's rule that no threshold stands in for judgment). An absent file is no fact."""
     import time as _time
 
-    lines: List[str] = []
     try:
         identity_path = env.drive_path("memory/identity.md")
         if identity_path.exists():
-            age_hours = (_time.time() - identity_path.stat().st_mtime) / 3600
-            if age_hours > 8:
-                lines.append(f"WARNING: STALE IDENTITY — identity.md last updated {age_hours:.0f}h ago")
-            else:
-                lines.append("OK: identity.md recent")
+            return f"identity.md last updated {(_time.time() - identity_path.stat().st_mtime) / 3600:.1f} h ago"
     except Exception:
         pass
-    try:
-        identity_content = read_text(env.drive_path("memory/identity.md"))
-        if len(identity_content.strip()) < 200:
-            lines.append(f"WARNING: THIN IDENTITY — identity.md is only {len(identity_content)} chars. Cognitive decay signal.")
-    except Exception:
-        pass
-
-    try:
-        sp_len = len(read_text(env.drive_path("memory/scratchpad.md")).strip())
-        if sp_len < 50:
-            lines.append("WARNING: EMPTY SCRATCHPAD — scratchpad is nearly empty. Memory loss signal.")
-        elif sp_len > SCRATCHPAD_BLOAT_WARN_CHARS:
-            lines.append(f"WARNING: BLOATED SCRATCHPAD — {sp_len} chars. Extract durable insights to knowledge base.")
-        else:
-            lines.append(f"OK: scratchpad size ({sp_len} chars)")
-    except Exception:
-        pass
-    return lines
+    return ""
 
 
 def _unread_output_line(custody_root: Any, run: Any, task_id: str) -> str:
@@ -274,27 +243,26 @@ def _foreign_owner(run: Any, task_id: str) -> str:
     return str(run.task_id) if task_id and run.task_id and task_id != run.task_id else ""
 
 
-def _foreign_work_line(owner: str, work: Dict[str, List[str]]) -> str:
-    """Another task's delegated obligations as ONE line (owner decision Q3=A, 18.10.2026).
+def _foreign_work_line(root: Any, foreign: Dict[str, Dict[str, List[str]]]) -> str:
+    """One line for all foreign obligations; the exact list uses the existing blob reader.
 
-    D7 keeps them visible to every reader, but only their owner reads and acknowledges its results, and
-    decides its patches while it lives; a copy of every run's line in every task's context was most of
-    the Health section (17.10: 223 lines, ~110k characters, nearly all about other tasks). The reader
-    sees each owner once: the counts, the run ids, the authority rule and the owner's record, which
-    any task can read (a run's own reader resolves only in its owner's lineage).
+    No seen-state: identical lists reuse content-addressed source bytes. If retention fails,
+    keep the list in the line rather than publishing an unreadable pointer.
     """
-    parts = [f"{label}: {', '.join(work[key])}" for key, label in (
-        ("unread", "results not read to EOF"), ("patches", "patches awaiting apply/reject")) if work[key]]
-    line = (f"{'WARNING' if work['patches'] else 'INFO'}: ANOTHER TASK'S DELEGATED WORK — owner task {owner}: "
-            + "; ".join(parts) + ". Only the owner reads and acknowledges its results and decides its patches "
-            "while it lives; once it is terminal, a live top-level task may reject them from any root or apply "
-            "them from the recorded target or a fresh payload binding (integrate_delegated_patch; the disposition "
-            f"row records who acted). The owner's record: query_data(op='json', kind='task_result', ids=['{owner}']).")
-    if work["yours"]:
-        run_id = work["yours"][0] if len(work["yours"]) == 1 else "<run_id>"
-        line += (f" Your active root matches the target of {', '.join(work['yours'])}: once the owner is terminal, "
-                 f"integrate_delegated_patch(run_id='{run_id}', decision='apply'|'reject').")
-    return line
+    from ouroboros.observability import write_blob
+
+    try:
+        ref = write_blob(root, foreign)
+        source = f"query_data(op='blob', sha256='{ref['sha256']}')"
+    except OSError:
+        source = "retention unavailable; exact list: " + json.dumps(foreign, ensure_ascii=False, sort_keys=True)
+    severity = "WARNING" if any(work["patches"] for work in foreign.values()) else "INFO"
+    return (f"{severity}: OTHER TASKS' DELEGATED WORK — full owner/run list (unread results, undisposed patches, "
+            f"'yours' = matching target geometry, not write authority): {source}. Only the owner acknowledges "
+            "results and decides patches while live; after it ends, a live top-level task may reject from any "
+            "root or apply to the original target when location and current write rights permit "
+            "(payloads need a fresh binding) "
+            "via integrate_delegated_patch.")
 
 
 # One line per own settled run, bounded like ``terminal_custody_notice``.
@@ -354,6 +322,7 @@ def _own_run_outcome_lines(custody_root: Any, custody_state: Any, task_id: str,
     return lines
 
 
+@timed_section("health")
 def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                             attempt_key: str = "") -> str:
     """Render the health-invariant WARNING block for one reader's context.
@@ -382,7 +351,6 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     (``_own_run_outcome_lines``). Empty renders none of those lines.
     """
     checks: List[str] = []
-
     try:
         from ouroboros.claudexor_exit_facts import health_line
         engine_exit = health_line(env.drive_path("logs/supervisor.jsonl").parent.parent)
@@ -440,8 +408,6 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
             pass
         if desync_parts:
             checks.append(f"CRITICAL: VERSION DESYNC — VERSION={ver_file}, {', '.join(desync_parts)}")
-        elif ver_file:
-            checks.append(f"OK: version sync ({ver_file})")
     except Exception:
         pass
 
@@ -452,22 +418,10 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
         accounted = float(usage_breakdown(env.drive_root).get("accounted_usd") or 0.0)
         if state_data.get("budget_drift_alert"):
             checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${accounted:.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
-        else:
-            checks.append("OK: budget drift within tolerance")
     except Exception:
         checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — budget drift check skipped")
 
-    try:
-        from supervisor.state import per_task_cost_summary
-        costly = [t for t in per_task_cost_summary(5) if t["cost"] > 5.0]
-        for t in costly:
-            checks.append(f"WARNING: HIGH-COST TASK — task_id={t['task_id']} cost=${t['cost']:.2f} rounds={t['rounds']}")
-        if not costly:
-            checks.append("OK: no high-cost tasks (>$5)")
-    except Exception:
-        checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — high-cost task check skipped")
-
-    checks.extend(_memory_health_lines(env))
+    checks.extend(filter(None, [_identity_age_line(env)]))
 
     # state/crash_report.json retired (CPL4-C9, owner 2A): its writer — the
     # crash-rollback path — no longer exists in this tree, so the reader and
@@ -491,28 +445,30 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     plan_note = _plan_review_note(env, task_id)
     if plan_note:
         checks.append(plan_note)
-    # The three delegated-run blocks below share ONE custody read of the rows they
-    # can name (``health_runs``: own, held, maybe-unread), so a build decodes neither
+    # The three delegated-run blocks below share ONE selected custody read of the rows
+    # they can name (``health_runs``: own, held, maybe-unread), so a build decodes neither
     # every settled run nor each block's own copy (I18); their predicates and order
-    # decide. A failed selection reads every row into the same state, because the
-    # own-run lines have no read of their own; only if that fails too does each
-    # remaining block replay for itself, under its own fail-soft arm.
-    custody_root = None
+    # decide. A read that fails is said as such, with the addressed reader, and those
+    # blocks are skipped: each would otherwise replay every row for itself, and an empty
+    # replay proves no absence of obligations. Containment faults keep their own read.
+    custody_root = getattr(env, "drive_root", None) or env.drive_path("state").parent
     custody_state = None
+    custody_gap = ""
     try:
-        from ouroboros.delegate_custody import replay as replay_custody
         from ouroboros.delegate_custody_current import health_runs
 
-        custody_root = getattr(env, "drive_root", None) or env.drive_path("state").parent
-        try:
-            custody_state = health_runs(custody_root, task_id)
-        except Exception:
-            log.debug("Selected custody read failed; reading every row", exc_info=True)
-            custody_state = replay_custody(custody_root)
-    except Exception:
-        custody_state = None
+        custody_state = health_runs(custody_root, task_id)
+    except Exception as exc:
+        log.debug("Selected custody read failed", exc_info=True)
+        custody_gap = f"{type(exc).__name__}: {str(exc)[:200]}"
+    if custody_gap:
+        checks.append(
+            f"WARNING: CUSTODY UNAVAILABLE — the delegated-run obligations could not be read ({custody_gap}); "
+            "nothing here proves their absence. Read them with query_data(op='sql', db='current', "
+            "query=\"SELECT run_id, task_id, state FROM custody_runs WHERE state='held' OR output_unread=1\")."
+        )
 
-    foreign: Dict[str, Dict[str, List[str]]] = {}  # another task's obligations, one line per owner (Q3=A)
+    foreign: Dict[str, Dict[str, List[str]]] = {}  # exact source for one line covering all foreign owners
 
     def foreign_work(owner: str) -> Dict[str, List[str]]:
         return foreign.setdefault(owner, {"unread": [], "patches": [], "yours": []})
@@ -520,7 +476,7 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     try:
         from ouroboros.delegate_custody import settled_unread_outputs
 
-        for run in settled_unread_outputs(custody_root, custody_state):
+        for run in settled_unread_outputs(custody_root, custody_state) if not custody_gap else ():
             # Owner doctrine D7, made load-bearing: a delegated result that was paid for
             # and never read to EOF is the launched-never-collected class. Not CRITICAL —
             # nothing is live and nothing is mutating — but it stays visible until the
@@ -541,9 +497,14 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
 
     try:
         from ouroboros.delegate_custody import undisposed_patches
-        from ouroboros.delegate_shared import orphan_apply_target_ok
+        from ouroboros.config import get_subagent_projects_root
+        from ouroboros.launch_roots import WorkRootUnavailable
 
-        for run in undisposed_patches(custody_root, custody_state):
+        try:
+            projects_root = pathlib.Path(get_subagent_projects_root()).expanduser().resolve()
+        except WorkRootUnavailable:  # undecided: no folder is "yours" through it; every warning still shows
+            projects_root = None
+        for run in undisposed_patches(custody_root, custody_state) if not custody_gap else ():
             # C1: a settled mutating run's work lives in its private snapshot (and its
             # captured patch, once one exists) until someone explicitly applies or
             # rejects it. The GC preserves the material, but preserved-and-invisible is
@@ -558,7 +519,7 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                     f"settled with its changes captured from a private snapshot of "
                     f"{run.target_root or '?'}"
                 )
-                persist_clause = "The snapshot and patch persist until that disposition."
+                persist_clause = "The saved patch and its pinned commits persist until that disposition."
             else:
                 state_clause = (
                     f"settled with its work preserved in its private snapshot of "
@@ -567,15 +528,16 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
                     f"before any apply)"
                 )
                 persist_clause = "The snapshot persists until that disposition."
-            # Another task's patch folds into its owner's one line (Q3=A); the predicate the apply
-            # gate uses names the runs whose recorded target this reader's own active root already
-            # satisfies, so the line can carry the concrete call (no per-orphan task_result read;
-            # the tool re-verifies every guard).
+            # Keep target-match facts in the retained list; the apply tool re-verifies every guard.
             owner = _foreign_owner(run, task_id)
             if owner:
                 foreign_work(owner)["patches"].append(str(run.run_id or "?"))
-                if active_root and orphan_apply_target_ok(run.target_root, active_root):
-                    foreign_work(owner)["yours"].append(str(run.run_id))
+                if active_root and str(run.target_root or "").strip():
+                    target = pathlib.Path(run.target_root).expanduser().resolve()
+                    active = pathlib.Path(active_root).expanduser().resolve()
+                    if target == active or (target.is_relative_to(active) and projects_root is not None
+                                            and active.is_relative_to(projects_root)):
+                        foreign_work(owner)["yours"].append(str(run.run_id))
                 continue
             decide_clause = (
                 f"decide with integrate_delegated_patch(run_id='{run.run_id}', "
@@ -589,7 +551,8 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
             )
     except Exception:
         pass
-    checks.extend(_foreign_work_line(owner, work) for owner, work in foreign.items())
+    if foreign:
+        checks.append(_foreign_work_line(getattr(env, "budget_drive_root", None) or custody_root, foreign))
 
     try:
         from ouroboros.delegate_custody import open_containment_faults
@@ -618,35 +581,3 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     if not checks:
         return ""
     return "## Health Invariants\n\n" + "\n".join(f"- {check}" for check in checks)
-
-
-def _compute_cache_hit_rate(env: Any) -> Optional[float]:
-    from ouroboros.event_token_totals import token_counter
-
-    total_prompt = total_cached = reported = 0
-    try:
-        for ev in _iter_recent_jsonl(env.drive_path("logs/events.jsonl")):
-            if ev.get("type") != "llm_round":
-                continue
-            # Per round (#1578): an absent, null (record v2) or malformed counter
-            # means the round measured nothing, and an unstamped/v1 zero may be an
-            # old writer's unknown-to-zero (record contract LEGACY_RULE), so such a
-            # round joins NEITHER side of the ratio and never voids the measured
-            # rounds beside it; a v2 zero is a real measured miss.
-            pt_state, pt = token_counter(ev, "prompt_tokens")
-            cached_state, cached = token_counter(ev, "cached_tokens")
-            if pt and pt_state == cached_state == "known":
-                total_prompt += pt
-                total_cached += cached
-                reported += 1
-    except Exception:
-        return None
-    # Nobody reporting a cache is not a cache that missed: without the key the
-    # share is UNKNOWN, and the arithmetic zero below would render that absence
-    # as an honest 0% and send the owner hunting a caching regression no round
-    # ever measured. The window is the REPORTING rounds for the same reason: on
-    # an install whose providers are mixed, charging a silent round's prompt to
-    # the denominator understates the share the measuring rounds actually saw.
-    if reported < 5 or total_prompt == 0:
-        return None
-    return total_cached / total_prompt

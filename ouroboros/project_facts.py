@@ -47,6 +47,21 @@ def sanitize_project_id(value: Any) -> str:
     return pid.casefold()
 
 
+_MINTED_PROJECT_ID = re.compile(r"proj_[0-9a-f]+")
+
+
+def project_display_name(name: Any, project_id: Any) -> str:
+    """The Project's own name, or "" for a row that was never named.
+
+    A never-named row carries its minted ``proj_<hex>`` id as the name (the two
+    minters below); only that shape is a non-name. An owner's own ``blog`` has
+    the id ``blog`` too, and it IS the name (DESIGN "References and actions";
+    the browser twin is ``project_reference.js`` ``MINTED_ID``).
+    """
+    text = " ".join(str(name or "").split())
+    return "" if not text or (text == str(project_id or "") and _MINTED_PROJECT_ID.fullmatch(text)) else text
+
+
 def project_id_from_display_name(value: Any) -> str:
     """Derive a filesystem-clean project id from a human DISPLAY name, ALWAYS
     yielding a usable id for any non-blank name. The sanitized slug is used when it
@@ -239,7 +254,7 @@ def _project_store_reader_hint(parts: list) -> str:
     layout the path helpers below own (#1612). One text answers reads, writes, listings
     and edits, so it names the exact read/write pair and never more access than those
     tools already grant; anything they do not address is said plainly."""
-    from ouroboros.knowledge import ALWAYS_ACTIVE_TOPICS, INDEX_FILE, sanitize_topic
+    from ouroboros.knowledge import GLOBAL_ADDRESS_TOPICS, INDEX_FILE, sanitize_topic
 
     pid, rest = (parts[0], "/".join(parts[1:])) if parts else ("", "")
     if rest and explicit_project_id_ok(pid):
@@ -252,7 +267,7 @@ def _project_store_reader_hint(parts: list) -> str:
                 topic = sanitize_topic(rest[len(shelf) + 1:-3])
             except ValueError:
                 return f"This file is not addressable as a knowledge topic; knowledge_list({scope}) lists the shelf."
-            if topic in ALWAYS_ACTIVE_TOPICS:
+            if topic in GLOBAL_ADDRESS_TOPICS:
                 return (f"Topic {topic!r} is global-only: knowledge_read/knowledge_write(topic={topic!r}) read and "
                         "replace the global note even with a project scope, never this project copy; "
                         f"knowledge_list({scope}) may still list it.")

@@ -3,19 +3,31 @@
 ## Roots, Ports and One Server per Data Directory
 
 Paths: `OUROBOROS_REPO_DIR` (checkout), `OUROBOROS_DATA_DIR` (memory/state/settings/logs),
-`OUROBOROS_SETTINGS_PATH`, `OUROBOROS_PID_FILE` (launcher lock),
-`OUROBOROS_PORT_FILE`; `OUROBOROS_APP_ROOT` defaults to `~/Ouroboros`. Work roots
+`OUROBOROS_SETTINGS_PATH`, `OUROBOROS_PID_FILE` (launcher lock), `OUROBOROS_PORT_FILE`.
+Checkout, data root and PID file default beneath `OUROBOROS_APP_ROOT` (`~/Ouroboros`);
+the settings and port files default beneath the data root, so an explicit DATA_DIR
+supplies their defaults too. No root is inferred from another's parent. Work roots
 (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`, `OUROBOROS_SUBAGENT_WORKTREE_ROOT`,
-`OUROBOROS_DELIVERABLES_ROOT`) prefer saved settings, then environment, then
-defaults. Compose/systemd/shell may load an env file; Ouroboros does not.
-A direct server defaults to its checkout and `~/Ouroboros/data` even with APP_ROOT:
-specify DATA_DIR (ARCHITECTURE §7).
+`OUROBOROS_DELIVERABLES_ROOT`) prefer saved settings,
+then environment, then the data root's basis (`state/state.initialized.json`):
+`<APP_ROOT>/<folder>` for data first initialized by this release or later,
+`~/Ouroboros/<folder>` for older data. An unreadable basis makes a default work root
+refuse until its key is set; nothing is moved, copied or deleted. Compose/systemd/shell
+may load an env file; Ouroboros does not. A direct server uses its checkout and
+`<APP_ROOT>/data`; while DATA_DIR is unset and `~/Ouroboros/data` holds memory (or cannot
+be examined), it exits 2 naming both choices: that data with the old
+`<APP_ROOT>/data/settings.json`, or `<APP_ROOT>/data` (ARCHITECTURE §7).
 
 `OUROBOROS_SERVER_PORT` defaults to 8765; fallback skips Host Service/local-model
-ports. Source CLI, Settings, extensions and launcher use the published port.
-Desktop CLI scrubs path overrides and uses `~/Ouroboros/data`; relocated servers
-need `--url` or `OUROBOROS_URL`.
-Keep containers' published port free.
+ports. Source CLI, desktop CLI, Settings, extensions and launcher use the published
+port of the roots they resolve. Desktop `run --start` accepts a running server only when
+that data root's service binding names it (`--url` names one outright); otherwise it opens
+the app, on macOS through `open -n --env` with its resolved paths, including defaults. Keep containers'
+published port free.
+
+An older release ignores the basis: it creates new work roots under `~/Ouroboros`, and
+its direct server given only APP_ROOT keeps memory in `~/Ouroboros/data`. Set DATA_DIR
+and the three work-root keys explicitly before running one on such data.
 
 One server holds `<data>/state/server.lock` until exit, regardless of repository,
 PID file or port. A second waits briefly for Restart, then exits 2;
@@ -33,6 +45,56 @@ into the destination's task layout, then call
 updated `budget_drive_root`, `drive_root`/`child_drive_root` as applicable, and
 cleared `reason_code`/`reason_detail`. Keep sources through adoption.
 Copying the directory alone never rewrites those pointers.
+
+## Unknown model role at startup
+
+An error such as `OUROBOROS_MODEL_CONTEXT_WINDOWS: unknown model role(s)`
+means the code reading that setting does not recognize a role name. Current
+diagnostics name the setting and offending roles, without dumping their values.
+Older packages print `OUROBOROS_MODEL_CONTEXT_WINDOWS must contain only known
+model roles` without identifying the role; the same recovery below applies.
+Check for a misspelling or a version mismatch. The same strict rule applies to account pins
+and processing preferences: unknown entries are not silently ignored or changed
+to Auto, even when a context window is zero.
+
+The packaged launcher and the managed repository are separate. Updating the
+repository, including a manual `git pull` in a fork, does not replace an older
+executable. Current launchers can hand off to updated source after an import
+probe, but an older executable without that handoff still needs an application
+package update. New source cannot repair its frozen settings parser or logging.
+
+To recover without resetting the installation:
+
+1. Identify the executable you actually launch, its package/build, the user it
+   runs as, and the effective paths listed above. The default native Linux
+   package is `/opt/ouroboros/Ouroboros`; AppImages and tarballs live wherever
+   you placed them. A repository version alone does not identify the launcher.
+2. Stop that instance through its normal launch path. If you chose the optional
+   systemd unit, see its [stop and log instructions](../packaging/systemd/README.md)
+   and shared-daemon caveat. Back up the actual data directory, settings file
+   (if separate), and repository/local changes before changing anything.
+   Do not delete `settings.json`, memory, or the checkout to get past this error.
+3. If the name is genuinely misspelled, correct only that entry after checking
+   its intended role. If another version wrote a legitimate role, identify which
+   reader is stale from the traceback. A frozen launcher needs a compatible
+   package: upgrade the `.deb`/`.rpm`, or replace the AppImage/tarball application
+   files; keep user data and the managed checkout. If the managed checkout is
+   older (for example, after a rollback or in a pinned fork), use a compatible
+   checkout while preserving local changes. A newer package alone will not fix
+   that reader. Do not strip an unfamiliar role merely to bypass validation.
+   Default native package files under `/opt/ouroboros` are separate from
+   `~/Ouroboros/data` and `~/Ouroboros/repo`. Verify any custom layout first.
+4. Launch as the same user with the same path overrides, then check the saved
+   model/account selections and logs. Normal bootstrap/migrations still run;
+   package replacement is not a promise that every file remains byte-identical.
+
+Current launchers log uncaught main/thread exceptions. With an older package,
+`launcher.log` can contain only a crash-fuse summary while the actual traceback
+went to stderr. After stopping the old instance, run the same executable from a
+terminal and retain its output, or read the unit journal if that was the launch
+path. Default logs are in `~/Ouroboros/data/logs/`; use the actual data root if
+overridden. Share only the relevant traceback and package identity, never the
+whole settings file or credentials. Repeated restarts do not fix a parser mismatch.
 
 ## Containers
 
@@ -183,8 +245,25 @@ the last `X-Forwarded-For` entry that is not such a proxy:
 - A proxy on another machine must be listed in `FORWARDED_ALLOW_IPS`; otherwise
   the core treats the proxy itself as the client and does not see TLS, so the
   session cookie is not marked `Secure`.
+- The core accepts a browser's requests and WebSocket handshakes by the
+  browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host` or
+  terminate TLS. A browser that sends no Fetch Metadata is accepted only when
+  its `Origin` equals the scheme and host the core sees: pass `Host` through,
+  plus `X-Forwarded-Proto` from a proxy in `FORWARDED_ALLOW_IPS`.
 - Visitors who are not loopback need `OUROBOROS_FILE_BROWSER_DEFAULT` for Files;
   without it the path-addressed `/api/files/*` operations refuse them.
+
+With or without a password, on loopback too, the core answers another site's
+page with 403 (a WebSocket closes with 4403) and a body that is not JSON where
+the API expects JSON with 415. Pages and files any page may load (the interface,
+setup and login pages, their static files, extensions' reviewed widget files)
+pass this check; the password gate above still applies. A request with neither
+`Origin` nor `Sec-Fetch-Site` counts as a native client (the CLI, sidecars,
+skills). Browsers send Fetch Metadata only to HTTPS, `localhost` and loopback
+addresses and omit `Origin` on simple GET/HEAD loads, so through a plain-HTTP
+hostname another site's page can still make the browser run GET/HEAD handlers,
+without reading the answers. A hostname that resolves to this machine (DNS
+rebinding) is not told apart either.
 
 ## Extra CA Certificates
 
@@ -235,7 +314,7 @@ deployment connects a destination of its own.
 - File collectors (OpenTelemetry Collector, Vector, Fluent Bit) can ship durable
   JSONL under `logs/` and task drives without changing Ouroboros (`docs/PERSISTENCE.md`).
   The record passport, `ouroboros/contracts/record_contract.py`, defines guaranteed
-  anchors/fields, correlation, content, rotation, tools replicas, child-drive retention
+  anchors/fields, correlation, content, rotation, tool and model-error replicas, child-drive retention
   (`OUROBOROS_GC_RETENTION_DAYS`) and money's source: accounting views, never summed
   `llm_usage`. Its `LEGACY_RULE` explains v2 nullable tokens: retain the stamp and nulls;
   old zeros stay ambiguous. `docs/examples/log_collector/` is a verified metadata-only

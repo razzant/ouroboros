@@ -303,7 +303,7 @@ def test_sources_trust_menu_and_the_two_step_add(skills_browser, browser_name, w
 
         # ⋮ Refresh, Rename, Remove; the built-in source has no Remove.
         page.locator('[data-source-menu="builtin"]').click()
-        menu = page.locator("body > .skills-card-menu-dialog")
+        menu = page.locator("body > .skills-card-menu-dialog:not([data-leaving])")
         assert [item.strip() for item in menu.locator("[data-menu-action]").all_inner_texts()] == ["Refresh", "Rename…"]
         page.keyboard.press("Escape")
         folder = page.locator('[data-source-menu="my-folder"]')
@@ -450,7 +450,7 @@ def test_publish_destination_reaches_the_preflight_and_the_task(skills_browser, 
         card = page.locator('.skills-card[data-skill="anime_studio"]')
         card.scroll_into_view_if_needed()
         card.locator("[data-skill-menu-trigger]").click()
-        page.locator("body > .skills-card-menu-dialog .skills-submit-hub").click()
+        page.locator("body > .skills-card-menu-dialog:not([data-leaving]) .skills-submit-hub").click()
         dialog = page.locator(".skills-dialog")
         dialog.wait_for()
         labels = [label.strip() for label in dialog.locator(".chat-quiz-option-label").all_inner_texts()]

@@ -6,8 +6,8 @@ context builder in each mode, ``journal_read`` — and only model transports are
 What they pin: one writer (revision-checked, history kept) for patterns and the backlog;
 no automatic lesson, register rewrite, memory action or backlog effect after any task shape,
 including a Pause an earlier version saved; the chooser reads the complete authored backlog;
-historical reports and automatic reflections stay readable at their source while contexts
-carry dated pointers, and late review settlements stay whole.
+contexts carry the register only as its index line; historical reports and automatic
+reflections stay readable at their source, and contexts carry a dated pointer to the report.
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ def test_two_writers_from_one_read_land_once(tmp_path):
     assert len(_history(tmp_path, BACKLOG)) == 2  # the create and the one winner
 
 
-def test_the_pattern_register_is_edited_like_any_note_and_rides_whole(tmp_path):
+def test_the_pattern_register_is_edited_like_any_note_and_read_where_it_lives(tmp_path):
     from ouroboros.context import build_knowledge_sections
 
     registry = _registry(tmp_path)
@@ -135,9 +135,10 @@ def test_the_pattern_register_is_edited_like_any_note_and_rides_whole(tmp_path):
         "content": "| class-39 | 39 | cause 39 | fixed by its author | closed: verified |",
         "expected_revision": current.revision}))
     text = "\n\n".join(build_knowledge_sections(SimpleNamespace(drive_path=lambda rel: tmp_path / rel)))
-    assert "## Known error patterns (Pattern Register)" in text
-    assert all(f"| class-{n:02d} |" in text for n in range(REGISTER_ROWS)) and "LAST REGISTER LINE" in text
-    assert "fixed by its author" in text
+    # The context carries the register as its index line only (written here without a summary).
+    assert "**patterns**: [Pattern Register](<patterns.md>) (no summary)" in text
+    assert "| class-" not in text and "LAST REGISTER LINE" not in text and "fixed by its author" not in text
+    assert "fixed by its author" in registry.execute("knowledge_read", {"topic": "patterns"})
     assert [row["mode"] for row in _history(tmp_path, "patterns")] == ["overwrite", "edit"]
 
 
@@ -180,21 +181,24 @@ def test_a_delegated_child_still_authors_an_explicit_note_on_the_canonical_shelf
     assert not (fork / "memory" / "knowledge").exists()
 
 
-def test_the_pressure_path_compresses_and_ignores_old_shaped_nominations(tmp_path):
+def test_the_mind_folds_its_scratchpad_and_old_shaped_nominations_write_nothing(tmp_path):
+    """The Light pressure path is retired (#918): the integrating mind folds through its own tool;
+    a fold text shaped like an old answer is kept as written and writes no note."""
     from ouroboros import consolidator
-    from ouroboros.memory import Memory
+    from ouroboros.memory import Memory, scratchpad_block_sha256
 
+    assert not hasattr(consolidator, "consolidate_scratchpad")
     memory = Memory(tmp_path)
     for index in range(2):
         memory.append_scratchpad_block(f"block-{index} " + "z" * 500, source=f"source-{index}")
-
-    class Answer:
-        def chat(self, **_kwargs):
-            return {"content": json.dumps({"knowledge_entries": [{"topic": "lessons/pressure", "content": "Nominated."}],
-                                           "compressed_block": "Short."})}, {"cost": 0.01}
-
-    consolidator.consolidate_scratchpad(memory, Answer(), pressure=True)
-    assert [block["content"] for block in memory.load_scratchpad_blocks()] == ["Short."]
+    text = json.dumps({"knowledge_entries": [{"topic": "lessons/pressure", "content": "Nominated."}],
+                       "compressed_block": "Short."})
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mind-turn"))
+    reply = registry.execute("update_scratchpad", {"content": text, "replaces": [
+        scratchpad_block_sha256(block) for block in memory.load_scratchpad_blocks()]})
+    assert reply.startswith("OK: scratchpad fold applied: 2 blocks"), reply
+    assert [block["content"] for block in memory.load_scratchpad_blocks()] == [text]
     assert not (tmp_path / "memory" / "knowledge").exists()
     assert not (tmp_path / "memory" / "knowledge_history.jsonl").exists()
 
@@ -211,8 +215,6 @@ class _Transport:
     def chat(self, *, messages, **_kwargs):
         prompt = str(messages[0]["content"])
         usage = {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.0}
-        if "scratchpad working memory" in prompt:
-            return {"content": json.dumps({"compressed_block": "Compressed working notes."})}, usage
         if "You decide whether Ouroboros should run ONE reviewed self-improvement" in prompt:
             return {"content": json.dumps({"promote": False, "objective": ""})}, usage
         return {"content": "ok"}, usage
@@ -226,7 +228,7 @@ def _offline_light(monkeypatch):
     monkeypatch.setattr(context_fit, "resolve_context_fit_route", lambda task, *, allow_fetch: (
         {"model": task["model"], "provider": "openrouter"},
         CapabilityEvidence(1_000_000, "confirmed", "test", "route-test", model=task["model"], provider="openrouter")))
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
 
 
 def _recorded_call_types(monkeypatch):
@@ -272,8 +274,9 @@ def test_no_task_shape_buys_a_lesson_or_writes_a_note(tmp_path, monkeypatch, sha
     fields, usage, errored = _SHAPES[shape]
     (tmp_path / "logs").mkdir()
     memory = Memory(tmp_path)
-    for index in range(4):  # past the compression threshold: the one paid upkeep every root keeps
+    for index in range(4):  # past the retired compression threshold: no root buys a scratchpad call (#918)
         memory.append_scratchpad_block(f"note-{index}-" + chr(97 + index) * 8_000, source=f"task-{index}")
+    blocks_before = memory.load_scratchpad_blocks()
     trace = {"tool_calls": [{"tool": "run_command", "status": "error", "is_error": True,
                              "result": "TOOL_ERROR: boom"}] * (3 if errored else 0), "reasoning_notes": []}
     task = {"id": f"root-{shape}", "type": "task", "chat_id": 1, "drive_root": str(tmp_path), **fields}
@@ -283,11 +286,11 @@ def test_no_task_shape_buys_a_lesson_or_writes_a_note(tmp_path, monkeypatch, sha
 
     # A workspace binds a project; Project, Presence and evolution tasks never reach the global chooser.
     chooser = opted_in and shape in {"failed_costly", "clean"}
-    assert call_types == ["scratchpad_consolidation"] + (["post_task_evolution_decision"] if chooser else []), call_types
+    assert call_types == (["post_task_evolution_decision"] if chooser else []), call_types
     assert not (tmp_path / "memory" / "knowledge_history.jsonl").exists()  # no note, register or backlog write
     assert not (tmp_path / "memory" / "knowledge").exists()
     assert not (tmp_path / "logs" / "task_reflections.jsonl").exists()
-    assert memory.load_scratchpad_blocks()[0]["content"] == "Compressed working notes."
+    assert memory.load_scratchpad_blocks() == blocks_before  # only the mind's fold replaces blocks
     rows = dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
     assert [row.get("summary_kind") for row in rows if row.get("task_id") == task["id"]].count("host_task_facts") == 1
     checkpoint = pipeline.load_task_result(tmp_path, task["id"])["root_phase_checkpoint"]
@@ -518,7 +521,7 @@ def _chooser_prompt(tmp_path, monkeypatch, task, sealed=None):
 
     monkeypatch.setattr("ouroboros.llm_observability.chat_observed", chat_observed)
     monkeypatch.setattr(pte, "_active_campaign_objective", lambda: "")
-    pte._decide_promotion(SimpleNamespace(drive_root=tmp_path), task, sealed, object(), force=False)
+    pte._decide_promotion(SimpleNamespace(drive_root=tmp_path), task, sealed, object())
     return captured["prompt"]
 
 
@@ -547,7 +550,7 @@ def test_the_chooser_reads_the_sealed_outcome_bounded_with_its_cut_named(tmp_pat
 
 def test_a_missing_backlog_is_named_and_an_unreadable_one_stays_unknown(tmp_path, monkeypatch):
     prompt = _chooser_prompt(tmp_path, monkeypatch, {"id": "t", "text": "x"})
-    assert "No improvement-backlog note has been written yet" in prompt
+    assert "No improvement-backlog note exists." in prompt
     path = _address(tmp_path, BACKLOG).path
     path.mkdir(parents=True)  # unreadable as a file; Windows reports PermissionError
     with pytest.raises(OSError) as failure:
@@ -557,16 +560,18 @@ def test_a_missing_backlog_is_named_and_an_unreadable_one_stays_unknown(tmp_path
             "it is unknown, not empty") in prompt
 
 
-# --- contexts: the full register where it lived, dated pointers, whole late criticism -------------
+# --- contexts: the register as its index line, never its body; a dated pointer to the report -----
 
 
 DEEP_REVIEW = ("<!-- deep-review provenance: generated_at=2026-09-30T10:00:00Z, source_revision=abc123 -->\n"
                "# Deep review\n\nOLD DEEP REVIEW BODY\n")
+# Where the register lives in an integrating context: its index line, title and authored summary.
+REGISTER_SUMMARY = "Error classes met so far and what closed each."
+REGISTER_INDEX_LINE = f"**patterns**: [Pattern Register](<patterns.md>)\n  {REGISTER_SUMMARY}"
 
 
 def _context_world(tmp_path):
     from ouroboros.memory import Memory
-    from ouroboros.plan_review_facts import LATE_SETTLEMENT_TASK_TYPE
 
     repo, drive = tmp_path / "repo", tmp_path / "data"
     for rel, text in {"prompts/SYSTEM.md": "I am Ouroboros.", "BIBLE.md": "The constitution.",
@@ -576,15 +581,12 @@ def _context_world(tmp_path):
     memory = Memory(drive_root=drive, repo_dir=repo)
     memory.ensure_files()
     (drive / "memory" / "identity.md").write_text("My identity.", encoding="utf-8")
-    assert store.write_knowledge_note(_address(drive, "patterns"), REGISTER).ok
+    register = f"---\nsummary: {REGISTER_SUMMARY}\n---\n{REGISTER}"
+    assert store.write_knowledge_note(_address(drive, "patterns"), register).ok
     (drive / "memory" / "deep_review.md").write_text(DEEP_REVIEW, encoding="utf-8")
     (drive / "logs").mkdir(exist_ok=True)
     rows = [{"ts": "2026-09-01T10:00:00Z", "task_id": "old-1", "task_type": "task", "goal": "old goal",
-             "reflection": "OLD AUTOMATIC LESSON BODY"},
-            {"ts": "2026-10-12T11:00:00Z", "task_id": "late-1", "type": LATE_SETTLEMENT_TASK_TYPE,
-             "task_type": LATE_SETTLEMENT_TASK_TYPE, "reflection": "LATE CRITICISM: reviewers later found the claim unsupported."},
-            {"ts": "2026-10-12T12:00:00Z", "task_id": "p-row", "type": "project_reflection_pointer",
-             "project_id": "p1", "reflection_path": "/elsewhere/task_reflections.jsonl", "write_failed": True}]
+             "reflection": "OLD AUTOMATIC LESSON BODY"}]
     (drive / "logs" / "task_reflections.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     env = SimpleNamespace(repo_dir=repo, drive_root=drive, repo_path=lambda p: repo / p, drive_path=lambda p: drive / p)
     return env, memory
@@ -617,7 +619,7 @@ _ROLES = {
 
 
 @pytest.mark.parametrize("role", sorted(_ROLES))
-def test_every_role_and_mode_keeps_its_register_and_carries_history_as_dated_pointers(tmp_path, monkeypatch, role):
+def test_every_role_and_mode_indexes_the_register_and_carries_history_as_dated_pointers(tmp_path, monkeypatch, role):
     import ouroboros.config as cfg
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
@@ -628,22 +630,17 @@ def test_every_role_and_mode_keeps_its_register_and_carries_history_as_dated_poi
              else _actor(env, task["id"], is_direct_chat=True) if integrating else None)
     for mode, text in _mode_texts(env, memory, task, actor).items():
         where = (role, mode)
-        # No automatic historical prose anywhere: not the old lesson, not the old report body.
+        # No automatic historical prose anywhere: not the old lesson, not the old report body,
+        # and no register body in any role or mode: the register is read where it lives.
         assert "OLD AUTOMATIC LESSON BODY" not in text and "OLD DEEP REVIEW BODY" not in text, where
+        assert "| class-00 |" not in text and "LAST REGISTER LINE" not in text, where
         if integrating:
-            # The full current register, in every mode, exactly where it already lived.
-            assert all(f"| class-{n:02d} |" in text for n in range(REGISTER_ROWS)), where
-            assert "LAST REGISTER LINE" in text, where
-            assert "Historical automatic reflections: 1 row(s)" in text and "dated 2026-09-01T10:00:00" in text, where
-            assert "read_file(root='runtime_data', path='logs/task_reflections.jsonl')" in text, where
+            # The overview and the knowledge index ride where they lived; the index lists the register.
+            assert "## Shared understanding" in text and REGISTER_INDEX_LINE in text, where
             assert "subject to this task's tool/resource restrictions and Presence grants" in text, where
-            # The latest late criticism stays whole; a failed project pointer keeps its diagnostic.
-            assert "LATE CRITICISM: reviewers later found the claim unsupported." in text, where
-            assert "(project write FAILED)" in text, where
             assert ("generated_at=2026-09-30T10:00:00Z, source_revision=abc123 (its provenance header)" in text), where
         else:
-            assert "| class-00 |" not in text and "LAST REGISTER LINE" not in text, where
-            assert "LATE CRITICISM" not in text and "## Last Deep Self-Review" not in text, where
+            assert "## Last Deep Self-Review" not in text, where
 
 
 def test_the_pointers_are_stable_bytes_and_an_undated_report_stays_unknown(tmp_path, monkeypatch):
@@ -654,13 +651,12 @@ def test_the_pointers_are_stable_bytes_and_an_undated_report_stays_unknown(tmp_p
     task = {"id": "t-main", "type": "task", "text": "Work.", "_is_direct_chat": True}
 
     def pointers(text):
-        return [line for line in text.splitlines()
-                if "Historical automatic reflections" in line or "A historical report kept at its source" in line]
+        return [line for line in text.splitlines() if "A historical report kept at its source" in line]
 
     first = pointers(_mode_texts(env, memory, task)["max"])
-    for path in (env.drive_root / "memory" / "deep_review.md", env.drive_root / "logs" / "task_reflections.jsonl"):
-        os.utime(path, (1_900_000_000, 1_900_000_000))  # a later file time is not provenance
-    assert pointers(_mode_texts(env, memory, task)["max"]) == first and len(first) == 2
+    # A later file time is not provenance.
+    os.utime(env.drive_root / "memory" / "deep_review.md", (1_900_000_000, 1_900_000_000))
+    assert pointers(_mode_texts(env, memory, task)["max"]) == first and len(first) == 1
     (env.drive_root / "memory" / "deep_review.md").write_text("# Report without a header\n", encoding="utf-8")
     text = _mode_texts(env, memory, task)["max"]
     assert "generated_at=unknown, source_revision=unknown (no provenance header)" in text
@@ -675,9 +671,10 @@ def _actor(env, task_id, drive_root=None, **fields):
 
 def _speaker(env, task_id, *targets):
     """A Presence speaker whose host-minted ceiling selects exactly ``targets`` beyond its baseline."""
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceProfileResolution, PresenceSelection, PresenceToolTarget
-    from ouroboros.presence_runtime import ResolvedPresenceRuntime
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceProfileResolution, PresenceSelection, PresenceToolTarget
+    from tests.frozen_presence_runtime import ResolvedPresenceRuntime
 
     selected = targets or (PresenceToolTarget("builtin", "chat_history"),)
     resolution = PresenceProfileResolution(
@@ -694,7 +691,7 @@ def _readers(text):
     """The ``Read:`` clause of every pointer line, in order."""
     return [line.rsplit("Read: ", 1)[1].removesuffix(".").split(" (reader address,", 1)[0]
             for line in text.splitlines()
-            if "Read: " in line and ("Historical automatic reflections" in line or "A historical report kept" in line)]
+            if "Read: " in line and "A historical report kept" in line]
 
 
 def _run(ctx, call):
@@ -707,17 +704,16 @@ def _run(ctx, call):
     return registry.execute(expr.func.id, {kw.arg: ast.literal_eval(kw.value) for kw in expr.keywords})
 
 
-def test_a_root_on_the_canonical_drive_opens_both_sources_with_the_calls_it_is_shown(tmp_path, monkeypatch):
+def test_a_root_on_the_canonical_drive_opens_the_report_with_the_call_it_is_shown(tmp_path, monkeypatch):
     import ouroboros.config as cfg
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
     env, memory = _context_world(tmp_path)
     root = _actor(env, "t-main", is_direct_chat=True)
     text = _mode_texts(env, memory, {"id": "t-main", "type": "task", "text": "Work."}, root)["max"]
-    deep, log = _readers(text)
+    [deep] = _readers(text)
     assert deep == "read_file(root='runtime_data', path='memory/deep_review.md')"
-    assert log == "read_file(root='runtime_data', path='logs/task_reflections.jsonl')"
-    assert "OLD DEEP REVIEW BODY" in _run(root, deep) and "OLD AUTOMATIC LESSON BODY" in _run(root, log)
+    assert "OLD DEEP REVIEW BODY" in _run(root, deep)
 
 
 @pytest.mark.parametrize("mode", ["light", "advanced", "pro", "cyber_pro"])
@@ -746,22 +742,21 @@ def test_context_readers_open_canonical_history_in_every_mode_and_focus(tmp_path
             surface="external_workspace" if focus == "acting_child" else "", write_root=str(workspace))
     actor = _actor(env, "t-focus", drive_root=drive, task_metadata=meta, **fields)
     task = {"id": "t-focus", "type": "task", "text": "Work.", "budget_drive_root": str(env.drive_root)}
-    # Use the real task role: integrating roots emit history pointers, children keep
+    # Use the real task role: integrating roots emit the report pointer, children keep
     # their own smaller context and open a supplied canonical address on demand.
     task.update(project_id=fields.get("project_id", ""), **meta)
     texts = _mode_texts(env, memory, task, actor)
-    rels = ("memory/deep_review.md", "logs/task_reflections.jsonl")
-    expected = [f"read_file(root='runtime_data', path={str((env.drive_root / rel).resolve())!r})"
-                if forked else f"read_file(root='runtime_data', path={rel!r})" for rel in rels]
+    report = "memory/deep_review.md"
+    expected = (f"read_file(root='runtime_data', path={str((env.drive_root / report).resolve())!r})"
+                if forked else f"read_file(root='runtime_data', path={report!r})")
     for text in texts.values():
         if focus.endswith("child"):
             assert not _readers(text) and "LAST REGISTER LINE" not in text
         else:
-            assert _readers(text) == expected
-            for reader, marker in zip(_readers(text), ("OLD DEEP REVIEW BODY", "OLD AUTOMATIC LESSON BODY")):
-                assert marker in _run(actor, reader)
-            assert "LATE CRITICISM" in text and "LAST REGISTER LINE" in text
-    for rel in (*rels, "settings.json", "memory/knowledge_history.jsonl"):
+            assert _readers(text) == [expected]
+            assert "OLD DEEP REVIEW BODY" in _run(actor, expected)
+            assert "LAST REGISTER LINE" not in text and REGISTER_INDEX_LINE in text
+    for rel in (report, "logs/task_reflections.jsonl", "settings.json", "memory/knowledge_history.jsonl"):
         source = env.drive_root / rel
         if not source.exists():
             source.write_text('{"synthetic": "CANONICAL_SETTINGS_OR_HISTORY"}\n', encoding="utf-8")
@@ -778,7 +773,7 @@ def test_context_readers_open_canonical_history_in_every_mode_and_focus(tmp_path
 
 def test_a_presence_ceiling_admits_only_what_it_selected(tmp_path, monkeypatch):
     import ouroboros.config as cfg
-    from ouroboros.presence_capabilities import PresenceResourceTarget, PresenceToolTarget
+    from tests.frozen_presence_capabilities import PresenceResourceTarget, PresenceToolTarget
 
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
     env, memory = _context_world(tmp_path)
@@ -792,62 +787,11 @@ def test_a_presence_ceiling_admits_only_what_it_selected(tmp_path, monkeypatch):
     # A profile that selected read_file over runtime_data/memory opens the report, not the logs.
     granted = _speaker(env, "t-speaker", PresenceToolTarget("builtin", "read_file"),
                        PresenceResourceTarget("runtime_data", ("read",), "memory"))
-    deep, log = _readers(_mode_texts(env, memory, task, granted)["max"])
+    [deep] = _readers(_mode_texts(env, memory, task, granted)["max"])
     assert deep == "read_file(root='runtime_data', path='memory/deep_review.md')"
     assert "OLD DEEP REVIEW BODY" in _run(granted, deep)
-    assert _run(granted, log).startswith("⚠️ PRESENCE_RESOURCE_BLOCKED")
     assert _run(granted, "read_file(root='runtime_data', path='logs/task_reflections.jsonl')").startswith(
         "⚠️ PRESENCE_RESOURCE_BLOCKED")
-
-
-def test_project_pointers_name_journal_read_only_where_its_project_authority_admits_it(tmp_path, monkeypatch):
-    import ouroboros.config as cfg
-    from ouroboros.plan_review_facts import LATE_SETTLEMENT_TASK_TYPE
-    from ouroboros.project_facts import project_reflections_path
-    from ouroboros.utils import append_jsonl
-
-    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "data")
-    env, memory = _context_world(tmp_path)
-    for pid, body in (("p1", "PROJECT OLD LESSON"), ("p2", "OTHER PROJECT LESSON")):
-        path = project_reflections_path(pid)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"ts": "2026-08-10T12:00:00Z", "task_id": f"{pid}-1", "reflection": body}) + "\n",
-                        encoding="utf-8")
-    append_jsonl(project_reflections_path("p1"), {"ts": "2026-10-11T09:00:00Z", "task_id": "pr-2",
-                                                  "type": LATE_SETTLEMENT_TASK_TYPE, "task_type": LATE_SETTLEMENT_TASK_TYPE,
-                                                  "reflection": "PROJECT LATE CRITICISM"})
-    # The canonical log points at p2's store (written there, not failed).
-    append_jsonl(env.drive_root / "logs" / "task_reflections.jsonl", {
-        "ts": "2026-10-12T13:00:00Z", "task_id": "p2-row", "type": "project_reflection_pointer",
-        "project_id": "p2", "reflection_path": str(project_reflections_path("p2"))})
-
-    def pointers(ctx, task):
-        text = _mode_texts(env, memory, {"type": "task", "text": "Work.", **task}, ctx)["max"]
-        project = text[text.index("## Project execution reflections (this project's own: p1)"):]
-        global_row = next(line for line in text.splitlines() if "Full reflection lives on project drive: p2" in line)
-        return project, global_row
-
-    root = _actor(env, "t-p", project_id="p1", is_direct_chat=True)
-    project, global_row = pointers(root, {"id": "t-p", "project_id": "p1"})
-    assert "PROJECT LATE CRITICISM" in project and "PROJECT OLD LESSON" not in project
-    assert "dated 2026-08-10T12:00:00" in project
-    own = "journal_read(project_id='p1', source='reflections')"
-    assert _readers(project) == [own] and "PROJECT OLD LESSON" in _run(root, own)
-    # A root may read another project's store; the global pointer row names that call and it reads.
-    other = "journal_read(project_id='p2', source='reflections')"
-    assert f"; read: {other} (reader address," in global_row and "OTHER PROJECT LESSON" in _run(root, other)
-    # A scope-qualified address grants nothing to an actor lacking explicit root identity.
-    scoped = _actor(env, "t-s", project_id="p1")
-    _project, global_row = pointers(scoped, {"id": "t-s", "project_id": "p1"})
-    assert f"; read: {other} (reader address," in global_row and "journal project scope applies" in global_row
-    assert _run(scoped, other).startswith("⚠️ TOOL_FORBIDDEN")
-    # A Presence speaker's ceiling grants no journal_read at all, even for its own project.
-    speaker = _speaker(env, "t-speaker")
-    speaker.project_id = "p1"
-    project, _row = pointers(speaker, {"id": "t-speaker", "project_id": "p1", "_presence_turn": True,
-                                       "metadata": {"presence": _PRESENCE}})
-    assert _readers(project) == [own]
-    assert _run(speaker, own).startswith("⚠️ PRESENCE_CAPABILITY_BLOCKED")
 
 
 def test_unestablished_access_stays_unknown_rather_than_denied(tmp_path, monkeypatch):
@@ -858,7 +802,7 @@ def test_unestablished_access_stays_unknown_rather_than_denied(tmp_path, monkeyp
     task = {"id": "t-main", "type": "task", "text": "Work."}
     source = (env.drive_root / "memory" / "deep_review.md").resolve()
     # No tool context (the tool-less update letter): no call is promised and none is denied.
-    deep, _log = _readers(_mode_texts(env, memory, task)["max"])
+    [deep] = _readers(_mode_texts(env, memory, task)["max"])
     assert deep == f"{source} (no tool context here, so whether this actor can open it is unknown)"
 
 

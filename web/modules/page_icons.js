@@ -32,12 +32,36 @@ const CONTROL_BODIES = {
     check: '<path d="M20 6 9 17l-5-5"/>',
     book: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
     stop: '<rect width="12" height="12" x="6" y="6" rx="2"/>',
+    // Consciousness, its own time: the header's chip and the Dashboard's wakes.
+    brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
+    'message-circle': '<path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z"/>',
+    hash: '<path d="M4 9h16M3 15h16M10 3 8 21M16 3l-2 18"/>',
+    mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 6 10 7 10-7"/>',
+    network: '<rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M12 8v4M5 16v-4h14v4"/>',
+    inbox: '<path d="m4 4-3 10v6h22v-6L20 4ZM1 14h6l2 3h6l2-3h6"/>',
+    plug: '<path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0ZM12 17v4"/>',
+    globe: '<circle cx="12" cy="12" r="10"/><ellipse cx="12" cy="12" rx="4" ry="10"/><path d="M2 12h20"/>',
+    bot: '<rect x="4" y="7" width="16" height="14" rx="2"/><path d="M12 7V3H8M8 12v3M16 12v3M1 11v6M23 11v6"/>',
+    webhook: '<circle cx="12" cy="5" r="3"/><circle cx="5" cy="18" r="3"/><circle cx="19" cy="18" r="3"/><path d="m10 8-3 7m1 3h8M14 8l3 7"/>',
 };
 
 /** A control glyph by name at `size` px; a name outside the set draws the Skills glyph (a skill's control). */
 export const controlIcon = (name, size = 14) => strokeIcon(CONTROL_BODIES[name] || CONTROL_BODIES.skills, size);
+
+/** Host-projected geometry or a named glyph. Keep the skill/place label visible beside it. */
+export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
+    const pixels = Number.isFinite(size) && size > 0 ? size : 16;
+    const name = typeof spec === 'string' ? spec : spec?.name;
+    let svg = strokeIcon(CONTROL_BODIES[name] || CONTROL_BODIES.plug, pixels);
+    // icon_spec rebuilt this geometry on the server; do not fetch or sanitize it again.
+    if (spec?.kind === 'svg' && typeof spec.svg === 'string' && spec.svg.startsWith('<svg ') && spec.svg.endsWith('</svg>')) {
+        svg = spec.svg.replace('<svg ', `<svg width="${pixels}" height="${pixels}" `);
+    }
+    const css = String(className).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+    return svg.replace('<svg ', `<svg aria-hidden="true"${css ? ` class="${css}"` : ''} `);
+}
 
 // The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯) and the
 // chevron. Same stroke family as the page icons; a control's accessible name says what the glyph does.

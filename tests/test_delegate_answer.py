@@ -1169,7 +1169,7 @@ def test_waiting_note_routes_above_authority_questions_to_escalate():
     from ouroboros.delegate_interactions import _waiting_on_user_note
 
     note = _waiting_on_user_note([{"interaction_id": "i1", "timeout_at": None}])
-    assert "escalate(question, options, stake, assumption)" in note
+    assert "escalate(question, options, stake, assumption, reply_to=<address above>)" in note
     assert "PARENT task" in note
     assert "delegate_answer" in note and "delegate_wait" in note
     assert "progress message" not in note

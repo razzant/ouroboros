@@ -41,7 +41,8 @@ def _failed_actor():
 
 def _rows(root):
     path = root / "logs" / "events.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [row for line in path.read_text().splitlines()
+            if (row := json.loads(line)).get("type") == "review_model_error"] if path.exists() else []
 
 
 def _run(root, monkeypatch, actor, *, surface="multi_model_review", ctx=None):
@@ -51,7 +52,7 @@ def _run(root, monkeypatch, actor, *, surface="multi_model_review", ctx=None):
     monkeypatch.setattr("ouroboros.reviewer_slot_config.record_reviewer_slot_executions", lambda *a, **kw: None)
     request = ReviewRequest(surface=surface, goal="review test", task_id="child", retry_key="wave-known")
     coordinator = ReviewCoordinator(llm=object(), drive_root=root, usage_ctx=ctx)
-    return coordinator.run(request, [ReviewSlot(slot_id="slot-stable", model="requested-model")])
+    return coordinator.run(request, [ReviewSlot(slot_id=actor.slot_id, model="requested-model")])
 
 
 @pytest.mark.parametrize("surface", [
@@ -76,7 +77,10 @@ def test_a_run_failure_has_cause_identity_and_one_live_frame(tmp_path, monkeypat
     assert row["prompt_ref"] == {"call_id": "prompt-1"} and row["response_ref"] == {"call_id": "response-1"}
     frames = []
     supervisor = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, bridge=SimpleNamespace(push_log=frames.append))
-    envelope = ctx.event_queue.get_nowait()
+    envelopes = []
+    while not ctx.event_queue.empty():
+        envelopes.append(ctx.event_queue.get_nowait())
+    [envelope] = [row for row in envelopes if row.get("data", {}).get("type") == "review_model_error"]
     assert envelope["type"] == "log_event"
     _handle_log_event(envelope, supervisor)
     assert len(frames) == 1 and frames[0]["error"] == row["error"]
@@ -152,7 +156,7 @@ def test_the_manual_collector_reuses_the_logged_run_failure(tmp_path, monkeypatc
     envelope = parse_model_response("requested-model", {**actor, **review_operation_fields(actor)}, None)
     _critical, _advisory, errored, raw = _collect_review_findings(ctx, [envelope])
     assert errored and raw[0]["error_event_logged"] is True
-    assert len(_rows(tmp_path)) == len(frames) == 1
+    assert len(_rows(tmp_path)) == len([row for row in frames if row.get("type") == "review_model_error"]) == 1
     assert ctx.pending_events == [] and ctx.event_queue.empty()
 
 
@@ -242,7 +246,7 @@ def test_same_cycle_replay_keeps_the_settled_operations_append_receipt(tmp_path,
     fast = [run.actors[0] for run in runs]
     assert len({actor["operation_id"] for actor in fast}) == 1  # one paid operation, replayed
     assert all(run.actors[1]["late_result_pending"] for run in runs)  # its sibling never settled meanwhile
-    assert [row["slot_id"] for row in _model_errors(tmp_path)] == ["fast"]
+    assert sorted(row["slot_id"] for row in _model_errors(tmp_path)) == ["fast", "late"]
     assert [actor["error_event_logged"] for actor in fast] == [append_ok, True, True]
 
 
@@ -294,12 +298,15 @@ def test_a_receipt_marks_only_its_own_settled_operation(tmp_path, monkeypatch):
 
 
 def test_awaited_valid_and_report_answers_write_no_error(tmp_path, monkeypatch):
+    from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
+
     monkeypatch.setattr(utils, "_log_sink", None)
     for actor, surface in (
         (ReviewActorRecord(slot_id="slot-stable", model="m", status="error", operation_state="pending_dispatch"),
          "multi_model_review"),
         (ReviewActorRecord(slot_id="slot-stable", model="m", status="ok", raw_text=json.dumps([
-            {"item": "coupling", "verdict": "PASS", "severity": "advisory", "reason": "checked"}])),
+            {"item": item, "verdict": "PASS", "severity": "advisory", "reason": "checked"}
+            for item in sorted(SCOPE_REQUIRED_ITEMS)])),
          "scope_review"),
         (ReviewActorRecord(slot_id="slot-stable", model="m", status="ok", raw_text="# Review\nAll checks passed."),
          "deep_self_review"),
@@ -308,10 +315,10 @@ def test_awaited_valid_and_report_answers_write_no_error(tmp_path, monkeypatch):
     assert _rows(tmp_path) == []
 
 
-@pytest.mark.parametrize("text,status", [("unparseable", "parse_failure"), ("[]", "partial")])
+@pytest.mark.parametrize("text,status", [("unparseable", "parse_failure"), ("I cannot review this. []", "parse_failure")])
 def test_the_skill_parser_records_its_specific_failure_without_invented_ids(tmp_path, monkeypatch, text, status):
     monkeypatch.setattr(utils, "_log_sink", None)
-    parsed = triad_review.parse_model_review_results({"results": [{"model": "m", "text": text}]}, required_items=["a"])
+    parsed = triad_review.parse_seat_answers({"results": [{"model": "m", "text": text}]}, {"": ("skill",)})
     ctx = SimpleNamespace(drive_logs=lambda: tmp_path / "logs")  # a context exposing only its log dir
     triad_review.emit_review_model_error_events(ctx, parsed, source="skill_review", skill_name="demo")
     [row] = _rows(tmp_path)
@@ -323,8 +330,8 @@ def test_the_recorded_operation_binding_outranks_the_collecting_context(tmp_path
     """A result collected under another context keeps its producer's lineage (``review_operation_binding``)."""
     monkeypatch.setattr(utils, "_log_sink", None)
     binding = {"task_id": "producer-child", "root_task_id": "producer-root", "parent_task_id": "producer-parent"}
-    parsed = triad_review.parse_model_review_results({"results": [{
-        "model": "m", "text": "provider refused", "verdict": "ERROR", "recovery_binding": binding}]})
+    parsed = triad_review.parse_seat_answers({"results": [{
+        "model": "m", "text": "provider refused", "verdict": "ERROR", "recovery_binding": binding}]}, {})
     triad_review.emit_review_model_error_events(_ctx(tmp_path), parsed, source="multi_model_review")
     [row] = _rows(tmp_path)
     assert all(row[key] == value for key, value in binding.items())

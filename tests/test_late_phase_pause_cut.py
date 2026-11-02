@@ -1,12 +1,16 @@
 """The owner's Pause ends an answered root's post-answer upkeep at once; nothing is saved.
 
 Real consumers end to end: the owner's Pause ingress, the post-task stage
-coordinator, scratchpad consolidation (a knowledge read, then its answer — one
-Light operation of two physical sends), the usage ledger's physical-send gate,
-the activity census, held Continues and the maintenance pass that ends a Pause
-an earlier version saved. Only the model transport is a deterministic fake, and
-it still goes through ``execute_physical_attempt`` — the real reservation and
-owner-fence gate.
+coordinator and its fallback-draft stage adapter, the shared Light transport (a
+knowledge read, then its answer — one Light operation of two physical sends), the
+usage ledger's physical-send gate, the activity census, held Continues and the
+maintenance pass that ends a Pause an earlier version saved. The retired scratchpad
+pass (#918) used to be that first paid stage; the fallback stage's draft selection is
+now stood in for by that same two-send operation (``_fallback_stand_in``), and the
+seeded scratchpad proves no stage touches it. Only the model transport is a
+deterministic fake, and it still goes through ``execute_physical_attempt`` — the real
+reservation and owner-fence gate. A Pause an earlier version saved keeps the stage
+names that version had.
 """
 
 from __future__ import annotations
@@ -23,10 +27,11 @@ from tests.test_consolidator_context_fit import fit  # noqa: F401 — offline Li
 
 ROOT = "late-root"
 ANSWER = "Already delivered answer"
+DRAFT = "FALLBACK-DRAFT-STAND-IN"
 
 
 def _scratchpad(root: pathlib.Path, count: int = 4, tag: str = "block") -> None:
-    """Enough scratchpad working memory that the post-task scratchpad stage runs."""
+    """Working memory past the retired compression threshold: no late stage may touch it (#918)."""
     from ouroboros.memory import Memory
 
     memory = Memory(root)
@@ -50,7 +55,7 @@ class Light:
             from ouroboros.usage_accounting import AttemptRequest, current_usage_scope, execute_physical_attempt
 
             prompt = str(messages[0]["content"])
-            kind = "scratchpad" if "scratchpad working memory" in prompt else "other"
+            kind = "draft" if DRAFT in prompt else "other"
             answered = messages[-1].get("role") == "tool"  # the read came back: this send answers
             scope = current_usage_scope()
 
@@ -61,11 +66,11 @@ class Light:
                 if hook is not None:
                     hook()
                 usage = {"prompt_tokens": 1, "completion_tokens": 1}
-                if kind == "scratchpad" and not answered:
+                if kind == "draft" and not answered:
                     return {"content": "", "tool_calls": [{"id": "list", "type": "function", "function": {
                         "name": "knowledge_list", "arguments": "{}"}}]}, usage
-                if kind == "scratchpad":
-                    return {"content": json.dumps({"compressed_block": f"compressed-{len(light.sends)}"})}, usage
+                if kind == "draft":
+                    return {"content": json.dumps({"text": f"draft-{len(light.sends)}", "quotes": []})}, usage
                 return {"content": f"{kind}-{len(light.sends)}"}, usage
 
             return execute_physical_attempt(
@@ -76,6 +81,24 @@ class Light:
 
     def kinds(self) -> list:
         return [row["kind"] for row in self.sends]
+
+
+def _fallback_stand_in(monkeypatch) -> None:
+    """The late phase's first paid stage: the real ``_run_memory_fallback_draft`` adapter around one
+    Light operation of two physical sends through the shared transport, in place of the fallback's
+    draft selection (which needs an activated chronicle with a unit to draft)."""
+    from ouroboros import consolidator, memory_fallback
+    from ouroboros.tools.registry import ToolContext
+
+    def run_fallback_draft(env, task, llm, _drive_logs, _trace):
+        ctx = ToolContext(repo_dir=env.repo_dir, drive_root=env.drive_root, task_id=str(task.get("id") or ""))
+        _text, usage = consolidator._call_consolidation_llm(
+            llm, f"{DRAFT}: draft one page from the closed records.", memory_fallback.LABEL,
+            knowledge=consolidator.KnowledgeReadContext(ctx))
+        errors = list(usage.get("_consolidation_errors") or [])
+        return memory_fallback.FallbackRun("failed" if errors else "nothing", usage=usage, errors=errors)
+
+    monkeypatch.setattr(memory_fallback, "run_fallback_draft", run_fallback_draft)
 
 
 @pytest.fixture
@@ -96,6 +119,7 @@ def late(tmp_path, monkeypatch, fit):  # noqa: F811
                       root_phase_checkpoint={"post_task_synthesis": "pending_once"})
     env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path, drive_path=lambda rel: tmp_path / rel)
     light = Light(monkeypatch)
+    _fallback_stand_in(monkeypatch)
     stages: list = []
     # Promotion is a real stage; its chooser is off for this root and only records that it ran.
     monkeypatch.setattr("ouroboros.post_task_evolution.maybe_promote", lambda *a, **k: stages.append("promotion"))
@@ -174,14 +198,14 @@ def _census(f) -> dict:
 
 
 def _during_read(f, act, cap=3.0, **kwargs):
-    """Run ``act`` while the scratchpad operation's first send (its read) is on the wire."""
+    """Run ``act`` while the draft operation's first send (its read) is on the wire."""
     entered, release, answer = threading.Event(), threading.Event(), {}
 
     def hook():
         entered.set()
         assert release.wait(10)
 
-    f.light.hooks["scratchpad"] = [hook]
+    f.light.hooks["draft"] = [hook]
     threads = _start(f, cap=cap, **kwargs)
     try:
         assert entered.wait(10)
@@ -193,7 +217,7 @@ def _during_read(f, act, cap=3.0, **kwargs):
 
 
 def _pause_during_read(f, request_id="late-pause", cap=3.0, **kwargs):
-    """The owner's Pause lands while the scratchpad operation's first send (its read) is on the wire."""
+    """The owner's Pause lands while the draft operation's first send (its read) is on the wire."""
     from supervisor.owner_pause_control import request_owner_pause
 
     return _during_read(f, lambda: request_owner_pause(ROOT, request_id=request_id), cap=cap, **kwargs)
@@ -259,12 +283,12 @@ def test_pause_during_the_upkeep_ends_it_at_once_with_the_skip_disclosed_and_the
     assert pause["ok"] and pause["root_task_id"] == ROOT, pause
     assert pause["state"] == "requested"  # accepted while the upkeep was still running
     # The read on the wire finished; the answering send never got a physical send, nor did promotion.
-    assert f.light.kinds() == ["scratchpad"] and f.stages == []
+    assert f.light.kinds() == ["draft"] and f.stages == []
     row = _row(f)
     assert row["status"] == "completed" and row["result"] == ANSWER
     checkpoint = row["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded"
-    assert checkpoint["post_task_stop_reason"] == "owner_pause:skipped=scratchpad_consolidation,promotion"
+    assert checkpoint["post_task_stop_reason"] == "owner_pause:skipped=memory_fallback_draft,promotion"
     assert "post_task_pause" not in checkpoint  # nothing saved to resume
     assert [event["post_task_stop_reason"] for event in _events(f, "task_cost_finalized")] == [
         checkpoint["post_task_stop_reason"]]
@@ -272,7 +296,7 @@ def test_pause_during_the_upkeep_ends_it_at_once_with_the_skip_disclosed_and_the
     assert read_fence(f.root, ROOT)["state"] == "released" and ROOT not in f.q.BUDGET_ROOT_FENCES
     assert ROOT not in _census(f)
     # Nothing is left to resume: Resume finds no Pause and buys nothing.
-    assert not _resume(f).get("ok") and f.light.kinds() == ["scratchpad"] and _phase(f) == "degraded"
+    assert not _resume(f).get("ok") and f.light.kinds() == ["draft"] and _phase(f) == "degraded"
 
 
 def test_pooled_pause_ends_the_upkeep_and_task_done_releases_the_pause(late, monkeypatch):
@@ -292,13 +316,13 @@ def test_pooled_pause_ends_the_upkeep_and_task_done_releases_the_pause(late, mon
         answers.update(request_owner_pause(ROOT, request_id="pooled-late-pause"))
         assert _census(f)[ROOT] == "budget_pausing"
 
-    f.light.hooks["scratchpad"] = [hook]
+    f.light.hooks["draft"] = [hook]
     with task_model_wait_scope(task=f.task, drive_root=f.root, event_queue=None, worker_slot_held=True):
         _start(f, blocking=True)
     assert answers["ok"], answers
-    assert f.light.kinds() == ["scratchpad"] and f.stages == [] and _phase(f) == "degraded"
+    assert f.light.kinds() == ["draft"] and f.stages == [] and _phase(f) == "degraded"
     assert _row(f)["root_phase_checkpoint"]["post_task_stop_reason"] == (
-        "owner_pause:skipped=scratchpad_consolidation,promotion")
+        "owner_pause:skipped=memory_fallback_draft,promotion")
     # Ended, but the worker still holds its slot until task_done: the tree is still pausing.
     assert _census(f)[ROOT] == "budget_pausing" and read_fence(f.root, ROOT)["state"] == "requested"
     # The task_done handler's order: release the slot and the latch, settle the tree.
@@ -316,12 +340,12 @@ def test_a_stop_still_ends_the_upkeep_at_once(late):
     stopped = _row(f)["root_phase_checkpoint"]
     assert stopped["post_task_synthesis"] == "degraded"
     assert stopped["post_task_stop_reason"] == "cancelled:skipped=promotion"
-    assert f.light.kinds() == ["scratchpad"] and f.stages == [] and "post_task_pause" not in stopped
+    assert f.light.kinds() == ["draft"] and f.stages == [] and "post_task_pause" not in stopped
 
 
 @pytest.mark.parametrize("order,expected", [
     ("both_before_the_next_send", "cancelled:skipped=promotion"),
-    ("stop_after_the_pause_cut", "owner_stopped:skipped=scratchpad_consolidation,promotion"),
+    ("stop_after_the_pause_cut", "owner_stopped:skipped=memory_fallback_draft,promotion"),
 ])
 def test_a_stop_beside_the_pause_is_what_the_disclosure_names(late, monkeypatch, order, expected):
     """Stop outranks Pause: landing before the next send the Stop is what the send gate
@@ -349,7 +373,7 @@ def test_a_stop_beside_the_pause_is_what_the_disclosure_names(late, monkeypatch,
     _during_read(f, pause_and_stop)
     checkpoint = _row(f)["root_phase_checkpoint"]
     assert checkpoint["post_task_synthesis"] == "degraded" and checkpoint["post_task_stop_reason"] == expected
-    assert f.light.kinds() == ["scratchpad"] and f.stages == [] and "post_task_pause" not in checkpoint
+    assert f.light.kinds() == ["draft"] and f.stages == [] and "post_task_pause" not in checkpoint
 
 
 def test_fully_finished_root_reports_pause_inapplicable_and_buys_nothing(late):

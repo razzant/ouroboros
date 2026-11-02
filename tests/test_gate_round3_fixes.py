@@ -460,8 +460,8 @@ def test_reaper_already_terminal_recovery_registers_the_answer_owed(qenv, monkey
     task_reaper.reap_timed_out_task({
         "worker_id": 0, "proc": None, "task_id": "sf1",
         "task": {"id": "sf1", "chat_id": 5}, "task_type": "task",
-        "terminal_reason": "idle_timeout", "attempt": 1,
-        "owner_chat_id": 0, "runtime_sec": 10.0, "will_retry": False,
+        "terminal_reason": "deadline", "attempt": 1, "owner_chat_id": 0,
+        "runtime_sec": 10.0, "deadline_reached": True, "ceiling_reached": False,
     })
 
     did = td.delivery_id_for("sf1", "the finished answer")

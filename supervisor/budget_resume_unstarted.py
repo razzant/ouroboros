@@ -22,19 +22,17 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
     """
     from ouroboros.owner_pause import FENCE_RELEASED, launch_lock, read_fence, set_fence_state
     import copy
-    from supervisor.events_budget import BUDGET_HOLD_KEY, OWNER_ROOT_RESUME_HOLDS, budget_hold_fact, hold_root_resume_descendants
+    from supervisor.events_budget import BUDGET_HOLD_KEY, hold_root_resume_descendants
 
     task_id, root_id = str(task.get("id") or ""), str(fence.get("root_task_id") or task.get("id") or "")
     admitted = "owner_pause_blockers" in observation
     safe, error = observation["safe"], observation["unsafe_error"]
     if not safe and not admitted:
         return {"ok": False, "error": error, "action": "cancel_or_new_run"}
-    hold = budget_hold_fact(task)
-    # This explicit root Resume releases its Pause, its app-stop hold and its unsaved
-    # pause intent. A Continue's prior writer hold is rechecked below, never waived.
-    # All other holds, observed effects and durable write gates still bind.
-    if hold and hold.get("reason") not in OWNER_ROOT_RESUME_HOLDS:
-        return {"ok": False, "error": str(hold.get("reason") or "selection_owner_held")}
+    from ouroboros.work_stop import clear_refusal, current_stop, release_refusal
+    if refusal := release_refusal(current_stop(task, {
+            "owner": observation["authority"]["owner_fence"], "budget": q.BUDGET_ROOT_FENCES}), control_actor()):
+        return refusal
     if observation.get("blockers"):
         from supervisor.continuation_admission import writers_unsettled_refusal
 
@@ -61,6 +59,7 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
         q.BUDGET_ROOT_FENCES.pop(root_id, None)
         task.pop("_budget_pause", None)
         task.pop(BUDGET_HOLD_KEY, None)
+        clear_refusal(task)
         if members:
             # No root grant exists to bind: only the owner selects these members.
             hold_root_resume_descendants(q, root_id, fence, {"grant_id": "", "generation": 0}, actor_id=task_id)

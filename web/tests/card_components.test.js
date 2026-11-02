@@ -165,6 +165,52 @@ test('a card read again shows its recorded presses; a kept card on Widgets uses 
     }
 });
 
+test('a press that waits for its paused task says so until that task reads it, live and after a reload', async () => {
+    const dom = installCardDom();
+    try {
+        const waiting = { ok: true, delivery: 'delivered', reason_code: 'awaiting_recipient_read' };
+        const r = recorder({ status: 200, body: waiting }, { status: 200, body: { ok: true, delivery: 'delivered' } });
+        const mount = document.createElement('div');
+        const mounted = mountCardComponents(mount, CARD, { presses: createCardPresses({ cardId: CARD.card_id, post: r.post, newId: r.newId }) });
+        mount.querySelector('[data-widget-action]').click();
+        await tick();
+        assert.equal(mount.querySelector('[data-widget-feedback]').textContent, 'Saved · the task reads it when it continues');
+        assert.equal(mount.querySelector('[data-widget-action]').disabled, true, 'a once control still locks');
+        mounted.update({ ...CARD, submissions_summary: [{ action_id: 'buy', label: 'Buy', at: 't', delivery: 'delivered', request_id: 'req-1' }] });
+        assert.equal(mount.querySelector('[data-widget-feedback]').textContent, 'Sent ✓', 'its read ends the wait, live');
+
+        const reread = document.createElement('div');
+        const again = mountCardComponents(reread, { ...CARD, submissions_summary: [{ action_id: 'note', label: 'Send note', at: 't',
+            delivery: 'delivered', request_id: 'req-9', reason_code: 'awaiting_recipient_read' }] },
+        { presses: createCardPresses({ cardId: CARD.card_id, post: r.post, newId: r.newId }) });
+        assert.deepEqual(reread.querySelectorAll('[data-widget-feedback]').map((node) => node.textContent), ['Saved · the task reads it when it continues']);
+        const form = reread.querySelector('[data-widget-form]');
+        form.elements = { namedItem: (name) => (name === 'text' ? { value: 'Later' } : null) };
+        form.dispatch('submit');
+        await tick();
+        assert.deepEqual(reread.querySelectorAll('[data-widget-feedback]').map((node) => node.textContent), ['Sent ✓'],
+            'a press to a task that reads its mail does not wait');
+        again.dispose();
+
+        // A kept copy on Widgets hears no card_state: it says Sent ✓ rather than a wait it could never see end.
+        const prior = globalThis.fetch;
+        globalThis.fetch = async () => ({ status: 200, json: async () => waiting });
+        try {
+            const board = document.createElement('div');
+            const dispose = mountPinnedCard(board, { key: '_cards:card_d', skill: '_cards', tab_id: 'card_d', pinned_card: true,
+                render: { kind: 'declarative', components: CARD.components, data: CARD.data } });
+            board.querySelector('[data-widget-action]').click();
+            await tick();
+            assert.equal(board.querySelector('[data-widget-feedback]').textContent, 'Sent ✓');
+            dispose();
+        } finally {
+            globalThis.fetch = prior;
+        }
+    } finally {
+        dom.restore();
+    }
+});
+
 test('an owed once press is retried under its recorded id, after a reload too; once delivered it locks', async () => {
     const r = recorder({ status: 202, body: { ok: true, delivery: 'owed' } }, { status: 200, body: { ok: true, delivery: 'forwarded' } });
     const presses = createCardPresses({ cardId: 'card_e', post: r.post, newId: r.newId });

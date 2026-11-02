@@ -1,6 +1,6 @@
 """The browser-side files the design skills ship: what they promise without a browser.
 
-`design_demo/assets/compare.html` is the one-file comparison page, and `ui_design/references`
+`ui_design/assets/compare.html` is the one-file comparison page, and `ui_design/references`
 holds `measure.js` (observations about a rendered page) and `freeze.js` (a rendered page as one
 self-contained document). These checks pin the contract the skills' prose relies on: one file that
 fetches nothing, a data block that parses, function expressions a browser tool can evaluate, and
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-COMPARE = REPO / "skills" / "design_demo" / "assets" / "compare.html"
+COMPARE = REPO / "skills" / "ui_design" / "assets" / "compare.html"
 MEASURE = REPO / "skills" / "ui_design" / "references" / "measure.js"
 FREEZE = REPO / "skills" / "ui_design" / "references" / "freeze.js"
 ASSETS = (COMPARE, MEASURE, FREEZE)

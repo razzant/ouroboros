@@ -340,11 +340,10 @@ def test_a_stop_waits_for_a_committed_launch_to_reach_its_worker(env, monkeypatc
 def test_a_stop_waits_for_a_scheduled_launch_to_reach_its_worker(env, monkeypatch):
     """The same for an occurrence a schedule fired: its receipt says ``possible`` only once the put
     is certain to follow, so restore never holds a never-sent occurrence (and its schedule fires on)."""
-    from supervisor import queue_schedules, schedule_occurrence
+    from supervisor import schedule_occurrence
     from tests.test_schedule_occurrence import _row
 
     worker, delivered = install_worker(env, monkeypatch)
-    monkeypatch.setattr(queue_schedules, "resync_skill_schedules", lambda *_a: {})
     monkeypatch.setattr("ouroboros.config.get_bg_wakeup_min_sec", lambda: 0)
     _row(SimpleNamespace(queue=queue, pending=queue.PENDING, root=env.data), intent={"kind": "system_repo"})
     queue.check_scheduled_tasks()
@@ -506,7 +505,9 @@ def test_a_launch_on_the_lane_counts_against_its_roots_cap_in_the_same_pass(env,
     monkeypatch.setattr("ouroboros.config.get_max_active_subagents_per_root", lambda: 1)
     first, other = scheduled_child(env), scheduled_child(env, "launch-second")
     with contextlib.ExitStack() as stack:
-        held, _attempts, failures = hold_at_marks(env, monkeypatch, stack, write=False)
+        # A hold that contends the marks write in either journal mode: a read holds a rollback journal's COMMIT,
+        # but blocks nothing under WAL, which shipped SQLite (3.53) runs on a local disk.
+        held, _attempts, failures = hold_at_marks(env, monkeypatch, stack, write=True)
         workers.assign_tasks()  # the first child's launch waits on the lane; the second sees it as started
         wait_for(lambda: failures, "the first launch reached the held store")
         assert first.get("_launch_claim") and not other.get("_launch_claim") and second.busy_task_id is None

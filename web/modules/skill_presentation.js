@@ -6,6 +6,7 @@
 // three-dot loop moves.
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { strokeIcon } from './page_icons.js';
+import * as pageIcons from './page_icons.js';
 import { formatCompactNumber, safeExternalUrl } from './utils.js';
 import { openExternalViaHostBridge } from './ui_helpers.js';
 import { statusMarkHtml } from './status_mark.js';
@@ -176,7 +177,7 @@ export const PERMISSION_WORDS = Object.freeze({
     read_settings: 'Reads the keys you allow',
     subscribe_event: 'Sees app events',
     inject_chat: 'Writes into your chat — with your permission',
-    presence: 'Talks with other people for you — with your permission',
+    presence: 'Lives in a place for you: hears, speaks and acts there, with your permission',
     notify_owner: 'Sends you short notices — with your permission',
 });
 
@@ -192,7 +193,7 @@ export function permissionWords(permissions = []) {
 
 // Grantable host permissions as the request a skill makes («Wants your permission to …»).
 const GRANT_PHRASES = Object.freeze({
-    presence: 'talk with other people for you',
+    presence: 'live in a place for you: hear, speak and act there',
     inject_chat: 'write into your chat',
     notify_owner: 'send you short notices',
     subscribe_event: 'see chat events',
@@ -269,3 +270,37 @@ export function sourceAboutText(source = {}) {
 export function trustValueText(source = {}) {
     return source.trust === 'trusted' ? 'Installs without review' : 'Reviews each skill';
 }
+
+/**
+ * Pass the host's SVG or named glyph spec to `renderSkillIcon`; legacy `{name}` specs also keep their glyph.
+ * An absent or unknown icon uses the house plug. The label beside it always says what it is.
+ */
+export function skillIconHtml(icon, size = 18) {
+    const render = pageIcons.renderSkillIcon;
+    if (typeof render === 'function') {
+        try { return render(icon || {}, { size }); } catch { /* the house glyph below */ }
+    }
+    return pageIcons.controlIcon(icon?.name || '', size);
+}
+
+/** The services a connector connects: the host's `connects` fact, a list of names derived from its place declaration. */
+export function connectsServices(item) {
+    const value = item?.connects;
+    return Array.isArray(value) ? value.map((name) => String(name || '').trim()).filter(Boolean) : [];
+}
+
+/** «Connects Slack» for a connector, else ''. */
+export function connectsText(item) {
+    const services = connectsServices(item);
+    return services.length ? `Connects ${services.join(', ')}` : '';
+}
+
+/** A skill that writes into the owner's chat without a place of its own: what arrives from it is the owner's. */
+export function countsAsYoursText(item) {
+    const permissions = Array.isArray(item?.permissions) ? item.permissions : [];
+    const injects = permissions.some((permission) => String(permission || '').split(':')[0] === 'inject_chat');
+    return injects && !connectsServices(item).length ? 'Messages from here count as yours' : '';
+}
+
+/** A connector's contribution supplies its public label; ids remain canonical. */
+export const skillTitle = (skill) => skill.title || skill.contributes?.find((row) => row.provides === 'place' && row.label)?.label || skill.name;

@@ -229,8 +229,11 @@ def validate_producer_invocation(root: Any, token: str, expected: dict, payload:
     invocation = invocation_record(root, token) if token else None
     if invocation is not None and invocation.get("state") == "legacy_gap":
         raise ValueError(f"legacy_gap: {invocation['reason']}; completed producer custody needs repair")
+    # A binding names the facts its request carried: a request without a reconciliation
+    # identity binds no root, which is an unbound fact, never a contradiction.
     if not invocation or any(str(invocation.get(k) or "") != str(expected[k] or "")
-                             for k in ("task_id", "root_task_id", "surface", "slot_id", "operation_id")):
+                             for k in ("task_id", "root_task_id", "surface", "slot_id", "operation_id")
+                             if k in expected):
         raise ValueError("completed producer has no exact delegated invocation")
     run_id = str(usage.get("delegated_run_id") or "")
     if run_id and run_id != str(invocation.get("run_id") or ""):

@@ -13,7 +13,7 @@ import sqlite3
 
 import pytest
 
-from ouroboros import chat_chain, dialogue_import as di, dialogue_store as ds, store
+from ouroboros import chat_chain, dialogue_import as di, dialogue_positions as dp, dialogue_store as ds, store
 from ouroboros.utils import iter_jsonl_objects, jsonl_chain_handles, jsonl_generation_signature
 from tests._dialogue import chat_rows, lines, progress_rows, seed
 
@@ -40,6 +40,126 @@ def chain_offsets(root, stream):
                     pass  # a blank or malformed line takes bytes, not a row
                 position += len(raw)
     return offsets, position
+
+
+# ---- a page of rows in one step ---------------------------------------------------------------
+
+def _plain_rows(conn, where, params=()):
+    """The readers' rows before one-step pages: a plain SELECT, one ``sqlite3_step`` (one GIL release) per row."""
+    return [ds._row(record) for record in conn.execute(f"{ds._SELECT} {where}", params).fetchall()]
+
+
+def _plain_probe(conn, keys, *, before, lower, limit, newest_first):
+    """``_probe`` as it read before: each column's coordinates row by row, then the winners' rows."""
+    found, order = set(), "DESC" if newest_first else "ASC"
+    for column, value in keys:
+        index = ds._PROBE_INDEX[column]
+        test, args = ("IS NULL", ()) if value is None else ("=?", (value,))
+        found.update(seq for (seq,) in conn.execute(
+            f"SELECT seq FROM dialogue INDEXED BY {index} WHERE stream='chat' AND {column} {test} AND seq<? AND seq>=? "
+            f"ORDER BY seq {order} LIMIT ?", (*args, before, lower, limit)))
+    chosen = sorted(found, reverse=newest_first)[:limit]
+    rows = {row.seq: row for row in _plain_rows(conn, f"WHERE stream='chat' AND seq IN ({','.join('?' * len(chosen))})",
+                                                ("chat", *chosen)[1:])} if chosen else {}
+    return [rows[seq] for seq in chosen]
+
+
+def test_a_page_read_in_one_step_holds_the_rows_and_order_a_plain_select_returns(tmp_path):
+    texts = ['plain', 'a "quoted" word', 'back\\slash \\n and a real\nnewline\tand a tab', 'кириллица и 🐍', '{"json": [1]}']
+    rows = [chat(f"m{i}" if i % 3 else "", texts[i % len(texts)] + f" {i}", chat_id=1 + i % 4, direction="in" if i % 2 else "out",
+                 ts=f"2026-10-17T{i // 3600:02d}:{i // 60 % 60:02d}:{i % 60:02d}+00:00",
+                 **({"task_id": f"task{i % 7}"} if i % 5 == 0 else {})) for i in range(1_203)]
+    seed(tmp_path, live={"chat": rows})
+    from tests._dialogue import import_all
+    import_all(tmp_path)  # one import, not a write transaction a row
+    ds.append(tmp_path, "chat", chat("named", "owed", dispatch_marker=1), dispatch={"process": "p1"})
+    ds.append(tmp_path, "chat", {"ts": "2026-10-18T00:00:00+00:00", "direction": "in", "text": "no chat id"})
+    arrival = ds.append(tmp_path, "chat", chat("", "a guest", chat_id=4242, type="place_arrival"))
+    with sqlite3.connect(ds.path(tmp_path)) as db:  # a place arrival's source pointer lands after its append
+        db.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
+                   (json.dumps({"place_context_source_ref": {"kind": "place_context", "id": "c1"}}), arrival.seq))
+    with ds.transaction(tmp_path, write=False) as conn:
+        every = _plain_rows(conn, "WHERE stream=? ORDER BY seq", ("chat",))
+        probes = {(keys, newest): _plain_probe(conn, keys, before=every[-1].end, lower=every[4].seq, limit=60,
+                                               newest_first=newest)
+                  for keys in ((("chat_id", 2), ("task_id", "task3")), (("chat_id", None), ("chat_id", 4242)))
+                  for newest in (True, False)}
+    seqs = [row.seq for row in every]
+    assert len(every) == 1_206 and every[-3].dispatch == "pending" and type(every[-1].row).__name__ == "SourceProjection"
+    assert list(ds.iter_rows(tmp_path, "chat")) == every  # three pages of 500
+    assert list(ds.iter_rows(tmp_path, "chat", lower=seqs[10], upper=seqs[700], batch=97)) == every[10:700]
+    assert ds.rows_between(tmp_path, "chat", seqs[3], seqs[900]) == every[3:900]
+    assert ds.rows_after(tmp_path, "chat", seqs[5], limit=600) == every[6:606]
+    assert ds.rows_at(tmp_path, "chat", seqs[::2] + [seqs[-1] + 10**6]) == {row.seq: row for row in every[::2]}
+    for (keys, newest), expected in probes.items():
+        assert ds.probe_rows(tmp_path, "chat", keys, before=every[-1].end, lower=seqs[4], limit=60,
+                             newest_first=newest) == expected and expected
+    with ds.transaction(tmp_path, write=False) as conn:  # the legacy addresses and the counts, read row by row
+        hints = {}
+        for record in conn.execute("SELECT seq, gen, line FROM legacy_addresses ORDER BY seq, gen, line"):
+            hints.setdefault(record["seq"], (record["gen"], record["line"]))
+        pairs = sorted(set(hints.values()))[::3] + [("0" * 64, 1)]
+        candidates = {pair: _plain_rows(conn, "WHERE stream='chat' AND seq IN (SELECT seq FROM legacy_addresses "
+                                              "WHERE gen=? AND line=?) ORDER BY seq", pair) for pair in pairs}
+        ordinals = {record["seq"]: dp.Ordinals(int(record["ordinal"]), record["pos"])
+                    for record in conn.execute(f"{dp._ORDINALS} WHERE stream='chat'")}
+    assert len(hints) == 1_203 and ds.legacy_addresses(tmp_path, seqs + [seqs[-1] + 10**6]) == hints
+    assert ds.legacy_candidates_of(tmp_path, pairs) == candidates and candidates[pairs[0]] and not candidates[pairs[-1]]
+    assert dp.ordinals_of(tmp_path, "chat", seqs + [seqs[-1] + 10**6]) == ordinals and len(ordinals) == 1_206
+
+
+class _Stepped:
+    """A read connection that counts the result rows its statements hand to Python: one ``sqlite3_step`` each."""
+
+    def __init__(self, conn, stepped):
+        self._conn, self._stepped = conn, stepped
+
+    def execute(self, *args):
+        rows = self._conn.execute(*args).fetchall()
+        self._stepped.append(len(rows))
+        return _Rows(rows)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class _Rows(list):
+    def fetchone(self):
+        return self[0] if self else None
+
+    def fetchall(self):
+        return list(self)
+
+
+def test_a_page_of_rows_reaches_python_in_one_step_whatever_its_length(tmp_path, monkeypatch):
+    import contextlib
+
+    from tests._dialogue import import_all
+    seed(tmp_path, live={"chat": [chat(f"m{i}", f"row {i}", chat_id=1 + i % 3, task_id=f"t{i % 4}") for i in range(1_203)]})
+    import_all(tmp_path)
+    stepped, real = [], ds.transaction
+
+    @contextlib.contextmanager
+    def stepping(*args, **kwargs):
+        with real(*args, **kwargs) as conn:
+            yield _Stepped(conn, stepped) if not kwargs.get("write") else conn
+
+    monkeypatch.setattr(ds, "transaction", stepping)
+    every = list(ds.iter_rows(tmp_path, "chat"))
+    assert len(every) == 1_203 and sum(stepped) == 3  # three pages of 500, one step each (1,203 steps per row)
+    stepped.clear()
+    assert len(ds.rows_at(tmp_path, "chat", [row.seq for row in every])) == 1_203 and sum(stepped) == 3
+    stepped.clear()
+    assert len(ds.probe_rows(tmp_path, "chat", [("chat_id", 2), ("task_id", "t1")], limit=200)) == 200
+    assert sum(stepped) == 3  # each column's coordinates, then the winners' page
+    stepped.clear()
+    hints = ds.legacy_addresses(tmp_path, [row.seq for row in every])
+    assert len(hints) == 1_203 and sum(stepped) == 3  # a step per 500 rows' addresses, not one per row
+    stepped.clear()
+    found = ds.legacy_candidates_of(tmp_path, hints.values())
+    assert sum(map(len, found.values())) == 1_203 and sum(stepped) == 5 + 3  # 250 addresses a step, then 500 rows
+    stepped.clear()
+    assert len(dp.ordinals_of(tmp_path, "chat", [row.seq for row in every])) == 1_203 and sum(stepped) == 3
 
 
 # ---- the writer seam ------------------------------------------------------------------------

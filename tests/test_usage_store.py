@@ -680,9 +680,9 @@ def test_bulk_readers_are_called_only_by_the_audit_and_the_export():
             if not isinstance(node, ast.Call):
                 continue
             name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-            # ``Txn.attempts()`` without a predicate is the same scan of every attempt.
-            if name == "read_usage_records" or (name == "attempts" and not node.args and not node.keywords
-                                                 and isinstance(node.func, ast.Attribute)):
+            # ``Txn.attempts()`` / ``Txn.attempt_rows()`` without a predicate is the same scan of every attempt.
+            if name == "read_usage_records" or (name in {"attempts", "attempt_rows"} and not node.args
+                                                 and not node.keywords and isinstance(node.func, ast.Attribute)):
                 callers.add(path.relative_to(REPO).as_posix())
     assert callers <= _BULK_ALLOWED, callers - _BULK_ALLOWED
     assert "ouroboros/model_send_seal.py" in callers  # the explicit audit still reads history
@@ -694,14 +694,19 @@ def test_ordinary_money_paths_never_read_every_attempt(root, monkeypatch):
 
     held = ua.reserve_attempt(request(root))
     ua.release_attempt(held)
-    scan = usage_store.Txn.attempts
+    scan, captured_scan = usage_store.Txn.attempts, usage_store.Txn.attempt_rows
 
     def forbidden_scan(txn, where="1", params=()):
         assert str(where).strip() != "1", "an ordinary path scanned every attempt"
         return scan(txn, where, params)
 
+    def forbidden_captured_scan(txn, where="1", params=()):
+        assert str(where).strip() != "1", "an ordinary path captured every attempt"
+        return captured_scan(txn, where, params)
+
     monkeypatch.setattr(usage_store, "read_usage_records", lambda *_a, **_k: pytest.fail("bulk read"))
     monkeypatch.setattr(usage_store.Txn, "attempts", forbidden_scan)
+    monkeypatch.setattr(usage_store.Txn, "attempt_rows", forbidden_captured_scan)
     monkeypatch.setattr(queue, "task_has_live_ownership", lambda _task_id, **_kw: False)
     sent = ua.execute_physical_attempt(request(root, reservation_usd=.1), lambda: {"usage": {}},
                                        extractor=lambda _r: ({}, .1, True))

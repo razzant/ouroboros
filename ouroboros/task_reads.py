@@ -59,6 +59,7 @@ class TaskReads:
     def __init__(self, drive_root: Any) -> None:
         self.root = pathlib.Path(drive_root)
         self._documents: Dict[Tuple[str, str], Optional[str]] = {}  # (root, task id) -> view text
+        self._decoded: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}  # this read's own lookups, never handed out
         self._queue: Dict[str, Dict[str, Any]] = {}
         self._intents: Dict[str, Dict[str, Any]] = {}
         self._events: Any = None
@@ -151,8 +152,12 @@ class TaskReads:
         return found
 
     def _peek(self, root: pathlib.Path, task_id: str) -> Optional[Dict[str, Any]]:
-        text = self._documents.get((str(root), str(task_id)))
-        return json.loads(text) if text is not None else None
+        """A view decoded once per read for the prefetch's own lookups (a fetched text never changes)."""
+        key = (str(root), str(task_id))
+        if key not in self._decoded:
+            text = self._documents.get(key)
+            self._decoded[key] = json.loads(text) if text is not None else None
+        return self._decoded[key]
 
     def load(self, root: Any, task_id: str) -> Optional[Dict[str, Any]]:
         """One document's display view (a private copy, as ``load_task_result`` returns), read
@@ -162,8 +167,8 @@ class TaskReads:
         root = pathlib.Path(root)
         if (str(root), str(task_id)) not in self._documents:
             self._fetch(root, [str(task_id)])
-        document = self._peek(root, task_id)
-        return _normalize_swarm_efficiency(document) if document is not None else None
+        text = self._documents.get((str(root), str(task_id)))
+        return _normalize_swarm_efficiency(json.loads(text)) if text is not None else None
 
     def absent(self, task_id: str) -> bool:
         """Whether the canonical store answers that ``task_id`` has no row (asked now when no

@@ -1,10 +1,11 @@
-// The work card's one disclosure (DESIGN §5; owner 17.10, plan P6): "N notes · Show details" is a real button and
-// the only thing that opens the card; the summary band above it and the body below are reading content, which
+// The work card's one disclosure (DESIGN §5; owner 17.10, plan P6; refined A 21.10): "Details", its notes count kept
+// in its name, is a real button and the only thing that opens the card; the summary band above it and the body below are reading content, which
 // neither answers a click nor paints under the pointer (the half-card tint read as a seam on a whole object).
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { createChatInstance } from '../modules/chat.js';
+import { liveCardCountBits } from '../modules/task_phase_chip.js';
 import { installDom, restoreDom, walkCard } from './chat_dom_fixture.js';
 
 const ROOT = 'root-p6';
@@ -29,7 +30,15 @@ function fixture() {
     };
 }
 
-test('the summary band is reading content; "Show details" is the one disclosure, a real button', () => {
+test('the disclosure count starts at two notes and counts children independently', () => {
+    assert.deepEqual(liveCardCountBits(0, 0), []);
+    assert.deepEqual(liveCardCountBits(1, 0), []);
+    assert.deepEqual(liveCardCountBits(2, 0), ['2 notes']);
+    assert.deepEqual(liveCardCountBits(1, 1), ['1 child']);
+    assert.deepEqual(liveCardCountBits(3, 2), ['3 notes', '2 children']);
+});
+
+test('the summary band is reading content; "Details" is the one disclosure, a real button', () => {
     const f = fixture();
     try {
         f.emit({ role: 'assistant', task_id: ROOT, content: 'Reading the third project', narration: true });
@@ -49,11 +58,12 @@ test('the summary band is reading content; "Show details" is the one disclosure,
         disclosure.click();
         assert.equal(card.dataset.expanded, '1');
         assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
-        assert.equal(card.querySelector('[data-live-toggle]').textContent, 'Hide details');
+        // The word stays; aria-expanded (and the turned chevron) say open or closed.
+        assert.equal(card.querySelector('[data-live-toggle]').textContent, 'Details');
         disclosure.click();
         assert.equal(card.dataset.expanded, '0');
         assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
-        assert.equal(card.querySelector('[data-live-toggle]').textContent, 'Show details');
+        assert.equal(card.querySelector('[data-live-toggle]').textContent, 'Details');
     } finally { f.close(); }
 });
 

@@ -482,7 +482,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
 
 
 async def api_project_update(request: Request) -> JSONResponse:
-    """POST /api/projects/{project_id}/update — partial name/pin metadata update."""
+    """POST /api/projects/{project_id}/update — partial name, pin or closure update."""
     try:
         from ouroboros.projects_registry import PROJECT_NAME_MAX, get_project, update_project
 
@@ -503,8 +503,13 @@ async def api_project_update(request: Request) -> JSONResponse:
             if type(body["pinned"]) is not bool:
                 return JSONResponse({"error": "pinned must be a boolean"}, status_code=400)
             updates["pinned"] = body["pinned"]
+        if "closed" in body:
+            if type(body["closed"]) is not bool:
+                return JSONResponse({"error": "closed must be a boolean"}, status_code=400)
+            from ouroboros.utils import utc_now_iso
+            updates["closed"] = {"at": utc_now_iso(), "by": "owner", "note": "Closed by owner."} if body["closed"] else None
         if not updates:
-            return JSONResponse({"error": "name or pinned is required"}, status_code=400)
+            return JSONResponse({"error": "name, pinned or closed is required"}, status_code=400)
         entry = update_project(drive_root, project_id, **updates)
         if entry is None:
             return JSONResponse({"error": "project is no longer active"}, status_code=409)

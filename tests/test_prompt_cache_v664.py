@@ -109,21 +109,26 @@ def test_openrouter_uses_session_id_without_replacing_existing_extra_body(monkey
 
 
 def _sealed_transcripts():
+    """The default seal round by round: the task message, each newest tool result with no
+    lag, a tool-free round's host line (#1186), then a compaction back to the task."""
     from ouroboros.context_fit import seal_task_transcript
 
     messages = _messages(stable="stable policy " * 800)
     snapshots = []
-    for count in range(1, 8):
-        messages.extend([
-            {"role": "assistant", "content": "", "tool_calls": [{
-                "id": f"read-{count}", "type": "function",
-                "function": {"name": "read_file", "arguments": "{}"},
-            }]},
-            {"role": "tool", "tool_call_id": f"read-{count}", "content": f"evidence {count}"},
-        ])
-        if count >= 5:
-            seal_task_transcript(messages)
-            snapshots.append(copy.deepcopy(messages))
+    for count in range(4):
+        if count == 3:
+            messages.extend([{"role": "user", "content": "[Host clock at this request: 2026-10-21T00:00:00Z UTC]"},
+                             {"role": "assistant", "content": "working"}])
+        elif count:
+            messages.extend([
+                {"role": "assistant", "content": "", "tool_calls": [{
+                    "id": f"read-{count}", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }]},
+                {"role": "tool", "tool_call_id": f"read-{count}", "content": f"evidence {count}"},
+            ])
+        seal_task_transcript(messages)
+        snapshots.append(copy.deepcopy(messages))
     # A compacted transcript can return the cache boundary to the task message.
     messages = messages[:len(snapshots[0])]
     seal_task_transcript(messages)
@@ -183,9 +188,10 @@ def test_openrouter_session_survives_marker_migration_on_sdk_wire(asynchronous, 
             for payload in payloads:
                 sdk.chat.completions.create(**payload)
 
-    assert len(captured) == 4
+    assert len(captured) == 5
     assert len({payload["session_id"] for payload in captured}) == 1
     assert all(payload["tools"] == captured[0]["tools"] for payload in captured)
+    assert all("cache_control" not in message for payload in captured for message in payload["messages"])
     boundaries = []
     for payload in captured:
         marked = [i for i, message in enumerate(payload["messages"])
@@ -193,12 +199,12 @@ def test_openrouter_session_survives_marker_migration_on_sdk_wire(asynchronous, 
                   for block in message["content"] if "cache_control" in block]
         boundaries.append(marked)
     if cache_markers:
-        assert boundaries == [[1], [3], [5], [1]], "supported markers must still migrate both ways"
+        assert boundaries == [[1], [3], [5], [6], [1]], "supported markers must still migrate both ways"
     else:
-        assert boundaries == [[], [], [], []]
-        for previous, current in zip(captured[:2], captured[1:3]):
+        assert boundaries == [[], [], [], [], []]
+        for previous, current in zip(captured[:3], captured[1:4]):
             assert current["messages"][:len(previous["messages"])] == previous["messages"]
-        assert captured[3]["messages"] == captured[0]["messages"]
+        assert captured[4]["messages"] == captured[0]["messages"]
 
 
 def _first_user_variants(messages):

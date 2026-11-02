@@ -206,7 +206,7 @@ def commit_refusal_facts(ledger: dict, tools_rows: list, stored: dict) -> dict:
     Three durable sources, none of them model prose: the review state's attempt rows
     (``phase``/``status``/``block_reason``), the tools.jsonl rows of
     the two review tools (their typed ``status`` plus the runtime's own ``⚠️ CODE:`` refusal
-    prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, SCOPE_REVIEW_BLOCKED, ...), and the
+    prefix — PREFLIGHT_BLOCKED, TESTS_PREFLIGHT_BLOCKED, REVIEW_BLOCKED, ...), and the
     task's terminal ``reason_code`` (``budget_exhausted`` = BudgetExceeded, ``deadline_local``
     = the deadline). The first paid run's SM1 lanes failed on exactly this ladder and the
     result rows named none of it."""
@@ -707,7 +707,7 @@ def sm1_stub_script(clone: pathlib.Path) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# SW1 — Swarm: force_plan + roster, >=2 children, fanout receipt, cost rollup, no orphans
+# SW1 — Swarm: room mode + roster, >=2 children, fanout receipt, cost rollup, no orphans
 # --------------------------------------------------------------------------- #
 
 def sw1_roster(child_model: str, template: dict | None = None) -> str:
@@ -742,25 +742,21 @@ def _find_root_task(ctx: LaneContext, marker: str) -> str:
 def run_sw1(ctx: LaneContext) -> None:
     ui_path = ctx.ui is not None
     if ui_path:
-        # The owner's path: the Swarm button arms force_plan on the WS chat frame.
+        # The UI probe selects the room's persistent Swarm choice before sending.
         ctx.ui.goto("/")
         ctx.ui.send_chat(SW1_OBJECTIVE, swarm=True)
         ctx.screenshot("sw1_swarm_sent")
         parent_id = ctx.h.wait_until(lambda: _find_root_task(ctx, "E2E_LIVE_SW1"), 300) or ""
     else:
-        parent_id = ctx.submit(SW1_OBJECTIVE, metadata={"force_plan": True, "force_plan_source": "swarm"})
+        saved = _api(ctx.server.base_url, "POST", "/api/owner/subagents-mode", {"mode": "swarm"}, timeout=60)
+        ctx.check("subagents_mode_saved", saved.get("subagents_mode") == "swarm")
+        parent_id = ctx.submit(SW1_OBJECTIVE)
     ctx.check("ui_swarm_path_exercised", ui_path, ui_reason=ctx.ui_reason)
     ctx.check("root_task_admitted", bool(parent_id), task_id=parent_id)
     if not parent_id:
         return
     stored = ctx.wait_task(parent_id)
-    # The planning organ's record: the Swarm root wrote a plan and one ask reached a reviewer.
-    record = stored.get("plan_record") if isinstance(stored.get("plan_record"), dict) else {}
-    asks = [a for a in (record.get("asks") or []) if isinstance(a, dict)]
-    ctx.check("plan_record_engaged", bool(record.get("revisions")) and bool(asks),
-              revisions=len(record.get("revisions") or []), asks=len(asks))
-    ctx.check("plan_ask_dispatched", any(p.get("dispatched") for ask in asks for p in ask.get("participants") or []),
-              participants=[f"{p.get('seat_id')}:{p.get('status')}" for ask in asks for p in ask.get("participants") or []])
+    ctx.check("root_admitted_in_swarm", (stored.get("metadata") or {}).get("subagents_mode") == "swarm")
     # The quiescent path, not the forced one: every child result absorbed before the final.
     ctx.check("clean_finalization", str(stored.get("reason_code") or "") != "children_unabsorbed",
               parent_reason_code=str(stored.get("reason_code") or ""))
@@ -996,7 +992,7 @@ SCENARIOS: dict[str, Scenario] = {
         sm1_prompt(), {"OUROBOROS_RUNTIME_MODE": "advanced", "OUROBOROS_REVIEW_ENFORCEMENT": "blocking"},
         True, run_sm1, sm1_stub_script, expects_absorb=True),
     "SW1": Scenario(
-        "SW1", "Swarm: force_plan + roster, two children, fanout receipt, cost rollup, no orphans",
+        "SW1", "Swarm: room mode + roster, two children, fanout receipt, cost rollup, no orphans",
         SW1_OBJECTIVE, {"OUROBOROS_MAX_WORKERS": 4, "OUROBOROS_MAX_SUBAGENT_DEPTH": 1},
         True, run_sw1, sw1_stub_script),
     "SK1": Scenario(

@@ -43,7 +43,7 @@ from ouroboros.settings_scales import (
     EFFORT_SCALE, EFFORT_RANGE_KEYS, EFFORT_FORMAT_KEY, normalize_effort_document, OPTIONAL_BOUND_LEGACY, UNLIMITED,  # noqa: F401
     PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value,  # noqa: F401
     REVIEW_POOL_DEFAULT_EFFORT,  # noqa: F401
-    VALID_RUNTIME_MODES,  # noqa: F401
+    VALID_RUNTIME_MODES, VALID_SUBAGENTS_MODES, normalize_subagents_mode,  # noqa: F401
     VALID_SAFETY_MODES,  # noqa: F401
     _RUNTIME_MODE_RANK,  # noqa: F401
     _SAFETY_MODE_RANK,  # noqa: F401
@@ -69,6 +69,7 @@ from ouroboros.model_slots import (
     get_heavy_model,  # noqa: F401
     get_image_input_mode,  # noqa: F401
     get_light_model,  # noqa: F401
+    get_safety_model,  # noqa: F401
     get_vision_model,  # noqa: F401
     migrate_legacy_slot_keys,  # noqa: F401
     parse_fallback_chain,  # noqa: F401
@@ -81,6 +82,7 @@ from ouroboros.review_model_routes import (
 )
 from ouroboros.runtime_limits import (
     ARTIFACT_COMPRESSION_TIMEOUT_SEC, EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC, WORKER_SPAWN_GRACE_SEC,  # noqa: F401
+    GIT_READ_CAPTURE_TIMEOUT_SEC,  # noqa: F401
     WORKER_READY_WINDOW_SEC,  # noqa: F401
     WORKER_READY_MAX_ATTEMPTS, WORKER_READY_CEILING_SEC,  # noqa: F401
     SUPERVISOR_EVENT_BATCH_MAX_EVENTS, SUPERVISOR_EVENT_BATCH_MAX_SEC, BUDGET_PROJECTION_RETRY_SEC,  # noqa: F401
@@ -94,7 +96,7 @@ from ouroboros.runtime_limits import (
     CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC,  # noqa: F401
     CLAUDEXOR_STOP_EXIT_WAIT_SEC, BODY_MAINTENANCE_INTERVAL_SEC,  # noqa: F401
     DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
-    DELEGATE_WAIT_WINDOW_MAX_SEC, OPERATION_WINDOW_FALLBACK_SEC,  # noqa: F401
+    DELEGATE_WAIT_WINDOW_MAX_SEC, IDLE_LEASE_MAX_SEC,  # noqa: F401
     MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP,  # noqa: F401
     WAKE_DEFAULT_SEC,  # noqa: F401
     _bounded_positive_int_setting,  # noqa: F401
@@ -113,8 +115,6 @@ from ouroboros.runtime_limits import (
     get_max_subagent_depth,  # noqa: F401
     get_max_workers,  # noqa: F401
     get_onboarding_snapshot_timeout_sec,  # noqa: F401
-    get_per_call_timeout_ceiling_sec,  # noqa: F401
-    get_plan_task_deadline_min_sec,  # noqa: F401
     get_post_task_evolution_budget_usd,  # noqa: F401
     get_model_substitution_redos,  # noqa: F401
     get_restart_drain_max_sec,  # noqa: F401
@@ -122,11 +122,11 @@ from ouroboros.runtime_limits import (
     get_settings_document_lock_timeout_sec,  # noqa: F401
     get_safety_max_tokens,  # noqa: F401
     get_search_code_wall_sec, get_supervisor_liveness_deadline_sec,  # noqa: F401
-    get_task_abs_ceiling_sec, get_max_rounds, operation_window_sec,  # noqa: F401
+    get_task_abs_ceiling_sec, get_max_rounds,  # noqa: F401
     explicit_execution_timeout_sec, _CURRENT_TASK_CEILING,  # noqa: F401
     resolve_task_execution_timeout_sec as _resolve_task_execution_timeout_sec,
     get_task_idle_timeout_sec, get_vision_caption_timeout_sec,  # noqa: F401
-    get_update_letter_timeout_sec, get_ui_translation_timeout_sec, get_websearch_timeout_sec,  # noqa: F401
+    get_ui_translation_timeout_sec, get_websearch_timeout_sec,  # noqa: F401
 )
 from ouroboros.update_channels import UPDATE_SETTINGS_DEFAULTS, normalize_update_channel  # noqa: F401
 
@@ -149,16 +149,13 @@ def resolve_task_execution_timeout_sec(task: dict, *, global_ceiling=_CURRENT_TA
 # whose OUROBOROS_* env landed late) resolves per call (the hermeticity class of issue #455).
 
 
-def resolve_app_root() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("OUROBOROS_APP_ROOT", pathlib.Path.home() / "Ouroboros"))
+from ouroboros import launch_roots as _launch_roots  # noqa: E402 — the one derivation of the launch tuple
+
+resolve_app_root, resolve_data_dir = _launch_roots.app_root, _launch_roots.data_dir
 
 
 def resolve_repo_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", resolve_app_root() / "repo"))
-
-
-def resolve_data_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("OUROBOROS_DATA_DIR", resolve_app_root() / "data"))
+    return _launch_roots.configured_roots().repo_dir
 
 
 def resolve_port_file(data_dir=None, *, hosting_data_dir=None) -> pathlib.Path:
@@ -174,12 +171,7 @@ def resolve_port_file(data_dir=None, *, hosting_data_dir=None) -> pathlib.Path:
 
 
 HOME = pathlib.Path.home()
-APP_ROOT = resolve_app_root()
-REPO_DIR = resolve_repo_dir()
-DATA_DIR = resolve_data_dir()
-SETTINGS_PATH = pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH", DATA_DIR / "settings.json"))
-PID_FILE = pathlib.Path(os.environ.get("OUROBOROS_PID_FILE", APP_ROOT / "ouroboros.pid"))
-PORT_FILE = resolve_port_file(DATA_DIR)
+APP_ROOT, REPO_DIR, DATA_DIR, SETTINGS_PATH, PID_FILE, PORT_FILE = _launch_roots.configured_roots()
 
 # Settings pin + write guards: SSOT settings_integrity; re-exported for config.X imports.
 from ouroboros import settings_integrity as _settings_integrity  # noqa: E402
@@ -342,9 +334,10 @@ def get_allow_mutative_subagents(write_surface: str = "", *, source_is_system_re
 
 
 def _work_root(key: str, leaf: str) -> str:
-    """A work root: the saved setting, else the environment (``runtime_setting``), else ``~/Ouroboros/<leaf>``."""
+    """A work root: the saved setting, else the environment (``runtime_setting``), else ``<leaf>`` under
+    the data root's work-root basis, never saved (``launch_roots``: ``~/Ouroboros`` or APP_ROOT)."""
     raw = str(runtime_setting(key, "") or SETTINGS_DEFAULTS.get(key, "")).strip()
-    return raw or os.path.expanduser(os.path.join("~", "Ouroboros", leaf))
+    return raw or _launch_roots.work_root_default(key, leaf)
 
 
 def get_subagent_worktree_root() -> str:
@@ -362,8 +355,8 @@ def get_subagent_projects_root() -> str:
 
 def get_deliverables_root() -> str:
     """Visible container for UNNAMED user deliverables: a bare filename (no directory) lands here
-    instead of cluttering the home root. Sibling of the genesis projects root under ~/Ouroboros,
-    outside data/, and never GC-pruned. An explicit placement (Desktop/..., Downloads/..., or any
+    instead of cluttering the home root. Sibling of the genesis projects root, outside data/,
+    and never GC-pruned. An explicit placement (Desktop/..., Downloads/..., or any
     path WITH a directory) is always honored as given. Override with OUROBOROS_DELIVERABLES_ROOT."""
     return _work_root("OUROBOROS_DELIVERABLES_ROOT", "Deliverables")
 
@@ -415,17 +408,6 @@ def get_runtime_mode() -> str:
     if inherited is not None:
         return normalize_runtime_mode(inherited)
     return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
-
-
-def get_safety_mode() -> str:
-    """Return captured Supervisor coverage (full | light | off).
-
-    Ordinary modes use the owner writer; Cyber may configure subsequent work
-    through the same settings owner. Coverage is separate from Cyber's advisory
-    decision authority and from the facts of a saved physical request.
-    """
-    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_SAFETY_MODE"])
-    return normalize_safety_mode(runtime_setting("OUROBOROS_SAFETY_MODE", default_val) or default_val)
 
 
 def get_context_mode() -> str:
@@ -499,6 +481,7 @@ def prepare_settings_for_persist(settings: dict, *, authored_keys: Sequence[str]
         and str(v) == str(SETTINGS_DEFAULTS.get(k, "")))}
     _guard_context_mode_lowering(prepared, allow_context_lowering=allow_context_lowering)
     _guard_safety_mode_lowering(prepared, allow_safety_lowering=allow_safety_lowering)
+    _guard_safety_configuration(prepared, owner_write=allow_safety_lowering)
     if runtime_mode_at_least(get_runtime_mode(), "cyber_pro") and prepared.get("OUROBOROS_CONTEXT_MODE") == "low":
         # Cyber may author Low. Keep that explicit choice distinct from retired auto-Low.
         prepared["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
@@ -517,13 +500,16 @@ def _guard_safety_mode_lowering(settings: dict, *, allow_safety_lowering: bool =
     owner-only outside Cyber Pro (mirrors the context-mode ratchet, BIBLE P3)."""
     if runtime_mode_at_least(get_runtime_mode(), "cyber_pro"):
         return
-    previous_mode = normalize_safety_mode(_settings_file_value("OUROBOROS_SAFETY_MODE", "full"))
-    next_mode = normalize_safety_mode(settings.get("OUROBOROS_SAFETY_MODE", previous_mode))
-    if _SAFETY_MODE_RANK[next_mode] < _SAFETY_MODE_RANK[previous_mode] and not allow_safety_lowering:
-        raise PermissionError(
-            f"OUROBOROS_SAFETY_MODE lowering refused: {previous_mode!r} -> {next_mode!r}. "
-            "Safety mode is owner-controlled — use the dedicated /api/owner/safety-mode endpoint."
-        )
+    raw = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
+    previous = normalize_consciousness_safety(raw if isinstance(raw, dict) else {})
+    for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"):
+        previous_mode = normalize_safety_mode(previous.get(key, "full"))
+        next_mode = normalize_safety_mode(settings.get(key, previous_mode))
+        if _SAFETY_MODE_RANK[next_mode] < _SAFETY_MODE_RANK[previous_mode] and not allow_safety_lowering:
+            raise PermissionError(
+                f"{key} lowering refused: {previous_mode!r} -> {next_mode!r}. "
+                "Safety mode is owner-controlled — use the dedicated /api/owner/safety-mode endpoint."
+            )
 
 
 def get_skills_repo_path() -> str:
@@ -660,6 +646,8 @@ def _coerce_setting_value(key: str, value):
         return normalize_runtime_mode(value)
     if key == "OUROBOROS_UPDATE_CHANNEL":
         return normalize_update_channel(value)
+    if key == "OUROBOROS_SUBAGENTS_MODE":
+        return normalize_subagents_mode(value)
     if key == "OUROBOROS_CONTEXT_MODE":
         return normalize_context_mode(value)
     if key in OPTIONAL_BOUND_LEGACY:  # document spelling: "unlimited" or a positive int; a typo is finite
@@ -667,7 +655,7 @@ def _coerce_setting_value(key: str, value):
     # Trim so whitespace-only config is not treated as a configured skills repo.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
-    if key == "MCP_SERVERS":
+    if isinstance(default, list):  # MCP_SERVERS, OUROBOROS_CONNECTIONS: a list of row objects
         if isinstance(value, str):
             try:
                 value = json.loads(value)
@@ -697,6 +685,11 @@ def verify_settings_integrity() -> str | None:
     return _settings_integrity.verify_settings_integrity(SETTINGS_PATH)
 
 
+from ouroboros.safety_config import (  # noqa: F401 -- the settings API stays config.*
+    get_safety_mode, safety_configuration, _guard_safety_configuration, _migrate_consciousness_safety,
+    normalize_consciousness_safety,
+)
+
 log = logging.getLogger(__name__)
 
 # Retired-key combinations reported by normalize_settings_raw each get one notice.
@@ -721,7 +714,8 @@ def normalize_settings_raw(raw: dict) -> dict:
 
     A settings document on disk is written by whatever release the owner last used, so a
     reader's first job is to translate it into today's vocabulary: coerce every known key to
-    the type its default declares, fold the deprecated per-subsystem retention keys into the
+    the type its default declares, seed absent consciousness coverage from saved owner coverage,
+    fold the deprecated per-subsystem retention keys into the
     unified one, seed the shared review-cycle cap from the retired acceptance-pass count,
     turn the former review lanes into reviewer rows of the subagent catalog (``review_pool_migration``:
     pure, once per document digest; one that cannot finish keeps its keys for the owner's next save),
@@ -744,7 +738,7 @@ def normalize_settings_raw(raw: dict) -> dict:
     (``retired_key_sets_seen`` -> ``server_maintenance._startup_retired_settings_notice``)."""
     from ouroboros.retention import LEGACY_RETENTION_KEYS, pick_legacy_retention_seed
 
-    loaded = coerce_settings_raw(raw)
+    loaded = normalize_consciousness_safety(coerce_settings_raw(raw))
     # Prefer a CUSTOMIZED legacy retention value so a rename never orphans it; an
     # all-defaults file collapses to the unified default.
     if "OUROBOROS_GC_RETENTION_DAYS" not in loaded:
@@ -795,8 +789,9 @@ def serialize_settings(settings: dict) -> str:
     return json.dumps(settings, ensure_ascii=False, indent=2)
 
 
-def load_settings() -> dict:
-    fd = _acquire_settings_lock()
+def load_settings(*, migrate: bool = False) -> dict:
+    """A read takes no lock file and writes nothing; ``migrate`` (boot, onboarding) persists the compatibility upgrades."""
+    fd = _acquire_settings_lock() if migrate else None
     try:
         return load_settings_lock_held(_settings_lock_held=fd is not None)
     finally:
@@ -804,24 +799,21 @@ def load_settings() -> dict:
 
 
 def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
-    """The same read, for a caller that ALREADY holds the settings lock. The lock is not
-    re-entrant, so a nested ``load_settings()`` burns the full 2s timeout and then reads
-    anyway; a write-path precondition needs the effective settings as of NOW, so it reads here.
-
-    ``load_settings`` passes whether it actually acquired the best-effort read lock. Direct
-    callers are lock-owning write preconditions, so the default remains true. A raw context
-    compatibility migration is persisted only while that lock is held; the write contains
-    the raw mapping plus the normalized pair, never a defaults-merged settings document."""
+    """The same read, for a caller that ALREADY holds the (not re-entrant) settings lock: a write
+    precondition needs the effective settings as of NOW. Only under that lock (a writer, or a
+    ``load_settings(migrate=True)`` that acquired it) are the raw compatibility upgrades persisted: the
+    raw mapping plus the normalized pair, never a defaults-merged document; a lock-free read writes nothing."""
     from ouroboros.review_pool_migration import apply_at_read_seam, environment_overridable_keys
     from ouroboros.server_runtime import SAVED_MODEL_ROLE_KEYS, authored_model_slots, propose_unauthored_model_slots
     loaded: dict = {}
     try:
-        raw = _settings_integrity.read_settings_json_verified(SETTINGS_PATH)
+        raw = _settings_integrity.read_settings_json_verified(SETTINGS_PATH, behind_writer=not _settings_lock_held)
     except SettingsIntegrityError:
         raise
     except Exception:
         raw = None
     if isinstance(raw, dict):
+        raw = _migrate_consciousness_safety(raw, lock_held=_settings_lock_held)
         raw = normalize_and_persist_context_mode_compat(
             raw,
             settings_path=SETTINGS_PATH,
@@ -845,7 +837,7 @@ def load_settings_lock_held(*, _settings_lock_held: bool = True) -> dict:
             continue
         if raw_env == "" and key not in OPTIONAL_BOUND_LEGACY:
             continue
-        if key in loaded and key not in env_wins and settings.get(key) not in {None, ""}:
+        if key in loaded and key not in env_wins and settings.get(key) not in (None, "", []):  # a list row setting too
             continue
         settings[key] = _coerce_setting_value(key, raw_env)
         env_authored.add(key)
@@ -882,7 +874,8 @@ def save_settings(
         if onboarding_safety_default:
             wants_light = str(settings.get("OUROBOROS_SAFETY_MODE", "") or "").strip().lower() == "light"
             if wants_light and not SETTINGS_PATH.exists():
-                authored_keys = ("OUROBOROS_SAFETY_MODE",)
+                settings = {**settings, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full"}
+                authored_keys = ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE")
                 allow_safety_lowering = True
         settings = prepare_settings_for_persist(
             settings, authored_keys=authored_keys,

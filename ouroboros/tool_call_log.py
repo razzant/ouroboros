@@ -44,6 +44,12 @@ def current_tool_call_id() -> str:
     return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
 
 
+def current_args_source() -> Dict[str, Any]:
+    """This call's persisted dispatch-input ref and status; ``{}`` outside a loop call."""
+    active = _ACTIVE_CALL.get() or {}
+    return {key: active[key] for key in ("args_source_ref", "args_source_status") if key in active}
+
+
 @contextmanager
 def invocation_scope(invocation):
     token = _ACTIVE_CALL.set(invocation)

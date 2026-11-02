@@ -5,7 +5,9 @@
 # and the existing manual/tag checks stay exactly as they were.
 #
 # The complete lane runs as eight shards on eight runners. Every shard collects and
-# guards the WHOLE lane, then executes every eighth node of the sorted node ids;
+# guards the WHOLE lane, then executes its slice: nodes packed by the durations the
+# previous run recorded when ci.yml's shard plan carries them, else every eighth node
+# of the sorted node ids;
 # `ui-manifest` collects the lane once with no shard option, and the `ui-smoke`
 # aggregator fails unless the shards' evidence proves that each manifest node ran
 # in exactly the shard it belongs to. A node no shard executed is named there.
@@ -55,6 +57,12 @@ jobs:
     needs: scope
     if: ${{ needs.scope.outputs.run_browser == 'true' }}
     runs-on: ubuntu-latest
+    # The shard plan is read from this run's artifacts; the accepted-failure check of
+    # scripts/ci_retry.py reads issue label events.
+    permissions:
+      contents: read
+      actions: read
+      issues: read
     # Above the sum of the step ceilings below: a step ceiling fails its step and
     # the evidence steps still run, while the job ceiling cancels them.
     timeout-minutes: 170
@@ -71,6 +79,28 @@ jobs:
           interpreter: shipped  # the SQLite and journal mode fresh installs run
           install-project: 'false'
         id: setup_python
+      # ci.yml's `shard-plan` publishes this run's weight table. The manual wrapper's run has
+      # none: then every shard and the manifest keep the positional split. An unreadable
+      # API fails this step, never one shard silently packing differently from the others.
+      - name: Fetch this run's shard plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          id="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?name=shard-plan-$RUN_ID" --jq '.artifacts[0].id // empty')"
+          if [[ -z "$id" ]]; then
+            echo "This run published no shard plan; the lane keeps the positional split."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/shard-plan"
+          gh api "repos/$REPO/actions/artifacts/$id/zip" > "$RUNNER_TEMP/shard-plan.zip"
+          unzip -o -q "$RUNNER_TEMP/shard-plan.zip" -d "$RUNNER_TEMP/shard-plan"
+          if [[ -f "$RUNNER_TEMP/shard-plan/ci-durations.json" ]]; then
+            echo "OUROBOROS_CI_DURATIONS=$RUNNER_TEMP/shard-plan/ci-durations.json" >> "$GITHUB_ENV"
+          fi
       # tests/test_separate_ui_browser.py runs the interface behind a real Caddy. The official
       # release asset is pinned by the SHA-256 GitHub publishes for it (its SHA-512 is the line in
       # the release's signed caddy_<version>_checksums.txt). A missing Caddy is no tolerated skip:
@@ -104,19 +134,23 @@ jobs:
         run: python -m playwright install --with-deps chromium webkit
       # `--session-timeout` stops the session BETWEEN tests, so a slow shard still
       # ends through its session finish: the guard names the nodes it did not run
-      # and the evidence is exported. The step ceiling bounds a test that hangs;
-      # the incremental journal names it. There is no per-test timeout.
+      # and the evidence is exported. The per-test timeout (SIGALRM on this Linux
+      # runner) fails only a test that hangs. scripts/ci_retry.py retries each failed
+      # test once outside the lane guard and records FLAKY tests in verdict.json; the
+      # `ui-smoke` reconciliation reads that verdict, never a hidden red.
       - name: Run complete host UI lane with collection and availability guards
         id: ui_tests
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
         timeout-minutes: 90
         env:
+          GH_TOKEN: ${{ github.token }}
           OUROBOROS_RUN_UI_SMOKE: "1"
           OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
           SEPARATE_UI_CADDY: ${{ steps.install_caddy.outputs.path }}
         run: >-
-          python -I -S scripts/safe_test.py -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short
+          python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
+          python -I -S scripts/safe_test.py -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short --timeout=900
           --ui-browser-shard=${{ matrix.shard }}/8 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
@@ -204,6 +238,10 @@ jobs:
     if: ${{ needs.scope.outputs.run_browser == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The shard plan is read from this run's artifacts.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -212,6 +250,28 @@ jobs:
         with:
           interpreter: shipped  # the SQLite and journal mode fresh installs run
           install-project: 'false'
+      # ci.yml's `shard-plan` publishes this run's weight table. The manual wrapper's run has
+      # none: then every shard and the manifest keep the positional split. An unreadable
+      # API fails this step, never one shard silently packing differently from the others.
+      - name: Fetch this run's shard plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          id="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?name=shard-plan-$RUN_ID" --jq '.artifacts[0].id // empty')"
+          if [[ -z "$id" ]]; then
+            echo "This run published no shard plan; the lane keeps the positional split."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/shard-plan"
+          gh api "repos/$REPO/actions/artifacts/$id/zip" > "$RUNNER_TEMP/shard-plan.zip"
+          unzip -o -q "$RUNNER_TEMP/shard-plan.zip" -d "$RUNNER_TEMP/shard-plan"
+          if [[ -f "$RUNNER_TEMP/shard-plan/ci-durations.json" ]]; then
+            echo "OUROBOROS_CI_DURATIONS=$RUNNER_TEMP/shard-plan/ci-durations.json" >> "$GITHUB_ENV"
+          fi
       - name: Collect the complete host UI lane as the shard manifest
         id: ui_manifest
         env:

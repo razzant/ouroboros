@@ -21,7 +21,7 @@ OWNER_DELIVERY_TOOL_NAMES: frozenset[str] = frozenset({
 # child's sets below carry it for the child's own drafts only).
 COGNITIVE_MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
-    "update_scratchpad", "update_identity", "chat_history",
+    "update_scratchpad", "update_identity", "update_world", "chat_history",
     "memory_read", "memory_mark",
 })
 
@@ -33,7 +33,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "search_code", "query_code", "query_data", "plan_task",
     "run_command", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
-    "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
+    "vcs_read", "vcs_commit_reviewed", "commit_reviewed",
+    "github_read", "github_write",
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
     # One-shot deferred follow-up (W=A): core so a root task facing a typed wait
     # instant (e.g. a structurally unreachable review quorum with a known reset)
@@ -44,7 +45,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "integrate_delegated_patch",
     "wait_task", "wait_tasks", "get_task_result",
     # Serial addressed turns: wait for an unread mailbox entry without spending
-    # model rounds (slot held, clamped to the per-call ceiling, delivers nothing).
+    # model rounds (slot held for the requested window, delivers nothing).
     "await_messages", "continue_in_background", "pause_task", "resume_task", "continue_task",
     # D#7 soft-join child controls (siblings of tell_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
@@ -62,13 +63,13 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # enable_tools detour to route — though initial_tool_schemas exposes the full
     # set today, this makes the coupling explicit).
     "list_projects", "start_task", "tell_task",
-    "move_to_project",
+    "move_to_project", "close_project",
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
     "generate_image", "list_image_models", "recover_image",
     *OWNER_DELIVERY_TOOL_NAMES,
     "escalate",
@@ -101,7 +102,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
     "read_file", "list_files", "search_code", "query_code", "query_data",
-    "vcs_status", "vcs_diff",
+    "vcs_read", "github_read",
     # Memory: a child reads, writes knowledge notes and marks in its own name (the
     # host signs both with its focus) and publishes chronicle pages and parts only as
     # drafts signed with its focus (it is not the integrating mind, so tools/chronicle.py
@@ -135,10 +136,22 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
-    # Reads this child's own callable catalog (the name-miss answer points here);
-    # it grants nothing, unlike enable_tools, which stays Nano schema selection.
-    "list_available_tools", "list_image_models",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    # This child's own callable catalog (the name-miss answer points here) and the loader
+    # of a permitted schema a route's ceiling or Nano left out; neither grants a tool.
+    "list_available_tools", "enable_tools", "list_image_models",
+})
+
+# A host-minted silence diagnostic (#1376, ``ouroboros/work_diagnostics.py``) reads
+# the observed work and may request the existing lifecycle controls on that one
+# source. It writes no product, delegates nothing and discovers no extension/MCP
+# tool; inherited ceilings still intersect this set at schema and dispatch.
+TASK_DIAGNOSTIC_TOOL_NAMES: frozenset[str] = frozenset({
+    "read_file", "list_files", "search_code", "query_code", "query_data", "vcs_read",
+    "inspect_harness", "chat_history", "recent_tasks", "get_task_result", "peek_task",
+    "tree_read", "knowledge_read", "knowledge_list", "memory_read", "wait_task", "wait_tasks",
+    "await_messages", "forward_to_worker", "pause_task", "resume_task", "continue_task",
+    "finish_task", "list_available_tools", "switch_model",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -146,8 +159,10 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # Mutative ("acting") subagents may write inside their assigned write root
 # (isolated self_worktree / shared external_workspace) and run shell/services there.
 # They explicitly CANNOT commit the live body (commit_reviewed /
-# vcs_commit_reviewed), run runtime control, touch the skills lifecycle, enable
-# tools, or write identity or scratchpad (update_identity / update_scratchpad).
+# vcs_commit_reviewed), run runtime control, touch the skills lifecycle, grant
+# themselves tools (enable_tools only loads a schema they may already call), or
+# write identity, the world map or scratchpad (update_identity / update_world /
+# update_scratchpad).
 # Knowledge notes and memory marks they may write in their own name: the host
 # signs both with the child's focus. chronicle_write publishes only their drafts of
 # pages and parts, which the integrating mind accepts or rejects; a note, correction
@@ -163,7 +178,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # asking the parent to respawn it (BIBLE P5). Nothing about the sandbox changes.
     "switch_model",
     "read_file", "list_files", "search_code", "query_code", "query_data",
-    "vcs_status", "vcs_diff",
+    "vcs_read", "github_read",
     "write_file", "edit_text",
     "apply_patch", "edit_batch",
     "run_command", "run_script",
@@ -188,8 +203,8 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_message",
     "integrate_delegated_patch",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
-    "ocr_pdf", "youtube_transcript", "extract_video_frames",
-    "list_available_tools", "list_image_models", "generate_image", "recover_image",
+    "ocr_pdf", "extract_pdf_text", "youtube_transcript", "extract_video_frames",
+    "list_available_tools", "enable_tools", "list_image_models", "generate_image", "recover_image",
 })
 
 def schema_selection_tools_for_context(ctx: object) -> frozenset[str]:
@@ -216,8 +231,8 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_files",
     "search_code", "query_code", "query_data", "recent_tasks",
     "web_search", "chat_history",
-    "vcs_status", "vcs_diff", "service_status", "service_logs",
-    "get_task_result", "list_projects", "memory_read",
+    "vcs_read", "service_status", "service_logs",
+    "get_task_result", "list_projects", "memory_read", "search_ui_translations",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -358,7 +373,8 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
     RESULT_VIEW_HEAD_ARG, RESULT_VIEW_TAIL_ARG,
     "max_chars", "max_lines", "start_char", "start_line",
-    "source_start_char", "source_end_char", "offset", "limit",
+    "source_start_char", "source_end_char", "offset", "limit", "tail_lines",
+    "from", "to", "start", "after_seq",  # chronicle row bounds and continuation pages
 })
 
 # Tools whose own affordance IS paging: selects the recovery WORDING of a
@@ -448,8 +464,9 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "maintain_harness",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
-    "move_to_project", "delegate_start", "initiate_presence",
+    "move_to_project", "close_project", "delegate_start", "initiate_presence",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
+    "set_task_retention",
     # writing files, running processes, integrating patches
     "write_file", "edit_text", "apply_patch", "edit_batch",
     "generate_image", "recover_image",
@@ -463,13 +480,14 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     # skill payload; an orphan capture may belong to an unrelated earlier task,
     # so a read-only-children rule alone does not cover this path
     "integrate_delegated_patch", "integrate_subagent_patch",
-    # pushes docs/evolution.json to the public dashboard through the GitHub API
+    # writes a local task artifact; Observe does not grant general file writes
     "generate_evolution_stats",
-    # the world beyond the repository: forms, skills, project notes
+    # the world beyond the repository: forms, skills, project notes, the owner's interface wording
+    # and the update description shown to the owner
     "browser_action", "submit_skill_to_hub", "toggle_skill", "skill_owner_action",
     "skill_install", "skill_update",
-    "journal_write", "workpad_write",
-    "create_github_issue", "comment_on_issue", "comment_on_pr", "close_github_issue", "pr_merge",
+    "journal_write", "workpad_write", "pin_ui_translation", "record_update_description",
+    "github_write", "pr_merge",
 })
 
 
@@ -483,7 +501,20 @@ def substantive_tool_calls(calls: object) -> list:
             and not (call.get("completion_control") and not call.get("is_error"))]
 
 
+# Writes whose successful result is only a receipt of the write: the page, notes, marks and
+# addressed messages a finishing response carries with its answer (owner decision 27.10, "answer
+# first, then chronicle and forwards"). Any other answer from them, and every other tool, is read
+# before a finish; ``update_identity``/``update_world`` stay out: their ok answers can report an
+# edit that did not apply.
+COMPLETION_RECEIPT_TOOLS = frozenset({
+    "chronicle_write", "knowledge_write", "memory_mark", "update_scratchpad", "journal_write",
+    "workpad_write", "update_focus", "tree_note", "tell_task", "forward_to_worker",
+})
+
+
 def completion_observation_calls(calls: object) -> list:
-    """Results a finish must observe; only successful schema bookkeeping is exempt."""
-    return [call for call in substantive_tool_calls(calls)
-            if call.get("is_error") or call.get("tool") not in {"enable_tools", "list_available_tools"}]
+    """Results a finish must observe. Exempt: successful schema bookkeeping, and a receipt
+    write that answered exactly ``OK`` (a warning or a partial write is read first)."""
+    return [call for call in substantive_tool_calls(calls) if call.get("is_error") or not (
+        call.get("tool") in {"enable_tools", "list_available_tools"}
+        or (call.get("tool") in COMPLETION_RECEIPT_TOOLS and call.get("tool_result_code") == "OK"))]

@@ -141,7 +141,7 @@ def test_snapshot_hash_parity_and_full_public_control_views(tmp_path):
 
 def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path, monkeypatch):
     from ouroboros.marketplace.fetcher import stage
-    from ouroboros.skill_review_packs import _build_skill_file_packs
+    from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.skill_exec import _handle_list_skills
     from ouroboros.tools.review_file_pack import build_touched_file_pack
@@ -157,9 +157,9 @@ def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path
     assert [row["name"] for row in json.loads(_handle_list_skills(ctx))["skills"]] == ["demo"]
     row = json.loads(_handle_list_skills(ctx, name="demo"))["skills"][0]
     assert not row["load_error"] and row["content_hash"] == loaded.content_hash
-    packs = _build_skill_file_packs(payload, expected_content_hash=loaded.content_hash)
-    assert "### .env.example" in "\n".join(packs)
-    assert content.decode() in "\n".join(packs)
+    pack = payload_pack(frozen_payload_files(payload))
+    assert "### .env.example" in pack
+    assert content.decode() in pack
     touched, omitted = build_touched_file_pack(payload, [".env.example"])
     assert not omitted and "APP_NAME=example" in touched
     snapshot = capture_skill_publish_snapshot(loaded)

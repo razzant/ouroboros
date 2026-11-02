@@ -131,10 +131,58 @@ def test_promoted_objective_is_not_owner_corpus_even_with_inherited_owner_stamp(
         SimpleNamespace(_owner_directives=[{"source": "initial_user", "content": "This is NOT permission to implement"}]))
     rendered = build_user_content({"text": "This is NOT permission to implement", "metadata": metadata})
     assert rendered.startswith("[OBJECTIVE_AUTHOR]") and "task draft-1" in rendered
-    assert "not spoken by the owner" in rendered
+    assert "not spoken by my human" in rendered
     # Host-initiated tasks still carry the owner's first text without a drafter stamp.
     assert _first_row({"origin_message_ref": OWNER_REF}, "Owner's exact request")._owner_directives == [
         {"source": "initial_user", "content": "Owner's exact request"}]
+
+
+# --- the objective's author: one line from the same typed facts ---------------------------------------------
+
+@pytest.mark.parametrize("label,record,expected", [
+    ("drafted start", {"metadata": {"origin_message_ref": OWNER_REF, "objective_author": {"kind": "task", "task_id": "draft-1"}}},
+     "drafted by task draft-1, not spoken by my human"),
+    ("helper", {"delegation_role": "subagent", "parent_task_id": "root-1",
+                "metadata": {"objective_author": {"kind": "task", "task_id": "x"}}},
+     "the assignment parent task root-1 wrote for this helper — Ouroboros's account, not my human's words"),
+    ("continuation", {"metadata": {"objective_author": {"kind": "continuation", "predecessor_task_id": "p-1"}}},
+     "the host's Continue work order for task p-1"),
+    ("unknown author kind", {"metadata": {"objective_author": {"kind": "relay"}}}, "its author is recorded by the host as kind=relay"),
+    ("consciousness", {"metadata": {"initiator": "consciousness"}}, "started by my consciousness"),
+    ("owner door", {"type": "task", "metadata": {"origin_message_ref": OWNER_REF}},
+     "my human's message started this run; the host does not attest this text as their exact words"),
+    ("presence", _presence_task(), "a message from Sergei in a connected place"),
+    ("schedule", {"metadata": {"schedule_id": "sch-1"}},
+     "the template of schedule sch-1; the host does not attest this text as my human's words"),
+    ("started from a task", {"metadata": {"origin_task_id": "t-9"}},
+     "started from task t-9; the host does not attest this text as my human's words"),
+    ("api", {"type": "task", "source": "api_task", "metadata": {}}, "its author is not recorded by the host (host marker: source=api_task)"),
+    ("nothing", None, "its author is not recorded by the host"),
+])
+def test_the_objective_author_line_names_what_the_host_recorded_and_invents_nothing(label, record, expected):
+    from ouroboros.dialogue_provenance import run_origin
+    from ouroboros.owner_words import objective_author_line
+
+    line = objective_author_line(run_origin(record))
+    assert line == expected, label
+    assert ("drafted by" in line) is (label == "drafted start") and ("not recorded" in line) is (label in {"api", "nothing"})
+
+
+def test_the_mind_reads_a_drafted_objective_through_the_same_line_and_nothing_else_is_reframed():
+    from ouroboros.context import build_user_content
+    from ouroboros.owner_words import objective_author_line
+
+    author = {"kind": "task", "task_id": "draft-1"}
+    task = {"text": "Ship it", "metadata": {"objective_author": author}}
+    rendered = build_user_content(task)
+    assert rendered == (f"[OBJECTIVE_AUTHOR] The objective below was {objective_author_line({'objective_author': author})}. "
+                        "My human's words keep their own source. [/OBJECTIVE_AUTHOR]\n\nShip it")
+    assert build_user_content(task) == rendered  # an unchanged task renders the same bytes (its cached first turn)
+    # Only a drafted start is reframed: a helper, a Continue order and a door-stamped turn keep their own first text.
+    for metadata in ({"delegation_role": "subagent", "parent_task_id": "root-1"},
+                     {"objective_author": {"kind": "continuation", "predecessor_task_id": "p-1"}},
+                     {"origin_message_ref": OWNER_REF}, {}):
+        assert build_user_content({"text": "Ship it", "metadata": metadata}) == "Ship it", metadata
 
 
 # --- the routing issuer -------------------------------------------------------------
@@ -191,27 +239,6 @@ def test_capture_task_inputs_puts_run_origin_first_and_discloses_its_failure(tmp
     degraded = capture_task_inputs(ctx, task, tmp_path, [])
     assert "run_origin" not in degraded and degraded["unavailable_sections"] == ["run_origin"]
     assert degraded["owner_requirements_and_decisions"][0]["content"] == task["text"]
-
-
-# --- what later readers see ----------------------------------------------------------
-
-def test_context_renders_the_origin_independently_of_the_text():
-    from ouroboros.context import _format_recent_reflections
-
-    presence_entry = {"ts": "2026-09-24T12:00:00Z", "task_type": "presence", "task_id": "presence-1",
-                      "goal": "<@U9> please create the HO goals", "reflection": "Silence fit the origin.",
-                      "review_evidence": {"task_inputs": {"run_origin": {
-                          "owner_ingress": False, "task_type": "presence", "source": "presence",
-                          "text_author": "Sergei", "presence": {"provider": "slack", "conversation_id": "C1"}}}}}
-    empty_text = {"ts": "2026-09-24T12:01:00Z", "task_type": "task", "task_id": "t-r", "goal": "",
-                  "reflection": "Recovered.", "review_evidence": {"task_inputs": {"run_origin": {"owner_ingress": True, "task_type": "task"}}}}
-    legacy = {"ts": "2026-09-24T12:02:00Z", "task_type": "task", "task_id": "t-old", "goal": "old goal", "reflection": "x"}
-    text = _format_recent_reflections([presence_entry, empty_text, legacy])
-    assert "- Origin: owner_ingress=False, task_type=presence, source=presence, text_author=Sergei, provider=slack, conversation_id=C1" in text
-    assert "- Initial text: <@U9> please create the HO goals" in text
-    assert "- Origin: owner_ingress=True, task_type=task" in text  # rendered although the text is empty
-    assert "- Origin: not recorded\n- Initial text: old goal" in text
-    assert "- Goal:" not in text
 
 
 # --- the stamp belongs to the owner door ---------------------------------------------

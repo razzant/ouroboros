@@ -323,7 +323,7 @@ function createCodeBlock(source, language = '') {
     label.textContent = language || 'text';
     const copy = document.createElement('button');
     copy.type = 'button';
-    copy.className = 'md-code-copy';
+    copy.className = 'btn btn-ghost btn-sm md-code-copy';
     copy.dataset.codeCopy = '';
     copy.setAttribute('aria-label', tr('code.copy_code', 'Copy code'));
     copy.title = tr('code.copy_code', 'Copy code');
@@ -733,10 +733,17 @@ async function copyCode(code) {
    edges follow the actually hidden columns, as `scroll_fade.js` does for the
    vertical scroll bodies, and only while it scrolls is its wrapper a named
    region the keyboard can focus and scroll. */
+function measureTableOverflow(wrap) {
+    if (!wrap || wrap.isConnected === false) return null;
+    return { wrap, hidden: wrap.scrollWidth - wrap.clientWidth, scrolled: Math.abs(wrap.scrollLeft) };
+}
 function markTableOverflow(wrap) {
-    if (!wrap || wrap.isConnected === false) return;
-    const hidden = wrap.scrollWidth - wrap.clientWidth;
-    const scrolled = Math.abs(wrap.scrollLeft);
+    const seen = measureTableOverflow(wrap);
+    if (seen) applyTableOverflow(seen);
+}
+// Measured apart from the marks: a batch measures every table, then marks every one, so a write never makes the next
+// table's read lay the page out again.
+function applyTableOverflow({ wrap, hidden, scrolled }) {
     const scrolls = hidden > 1;
     wrap.toggleAttribute('data-scroll-start', scrolls && scrolled > 1);
     wrap.toggleAttribute('data-scroll-end', scrolls && hidden - scrolled > 1);
@@ -781,7 +788,8 @@ export function bindMarkdownTables(rootEl) {
     if (bound) return bound;
     // The wrapper resizes with its column; the table with its own content.
     const sizes = new ResizeObserver((entries) => {
-        for (const entry of entries) markTableOverflow(entry.target.closest('.md-table-wrap'));
+        const wraps = new Set(entries.map((entry) => entry.target.closest('.md-table-wrap')).filter(Boolean));
+        [...wraps].map(measureTableOverflow).filter(Boolean).forEach(applyTableOverflow);
     });
     const observe = (wrap) => {
         sizes.observe(wrap);

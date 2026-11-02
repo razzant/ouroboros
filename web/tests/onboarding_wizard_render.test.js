@@ -307,80 +307,346 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
     }, { fetch, location });
 });
 
-test('a 503 settings_save_timeout keeps the wizard open with "Check status", which proceeds once the probe says the save landed', async () => {
-    // The completion POST runs through the shared bounded settings writer:
-    // past twice the document-lock bound it answers 503 `settings_save_timeout`
-    // with `saved: null` — the save is STILL RUNNING in the server, so neither
-    // "saved" nor "nothing saved" is true. The wizard must not offer a blind
-    // retry (a second write over an unknown first); it re-reads the readiness
-    // probe on request and proceeds exactly as a receipt would once it passes.
-    const summaryFirst = {
-        ...BOOTSTRAP,
-        stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
-        initialState: { ...BOOTSTRAP.initialState, openrouterKey: 'sk-or-v1-abcdefghijklmnop' },
-    };
-    const requests = [];
-    // The summary step's Language control reads the translation memory when it mounts (once per
-    // page; settings_language.test.js pins that). This test is about the completion write, so the
-    // memory read is left out of the request list it asserts.
-    const calls = { filter: (fn) => requests.filter(fn) };
-    // The two passive reads the summary makes for itself (language, starter skills) are not the completion story.
-    Object.defineProperty(calls, 'list', { get: () => requests.filter((call) => !PASSIVE_READS.has(call)) });
-    const fetch = async (url, init = {}) => {
-        requests.push(`${init.method || 'GET'} ${String(url)}`);
-        if (String(url) === '/api/onboarding/complete') {
-            return {
-                ok: false, status: 503, text: async () => '',
-                json: async () => ({
-                    error: 'the settings save is still running in the server after 60s and was left to finish on its own; reload Settings to see what landed',
-                    code: 'settings_save_timeout', saved: null,
-                }),
-            };
-        }
-        if (String(url) === '/api/onboarding') {
-            return { ok: true, status: 204, text: async () => '', json: async () => { throw new Error('no body'); } };
-        }
-        return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
-    };
-    const replaced = [];
-    const location = {
-        origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding',
-        replace: (href) => replaced.push(href),
-    };
-    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+// The completion endpoint as an unknown save meets it. Every POST records the attempt id it carried and
+// answers `posted` (a function of the POST's number; an Error is a reply that never arrived); `GET ?attempt=<id>`
+// answers `attempts[id]`, by
+// default "not confirmed". The readiness probe always answers 204, as it does on any install whose provider
+// was saved before: exactly the answer that used to confirm a save it knew nothing about. A call for which
+// `server.hold(call)` is true waits for `server.release(prefix)`, and is answered as things stand then.
+const SAVE_TIMEOUT = { status: 503, body: { code: 'settings_save_timeout', saved: null,
+    error: 'the settings save is still running in the server after 60s and was left to finish on its own; reload Settings to see what landed' } };
+const receipt = (runtimeMode, restartRequired) => ({ ok: true, status: 'saved', runtime_mode: runtimeMode,
+    restart_required: restartRequired, preset: { applied: false, reason: 'not_requested', harnesses: [], receipt: {} } });
+const SUMMARY_FIRST = {
+    ...BOOTSTRAP,
+    stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
+    initialState: { ...BOOTSTRAP.initialState, openrouterKey: 'sk-or-v1-abcdefghijklmnop' },
+};
+const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 
-    await withWizard(summaryFirst, 'save=timeout', async ({ doc }) => {
+function completionServer({ posted = SAVE_TIMEOUT, attempts = {}, language = null, starter = {} } = {}) {
+    const server = { requests: [], sent: [], bodies: [], attempts, replaced: [], held: [], hold: () => false };
+    const answer = (status, body) => ({ ok: status >= 200 && status < 300, status, text: async () => '', json: async () => body });
+    server.fetch = async (url, init = {}) => {
+        const call = `${init.method || 'GET'} ${String(url)}`;
+        if (!PASSIVE_READS.has(call)) server.requests.push(call);
+        if (call === 'POST /api/onboarding/complete') server.bodies.push(JSON.parse(init.body));
+        if (call === 'POST /api/onboarding/complete') server.sent.push(server.bodies.at(-1).attempt_id);
+        if (server.hold(call)) await new Promise((go) => server.held.push({ call, go }));
+        if (call === 'POST /api/onboarding/complete') {
+            const reply = typeof posted === 'function' ? posted(server.sent.length) : posted;
+            if (reply instanceof Error) throw reply;
+            return answer(reply.status, reply.body);
+        }
+        const asked = /^\/api\/onboarding\/complete\?attempt=(.+)$/.exec(String(url));
+        if (asked) return answer(200, server.attempts[decodeURIComponent(asked[1])] || { saved: null });
+        if (String(url) === '/api/onboarding') return { ok: true, status: 204, text: async () => '', json: async () => { throw new Error('no body'); } };
+        if (String(url) === '/api/ui/i18n/language' && language) return answer(...language.shift());
+        if (String(url) === '/api/onboarding/starter-skills') return answer(200, starter);
+        return answer(200, {});
+    };
+    server.location = {
+        origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding',
+        replace: (href) => server.replaced.push(href),
+    };
+    server.readBack = (index = -1) => `GET /api/onboarding/complete?attempt=${server.sent.at(index)}`;
+    server.release = (prefix) => server.held.splice(server.held.findIndex(({ call }) => call.startsWith(prefix)), 1)[0].go();
+    return server;
+}
+
+test('an unknown save keeps the draft; Check status reads back THIS attempt, which a ready older provider never confirms', async () => {
+    // The completion POST answered 503 `settings_save_timeout` (`saved: null`): whether the bytes landed is
+    // unknown, so a retry would be a second write. "Check status" used to accept the readiness probe's 204,
+    // which every reopened install already passes with its OLD provider, and left the wizard on a save
+    // nobody had seen land. It now asks about the attempt id this save carried.
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=unknown-not-confirmed', async ({ doc }) => {
         doc.getElementById('next-btn').fire('click');   // "Start Ouroboros"
         await settle();
-        assert.deepEqual(calls.list, ['POST /api/onboarding/complete']);
-        const html = doc.getElementById('root').innerHTML;
-        assert.match(html, /is unknown — the save is still running/);
-        assert.match(html, /id="check-save-btn"[^>]*>Check status</);
+        assert.deepEqual(server.requests, ['POST /api/onboarding/complete']);
+        assert.match(server.sent[0], /^[0-9a-f]{32}$/, 'the attempt id is made before sending');
+        let html = doc.getElementById('root').innerHTML;
+        assert.match(html, /The save result is unknown\. Your draft has not been discarded\. Use &quot;Check status&quot; to read the result of this save\./);
+        assert.match(html, /class="footer-copy">The last save did not return a confirmed result\.</);
         assert.doesNotMatch(html, /Saving\.\.\./, 'the wizard is not stuck on Saving...');
-        assert.equal(replaced.length, 0, 'an unknown save is not announced as a completion');
-        // "Check status" is the ONE primary action while the outcome is
-        // unknown; the re-submit stays offered, but as an explicit secondary
-        // "Retry save" — the default "Start Ouroboros" beside it re-POSTed a
-        // second write over the first (rc.15 review MINOR 3).
-        assert.match(html, /class="btn btn-primary" id="check-save-btn"/, 'Check status is the primary action');
-        assert.match(html, /class="btn btn-secondary" id="next-btn"[^>]*>Retry save</, 'the retry is explicit and secondary');
+        // "Check status" is the ONE primary action while the outcome is unknown; the re-submit stays offered,
+        // as an explicit secondary "Retry save" (rc.15 review MINOR 3).
+        assert.match(html, /class="btn btn-primary" id="check-save-btn"[^>]*>Check status</);
+        assert.match(html, /class="btn btn-secondary" id="next-btn"[^>]*>Retry save</);
         assert.equal((html.match(/btn-primary/g) || []).length, 1, 'exactly one primary action');
-
-        doc.getElementById('next-btn').fire('click');   // the explicit retry path stays reachable
-        await settle();
-        assert.deepEqual(calls.list, ['POST /api/onboarding/complete', 'POST /api/onboarding/complete']);
-        assert.match(doc.getElementById('root').innerHTML, /class="btn btn-primary" id="check-save-btn"/);
 
         doc.getElementById('check-save-btn').fire('click');
         await settle();
-        assert.deepEqual(calls.list, ['POST /api/onboarding/complete', 'POST /api/onboarding/complete', 'GET /api/onboarding']);
-        // 204 = the readiness gate passes: the transaction landed. The plain
-        // browser shell proceeds as it does on a receipt (no restart needed —
-        // the runtime mode the wizard holds is the one the page loaded with).
-        assert.deepEqual(replaced, ['/']);
-    }, { fetch, location });
+        assert.deepEqual(server.requests, ['POST /api/onboarding/complete', server.readBack(0)]);
+        assert.deepEqual(server.replaced, [], 'an unconfirmed save is never announced as a completion');
+        html = doc.getElementById('root').innerHTML;
+        assert.match(html, /This save is not confirmed\. Your draft remains here\. You can check again or choose Retry save\./);
+        assert.match(html, /class="btn btn-primary" id="check-save-btn"/, 'the same check stays offered');
+    }, { fetch: server.fetch, location: server.location });
 });
 
+test('Retry save is a new attempt: the earlier one landing late never confirms it, stored is not done', async () => {
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=retry-new-attempt', async ({ doc }) => {
+        doc.getElementById('next-btn').fire('click');   // attempt A: unknown
+        await settle();
+        doc.getElementById('next-btn').fire('click');   // "Retry save": attempt B, also unknown
+        await settle();
+        assert.equal(server.sent.length, 2);
+        assert.notEqual(server.sent[0], server.sent[1], 'each explicit save carries its own id');
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('advanced', false) };   // A landed after all
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.equal(server.requests.at(-1), server.readBack(1), 'the check asks about B, the save the draft was sent with');
+        assert.deepEqual(server.replaced, [], 'A finishing does not confirm B');
+        assert.match(doc.getElementById('root').innerHTML, /This save is not confirmed\./);
+
+        server.attempts[server.sent[1]] = { saved: true };   // B's bytes are on disk; its post-commit steps still run
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.deepEqual(server.replaced, []);
+        assert.match(doc.getElementById('root').innerHTML,
+            /This save is stored\. Setup completion and restart requirements are not yet confirmed\./);
+
+        server.attempts[server.sent[1]] = { saved: true, receipt: receipt('advanced', false) };
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.deepEqual(server.replaced, ['/'], 'B\'s own receipt completes exactly as the reply would have');
+        assert.equal(server.requests.filter((call) => call === 'POST /api/onboarding/complete').length, 2, 'checking never re-sends');
+        assert.ok(!server.requests.includes('GET /api/onboarding'), 'readiness is never asked');
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('a confirmed restart comes from the attempt\'s own receipt, never from a guess about the draft', async () => {
+    // The draft keeps the runtime mode the page loaded with, which the old check read as "no restart needed".
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=confirmed-restart', async ({ doc }) => {
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('pro', true) };
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.deepEqual(server.replaced, [], 'a plain tab does not navigate past a pending restart');
+        const html = doc.getElementById('root').innerHTML;
+        assert.match(html, /Setup saved — restart to apply it/);
+        assert.match(html, /Ouroboros saved <code>pro<\/code> as the runtime mode for the next boot/);
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('an answer that never arrives is unknown, and a failure recorded for the attempt reads like its reply', async () => {
+    const lost = completionServer({ posted: new TypeError('Failed to fetch') });
+    await withWizard(SUMMARY_FIRST, 'save=reply-lost', async ({ doc }) => {
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        const html = doc.getElementById('root').innerHTML;
+        assert.match(html, /The answer to this save did not arrive \(Failed to fetch\)\. — The save result is unknown\./);
+        assert.match(html, /id="check-save-btn"/, 'a lost answer is checked, not presumed failed');
+    }, { fetch: lost.fetch, location: lost.location });
+
+    const refused = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=recorded-refusal', async ({ doc }) => {
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        refused.attempts[refused.sent[0]] = { saved: false, code: 'onboarding_state_changed',
+            error: 'The settings file changed while onboarding was being saved, so this save would have overwritten it; nothing was written. Try finishing again.' };
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        const html = doc.getElementById('root').innerHTML;
+        assert.match(html, /nothing was written\. Try finishing again\./);
+        assert.doesNotMatch(html, /id="check-save-btn"/, 'a known refusal leaves nothing to check');
+        assert.match(html, /class="btn btn-primary" id="next-btn"[^>]*>Start Ouroboros</);
+        assert.deepEqual(refused.replaced, []);
+    }, { fetch: refused.fetch, location: refused.location });
+});
+
+
+test('a late answer about the attempt Retry replaced never completes, fails or repaints the retry', async () => {
+    // "Check status" reads A; while that read is out the owner presses Retry save, so B is the save in
+    // progress. Whatever A's late answer says, it must not announce, apply the staged language, show its
+    // text, release Start or clear B: B's own answer decides, and the next check asks about B.
+    const lateAnswers = [
+        ['receipt', { saved: true, receipt: receipt('advanced', false) }],
+        ['refusal', { saved: false, code: 'onboarding_state_changed',
+            error: 'The settings file changed while onboarding was being saved, so this save would have overwritten it; nothing was written. Try finishing again.' }],
+        ['stored', { saved: true }],
+    ];
+    for (const [label, late] of lateAnswers) {
+        const server = completionServer();
+        const staged = { ...SUMMARY_FIRST, initialState: { ...SUMMARY_FIRST.initialState, languageChoice: 'en' } };
+        await withWizard(staged, `save=late-${label}`, async ({ doc }) => {
+            doc.getElementById('next-btn').fire('click');   // attempt A: unknown
+            await settle();
+            const [first] = server.sent;
+            server.hold = (call) => call === server.readBack(0) || call === 'POST /api/onboarding/complete';
+            doc.getElementById('check-save-btn').fire('click');   // the read of A is out
+            await settle();
+            doc.getElementById('next-btn').fire('click');   // "Retry save" meanwhile: attempt B, its answer out too
+            await settle();
+            assert.equal(server.sent.length, 2, label);
+            server.attempts[first] = late;
+            server.release(server.readBack(0));
+            await settle();
+            const html = doc.getElementById('root').innerHTML;
+            assert.deepEqual(server.replaced, [], `${label}: A never announces while B is out`);
+            assert.ok(!server.requests.includes('POST /api/ui/i18n/language'), `${label}: nor applies the language for A`);
+            assert.match(html, /id="next-btn" type="button" disabled>Saving\.\.\.</, `${label}: B is still the save in progress`);
+            assert.doesNotMatch(html, /nothing was written|This save is (?:stored|not confirmed)/, label);
+
+            server.hold = () => false;
+            server.release('POST /api/onboarding/complete');   // B's answer: unknown as well
+            await settle();
+            doc.getElementById('check-save-btn').fire('click');
+            await settle();
+            assert.equal(server.requests.at(-1), server.readBack(1), `${label}: the tracked attempt is B`);
+            assert.match(doc.getElementById('root').innerHTML, /This save is not confirmed\./, label);
+            assert.deepEqual(server.replaced, [], label);
+        }, { fetch: server.fetch, location: server.location });
+    }
+});
+
+test('while a confirmed answer is applied, Retry and Check are held, and completion is announced once', async () => {
+    // Between the receipt and the announcement the wizard awaits the staged language write and the agents
+    // step's release. As in the save path, Start/Retry stay held over both, so no new attempt can start
+    // under a completion that is already being announced.
+    const staged = { ...SUMMARY_FIRST, initialState: { ...SUMMARY_FIRST.initialState, languageChoice: 'en' } };
+    const server = completionServer({ language: [[200, { language: '', english: true, chosen: true, entries: {}, revision: 0, languages: [] }]] });
+    await withWizard(staged, 'save=held-while-applied', async ({ doc }) => {
+        doc.getElementById('next-btn').fire('click');   // attempt A: unknown
+        await settle();
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('advanced', false) };
+        server.hold = (call) => call === 'POST /api/ui/i18n/language';
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.match(doc.getElementById('root').innerHTML, /id="next-btn" type="button" disabled>Saving\.\.\.</);
+        doc.getElementById('next-btn').fire('click');   // Retry while the language write is out
+        doc.getElementById('check-save-btn').fire('click');   // and another check
+        await settle();
+        assert.deepEqual(server.requests, ['POST /api/onboarding/complete', server.readBack(0), 'POST /api/ui/i18n/language']);
+        server.release('POST /api/ui/i18n/language');
+        doc.getElementById('next-btn').fire('click');   // and again as that write answers
+        await settle();
+        assert.deepEqual(server.replaced, ['/'], 'announced exactly once');
+        assert.equal(server.requests.length, 3, 'no second save and no second read');
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('a newer Check status retires an older one\'s answer, so a receipt is acted on once', async () => {
+    const server = completionServer();
+    await withWizard(SUMMARY_FIRST, 'save=two-checks', async ({ doc }) => {
+        doc.getElementById('next-btn').fire('click');
+        await settle();
+        server.hold = (call) => call === server.readBack(0);
+        doc.getElementById('check-save-btn').fire('click');
+        doc.getElementById('check-save-btn').fire('click');
+        await settle();
+        assert.equal(server.held.length, 2);
+        server.attempts[server.sent[0]] = { saved: true, receipt: receipt('advanced', false) };
+        server.release(server.readBack(0));   // the older read answers first: retired
+        await settle();
+        assert.deepEqual(server.replaced, []);
+        server.release(server.readBack(0));
+        await settle();
+        assert.deepEqual(server.replaced, ['/']);
+    }, { fetch: server.fetch, location: server.location });
+});
+
+test('a retry refused while the earlier save still finishes keeps that save checkable; only its own values complete', async () => {
+    // A is stored (its bytes are on disk, its post-commit steps still run), so Retry B is refused with nothing
+    // written. The wizard says so and keeps A to check. A's receipt completes only the values A carried: once the
+    // owner edited the draft, it is reported as confirmed without completing what is shown now.
+    const settingsBusy = { status: 503, body: { code: 'settings_busy', saved: false,
+        error: 'another settings write is still in progress after 30s; nothing was written — try again' } };
+    const budgetFirst = { ...SUMMARY_FIRST, stepOrder: ['budget', 'summary',
+        ...BOOTSTRAP.stepOrder.filter((step) => !['budget', 'summary'].includes(step))] };
+    for (const edited of [false, true]) {
+        const server = completionServer({ posted: (count) => (count === 1 ? SAVE_TIMEOUT : settingsBusy) });
+        await withWizard(budgetFirst, `save=busy-retry-${edited}`, async ({ doc }) => {
+            doc.getElementById('next-btn').fire('click');   // Budget → Summary
+            doc.getElementById('next-btn').fire('click');   // "Start Ouroboros": attempt A, unknown
+            await settle();
+            const [first] = server.sent;
+            server.attempts[first] = { saved: true };
+            doc.getElementById('check-save-btn').fire('click');
+            await settle();
+            assert.match(doc.getElementById('root').innerHTML, /This save is stored\./);
+            if (edited) {
+                doc.getElementById('back-btn').fire('click');   // Summary → Budget
+                const total = doc.getElementById('total-budget');
+                total.value = '42';
+                total.fire('input');
+                doc.getElementById('next-btn').fire('click');   // Budget → Summary
+            }
+            doc.getElementById('next-btn').fire('click');   // "Retry save": attempt B, refused before writing
+            await settle();
+            assert.equal(server.sent.length, 2);
+            let html = doc.getElementById('root').innerHTML;
+            assert.match(html, /nothing was written — try again — This retry was not saved\. The earlier save may still be finishing; Check status reads that save\./);
+            assert.match(html, /class="btn btn-primary" id="check-save-btn"/, 'the earlier save stays checkable');
+            doc.getElementById('check-save-btn').fire('click');
+            await settle();
+            assert.equal(server.requests.at(-1), server.readBack(0), 'what is checked is A, the save that may still finish');
+            server.attempts[first] = { saved: true, receipt: receipt('advanced', false) };
+            doc.getElementById('check-save-btn').fire('click');
+            await settle();
+            html = doc.getElementById('root').innerHTML;
+            if (!edited) {
+                assert.deepEqual(server.replaced, ['/'], 'A carried exactly the values shown, so its receipt completes them');
+                return;
+            }
+            assert.deepEqual(server.replaced, [], 'A\'s receipt never completes values it did not carry');
+            assert.match(html, /The earlier save is confirmed, but it does not contain the values shown now\. Start Ouroboros to save them\./);
+            assert.match(html, /class="btn btn-primary" id="next-btn"[^>]*>Start Ouroboros</);
+            assert.doesNotMatch(html, /id="check-save-btn"/);
+        }, { fetch: server.fetch, location: server.location });
+    }
+});
+
+test('starter skills or hub trust changed after a stored save are values its receipt does not complete', async () => {
+    // The Summary's starter ticks and hub trust ride in the same POST as the settings. A is stored, the owner
+    // changes one of them, Retry B is refused before writing: A's receipt is reported without completing the
+    // draft, because A never carried the choice now shown.
+    const settingsBusy = { status: 503, body: { code: 'settings_busy', saved: false,
+        error: 'another settings write is still in progress after 30s; nothing was written — try again' } };
+    const starter = { groups: [{ category: 'research', items: [{ id: 'hub/notes', name: 'Notes', recommended: true },
+        { id: 'hub/papers', name: 'Papers' }] }], hub_rows: [{ id: 'ouroboros-hub', name: 'Ouroboros hub', part: 'official', trust: 'trusted' }] };
+    const changes = {
+        trust: { type: 'click', target: { closest: (selector) => (selector === '[data-starter-trust]'
+            ? { dataset: { starterTrust: 'ouroboros-hub', trust: 'review' } } : null) } },
+        tick: { type: 'change', target: { closest: (selector) => (selector === '[data-starter-item]'
+            ? { checked: false, dataset: { starterItem: 'hub/notes' }, closest: () => null } : null) } },
+    };
+    for (const [label, change] of Object.entries(changes)) {
+        const server = completionServer({ posted: (count) => (count === 1 ? SAVE_TIMEOUT : settingsBusy), starter });
+        const host = inertElement();   // the Summary's starter row mounts here on every render
+        const prepare = (doc) => {
+            const root = doc.getElementById('root');
+            root.querySelector = (selector) => (selector === '[data-starter-skills]' ? host : inertElement());
+        };
+        await withWizard(SUMMARY_FIRST, `save=starter-${label}`, async ({ doc }) => {
+            await settle();   // the starter list is read
+            doc.getElementById('next-btn').fire('click');   // attempt A: unknown
+            await settle();
+            const [first] = server.sent;
+            assert.deepEqual(server.bodies[0].skill_source_trust, { 'ouroboros-hub': 'trusted' }, label);
+            assert.deepEqual(server.bodies[0].starter_skills, ['hub/notes'], label);
+            server.attempts[first] = { saved: true };
+            doc.getElementById('check-save-btn').fire('click');
+            await settle();
+            host.fire(change.type, change);   // the owner changes a starter choice
+            doc.getElementById('next-btn').fire('click');   // "Retry save": B, refused before writing
+            await settle();
+            assert.notDeepEqual([server.bodies[1].skill_source_trust, server.bodies[1].starter_skills],
+                [server.bodies[0].skill_source_trust, server.bodies[0].starter_skills], `${label}: B sent the changed choice`);
+            assert.match(doc.getElementById('root').innerHTML, /This retry was not saved\. The earlier save may still be finishing/, label);
+            server.attempts[first] = { saved: true, receipt: receipt('advanced', false) };
+            doc.getElementById('check-save-btn').fire('click');
+            await settle();
+            assert.deepEqual(server.replaced, [], `${label}: A's receipt does not complete a choice A never sent`);
+            assert.match(doc.getElementById('root').innerHTML,
+                /The earlier save is confirmed, but it does not contain the values shown now\. Start Ouroboros to save them\./, label);
+        }, { fetch: server.fetch, location: server.location, prepare });
+    }
+});
 
 test('the summary step stages the language and applies it only after the completion transaction', async () => {
     // The harness renders inert elements, so the control itself is exercised in settings_language.test.js
@@ -395,9 +661,9 @@ test('the summary step stages the language and applies it only after the complet
     const announce = source.indexOf('announceCompletion(result);', complete);
     assert.ok(complete > 0 && apply > complete && announce > apply, 'complete → apply the staged language → announce');
     assert.match(source, /await saveLanguageChoice\(choice\)/, 'the shared writer, not a second path');
-    // The other verified-success path — a save that timed out and was then confirmed by the
-    // readiness probe — applies the staged language too, and the re-mounted control gets the draft back.
-    const recovered = source.indexOf('if (status === 204) {');
+    // The other verified-success path — an unknown save whose own receipt the attempt read-back returned —
+    // applies the staged language too, and the re-mounted control gets the draft back.
+    const recovered = source.indexOf('const outcome = await readCompletionAttempt(attempt);');
     assert.ok(recovered > 0 && source.indexOf('if (!(await applyStagedLanguage())) {', recovered) < source.indexOf('announceCompletion(', recovered));
     assert.match(source, /bindLanguageSettings\(root, \{ staged: state\.languageChoice, stage:/);
     // A completion whose settings landed but whose later step failed (`saved: true`) applies it as well;
@@ -406,57 +672,34 @@ test('the summary step stages the language and applies it only after the complet
 });
 
 test('a staged language whose writer is still busy keeps the wizard open; the next check applies it and proceeds', async () => {
-    // The completion timed out (503, `saved: null`) and the readiness probe then says it landed, while the
-    // finishing save still holds the settings document: the language writer answers 503. The staged choice
+    // The completion timed out (503, `saved: null`) and its read-back then returns the attempt's receipt, while
+    // the finishing save still holds the settings document: the language writer answers 503. The staged choice
     // must not be dropped with the page — the wizard stays, and the next "Check status" applies it.
-    const staged = {
-        ...BOOTSTRAP,
-        stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
-        initialState: { ...BOOTSTRAP.initialState, openrouterKey: 'sk-or-v1-abcdefghijklmnop', languageChoice: 'en' },
-    };
-    const requests = [];
-    const languageAnswers = [
-        { ok: false, status: 503, body: { ok: false, error: 'another settings save is still running', code: 'settings_busy' } },
-        { ok: true, status: 200, body: { language: '', english: true, chosen: true, entries: {}, revision: 0, languages: [] } },
-    ];
-    const fetch = async (url, init = {}) => {
-        const call = `${init.method || 'GET'} ${String(url)}`;
-        if (!PASSIVE_READS.has(call)) requests.push(call);
-        if (String(url) === '/api/onboarding/complete') {
-            return { ok: false, status: 503, text: async () => '', json: async () => ({ error: 'still running', code: 'settings_save_timeout', saved: null }) };
-        }
-        if (String(url) === '/api/onboarding') return { ok: true, status: 204, text: async () => '', json: async () => { throw new Error('no body'); } };
-        if (String(url) === '/api/ui/i18n/language') {
-            const answer = languageAnswers.shift();
-            return { ok: answer.ok, status: answer.status, text: async () => '', json: async () => answer.body };
-        }
-        return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
-    };
-    const replaced = [];
-    const location = {
-        origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding',
-        replace: (href) => replaced.push(href),
-    };
-    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const staged = { ...SUMMARY_FIRST, initialState: { ...SUMMARY_FIRST.initialState, languageChoice: 'en' } };
+    const server = completionServer({ language: [
+        [503, { ok: false, error: 'another settings save is still running', code: 'settings_busy' }],
+        [200, { language: '', english: true, chosen: true, entries: {}, revision: 0, languages: [] }],
+    ] });
     const warn = console.warn;
     console.warn = () => {};
     try {
         await withWizard(staged, 'save=timeout-language-busy', async ({ doc }) => {
             doc.getElementById('next-btn').fire('click');   // "Start Ouroboros" → 503, outcome unknown
             await settle();
-            assert.deepEqual(requests, ['POST /api/onboarding/complete'], 'nothing is written for the language before the save is known to have landed');
+            assert.deepEqual(server.requests, ['POST /api/onboarding/complete'], 'nothing is written for the language before the save is known to have landed');
+            server.attempts[server.sent[0]] = { saved: true, receipt: receipt('advanced', false) };
             doc.getElementById('check-save-btn').fire('click');
             await settle();
-            assert.deepEqual(requests.slice(1), ['GET /api/onboarding', 'POST /api/ui/i18n/language']);
-            assert.equal(replaced.length, 0, 'the wizard does not leave with the choice unapplied');
+            assert.deepEqual(server.requests.slice(1), [server.readBack(0), 'POST /api/ui/i18n/language']);
+            assert.equal(server.replaced.length, 0, 'the wizard does not leave with the choice unapplied');
             const html = doc.getElementById('root').innerHTML;
             assert.match(html, /Setup is saved\. The interface language is still being applied/);
             assert.match(html, /id="check-save-btn"/, 'the same action retries');
             doc.getElementById('check-save-btn').fire('click');
             await settle();
-            assert.deepEqual(requests.slice(3), ['GET /api/onboarding', 'POST /api/ui/i18n/language']);
-            assert.deepEqual(replaced, ['/'], 'applied: the wizard proceeds as it does on a receipt');
-        }, { fetch, location });
+            assert.deepEqual(server.requests.slice(3), [server.readBack(0), 'POST /api/ui/i18n/language']);
+            assert.deepEqual(server.replaced, ['/'], 'applied: the wizard proceeds as it does on a receipt');
+        }, { fetch: server.fetch, location: server.location });
     } finally {
         console.warn = warn;
     }
@@ -465,30 +708,10 @@ test('a staged language whose writer is still busy keeps the wizard open; the ne
 test('a staged language the gateway refuses for good does not hold the finished setup', async () => {
     // A failure a retry cannot fix (here: the gateway cannot work out the typed name) is logged and the
     // completed setup proceeds; the owner picks the language in Settings → Appearance, which says why.
-    const staged = {
-        ...BOOTSTRAP,
-        stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
-        initialState: { ...BOOTSTRAP.initialState, openrouterKey: 'sk-or-v1-abcdefghijklmnop', languageChoice: 'Quenya' },
-    };
-    const requests = [];
-    const fetch = async (url, init = {}) => {
-        const call = `${init.method || 'GET'} ${String(url)}`;
-        if (!PASSIVE_READS.has(call)) requests.push(call);
-        if (String(url) === '/api/onboarding/complete') {
-            return { ok: false, status: 503, text: async () => '', json: async () => ({ error: 'still running', code: 'settings_save_timeout', saved: null }) };
-        }
-        if (String(url) === '/api/onboarding') return { ok: true, status: 204, text: async () => '', json: async () => { throw new Error('no body'); } };
-        if (String(url) === '/api/ui/i18n/language') {
-            return { ok: false, status: 400, text: async () => '', json: async () => ({ ok: false, saved: false, code: 'language_needs_model', error: 'no credentialed model' }) };
-        }
-        return { ok: true, status: 200, json: async () => ({}), text: async () => '' };
-    };
-    const replaced = [];
-    const location = {
-        origin: 'http://127.0.0.1:8765', href: 'http://127.0.0.1:8765/onboarding', search: '', hash: '', pathname: '/onboarding',
-        replace: (href) => replaced.push(href),
-    };
-    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const staged = { ...SUMMARY_FIRST, initialState: { ...SUMMARY_FIRST.initialState, languageChoice: 'Quenya' } };
+    const server = completionServer({ language: [
+        [400, { ok: false, saved: false, code: 'language_needs_model', error: 'no credentialed model' }],
+    ] });
     const warn = console.warn;
     const warned = [];
     console.warn = (...args) => { warned.push(String(args[0])); };
@@ -496,12 +719,13 @@ test('a staged language the gateway refuses for good does not hold the finished 
         await withWizard(staged, 'save=timeout-language-refused', async ({ doc }) => {
             doc.getElementById('next-btn').fire('click');
             await settle();
+            server.attempts[server.sent[0]] = { saved: true, receipt: receipt('advanced', false) };
             doc.getElementById('check-save-btn').fire('click');
             await settle();
-            assert.deepEqual(requests, ['POST /api/onboarding/complete', 'GET /api/onboarding', 'POST /api/ui/i18n/language']);
-            assert.deepEqual(replaced, ['/']);
+            assert.deepEqual(server.requests, ['POST /api/onboarding/complete', server.readBack(0), 'POST /api/ui/i18n/language']);
+            assert.deepEqual(server.replaced, ['/']);
             assert.ok(warned.some((line) => line.includes('language not applied yet')));
-        }, { fetch, location });
+        }, { fetch: server.fetch, location: server.location });
     } finally {
         console.warn = warn;
     }

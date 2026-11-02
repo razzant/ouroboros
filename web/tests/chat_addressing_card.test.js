@@ -67,6 +67,8 @@ function fixture(history = [], chatId = 1) {
         card: () => walkCard(messages, TASK),
         rows: () => nodes(walkCard(messages, TASK)).filter((n) => n.classList?.contains('chat-live-line')),
         meta: () => walkCard(messages, TASK)?.querySelector('[data-live-meta]')?.innerHTML || '',
+        // The labelled facts beyond the compact line (tool calls among them): the card's own details list.
+        facts: () => walkCard(messages, TASK)?.querySelector('[data-live-facts]')?.innerHTML || '',
         owner: () => messages.children.find((node) => node.dataset.clientMessageId === 'owner-message'),
         answerVisible: () => messages.children.some((node) => /The task is scheduled/.test(node.innerHTML)),
         emit: (type, row) => handlers.get(type)({ chat_id: chatId, ts: TS, ...row }),

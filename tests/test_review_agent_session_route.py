@@ -872,7 +872,7 @@ def test_reserve_only_owner_window_skips_light_model_extraction(monkeypatch):
 
 def test_multi_model_wrapper_preserves_typed_refusal_into_skill_actor_record():
     from ouroboros.tools.review import _parse_model_response
-    from ouroboros.triad_review import parse_model_review_results
+    from ouroboros.triad_review import parse_seat_answers
 
     envelope = _parse_model_response("claude-fable-5", {
         "error": "Error: route unavailable",
@@ -882,9 +882,7 @@ def test_multi_model_wrapper_preserves_typed_refusal_into_skill_actor_record():
         "http_status": 429,
         "transport_status": "unavailable",
     }, None)
-    parsed = parse_model_review_results(
-        {"results": [envelope]}, required_items=("manifest_schema",),
-    )
+    parsed = parse_seat_answers({"results": [envelope]}, {})
 
     assert envelope["failure_code"] == "agent_session_route_unavailable"
     actor = parsed.actor_records[0].to_dict()
@@ -1361,9 +1359,9 @@ def test_final_route_observation_absence_is_disclosed_without_discarding_the_ver
         (final / "telemetry.yaml").write_text(raw, encoding="utf-8")
     # The transport supplies only the summary; the real reader sees the file above.
     fake_route.run_dir = None
-    fake_route.detail = _terminal_detail(json.dumps({"findings": [
-        {"item": "route", "verdict": "PASS", "severity": "advisory"},
-    ]}), conformance="passed")
+    from tests._contributor_packet_shared import _coupling_matrix
+    fake_route.detail = _terminal_detail(json.dumps({"findings": _coupling_matrix("route reviewed")}),
+                                         conformance="passed")
     fake_route.detail["summary"].update(
         runDir=str(run_dir), harnesses=["fake-review"], effectiveAccess="readonly",
         route={"harnessId": "earlier-route", "observedModel": "earlier-model", "verified": True},

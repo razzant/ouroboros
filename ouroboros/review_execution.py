@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from ouroboros.owner_pause import run_operation, OwnerPauseRefused
 
 from ouroboros.config import runtime_setting
-from ouroboros.model_wait import current_model_wait, monotonic_now, operation_wait_scope
+from ouroboros.model_wait import ModelWaitInterrupted, current_model_wait, monotonic_now, operation_wait_scope
 
 import asyncio
 import hashlib
@@ -37,10 +37,10 @@ from ouroboros.review_slot_cancel import (  # noqa: F401 — re-exported seam su
     _natural_success_terminal,
     _slot_cancel_outcome,
 )
-from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_review_paid_stamp
+from ouroboros.review_dispatch import bind_api_review_paid_stamp, invoke_late_review_paid_stamp, invoke_review_paid_stamp
 from ouroboros.usage_accounting import POSITIVE_PHYSICAL_ATTEMPT_STATES, BillingAuthorityUnavailable
 from ouroboros.delegate_custody_usage import (
-    observe_failed_review_send, observe_review_usage, session_usage_once,
+    observe_failed_review_send, observe_review_usage, observe_session_usage, run_names,
 )
 from ouroboros.triad_review import (
     TWO_PART_SESSION_OUTPUT_SCHEMA,
@@ -62,7 +62,8 @@ from ouroboros.review_session_custody import (
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
 from ouroboros.review_session_usage import (review_event_identity, session_custody_attribution,
-                                             session_failure_identity, session_invocation_fields, session_usage_facts)
+                                             session_failure_identity, session_invocation_fields, session_usage_facts, session_usage_chain,
+                                             combined_session_usage as _combined_session_usage)
 if TYPE_CHECKING:  # annotations only — importing the substrate here would cycle
     from ouroboros.review_substrate import ReviewRequest, ReviewSlot
 
@@ -334,6 +335,7 @@ class ReviewSlotExecutor:
         self.assignment = assignment
         self.llm = llm
         self.usage_observer: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.answer_observer: Optional[Callable[[], None]] = None
 
     def _observe_usage(self, usage: Optional[Dict[str, Any]]) -> None:
         observe_review_usage(self.usage_observer, usage)
@@ -446,7 +448,7 @@ class ApiChatReviewExecutor(ReviewSlotExecutor):
                 # cannot double-charge a route that already marked dispatch.
                 capture = getattr(exc, "physical_attempt_capture", None)
                 if str(getattr(capture, "state", "") or "") in POSITIVE_PHYSICAL_ATTEMPT_STATES:
-                    invoke_review_paid_stamp(self.assignment.dispatch_stamp)
+                    invoke_late_review_paid_stamp(self.assignment.dispatch_stamp)
                 observe_failed_review_send(self.usage_observer, exc)
                 raise
         # Null/non-object provider messages follow the caller's empty-response rail.
@@ -584,6 +586,7 @@ _REVIEW_SESSION_INSTRUCTIONS = (
 
 _SESSION_POLL_SEC = 3.0
 _CLAUDEXOR_MAX_SECONDS = 604_800
+_OWN_WINDOW = object()  # an executor no custody bound: it resolves its slot's own window
 
 
 def _retire_orphaned_review_registration(
@@ -639,7 +642,7 @@ class SessionInvocation:
     task_id: str
     surface: str
     slot_id: str
-    timeout_sec: float
+    timeout_sec: Optional[float]  # None = no logical window: the run is sent without maxSeconds
     logical_key_extra: tuple = ()
     output_schema: Optional[Dict[str, Any]] = None
     session_route: Any = None
@@ -658,18 +661,12 @@ class SessionInvocation:
     access: str = ""
     checking_source: Optional[Dict[str, Any]] = None
 
-def run_delegated_review_session(
-    *,
-    prompt: str,
-    root: str,
-    custody_drive: Any,
-    invocation: SessionInvocation,
-) -> Dict[str, Any]:
+def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
+                                 invocation: SessionInvocation) -> Dict[str, Any]:
     """All reviews share this transport: pin one subscription harness, request
     schema only if its effective adapter supports it, store the canonical body
     before POST, and replay only an explicit pending token. Bound tokens join
-    existing runs; reconciliation never replaces them. The nanny verifies
-    cancellation at ``timeout_sec`` and reads full output before ``delegate_custody`` settlement.
+    existing runs; reconciliation never replaces them. The nanny verifies cancellation at ``timeout_sec`` and reads full output before ``delegate_custody`` settlement.
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import ensure_owned_gateway
@@ -679,22 +676,21 @@ def run_delegated_review_session(
     from ouroboros.review_checking import bind_checking_thread, session_checking, terminal_seat_evidence
     task_id, surface, slot_id, timeout_sec, logical_key_extra, output_schema, \
         session_route, instructions, retry_state = session_invocation_fields(invocation)
-    use_thread = bool(invocation.use_thread)
-    thread_id = str(invocation.thread_id or "")
+    use_thread, thread_id = bool(invocation.use_thread), str(invocation.thread_id or "")
     root_task_id, parent_task_id, usage_custody = session_custody_attribution(current_usage_scope())
     # A reviewer never holds candidate write authority: writable access is an investigation.
     shape = delegated_run_shape(False, str(invocation.access or "readonly"))
     checking: Dict[str, Any] = {}
     state = retry_state if retry_state is not None else {}
-    run_id, turn_id, run_request, invocation_id = "", "", None, ""
-    started_custody = None
+    run_id, turn_id, run_request, invocation_id, started_custody = "", "", None, "", None
     retry_token = str(state.get("pending_invocation_id") or "")
     unrequested = not (retry_token or invocation.reconcile_only)
     gateway, route = None, session_route
     recovering, project_id, existing_project = False, "", ""  # also bound on early recovery failures
     observed, summary = {}, {}  # a failure after start still names what it observed
+    attempt_execution = None
     delivery_facts = invocation.source_delivery if invocation.source_delivery is not None else {}
-    continuations, stopped_summaries = [], []
+    continuations, stopped_details, session_usages = [], [], []
     start_attempted, start_refused = False, False  # only submit witnesses POST entry
     try:
         record = custody.invocation_record(custody_drive, retry_token) if retry_token else None
@@ -755,7 +751,7 @@ def run_delegated_review_session(
             if shape.investigation:  # a thread advances its own clone; a run gets a copy per operation
                 checking = session_checking(gateway, custody_drive=custody_drive, task_id=task_id,
                     operation_id=str(invocation.operation_id or ""), root=root, source=invocation.checking_source,
-                    shape=shape, thread_seat=f"{surface}:{slot_id}" if use_thread else "", thread_id=thread_id)
+                    shape=shape, thread_seat=f"{surface}:{slot_id}" if use_thread else "", thread_id=thread_id, route_id=route.route_id)
             if use_thread:
                 from ouroboros.review_thread_continuity import ensure_review_thread
                 # Thread creation can bind the project even if its response is lost.
@@ -767,29 +763,24 @@ def run_delegated_review_session(
                 if shape.investigation:
                     bind_checking_thread(custody_drive, task_id, f"{surface}:{slot_id}", thread_id)
             invocation_id = custody.new_invocation_id()
-            seconds = bounded_seconds(timeout_sec, default=300, maximum=_CLAUDEXOR_MAX_SECONDS)
             run_request = prepare_review_session_request(
                 invocation, route, prompt=prompt, root=root, ephemeral=ephemeral,
                 thread_id=thread_id, schema_asked=schema_asked,
                 shape=shape, execution=checking.get("execution"), instructions=checking.get("instructions", ""),
                 input_limit=(getattr(gateway, "ask_input_limits", lambda: {})() or {}).get(route.route_id),
-                source_root=custody_drive, delivery_facts=delivery_facts)
+                source_root=custody_drive, delivery_facts=delivery_facts, gateway=gateway)
         if not run_id:
             from ouroboros.budget_pause import dispatch_fenced
-
-            if dispatch_fenced(task_id):
-                # Observation-only while the owning task pauses (#1196): a
-                # fresh start AND a pending-invocation replay are both a new
-                # POST. The invocation row stays pending for the resumed task.
-                raise ReviewRouteUnavailable(
-                    "the owning task is entering an exact pause; no delegated "
-                    "review is started or re-posted while it pauses",
-                    code="budget_pausing_no_send")
+            if dispatch_fenced(task_id):  # Observation-only while the owning task pauses (#1196): a fresh
+                # start AND a pending-invocation replay are both a new POST; the row stays pending for Resume.
+                raise ReviewRouteUnavailable("the owning task is entering an exact pause; no delegated review is "
+                                             "started or re-posted while it pauses", code="budget_pausing_no_send")
             if (not recovering and invocation.owner_deadline_at and owner_deadline_exhausted(
                 deadline_at=invocation.owner_deadline_at, reserve_sec=get_finalization_grace_sec())):
                 raise _deadline_exhausted_error()
-            seconds = bounded_seconds(run_request.get("maxSeconds"), maximum=_CLAUDEXOR_MAX_SECONDS,
-                                      default=timeout_sec if timeout_sec is not None else 300)
+            # The cap the stored body itself sends (a replay keeps its bytes); absence = clock off, 0.
+            seconds = (bounded_seconds(run_request["maxSeconds"], default=1, maximum=_CLAUDEXOR_MAX_SECONDS)
+                       if "maxSeconds" in run_request else 0)
             unrequested = False  # neither a paid stamp nor an ambiguous write can be undone
             invoke_review_paid_stamp(invocation.dispatch_stamp)
             try:
@@ -803,6 +794,7 @@ def run_delegated_review_session(
                     root_task_id=root_task_id, parent_task_id=parent_task_id,
                     review_source_delivery=delivery_facts,
                     work_order_source_request=delivery_facts,
+                    prompt_cache_ttl=delivery_facts.get("prompt_cache_ttl"),
                     **usage_custody, **checking.get("custody", {}),
                 )
             except BillingAuthorityUnavailable as exc:  # Outer pre-start boundary owns cleanup; nothing sent.
@@ -823,10 +815,8 @@ def run_delegated_review_session(
                     from ouroboros.review_thread_continuity import start_review_thread_turn
                     return start_review_thread_turn(gateway, thread_id, run_request, idempotency_key=invocation_id)
                 return gateway.start_run(run_request, idempotency_key=invocation_id)
-
             try:
-                launch_source = SimpleNamespace(drive_root=custody_drive,
-                    task_id=task_id, root_task_id=root_task_id)
+                launch_source = SimpleNamespace(drive_root=custody_drive, task_id=task_id, root_task_id=root_task_id)
                 handle = run_operation(launch_source, submit)
             except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
                 code = getattr(exc, "code", str(exc))
@@ -843,12 +833,13 @@ def run_delegated_review_session(
         state["pending_invocation_id"] = invocation_id or retry_token
         state["delegated_run_id"] = run_id
         if started_custody is not None:
-            entry = started_custody
-            custody_durable = True
+            entry, custody_durable = started_custody, True
         else:
             entry = custody.RunCustody(
                 run_id=run_id, task_id=task_id, route_id=route.route_id, model=str(route.model or ""),
                 profile_id=str(getattr(route, "profile_id", "") or ""),
+                prompt_cache_ttl=(delivery_facts.get("prompt_cache_ttl")
+                                  if isinstance(delivery_facts.get("prompt_cache_ttl"), dict) else None),
                 project_id=project_id, project_owned=bool(project_id) and not existing_project,
                 root_task_id=root_task_id, parent_task_id=parent_task_id, **usage_custody,
                 ledger_root=str(custody_drive), idempotency_key=key, invocation_id=invocation_id or retry_token,
@@ -860,20 +851,27 @@ def run_delegated_review_session(
                 "root": root, "surface": surface, "slot_id": slot_id,
             }))
         # Pending custody remains above throughout polling, including failures.
-        window = float(timeout_sec) if timeout_sec is not None else 300.0
+        window = float("inf") if timeout_sec is None else float(timeout_sec)  # no window: observe until terminal
         poll_deadline = time.monotonic() + window
         detail = _poll_session_terminal(gateway, custody, custody_drive, entry, run_id, window)
         seen_runs = {run_id}
-        while str(custody.summary_of(detail).get("state") or "") != "succeeded":
-            stopped = custody.summary_of(detail)
+        while True:
+            summary, observed = custody.summary_of(detail), final_attempt_facts(detail, run_id)
+            attempt_execution = detail.get("attemptExecution")
+            if str(summary.get("state") or "") == "succeeded":
+                break
             successor = continue_review_run(gateway, custody_drive, entry, detail, invocation,
                 remaining=poll_deadline - time.monotonic(), seen=seen_runs)
             if successor is None:
                 break
             continuations.append({"from_run_id": run_id, "run_id": successor.run_id,
-                                  "resumable": stopped.get("resumable") or detail.get("resumable") or {}})
-            stopped_summaries.append(stopped)
+                                  "resumable": summary.get("resumable") or detail.get("resumable") or {}})
+            stopped_details.append(detail)
+            session_usages.append(session_usage_facts(run_id, requested_route=str(entry.route_id),
+                observed_attempt=observed, summary=summary, attempt_execution=attempt_execution))
             entry, run_id = successor, successor.run_id
+            observed, summary = {}, {}  # Prior-run facts never belong to an unobserved successor.
+            attempt_execution = None
             turn_id = ""  # A successor is never the stopped run's thread turn.
             seen_runs.add(run_id)
             state["delegated_run_id"] = run_id
@@ -884,39 +882,35 @@ def run_delegated_review_session(
             checking["evidence"] = terminal_seat_evidence(
                 custody_drive, task_id, str(invocation.operation_id or ""), detail)
         settlement = custody.settle_run(custody_drive, gateway, entry, detail)
-        summary = custody.summary_of(detail)
-        observed = final_attempt_facts(detail, run_id)
         run_state = str(summary.get("state") or "")
         if run_state != "succeeded":
             state.pop("pending_invocation_id", None)
             state.pop("delegated_run_id", None)
-            raise run_failure_error(run_id, run_state, summary.get("failure"))
+            failure = run_failure_error(run_id, run_state, summary.get("failure"))
+            failure.review_run_state = run_state
+            raise failure
         text = _full_session_text(gateway, run_id, detail)
-        spend, estimated, combined_summary = _combined_session_usage(custody, stopped_summaries, summary)
+        spend, estimated, combined_summary = _combined_session_usage(custody, stopped_details, detail)
         thread_receipt: Dict[str, Any] = {}
         if use_thread:
-            thread_receipt, thread_id, turn_id = _session_thread_receipt(
-                gateway, thread_id, run_id, turn_id, route, observed, continued=bool(continuations))
+            thread_receipt, thread_id, turn_id = _session_thread_receipt(gateway, thread_id, run_id, turn_id, route, observed,
+                continued=bool(continuations), run_names=custody.held_run_names(detail, run_id))
         state.pop("pending_invocation_id", None)
         state.pop("delegated_run_id", None)
         return {
-            "run_id": run_id, "thread_id": thread_id, "turn_id": turn_id,
-            "thread_receipt": thread_receipt,
-            "profile_continuity_receipt": thread_receipt.get("profile_continuity") or {},
-            "text": text,
-            "conformance": str(summary.get("outputConformance") or "").strip().lower(),
-            "schema_asked": schema_asked,
-            "custody_durable": custody_durable,
-            "idempotent_recovery": recovering,
-            "late_success_accepted": late_success,
-            "settlement": settlement,
-            "review_source_delivery": delivery_facts,
-            "review_continuations": continuations,
+            "run_id": run_id, "thread_id": thread_id, "turn_id": turn_id, "thread_receipt": thread_receipt,
+            "profile_continuity_receipt": thread_receipt.get("profile_continuity") or {}, "text": text,
+            "conformance": str(summary.get("outputConformance") or "").strip().lower(), "schema_asked": schema_asked,
+            "custody_durable": custody_durable, "idempotent_recovery": recovering,
+            "late_success_accepted": late_success, "settlement": settlement,
+            "review_source_delivery": delivery_facts, "review_continuations": continuations,
             "route_id": str(entry.route_id), "run_dir": str(summary.get("runDir") or ""),
             # One final attempt, never the requested pool or a mixed summary route.
             "effective_route_ids": [observed["harness_id"]] if observed.get("harness_id") else [],
             "observed_attempt": observed, "model": observed.get("model", ""),
-            "usage": session_usage_facts(run_id, requested_route=str(entry.route_id), observed_attempt=observed, summary=combined_summary),
+            "usage": session_usage_chain(run_id, requested_route=str(entry.route_id), observed_attempt=observed,
+                                         summary=summary, attempt_execution=attempt_execution,
+                                         combined_summary=combined_summary, previous=session_usages),
             "spend": spend, "spend_estimated": estimated,
             # D22/D29 applied facts are verbatim telemetry, never inferred.
             "applied_profile": observed.get("profile_id", ""),
@@ -946,8 +940,13 @@ def run_delegated_review_session(
                 custody_drive, task_id, str(invocation.operation_id or ""), getattr(exc, "checking_terminal_detail", None))
         if run_id and gateway is not None:
             exc.delegated_run_started, exc.delegated_run_id = True, run_id
-            exc.delegated_usage = session_usage_facts(run_id, requested_route=str(getattr(route, "route_id", "") or ""),
-                                                      observed_attempt=observed, summary=summary)  # #1578
+            carried = getattr(exc, "checking_terminal_detail", None)
+            if isinstance(carried, dict) and run_id in run_names(carried) and custody.is_terminal(carried):
+                summary, observed = custody.summary_of(carried), final_attempt_facts(carried, run_id)
+                attempt_execution = carried.get("attemptExecution")
+            exc.delegated_usage = session_usage_chain(run_id, requested_route=str(getattr(route, "route_id", "") or ""),
+                observed_attempt=observed, summary=summary, attempt_execution=attempt_execution, previous=session_usages,
+                source_delivery=delivery_facts)
             if continuations:
                 exc.delegated_usage["review_continuations"] = continuations
         if checking.get("evidence"):
@@ -956,8 +955,6 @@ def run_delegated_review_session(
     finally:
         if gateway is not None:
             gateway.close()
-
-
 def _require_route_headroom(gateway: Any, route: Any, shape: Any) -> None:
     """A fresh seat starts only on a route with headroom: a spent subscription window fails the slot
     typed, never a silent fallback onto metered API spend."""
@@ -976,30 +973,16 @@ def _require_route_headroom(gateway: Any, route: Any, shape: Any) -> None:
         raise ReviewRouteUnavailable(f"delegated review route unavailable: {unavailable}", code=unavailable)
 
 
-def _combined_session_usage(custody: Any, stopped: List[Dict[str, Any]],
-                            summary: Dict[str, Any]) -> Tuple[Any, bool, Dict[str, Any]]:
-    """The seat's money and tokens across its continuations: a sum only when every run disclosed it."""
-    spend, estimated = custody.disclosed_spend(summary)
-    combined = dict(summary)
-    if stopped:
-        spends = [custody.disclosed_spend(item) for item in [*stopped, summary]]
-        spend = sum(value for value, _estimated in spends) if all(value is not None for value, _ in spends) else None
-        estimated = any(flag for _value, flag in spends)
-        for key in ("inputTokens", "outputTokens", "cachedInputTokens"):
-            values = [item.get(key) for item in [*stopped, summary]]
-            combined[key] = sum(values) if all(type(v) in (int, float) for v in values) else None
-    return spend, estimated, combined
-
-
 def _session_thread_receipt(gateway: Any, thread_id: str, run_id: str, turn_id: str, route: Any,
-                            observed: Dict[str, Any], *, continued: bool) -> Tuple[Dict[str, Any], str, str]:
+                            observed: Dict[str, Any], *, continued: bool,
+                            run_names: Any = ()) -> Tuple[Dict[str, Any], str, str]:
     """The thread receipt of the seat's final run, with the thread and turn it names."""
     from ouroboros.review_thread_continuity import review_thread_receipt as receipt_for
 
     try:
         receipt = receipt_for(gateway, thread_id, run_id, turn_id,
                               expected_profile=str(getattr(route, "profile_id", "") or ""),
-                              applied_profile=observed.get("profile_id", ""))
+                              applied_profile=observed.get("profile_id", ""), run_names=run_names)
     except ReviewRouteUnavailable as exc:
         if not continued or exc.code != "review_thread_receipt_missing":
             raise
@@ -1057,13 +1040,50 @@ def _observe_session(gateway: Any, run_id: str, remaining: float, streak: Any) -
         return {}, exc
 
 
+def _await_session_attention(gateway: Any, run_id: str, seen: Optional[str], remaining: float) -> tuple:
+    """Hold on the engine's compact wait until the run needs attention or the slot's remaining
+    window ends: ``(due, token, held, detail)``. ``due`` says the detail read is now owed (a
+    question, a terminal, a problem row, or an engine without the wait, where every beat reads
+    the detail as before); ``token`` is echoed as ``seen`` only after that read (the engine's
+    token, or the acknowledgement of a problem row, so the engine holds again instead of
+    answering the same problem at once); ``held`` says the engine waited, so the loop sleeps
+    nothing; ``detail`` is a detail the adapter already read in this call (an engine that lost
+    the route), handed on so the slot never reads it twice. A hole, on the catalog or on the
+    wait, leaves the run unobserved for this beat and the detail read decides."""
+    from ouroboros.gateways import claudexor_observation as observation
+    from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
+    bound = min(remaining, SHORT_POLL_TIMEOUT_SEC)
+    try:
+        if not observation.wait_many_supported(gateway, timeout_sec=bound):
+            return True, None, False, None
+        wake = observation.wait_attention(gateway, [(run_id, seen)], wait_sec=remaining, timeout_sec=bound)
+    except ClaudexorUnavailable as exc:
+        if 400 <= exc.status_code < 500:
+            raise
+        if not observation.is_observation_hole(exc):
+            log.warning("delegated review session %s attention wait refused (%s); the detail read decides", run_id, exc)
+        return True, None, False, None
+    if wake.hole is not None:
+        return True, None, False, None  # unobserved this beat: the old path decides
+    row = wake.rows[0]
+    if row.detail is not None:
+        return True, None, False, row.detail  # the engine lost the route: this call read the detail, once
+    if row.problem is not None:  # the engine could not place the run: the addressed read says what it is
+        return True, observation.ACKNOWLEDGED_PROBLEM, wake.waited, None
+    return wake.needs_attention(0), row.token, wake.waited, None
+
+
 def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry: Any,
                            run_id: str, seconds: float) -> Dict[str, Any]:
     """Poll a delegated review run on the slot clock; verified cancel and
-    completion-wins semantics remain owned by the existing cancel seam."""
+    completion-wins semantics remain owned by the existing cancel seam. With no clock, a
+    run no panel owns ends on its owner's control (a panel's run outlives its author, #1006)."""
+    from ouroboros.delegate_registration_policy import review_owned_source
     from ouroboros.gateways.claudexor import pending_interactions as _cx_pending
     deadline = time.monotonic() + max(0.0, float(seconds))
+    owner = None if deadline < float("inf") or review_owned_source(getattr(entry, "source", "")) else current_model_wait()
     detail, unobserved = _observe_session(gateway, run_id, max(0.0, deadline - time.monotonic()), None)
+    seen: Optional[str] = None
     while not custody.is_terminal(detail):
         pending = _cx_pending(detail)
         first = pending[0] if pending else {}
@@ -1085,12 +1105,14 @@ def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry
                 + ") instead of silently burning its whole budget waiting")
             error.checking_terminal_detail = carried
             raise error
-        if time.monotonic() >= deadline:
+        stop = owner.control_reason() if owner is not None else None
+        if stop or time.monotonic() >= deadline:
             outcome, state, carried = _slot_cancel_outcome(
-                gateway, custody, custody_drive, entry, run_id, "review_slot_timeout")
+                gateway, custody, custody_drive, entry, run_id, f"owner_{stop}" if stop else "review_slot_timeout")
             settled = _natural_success_terminal(gateway, custody, run_id, state, carried)
             if settled is not None:
                 return settled
+            if stop: raise ModelWaitInterrupted(stop)  # the cancel's verified or unverified receipt rides custody
             # Blind on both reads (the cancel/verify raised, or its verify read reached no
             # state either): nothing terminal is known, so the run is not "timed out".
             if unobserved is not None and (outcome == "cancel_attempt_exception" or (
@@ -1106,9 +1128,19 @@ def _poll_session_terminal(gateway: Any, custody: Any, custody_drive: Any, entry
         remaining = max(0.0, deadline - time.monotonic())
         if remaining <= 0:
             continue
-        time.sleep(min(_SESSION_POLL_SEC, remaining))
-        detail, unobserved = _observe_session(
-            gateway, run_id, max(0.0, deadline - time.monotonic()), unobserved)
+        due, token, held, fetched = _await_session_attention(gateway, run_id, seen, remaining)
+        if not held or unobserved is not None:
+            # The slot's own beat, unless the engine held the call AND the last addressed read
+            # was answered: an unanswered read leaves the same notice to wake the next call at once.
+            time.sleep(min(_SESSION_POLL_SEC, remaining))
+        if not due:
+            continue  # the engine held the call and nothing needs the detail yet
+        if fetched is not None:
+            detail, unobserved = fetched, None  # one terminal detail, never a second read of the same
+        else:
+            detail, unobserved = _observe_session(gateway, run_id, max(0.0, deadline - time.monotonic()), unobserved)
+        if unobserved is None and token is not None:
+            seen = token  # acknowledged only once the rows it stands for were fetched
     return detail
 def _full_session_text(gateway: Any, run_id: str, detail: Dict[str, Any]) -> str:
     """The session's final answer from the verified FULL primary output (D7).
@@ -1224,7 +1256,6 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
         self._conformance_passed = False
         self._run_id = ""
         self._session_usage: Dict[str, Any] = {}
-        self._session_usage_observed = False
         self._deltas: List[Dict[str, Any]] = []
         # Unknown starts retain the exact invocation token for the permitted retry.
         self._retry_state: Dict[str, Any] = {}
@@ -1270,19 +1301,16 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
         try:
             self._run_session()
         except BaseException as exc:
-            self._run_id = self._run_id or str(getattr(exc, "delegated_run_id", "") or "")
+            self._run_id = str(getattr(exc, "delegated_run_id", "") or self._run_id)
             started = bool(self._run_id or getattr(exc, "delegated_run_started", False))
             if started:
                 self._session_usage = dict(getattr(exc, "delegated_usage", None) or session_usage_facts(self._run_id))
-            if started and not self._session_usage_observed and session_usage_once(self._run_id):
-                self._observe_usage({**self._session_usage, "cost": None})
-                self._session_usage_observed = True
+            if started:
+                observe_session_usage(self.usage_observer, {**self._session_usage, "cost": None})
             if not self._retry_state.get("pending_invocation_id"):
                 self._settled_failure = exc
             raise
-        if not self._session_usage_observed and session_usage_once(self._run_id):
-            self._observe_usage(self._session_usage)
-        self._session_usage_observed = True
+        observe_session_usage(self.usage_observer, self._session_usage)
         # Already-paid evidence: extraction runs on the operation's own wait, past an
         # expired SLOT deadline (#1547); calendar, Stop/Panic and ceiling still interrupt.
         with operation_wait_scope(current_model_wait()):
@@ -1328,12 +1356,14 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
                 raise ReviewRouteUnavailable("agent_session slot has no repository root", code="session_root_missing")
             from ouroboros.config import get_finalization_grace_sec
             from ouroboros.deadline_utils import review_operation_timeout_sec
-            logical_deadline = getattr(self, "_logical_deadline_monotonic", None)
+            # Custody's clock when it bound one (None = no window, never a fresh one); else the slot's own.
+            logical_deadline = getattr(self, "_logical_deadline_monotonic", _OWN_WINDOW)
             logical_timeout = (
-                max(0.001, float(logical_deadline) - monotonic_now()) if logical_deadline is not None else
-                review_operation_timeout_sec(getattr(slot, "timeout_sec", None), route=getattr(slot, "route", None),
+                review_operation_timeout_sec(getattr(slot, "timeout_sec", None), retrieves=True,
                     deadline_at=getattr(request, "deadline_at", "") or "",
-                    transport_timeout_sec=getattr(slot, "transport_timeout_sec", None), reserve_sec=get_finalization_grace_sec()))
+                    transport_timeout_sec=getattr(slot, "transport_timeout_sec", None), reserve_sec=get_finalization_grace_sec())
+                if logical_deadline is _OWN_WINDOW else None if logical_deadline is None
+                else max(0.001, float(logical_deadline) - monotonic_now()))
             invocation = SessionInvocation(
                 task_id=str(request.task_id or ""),
                 surface=request.surface,
@@ -1414,9 +1444,10 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
             # The ledger row is written by settle_run (record_subscription_session);
             # cost rides here for the actor record only, finality following the
             # spendEstimated fact, never re-derived.
-            "cost": spend if (spend is not None and not estimated) else None,
+            "cost": (facts.get("usage") or {}).get("cost", spend if not estimated else None),
             "cost_disclosed_usd": spend,
             "cost_estimated": estimated,
+            "cost_final": (facts.get("usage") or {}).get("cost_final", spend is not None and not estimated),
         }
         # What the vendor harness READ, folded from the tool-call journal the
         # engine keeps under the run directory (`run_dir`, the only witness of a
@@ -1439,6 +1470,8 @@ class AgentSessionReviewExecutor(ReviewSlotExecutor):
 
     def _verdict_result(self, force_extraction: bool = False) -> ReviewAttemptResult:
         text = self._raw_transcript or ""
+        if text.strip() and self.answer_observer:
+            self.answer_observer()
         canonical, method, extraction_usage = canonicalize_session_verdict(
             text,
             conformance_passed=self._conformance_passed and not force_extraction,

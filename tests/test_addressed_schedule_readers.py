@@ -15,7 +15,10 @@ def test_disabled_rows_without_occurrences_do_no_store_work(q, monkeypatch):
 
     rows = [{"id": f"off-{i}", "enabled": False, "source": "task_followup",
              "followup_origin": {"task_id": "origin", "root_task_id": "origin"},
-             "last_task_id": f"old-{i}", "trigger": {"type": "cron", "expr": "* * * * *"}}
+             "last_task_id": f"old-{i}", "trigger": {"type": "cron", "expr": "* * * * *"},
+             # The outcome of the last run is already cached, so the pass owes no result read.
+             "last_outcome": {"task_id": f"old-{i}", "state": "completed", "quiet": False,
+                              "notice": False, "ended_at": None, "line": ""}}
             for i in range(33)]
     schedules._write_scheduled_tasks({"tasks": rows}, q.root)
     before = schedules.load_schedule_store(q.root)

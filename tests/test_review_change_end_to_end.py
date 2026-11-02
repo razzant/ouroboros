@@ -1,15 +1,6 @@
-"""One subject, two doors, the same brief (seam 4 of the review operation).
-
-``review_change(root="system_repo", subject="index")`` and the commit gate's
-review-only cycle review the same staged index through the same seats, the same
-body-layer rules and the same prompt text. The ONLY differences the two doors
-may leave in a brief are the narrative line that names the wave (the gate hands
-the reviewers the intended commit message, the operation its own wave label
-``review_change: staged index of <root> ...``, both inside the
-``## Informational context — commit message`` block the goal section renders)
-and the gate's own test execution exhibit, which a standalone operation has no
-fact for. This test pins the differences to exactly those blocks.
-"""
+"""Index review and the commit gate's review-only cycle share one subject, seats and body rules.
+The only brief differences are the narrative line in ``## Informational context — commit message``
+and the gate's test execution exhibit; a standalone operation has no execution fact."""
 
 import hashlib
 import json
@@ -35,8 +26,7 @@ COMMIT_MESSAGE = "fix: return the proposal's constant\n\nThe narrative body of t
 
 
 def _brief_text(brief: dict) -> str:
-    """Every byte a seat was given: the message texts (plain or block-structured)
-    and, for a retrieving seat, its session task."""
+    """All delivered message bodies and, for a retrieving seat, its session task."""
     parts = []
     for message in brief["messages"]:
         content = message.get("content") or ""
@@ -138,14 +128,23 @@ def test_review_change_on_the_system_index_is_the_commit_gates_brief(staged_body
         assert hashlib.sha256(aligned.encode()).hexdigest() == hashlib.sha256(gate_text.encode()).hexdigest(), slot_id
         assert "## Informational context — commit message" in gate_text, slot_id
 
+    # Reviewing the contribution does not authorize a neutral commit on the serving checkout.
+    head = shared.git(repo, "rev-parse", "HEAD")
+    commit_ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "commit-drive")
+    git_mod._reset_commit_review_state(commit_ctx)
+    monkeypatch.setattr(substrate, "run_review_request", lambda *a, **kw: pytest.fail("serving refusal precedes paid review"))
+    refused = git_mod._run_reviewed_stage_cycle(commit_ctx, COMMIT_MESSAGE, 0, require_release_tag=False)
+    assert refused["status"] == "blocked" and refused["block_reason"] == "preflight", refused
+    assert "VERSION is not in scope" in refused["message"]
+    assert shared.git(repo, "rev-parse", "HEAD") == head
+
 
 QUESTIONS = ["Does the proposal's constant reach every caller of the helper?", "Which test pins the new value?"]
 PRIOR_OBLIGATION = "ob-prior-round-7"
 
 
 def _seed_open_obligation(drive_root: Path, repo: Path) -> None:
-    """One obligation of this checkout left open by an earlier round, in the durable
-    advisory state every door reads its history from."""
+    """Seed an earlier open obligation in the durable state both doors read."""
     from ouroboros.review_state import AdvisoryReviewState, ObligationItem, make_repo_key, save_state
 
     state = AdvisoryReviewState()

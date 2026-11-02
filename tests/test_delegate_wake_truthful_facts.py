@@ -36,7 +36,7 @@ def _child_events(wake, kind="child_terminal"):
 
 
 def _state(ctx):
-    return json.loads(supervision._state_path(ctx).read_text(encoding="utf-8"))
+    return supervision._load_state(ctx, "run-o")
 
 
 # -- A: the committed child-delivery cursor is task-scoped ---------------------
@@ -114,8 +114,10 @@ def test_recovery_handoff_and_restore_keep_the_committed_cursor(tmp_path, carrie
         row["coordination_cursor"] = dict(cursor)
     recovery._restore_wait_checkpoint(tmp_path, row)
     restored = json.loads(path.read_text(encoding="utf-8"))
-    assert restored["run_id"] == "run-new" and restored["status"] == "adopted"
-    assert (restored.get("coordination_cursor") == cursor) is carried
+    assert restored["schema"] == 2 and set(restored["runs"]) == {"run-old", "run-new"}
+    assert restored["runs"]["run-new"]["status"] == "adopted"
+    # D1 preserves task-wide delivery facts even when this holder carries none.
+    assert restored["coordination_cursor"] == cursor
 
 
 def test_prepare_handoff_row_snapshots_the_committed_cursor(tmp_path):

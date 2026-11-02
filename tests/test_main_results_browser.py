@@ -16,6 +16,7 @@ from tests.system_e2e.harness import (
     ArtifactOracle, KeylessIsolatedServer, ModelGate, ScriptedStubModel,
     body_text, keyless_settings, start_server, wait_durable_result,
 )
+from tests.ui_console_errors import PageErrors
 from tests.ui_failure_evidence import FailureEvidence
 
 wait_clone = clone_fixture
@@ -40,13 +41,12 @@ def _nf_evidence(tmp_path, stem):
     return path
 
 
-def _nf_observe(page, facts):
-    facts["frames"], facts["requests"], facts["page_errors"] = [], [], []
+def _nf_observe(page, facts, engine):
+    facts["frames"], facts["requests"], facts["page_errors"] = [], [], PageErrors(page, engine)
     page.on("websocket", lambda socket: socket.on("framereceived", lambda payload:
             facts["frames"].append(json.loads(payload))))
     page.on("request", lambda request: facts["requests"].append({
         "method": request.method, "url": request.url}))
-    page.on("pageerror", lambda error: facts["page_errors"].append(str(error)))
 
 
 def _nf_retain(page, server, candidate, evidence, facts):
@@ -106,7 +106,7 @@ def test_main_partial_final_has_one_compact_limitation_with_project_closed(
             with sync_playwright() as pw:
                 browser = getattr(pw, engine).launch()
                 page = browser.new_page(viewport={"width": width, "height": 900}, reduced_motion="reduce")
-                _nf_observe(page, facts)
+                _nf_observe(page, facts, engine)
                 with FailureEvidence(page, browser, evidence, request.node.nodeid, engine) as capture:
                     try:
                         page.goto(server.base_url, wait_until="domcontentloaded")
@@ -149,7 +149,7 @@ def test_main_partial_final_has_one_compact_limitation_with_project_closed(
                             page.screenshot(path=str(evidence / f"{stage}.png"), animations="disabled")
                         facts["model_calls"] = len(calls)
                         assert len(calls) == 1
-                        assert not facts["page_errors"], facts["page_errors"]
+                        assert not facts["page_errors"].unexpected(), facts["page_errors"]
                         facts["passed"] = True
                     finally:
                         _nf_retain(page, server, wait_clone, evidence, facts)
@@ -219,7 +219,7 @@ def test_real_notification_opens_exact_question_in_project_outside_first_fifty(
                 page.add_init_script("localStorage.setItem('ouroboros.notifications', JSON.stringify({"
                     "enabled:true, needs_answer:true, task_done:false, important:false, main_reply:false,"
                     "sound:false, show_text:false}));")
-                _nf_observe(page, facts)
+                _nf_observe(page, facts, engine)
                 with FailureEvidence(page, browser, evidence, request.node.nodeid, engine) as capture:
                     try:
                         page.goto(server.base_url, wait_until="domcontentloaded")

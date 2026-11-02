@@ -15,36 +15,35 @@ def case(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("owner", ["task", "run"])
-@pytest.mark.parametrize("change", ["delete", "rename", "recreated_excluded"])
+@pytest.mark.parametrize("change", ["delete", "rename", "recreated"])
 def test_staged_deleted_inputs_leave_current_snapshot_and_source_unchanged(case, owner, change):
+    """The copy is the source's CURRENT tree: a staged delete or rename is in it, and a file
+    recreated after ``git rm`` is an ordinary untracked input of the snapshot."""
     source = case[1]
-    name = ".env" if change == "recreated_excluded" else "a.txt"
-    if name == ".env":
-        (source / name).write_bytes(b"old tracked input\n")
-        git(source, "add", name); git(source, "commit", "-qm", "tracked input")
+    name = "a.txt"
     if change == "rename":
         git(source, "mv", name, "renamed.txt")
     else:
         git(source, "rm", name)
-        if change == "recreated_excluded":
-            (source / name).write_bytes(b"NEVER_HASH_THIS_NEW_CREDENTIAL=fixture\n")
+        if change == "recreated":
+            (source / name).write_bytes(b"recreated after the staged delete\n")
     head, index = git(source, "rev-parse", "HEAD"), (source / ".git/index").read_bytes()
     status = git(source, "status", "--porcelain")
     args = {"task_id": "copy", "worktree_root": case[3], "data_dir": case[2]}
     handle = (trees.provision_worktree(repo_dir=source, **args) if owner == "task" else
               trees.provision_execution_snapshot(target_root=source, snapshot_id="run-copy", **args))
     output = Path(handle.path)
-    assert not (output / name).exists()
-    assert git(output, "ls-files", name) == b""
+    if change == "recreated":
+        assert (output / name).read_bytes() == b"recreated after the staged delete\n"
+        assert git(output, "ls-files", name) == name.encode() + b"\n"
+    else:
+        assert not (output / name).exists()
+        assert git(output, "ls-files", name) == b""
     if change == "rename":
         assert (output / "renamed.txt").read_bytes() == b"base\n"
     assert git(source, "rev-parse", "HEAD") == head
     assert (source / ".git/index").read_bytes() == index
     assert git(source, "status", "--porcelain") == status
-    if change == "recreated_excluded":
-        oid = git(source, "hash-object", name).strip().decode()
-        import subprocess
-        assert subprocess.run(["git", "cat-file", "-e", oid], cwd=source, capture_output=True).returncode != 0
 
 
 def test_case_aliases_and_common_git_directory_are_physical_identity(case):
@@ -142,8 +141,9 @@ def test_parent_returns_named_source_under_existing_write_rights(case, monkeypat
 @pytest.mark.parametrize("restriction", ["readonly", "acting", "presence", "owner_store"])
 def test_named_source_never_mints_parent_write_authority(case, monkeypatch, restriction):
     from ouroboros.contracts.task_constraint import TaskConstraint
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
-    from ouroboros.presence_capabilities import PresenceResourceTarget
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
+    from tests.frozen_presence_capabilities import PresenceResourceTarget
     from tests.test_presence_authority import _resolution
 
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(case[1].parent))
@@ -189,7 +189,8 @@ def test_actual_body_policy_survives_false_child_label(case, monkeypatch):
 
 def test_apply_rechecks_presence_after_lock(case, monkeypatch):
     from ouroboros.tools import git as git_tools
-    from ouroboros.presence_authority import build_presence_capability_ceiling, presence_ceiling_payload
+    from ouroboros.presence_authority import presence_ceiling_payload
+    from tests.frozen_presence_authority import build_presence_capability_ceiling
     from tests.test_presence_authority import _resolution
     child, task = admit(case, "child", "parent")
     (child / "a.txt").write_bytes(b"child\n"); capture(case, child, task)

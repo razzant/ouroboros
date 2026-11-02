@@ -232,3 +232,34 @@ assert.match(host.innerHTML, /Saved headers are malformed/);
     result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def test_mcp_cards_show_the_schema_pin_and_what_each_server_costs_a_request():
+    """#2332: the owner sees each server's weight and pins its call schemas from task start."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+const status = { textContent: '', dataset: {} };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : id === 'mcp-global-status' ? status : null,
+    querySelector: () => null };
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ enabled: true, sdk_available: true, servers: [
+    { id: 'gitlab', tool_count: 99, map_tokens: 2400, schema_tokens: 31000, schemas_at_start: false },
+    { id: 'slack', tool_count: 11, map_tokens: 120, schema_tokens: 4600, schemas_at_start: true }],
+    weights: { tools: 110, map_tokens: 2600, schema_tokens_from_task_start: 4600 } }) });
+const servers = [{ id: 'gitlab', url: 'https://g.test/mcp', enabled: true },
+                 { id: 'slack', url: 'https://s.test/mcp', enabled: true, schemas_at_start: 'true' }];
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: servers });
+for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: servers });
+assert.match(host.innerHTML, /data-mcp-field="schemas_at_start"/);
+assert.match(host.innerHTML, /Connections map ≈2\.4k tokens in every Low\/Max request; call schemas ≈31\.0k tokens, loaded when Ouroboros takes up this server\./);
+assert.match(host.innerHTML, /call schemas ≈4\.6k tokens in every Low\/Max request from task start/);
+assert.match(status.textContent, /Connections map ≈2\.6k tokens in every Low\/Max request; call schemas from task start ≈4\.6k tokens\./);
+const saved = collectMcpSettings().MCP_SERVERS;
+assert.equal(saved[0].schemas_at_start, false);
+assert.equal(saved[1].schemas_at_start, true);
+'''
+    result = subprocess.run([_node_bin(), '--input-type=module', '-e', script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import pathlib
 from typing import Any, Dict, List, Optional, Tuple
@@ -175,27 +176,26 @@ def _vision_query_with_timeout(client: Any, *, model_role: str = "vision",
     remaining = dispatch_window_remaining_sec(deadline_at=kwargs.pop("_deadline_at", None),
                                               deadline_ts=kwargs.pop("_deadline_ts", None),
                                               reserve_sec=2 * NESTED_SETTLEMENT_MARGIN_SEC + float(kwargs.pop("_finalization_reserve", 0) or 0))
+    # A subscription call waits on its task's clocks only; ``None`` = none exists, and the
+    # child then has no timeout (its control watcher still ends it on Stop).
     operation_timeout = _vision_execution_window() if subscription else provider_timeout
     if remaining is not None:
-        operation_timeout = min(operation_timeout, remaining)
-    if operation_timeout <= 0:
+        operation_timeout = remaining if operation_timeout is None else min(operation_timeout, remaining)
+    if operation_timeout is not None and operation_timeout <= 0:
         raise TimeoutError("VLM task execution window exhausted before child dispatch")
-    child_timeout = operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
+    child_timeout = None if operation_timeout is None else operation_timeout + NESTED_SETTLEMENT_MARGIN_SEC
     return run_vision_child(child_timeout=child_timeout, subscription=subscription,
                             model_role=model_role, processing_preference=processing_preference, **kwargs)
 
 
-def _vision_execution_window() -> float:
-    from ouroboros.config import get_task_abs_ceiling_sec, operation_window_sec
+def _vision_execution_window() -> Optional[float]:
+    from ouroboros.deadline_utils import task_execution_window_sec
 
-    context = current_model_wait()
-    remaining = context.execution_window_remaining() if context else None
-    # An owner (or task) without an absolute clock still bounds this individual image.
-    return operation_window_sec(get_task_abs_ceiling_sec()) if remaining is None else remaining
+    return task_execution_window_sec()
 
 
-def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> float:
-    """Only a subscription image call adopts the task's existing execution cap."""
+def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> Optional[float]:
+    """Only a subscription image call adopts the task's existing execution cap (``None`` = none)."""
     from ouroboros.provider_models import provider_for_model
 
     context = current_model_wait()
@@ -207,7 +207,8 @@ def _vision_tool_timeout(ctx: Any, tool_args: dict | None) -> float:
     )
     if provider_for_model(model) != "claudexor":
         return 0.0
-    return _vision_execution_window() + (2 * NESTED_SETTLEMENT_MARGIN_SEC)
+    window = _vision_execution_window()
+    return None if window is None else window + (2 * NESTED_SETTLEMENT_MARGIN_SEC)
 
 
 def _path_is_under(path: "pathlib.Path", root: "pathlib.Path") -> bool:
@@ -489,11 +490,23 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     payload ``{"base64", "mime"}``. On any rejection returns ``(None, message)``.
     LOCAL FILES ONLY — no URL, no base64 (no new exfiltration surface). Shared by
     vlm_query(file_path=...) and view_image so both enforce identical checks.
-    A relative path resolves against the process working directory. An absent
+    A relative path means the caller's active workspace (read_file's default root), never the
+    process working directory: that is the serving checkout, whose same-named file
+    would answer for the task's. A workspace that cannot be named refuses. An absent
     path inside the admitted roots is a discovery miss (typed warning, no image),
     reported only after every admission guard; size/read/MIME failures stay errors."""
     import pathlib
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp = pathlib.Path(file_path).expanduser()
+    if not fp.is_absolute():
+        try:
+            from ouroboros.tools.registry import active_repo_dir_for
+            fp = pathlib.Path(active_repo_dir_for(ctx)).expanduser() / fp
+        except Exception as e:
+            return None, _refuse(ctx, (
+                f"⚠️ Relative image path {file_path!r} has no active workspace to resolve against: {e}. "
+                "Name the image by its absolute path."
+            ))
+    fp = fp.resolve()
     allowed = _allowed_file_roots(ctx)
     if not any(_path_is_under(fp, root) for root in allowed):
         return None, _refuse(ctx, (
@@ -530,8 +543,9 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     if retain_original:
         # Retain the admitted bytes BEFORE decoding/conversion, even on refusal.
         from ouroboros.image_preparation import retain_original as retain
+        from ouroboros.tool_access import canonical_data_root
         try:
-            source_path = str(retain(pathlib.Path(ctx.drive_root) / "uploads" / "views", raw, fp.name))
+            source_path = str(retain(canonical_data_root(ctx) / "uploads" / "views", raw, fp.name))
         except OSError:
             log.warning("Could not retain image original; source stays at %s", fp, exc_info=True)
     from ouroboros.image_preparation import image_mime
@@ -539,6 +553,7 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
         payload = _image_payload_from_bytes(raw, image_mime(raw))
         if retain_original:
             payload["source_path"] = source_path
+            payload["source_sha256"] = hashlib.sha256(raw).hexdigest()
         return payload, ""
     except _ProviderCapExceeded as e:
         return None, _refuse(ctx, f"{e}. Original: {source_path}", code="VLM_ERROR")
@@ -635,7 +650,8 @@ def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:
         log.debug("Failed to emit VLM usage event", exc_info=True)
 
 
-def attach_local_image_to_context(ctx: ToolContext, path: str) -> Tuple[bool, str]:
+def attach_local_image_to_context(ctx: ToolContext, path: str, *, stamp: Any = None,
+                                  observation: Optional[dict] = None, capture_source: str = "") -> Tuple[bool, str]:
     """Attach a LOCAL image file to the active conversation as a native image block.
 
     The single implementation behind BOTH the agent-called ``view_image`` tool and
@@ -660,6 +676,8 @@ def attach_local_image_to_context(ctx: ToolContext, path: str) -> Tuple[bool, st
 
     src_name = pathlib.Path(path).name
     source_path = payload["source_path"]
+    if observation is not None:
+        observation.update(source_path=source_path, source_sha256=payload["source_sha256"])
     caption = f"[image: {src_name}; original: {source_path}" + (f"; {payload['note']}]" if payload.get("note") else "]")
     from ouroboros.loop import _append_or_merge_user_content
 
@@ -670,8 +688,10 @@ def attach_local_image_to_context(ctx: ToolContext, path: str) -> Tuple[bool, st
             "image_url": {"url": f"data:{mime};base64,{b64}"},
             "_caption": caption,
             "_source_path": source_path,
+            "_source_sha256": payload["source_sha256"],
+            **({"_capture_source": capture_source} if capture_source else {}),
         },
-    ])
+    ], stamp=stamp or ctx)  # a batch eviction of sent images names its origin on the live slot
     return True, (
         f"'{src_name}' is now attached as a local image block. Vision-capable remote routes can "
         f"inspect it inline; blind/local routes may receive a caption or placeholder at send time. "
@@ -692,7 +712,11 @@ def _view_image(ctx: ToolContext, path: str = "") -> str:
     (no URL / no base64), same trust boundary as read_file. Prefer this over
     vlm_query when you need to reason about the image yourself (charts, renders,
     screenshots, photos, scanned/printed text)."""
-    _ok, message = attach_local_image_to_context(ctx, path)
+    observation = {}
+    ok, message = attach_local_image_to_context(ctx, path, observation=observation)
+    if ok:
+        return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=message,
+                                    meta={"image_attachment": {"status": "attached", **observation}}))
     return message
 
 
@@ -703,7 +727,7 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "analyze_screenshot",
                 "description": (
-                    "Analyze the last browser screenshot using a Vision LLM. "
+                    "Ask a vision model, in a separate call, about this task's last browser screenshot. "
                     "Must call browse_page(output='screenshot') or browser_action(action='screenshot') first. "
                     "Returns a text description and analysis of the screenshot. "
                     "Use this to verify UI, check for visual errors, or understand page layout. "
@@ -736,7 +760,7 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "vlm_query",
                 "description": (
-                    "Analyze any image using a Vision LLM. "
+                    "Ask a vision model, in a separate call, to analyze one image (not your own native view; see view_image). "
                     "Provide one of: file_path (local file, preferred — avoids large base64 in arguments), "
                     "image_url (public URL), or image_base64 (base64-encoded PNG/JPEG). "
                     "Use file_path for files already on disk (e.g. data/uploads/ attachments). "
@@ -754,7 +778,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot), the active task workspace, or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
+                            "description": "Local image path (preferred — avoids base64 in arguments): relative to the active workspace, or absolute inside the workspace, the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot) or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
                         },
                         "image_url": {
                             "type": "string",
@@ -802,7 +826,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Local image file path inside the task workspace, uploads dir, the skill-state tree (data/state/skills), or the task's artifact_store/task_drive (e.g. /app/chart.png after list_files finds it, or artifact_store/video_frames/frame_001.png from extract_video_frames).",
+                            "description": "Local image path: relative to the active workspace (list_files' default root), or absolute inside the workspace, uploads dir, the skill-state tree (data/state/skills) or the task's artifact_store/task_drive (e.g. a frame path extract_video_frames returned).",
                         },
                     },
                     "required": ["path"],

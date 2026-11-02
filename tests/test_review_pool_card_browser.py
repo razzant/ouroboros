@@ -102,11 +102,22 @@ def test_review_pool_card_and_reviewer_caption_at_phone_and_desktop_widths(direc
                     _open_review_checkpoint(card)
                     detail = card.locator("[data-review-attempt-detail]").first
                     detail.wait_for(state="visible", timeout=10_000)
-                    shown = detail.inner_text().splitlines()
+                    # Record facts is a definition list: each visible label/value pair still
+                    # reconstructs the exact sentence the old plain-text detail printed.
+                    shown = detail.locator('dl').evaluate("""dl => [...dl.querySelectorAll('dd')].map(dd => {
+                        const label = dd.previousElementSibling;
+                        return (label?.tagName === 'DT' ? label.textContent + ': ' : '') + dd.textContent;
+                    })""")
                     for line in CARD_LINES:
                         assert line in shown, (name, line, shown)
                     assert any(line.startswith("Reviewer critic: adviser, not counted · cost unknown") for line in shown)
                     _assert_contained(page, detail, viewport["width"])
+                    # Record facts keeps its values readable at every width: a long label never squeezes the value
+                    # column below the label column (a phone once read the record id two characters a line).
+                    columns = detail.locator('dl').evaluate("""dl => { const dt = dl.querySelector('dt');
+                        const dd = dt?.nextElementSibling; return dt && dd ? [dt.getBoundingClientRect().width,
+                        dd.getBoundingClientRect().width] : null; }""")
+                    assert columns and columns[1] >= columns[0], (name, columns)
                     detail.scroll_into_view_if_needed()
                     card.screenshot(path=str(evidence / f"review-pool-card-{name}.png"))
                     page.close()

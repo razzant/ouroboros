@@ -92,12 +92,16 @@ def test_ordinary_matrix_requires_admitted_manual_or_tag_event(event, ref, base,
     assert (triggered and bool(_value(WORKFLOW["jobs"]["quick-test"]["if"], **facts))) is quick
     job = WORKFLOW["jobs"]["full-test-runs"]
     admitted = triggered and _value(job["if"], **facts)
-    actual = _value(job["strategy"]["matrix"]["os"], **facts) if admitted else []
-    if admitted:
-        actual += [row["os"] for row in job["strategy"]["matrix"]["include"]]
+    rows = job["strategy"]["matrix"]["include"]
+    actual = [row["os"] for row in rows] if admitted else []
     assert sorted(set(actual)) == sorted(platforms)
-    assert actual.count("windows-latest") == (8 if "windows-latest" in platforms else 0)
-    assert all(actual.count(os) == 1 for os in platforms if os != "windows-latest")
+    # Every OS runs whole-file duration shards 1..N; macOS stays within the free plan's five slots.
+    shards = {"ubuntu-latest": 4, "macos-latest": 4, "windows-latest": 8}
+    for os, count in shards.items():
+        assert actual.count(os) == (count if os in platforms else 0)
+        mine = [row for row in rows if row["os"] == os]
+        assert sorted(row["shard"] for row in mine) == list(range(1, count + 1))
+        assert {row["shards"] for row in mine} == {count}
     assert job["strategy"]["fail-fast"] is False
     assert job["runs-on"] == "$" + "{{ matrix.os }}"
 
@@ -122,8 +126,9 @@ def test_dormant_pr_predicates_keep_checkout_and_base_evidence_secret_free():
     assert WORKFLOW["permissions"] == {"contents": "read"}
     job = WORKFLOW["jobs"]["quick-test"]
     assert "secrets." not in json.dumps(job)
-    # The book-growth exception reads PR label events, without any write grant.
-    assert job["permissions"] == {"contents": "read", "pull-requests": "read"}
+    # The book-growth exception reads PR label events and the accepted-failure check reads
+    # issue label events, without any write grant.
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "read"}
     checkout = job["steps"][0]
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"] == {"fetch-depth": 0}  # Default PR checkout tests the merge ref.
@@ -203,19 +208,17 @@ def test_status_checks_and_inequality_keep_independent_meanings(event, cancelled
     ) is expected
 
 
-@pytest.mark.parametrize("event,attempt,group,cancels", [
-    ("pull_request", 1, "ci-pr-42", True),
-    # GitHub keeps one pending run per group: a re-run of an old head must not share the new head's.
-    ("pull_request", 2, "ci-run-77-2", False),
-    ("push", 1, "ci-run-77-1", False),
-    ("schedule", 1, "ci-run-77-1", False),
-    ("workflow_dispatch", 1, "ci-run-77-1", False),
+@pytest.mark.parametrize("event,attempt,group", [
+    ("push", 1, "ci-run-77-1"),
+    # GitHub keeps one pending run per group: every attempt owns its group, so none displaces another.
+    ("push", 2, "ci-run-77-2"),
+    ("workflow_dispatch", 1, "ci-run-77-1"),
 ])
-def test_only_a_new_pull_request_head_cancels_a_run(event, attempt, group, cancels):
+def test_every_run_attempt_has_its_own_group_and_cancels_nothing(event, attempt, group):
     concurrency = WORKFLOW["concurrency"]
     facts = {"event": event, "ref": "refs/heads/candidate", "attempt": attempt}
     assert _value(concurrency["group"], **facts) == group
-    assert bool(_value(concurrency["cancel-in-progress"], **facts)) is cancels
+    assert concurrency["cancel-in-progress"] is False
 
 
 def test_manual_and_tag_desktop_matrix_remains_available_to_forks():
@@ -269,8 +272,8 @@ def test_the_windows_leg_runs_its_browser_modules_and_refuses_a_skip(tmp_path, r
                               + module)
     assert " -m ui_browser -k chromium " in command and "--require-ui-browser" not in command
     assert "matrix" not in run["run"]
-    assert "matrix.shard <= 1" in install["if"] and "matrix.shard <= 1" in run["if"]
-    assert job["strategy"]["matrix"].keys() == {"os", "shard", "include"}
+    assert "matrix.shard == 1" in install["if"] and "matrix.shard == 1" in run["if"]
+    assert job["strategy"]["matrix"].keys() == {"include"}
     # The skip guard, run as written against a junit report of each shape.
     for tests, skipped, ok in ((3, 0, True), (3, 1, False), (0, 0, False)):
         report = tmp_path / "attachment-browser.xml"

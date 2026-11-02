@@ -8,16 +8,16 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 Z_TOKENS = ("--z-page-header", "--z-sidebar", "--z-room", "--z-resize-handle", "--z-project-scrim", "--z-project-panel",
-            "--z-project-layer", "--z-drawer-scrim", "--z-header-menu", "--z-popover")
+            "--z-project-layer", "--z-drawer-scrim", "--z-popover")
 SHELL_RULES = {
-    "web/style.css": ("#primary-sidebar {", ".resize-handle {", ".chat-page-header {", ".chat-header-menu {",
+    "web/style.css": ("#primary-sidebar {", ".resize-handle {", ".chat-page-header {",
                       'html[data-layout="stack"] .nav-drawer-backdrop {', 'html[data-layout="stack"] #primary-sidebar {',
                       'html[data-layout="stack"] #content {',
                       ".project-panel {", ".project-panel-backdrop {", 'html[data-layout="stack"] .project-panel {'),
     "web/ui.css": (".ui-popup {",),
 }
 GATED_HOVERS = (".nav-row:hover", ".nav-project-kebab:hover", ".nav-projects-add:hover", ".resize-handle:hover",
-                ".chat-header-btn:hover", ".chat-header-btn.danger:hover", ".chat-header-menu-item:hover",
+                ".chat-header-btn:hover", ".chat-header-btn.danger:hover",
                 ".chat-budget-pill:hover", ".nav-drawer-close):hover", ".chat-budget-pill.ui-chrome-control:hover",
                 ".chat-project-row:hover")
 

@@ -2,7 +2,7 @@
 
 Every proof runs against the PRODUCTION seams — ``gateway.tasks.api_task_hurry``
 (re-export of ``gateway/task_hurry.py``), ``loop._drain_incoming_messages``,
-``loop._no_tool_final_answer``, ``loop._enforce_swarm_actions``, the dedicated
+``loop._no_tool_final_answer``, ``loop._enforce_plan_gate``, the dedicated
 locked projection writer, and the one shared retry-reset invoked by the
 ``supervisor/workers.py`` crash-requeue.
 
@@ -382,7 +382,7 @@ def test_the_hurry_reason_stays_out_of_the_forced_rail_and_best_effort_vocabular
 
 
 # ---------------------------------------------------------------------------
-# §19.7.4 bullet 6 — production _enforce_swarm_actions force-plan projection
+# §19.7.4 bullet 6 — production _enforce_plan_gate force-plan projection
 # ---------------------------------------------------------------------------
 
 
@@ -411,10 +411,10 @@ def _plan_record(kind: str) -> dict:
     [
         ("held", True), ("awaiting", True),        # locally advisory / proceed
         ("unsent", True),                          # an ask that reached nobody: attempted, disclosed, never held (scope R1 F1)
-        ("absent", False),                         # no plan at all: the Swarm admitted the task to write one — held
+        ("absent", True),                          # no plan creates no obligation
     ],
 )
-def test_enforce_swarm_actions_task_local_advisory_matrix(tmp_path, monkeypatch, kind, hurry_allows):
+def test_enforce_plan_gate_task_local_advisory_matrix(tmp_path, monkeypatch, kind, hurry_allows):
     import ouroboros.loop as loop_mod
 
     monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
@@ -423,15 +423,15 @@ def test_enforce_swarm_actions_task_local_advisory_matrix(tmp_path, monkeypatch,
     def _swarm_held(ctx):
         trace = {"reasoning_notes": []}
         tools = SimpleNamespace(_ctx=ctx)
-        held = loop_mod._enforce_swarm_actions("answer", [], tools, trace, lambda _m: None)
+        held = loop_mod._enforce_plan_gate("answer", [], tools, trace, lambda _m: None)
         return held, trace
 
     latched_ctx = _task_ctx(tmp_path, latched=True)
     latched_ctx.task_metadata = {"force_plan": True}
     held, trace = _swarm_held(latched_ctx)
     assert held is (not hurry_allows)
-    decision = trace["force_plan_decision"]
-    if hurry_allows:
+    decision = trace.get("plan_gate", {})
+    if hurry_allows and kind != "absent":
         # Attribution rides the decision for the task detail.
         assert decision["owner_hurry_local_advisory"] is True
         assert decision["configured_enforcement"] == "blocking"
@@ -441,7 +441,7 @@ def test_enforce_swarm_actions_task_local_advisory_matrix(tmp_path, monkeypatch,
     unlatched_ctx = _task_ctx(tmp_path, latched=False)
     unlatched_ctx.task_metadata = {"force_plan": True}
     held_unlatched, _t = _swarm_held(unlatched_ctx)
-    assert held_unlatched is (kind in ("held", "absent"))
+    assert held_unlatched is (kind == "held")
     # Durable review state was never touched (the monkeypatched loader is the
     # only read; nothing wrote a plan record).
     assert not (tmp_path / "task_results").exists() or "plan_record" not in json.dumps(
@@ -639,6 +639,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
                 event_queue=None, accumulated_usage={}, task_type="task",
                 active_use_local=False, tools=SimpleNamespace(_ctx=first_ctx),
                 drive_root=tmp_path, context_fit_plan=None, active_context_mode="max",
+                physical_send_claim=None,
             ),
             None,
             attempt_cap=1,
@@ -705,6 +706,7 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
             event_queue=None, accumulated_usage={}, task_type="task",
             active_use_local=False, tools=SimpleNamespace(_ctx=successor_ctx),
             drive_root=tmp_path, context_fit_plan=None, active_context_mode="max",
+            physical_send_claim=None,
         ),
         None,
         attempt_cap=1,

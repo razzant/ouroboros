@@ -26,6 +26,7 @@ def main_loop(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "12")
     monkeypatch.setenv("MCP_ENABLED", "false")
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
@@ -93,7 +94,8 @@ def test_main_records_and_applies_authored_view_without_manual_observation(main_
     before, after = f.inputs[1]["messages"], f.inputs[2]["messages"]
     assert checkpoint["messages"] == before
     assert f.source.splitlines()[-1] in str(checkpoint["messages"])
-    assert before[:2] == after[:2]
+    unmarked = lambda rows: [{k: v for k, v in m.items() if k != "cache_control"} for m in rows]  # noqa: E731
+    assert unmarked(after[:2]) == unmarked(before[:2])  # only the seal's host-only mark moved on
     assert not any(m.get("tool_call_id") == "read" for m in after)
     assert any(m.get("tool_call_id") == "compact" for m in after)
     assert "I retained the trailing conclusion." in str(after)

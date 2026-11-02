@@ -53,7 +53,7 @@ def test_resume_waits_for_exact_root_or_child_effect_retirement(tmp_path, monkey
         _park(root, monkeypatch, queue, workers)
         phase = next(row["phase"] for row in _chat_activities_snapshot_safe(tmp_path)
                      if row["activity_id"] == "root")
-        assert phase == "budget_pausing"
+        assert phase == "budget_paused"  # its stack parked; the handed tool is a separate blocker
         before = load_task_result(root, "root")["budget_pause"]
         refused = queue.resume_budget_paused_task("root")
         assert refused["error"] == "owner_pause_effects_unsettled", refused
@@ -269,7 +269,7 @@ def test_owner_pause_over_sleep_retains_sleep_source_and_explicit_resume(tmp_pat
     assert request_owner_pause("root", request_id="sleep-overlay")["ok"]
     _mail(tmp_path, "root", "wake", kind="owner_text")
     wake = wake_ready_sleepers(queue)
-    assert wake[0]["error"] == "sleep_wake_vetoed" and wake[0]["veto"] == "owner_pause"
+    assert wake[0]["error"] == "sleep_wake_vetoed" and wake[0]["veto"] == "pause"
     assert queue.resume_budget_paused_task("root")["ok"]
     sent = []
     workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,

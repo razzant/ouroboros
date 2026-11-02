@@ -75,6 +75,7 @@ from ouroboros.tools.core_file_tools import (  # noqa: F401
     _root_display_path,
     _runtime_data_read_check,
 )
+from ouroboros.delegate_reply import REPLY_TO_SCHEMA, validate_reply_target
 from ouroboros.tools.core_artifacts import (  # noqa: F401
     _MAX_DOCUMENT_FILE_BYTES,
     _MAX_PHOTO_FILE_BYTES,
@@ -1128,7 +1129,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
 
 
 def _forward_to_worker(
-    ctx: ToolContext, task_id: str, message: str, relayed_from_task_id: str = "",
+    ctx: ToolContext, task_id: str, message: str, relayed_from_task_id: str = "", reply_to: dict | None = None,
 ) -> str:
     """Write task context to the recipient's mailbox, never owner text.
     Descendants receive ancestor/relayed context; contributions inside one tree
@@ -1147,6 +1148,7 @@ def _forward_to_worker(
 
     try:
         tid = validate_task_id(task_id)
+        reply_to = validate_reply_target(ctx, reply_to, recipient=tid)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (forward_to_worker): {exc}"
     if len(str(message or "")) > TASK_MESSAGE_MAX_CHARS:
@@ -1166,11 +1168,8 @@ def _forward_to_worker(
     # read when it starts, or stay in its result as unread mail, the same receipt a queued one gives.
     if status not in (STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED):
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="LEGACY_BLOCKED", text=(f"⚠️ TASK_NOT_ACTIVE: task {tid} is {status or 'unknown'}, neither running nor queued.")))
-    # AR2-6: no NEW steering writes while a cancellation is pending. The
-    # effective status honestly stays ``running`` (cancel_state=pending rides
-    # beside it), so the checks above pass — consult the same predicate the
-    # steer_task/mailbox routes use, covering BOTH carriers (durable intent +
-    # legacy latch), and refuse typed.
+    # Cancellation may still report running; consult intent and legacy latch
+    # before accepting new steering, just as steer_task/mailbox do.
     try:
         from ouroboros.cancel_intents import cancel_pending
 
@@ -1190,10 +1189,8 @@ def _forward_to_worker(
     relation = ""
     listed_root = None
     if not durable_descendant_of(status_drive_root, tid, data, current_task_id):
-        # A peer inside the tree (the caller's parent, a sibling, or any task sharing
-        # its root) before the host roster; its typed admission (relay refused, cancel
-        # state read strictly) lives beside the roster's other addressability rules
-        # in peer_roster.
+        # Same-tree peer admission precedes the independent roster; it refuses
+        # relay and reads cancellation strictly.
         relation, refusal = peer_contribution_admission(
             status_drive_root, current_task_id, metadata, tid, data, relayed_from=relayed_from)
         if refusal is not None:
@@ -1241,6 +1238,7 @@ def _forward_to_worker(
             relayed_from_task_id=relayed_from,
             msg_id=uuid.uuid4().hex,
             relation=relation,
+            **({"reply_to": reply_to} if reply_to else {}),
         )
     except StoreForeign as exc:
         return _publish_tool_result(ctx, ToolResult(status="blocked", code="ACCESS_BLOCKED", text=(
@@ -1328,11 +1326,15 @@ def get_tools() -> List[ToolEntry]:
         }, _read_file),
         ToolEntry("list_files", {
             "name": "list_files",
-            "description": "List files under a resource root directory.",
+            "description": "List a directory, or use depth/include for a bounded live tree. Gaps make complete=false. "
+                           "Generated subtrees are skipped only in code roots; symlink directories are not followed.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "default": "."},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "max_entries": {"type": "integer", "default": 500},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1, "description": "Tree levels; depth=1 with no include preserves the ordinary one-directory listing."},
+                "include": {"type": "string", "description": "Optional basename glob, including braces such as *.{py,js}; directories are traversed but not returned as matches."},
+                "max_scan": {"type": "integer", "minimum": 1, "maximum": 20000, "default": 2000, "description": "Opt-in tree's examined-entry bound, not just match count; one additional lookahead detects a cut directory. Packed checkpoints are omitted with a direct listing recipe."},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
             }, "required": []},
@@ -1340,16 +1342,13 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("write_file", {
             "name": "write_file",
             "description": (
-                "For canonical output use root=artifact_store (created lazily), e.g. path=report.txt. Do not assume its physical directory already exists. "
-                "Write UTF-8 file(s) to a declared resource root. "
-                "With root omitted, relative paths use active_workspace; absolute paths select their permitted physical root, including user_files for home paths. "
-                "OK messages show root:path. "
-                "Overwriting an existing repo file returns the unified diff vs the "
-                "previous version — CHECK IT; invalid .py/.json content is blocked "
-                "before writing (force=true bypasses). "
-                "Use mode='append' to write a large file in chunks across multiple calls "
-                "(useful when the full content exceeds a single LLM output budget). "
-                "Set bucket/skill_name ONLY for root=skill_payload (skill authoring); leave empty for normal file edits."
+                (
+                'Create, overwrite or append UTF-8 files using path+content or files=[...]. Canonical output uses '
+                'root=artifact_store, created lazily. Omitted root selects active_workspace for relative paths and the '
+                'permitted physical root for absolute paths. Repo overwrites return a diff; check it. Invalid '
+                "Python/JSON is blocked unless force=true. Use mode='append' for chunks. bucket/skill_name apply only "
+                'to skill_payload.'
+            )
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -1409,9 +1408,9 @@ def get_tools() -> List[ToolEntry]:
         }, _send_photo),
         ToolEntry("send_video", {
             "name": "send_video",
-            "description": "Send a video to the owner's chat (e.g. an anime animation). Requires a local file_path.",
+            "description": "Send a local video file to the owner's chat, with an optional caption. Requires file_path.",
             "parameters": {"type": "object", "properties": {
-                "file_path": {"type": "string", "description": "Local file path to video (preferred)"},
+                "file_path": {"type": "string", "description": "Local file path to the video."},
                 "caption": {"type": "string", "description": "Optional caption for the video"},
             }, "required": ["file_path"]},
         }, _send_video),
@@ -1446,18 +1445,16 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("search_code", {
             "name": "search_code",
             "description": (
-                "Search for a pattern in the repository code. "
-                "Literal search by default; set regex=True for regular expressions. "
-                "Scoped to path (default: entire active workspace). "
-                "Skips binaries, caches, vendor dirs, and files >1MB. "
-                "Returns up to max_results matches (default 200) with root:file:line context; a long matched "
-                "line shows a window around its first match with that window's read_file range. "
-                "Use this for plain-text/regex matches (prefer it over grep/find-as-search in run_command); "
-                "for symbol-aware lookups (definitions, callers, references, impact) prefer query_code."
+                (
+                'Search literal text (default) or regex under root/path. Returns root:file:line matches with context; '
+                'long lines include a read_file range around the first match. Skips binaries, caches, vendor '
+                'directories and files over 1MB. max_results bounds matches. Use query_code for definitions, callers, '
+                'references or impact.'
+            )
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
-                "path": {"type": "string", "default": ".", "description": "Subdirectory to search (relative to repo root)"},
+                "path": {"type": "string", "default": ".", "description": "Subdirectory to search, relative to the selected root"},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "description": _FILE_ROOT_DESCRIPTION},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
@@ -1487,6 +1484,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running, queued or requested task to forward to"},
                 "message": {"type": "string", "description": "Message text to forward (at most 8000 chars)"},
+                "reply_to": REPLY_TO_SCHEMA,
                 "relayed_from_task_id": {"type": "string", "description":
                     "Optional sibling/descendant task whose output this ancestor relays. "
                     "The recipient sees both peer and ancestor provenance."},

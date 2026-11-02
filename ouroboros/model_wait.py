@@ -90,6 +90,8 @@ def model_wait_reason(error: Exception) -> str:
     code = getattr(error, "code", "")
     if code in {"auth_required", "subscription_window_exhausted"}:
         return "auth" if code == "auth_required" else "quota"
+    if code == "connection_unavailable":  # the route's connection is gone or disabled: typed, $0, owner's call
+        return "connection_unavailable"
     problem = getattr(error, "problem", None)
     context = problem.get("context") if isinstance(problem, dict) else None
     if code == "credential_pool_exhausted" and isinstance(context, dict) and context.get("poolCause") == "mixed":
@@ -189,8 +191,8 @@ def execution_elapsed_seconds(meta: dict, now: float) -> float:
 def execution_consumed_seconds(meta: dict) -> float:
     """Execution spent BEFORE this clock's origin (#939), never queue time.
 
-    Only a fresh-origin successor of an explicitly bounded task carries one
-    (``settle_execution_carry``); a preserved original start already spans
+    A fresh-origin successor or a pre-body Pause carries one (``settle_execution_carry``);
+    a preserved original start already spans
     every earlier attempt, so its offset never grows. Reads a RUNNING row's
     ``task`` or a task row itself.
     """
@@ -202,23 +204,79 @@ def execution_consumed_seconds(meta: dict) -> float:
     return max(0.0, value) if math.isfinite(value) else 0.0
 
 
+def closed_execution_total(meta: dict, now: float | None = None) -> float:
+    """An ended attempt's total execution (#939) from its RUNNING row. A quota wait
+    still open at the last observation stops there, never extended further:
+    the raw clock facts are read, never a reader's derived ``execution_sec``."""
+    clock = meta.get("model_wait_quota_clock")
+    closed = {**meta, "model_wait_quota_clock": {**clock, "active": False}} if isinstance(clock, dict) else meta
+    return execution_elapsed_seconds(closed, time.time() if now is None else now)
+
+
 def stamp_execution_handoff(successor: dict, meta: dict | None, now: float | None = None) -> None:
     """Record an ended attempt's total execution on its successor (#939).
 
     At assignment, ``settle_execution_carry`` keeps this total: a preserved
     origin excludes the intervening queue via the existing paused carrier;
-    a fresh origin carries the total as an offset. A quota wait
-    still open at the last observation stops there, never extended further:
-    the raw clock facts are read, never a reader's derived ``execution_sec``.
+    a fresh origin carries the total as an offset (``closed_execution_total``).
     """
     from ouroboros.runtime_limits import explicit_execution_timeout_sec
 
     successor.pop("_execution_handoff_sec", None)
     if explicit_execution_timeout_sec(successor) is None or not isinstance(meta, dict) or not meta:
         return
-    clock = meta.get("model_wait_quota_clock")
-    closed = {**meta, "model_wait_quota_clock": {**clock, "active": False}} if isinstance(clock, dict) else meta
-    successor["_execution_handoff_sec"] = execution_elapsed_seconds(closed, time.time() if now is None else now)
+    successor["_execution_handoff_sec"] = closed_execution_total(meta, now)
+
+
+# The result-row fact a budgeted task's terminal writer leaves for the work's next Continue
+# (``owner_continue.execution_carry``): ``{"sec": closed total, "attempt": the attempt it closed}``,
+# ``attempt`` 0 when written at admission, before any attempt of this id (``execution_opening``). It holds only while it
+# names the row's last started attempt (``task_attempt``): a later start that never closed is
+# unknown, never this older total.
+EXECUTION_CLOSE_KEY = "execution_consumed"
+
+
+def execution_close(task: dict, meta: dict | None, now: float | None = None) -> dict:
+    """``{EXECUTION_CLOSE_KEY: ...}`` for an ending attempt of a budgeted task, else ``{}``."""
+    from ouroboros.runtime_limits import explicit_execution_timeout_sec
+
+    if explicit_execution_timeout_sec(task) is None or not isinstance(meta, dict) or not meta:
+        return {}
+    attempt = int(meta.get("attempt") or task.get("_attempt") or 1)
+    return {EXECUTION_CLOSE_KEY: {"sec": closed_execution_total(meta, now), "attempt": attempt}}
+
+
+def execution_opening(task: dict, consumed: float = 0.0) -> dict:
+    """The attempt-0 close a budgeted row is admitted with, else ``{}``: what ran before any attempt of this id
+    (nothing at the task door, the carried total for a Continue's successor). Every start stamps ``task_attempt``
+    of at least 1, so it answers only for a row that never started."""
+    from ouroboros.runtime_limits import explicit_execution_timeout_sec
+
+    return {EXECUTION_CLOSE_KEY: {"sec": float(consumed), "attempt": 0}} if explicit_execution_timeout_sec(task) else {}
+
+
+def record_execution_close(drive_root: Any, task_id: str, task: dict, meta: dict | None) -> None:
+    """Write ``execution_close`` onto the task's EXISTING result before its RUNNING row is released.
+
+    Never creates a row; a failed write leaves the total unknown to Continue, never a new quota."""
+    fields = execution_close(task, meta)
+    if not fields or not task_id:
+        return
+    from ouroboros.task_result_schema import require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.task_store import patch_document
+
+    def update(current: dict) -> dict | None:
+        if not current:
+            return None
+        require_writable_task_result_schema(current)
+        return stamp_task_result_schema({**current, **fields})
+
+    try:
+        patch_document(pathlib.Path(task.get("budget_drive_root") or drive_root), str(task_id), update)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Execution total of %s not recorded; its Continue reads it as unknown",
+                                            task_id, exc_info=True)
 
 
 def native_sleep_started_at(handoff: Any) -> float | None:
@@ -709,8 +767,6 @@ class TaskModelWait:
         ceiling = resolve_task_execution_timeout_sec(self.task)  # None = unlimited; 0 = exhausted
         if ceiling is not None and self.executed_seconds() >= ceiling:
             return "absolute_ceiling"
-        if strict_current and control_gap is not None:
-            raise control_gap
         # The loop owns delivery. A private seen copy leaves that ownership
         # intact and excludes an already-drained or superseded stop control.
         from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
@@ -724,6 +780,8 @@ class TaskModelWait:
             if reason != REASON_OWNER_REQUESTED_FINALIZATION or _owner_stop_control_is_current(
                     self.tool_context, self.canonical_root, self.task_id, entry.get("msg_id", "")):
                 return "finalize_requested"
+        if strict_current and control_gap is not None:
+            raise control_gap  # only after every control readable here: a busy store hides no local Stop
         return None
 
     def pre_dispatch_pause(self) -> str | None:
@@ -966,9 +1024,12 @@ class TaskModelWait:
                 from ouroboros.llm_attempt import _PhysicalSendNotStarted
                 raise _PhysicalSendNotStarted("cancelled")
             self.answer_consumer_bound = True
+            from ouroboros.tool_custody import owner_proof
+
             return {"local_answer_consumer_id": self.answer_consumer_id,
                     "local_answer_task_attempt": self.attempt,
-                    "local_answer_owner_birth": self.answer_owner_birth}
+                    "local_answer_owner_birth": self.answer_owner_birth,
+                    "local_answer_owner_proof": owner_proof()}
 
     def rotate_answer_consumer(self) -> None:
         """A warm return after this receiver abandoned a sent wait (owner Pause).
@@ -987,9 +1048,9 @@ class TaskModelWait:
                 retire_model_consumers(self.canonical_root, self.task_id, {old: self.attempt})
             except Exception:
                 import logging
-                logging.getLogger(__name__).warning("Abandoned model consumer retirement could not persist for %s",
+                logging.getLogger(__name__).warning("Abandoned model consumer retirement owed for %s",
                                                     self.task_id, exc_info=True)
-                _retain_retirement_witness(self.canonical_root, self.task_id, {old: self.attempt})
+                _owe_consumer_retirement(self.canonical_root, self.task_id, {old: self.attempt})
 
     def close(self) -> None:
         with self.lock:
@@ -1001,6 +1062,10 @@ class TaskModelWait:
         # owner even when close is called under a different current context.
         forget_tool_scope(SimpleNamespace(drive_root=self.canonical_root, task_id=self.task_id),
                           attempt=self.attempt)
+        from ouroboros import custody_owed
+
+        if custody_owed.pending():
+            custody_owed.drain()  # scope close: one bounded attempt for what this process owes
         if not bound:
             return
         # Positive retirement of THIS consumer, not terminal task status, PID
@@ -1009,38 +1074,48 @@ class TaskModelWait:
             retire_model_consumers(self.canonical_root, self.task_id, {self.answer_consumer_id: self.attempt})
         except Exception:
             import logging
-            logging.getLogger(__name__).warning("Model consumer retirement could not persist for %s", self.task_id,
+            logging.getLogger(__name__).warning("Model consumer retirement owed for %s", self.task_id,
                                                 exc_info=True)
-            # The receiver IS closed on a live host: keep that positive fact for the
-            # addressed repair owner (#1554); never a second census or a PID test.
-            _retain_retirement_witness(self.canonical_root, self.task_id, {self.answer_consumer_id: self.attempt})
+            # The receiver IS closed on a live host: this process owes that positive
+            # fact and writes it later (custody_owed); never a second census or a PID test.
+            _owe_consumer_retirement(self.canonical_root, self.task_id, {self.answer_consumer_id: self.attempt})
 
 
-def _retain_retirement_witness(root: Any, task_id: str, consumers: dict[str, int]) -> None:
-    """A positive receiver closure whose durable retirement failed: retain the exact
-    witness (``local_custody_repair``), so the addressed recovery owner retries the
-    SAME writer instead of inferring death from the platform later."""
-    try:
-        from ouroboros.local_custody_repair import retain_witness
+def _owe_consumer_retirement(root: Any, task_id: str, consumers: dict[str, int]) -> None:
+    """A positive receiver closure whose durable retirement failed: this process owes the
+    SAME write (``custody_owed``) instead of leaving the receiver open for a later inference."""
+    from ouroboros import custody_owed
 
-        retain_witness(root, task_id, reason="receiver_closed_retirement_unwritten",
-                       model_consumers=dict(consumers))
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning("Retirement witness for %s could not be retained", task_id,
-                                            exc_info=True)
+    consumers = dict(consumers)
+
+    def write():
+        from ouroboros.store import acquisition_budget
+        from ouroboros._usage_wait import ACQUISITION_SLICE_SEC
+
+        try:
+            with acquisition_budget(ACQUISITION_SLICE_SEC):  # a driver's attempt never waits a full store budget
+                retire_model_consumers(root, task_id, consumers)
+        except ValueError as exc:
+            if type(exc.__cause__) is not LookupError:  # only "the task's row is gone" is done
+                raise
+            import logging
+            logging.getLogger(__name__).warning("Owed receiver retirement dropped: task %s is gone", task_id)
+    custody_owed.owe(("consumers", str(root), str(task_id), tuple(sorted(consumers))), write,
+                     label=f"consumers:{task_id}")
 
 
-def retire_model_consumers(root: Any, task_id: str, consumers: dict[str, int]) -> None:
+def retire_model_consumers(root: Any, task_id: str, consumers: dict[str, int], *, record: dict | None = None) -> None:
     """Positive receiver retirement, from scope exit or exact confirmed-worker death.
 
     This existing result projection releases only local answer-writing custody.
     It changes no usage row, external process or delegated-run obligation.
+    ``record`` adds facts to each row (an owner's or the mind's ``accepted`` decision). A
+    retirement already recorded is kept: the first writer's facts stand, decided in the write.
     """
     try:  # one `retired_model_consumers` row per consumer, one transaction, never the body
         put_handoffs(pathlib.Path(root), task_id, "retired_model_consumers",
-                     {consumer: {"task_attempt": attempt, "retired_at": utc_now_iso()}
-                      for consumer, attempt in consumers.items()})
+                     {consumer: {**(record or {}), "task_attempt": attempt, "retired_at": utc_now_iso()}
+                      for consumer, attempt in consumers.items()}, only_absent=True)
     except LookupError as exc:
         raise ValueError("model consumer retirement requires its task result") from exc
 
@@ -1059,8 +1134,120 @@ def task_model_wait_scope(*, task: dict, drive_root: Any, event_queue: Any,
         _CURRENT.reset(token)
 
 
+def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False):
+    """Resolve readable controls before surfacing a storage gap; Pause applies only before handoff."""
+    from ouroboros.owner_pause import RAIL_OWNER_PAUSE, scope_fence, read_fence, fence_closed
+    from ouroboros.store import StoreBusy
+
+    gap = None
+    try:
+        reason = owner.control_reason(strict_current=not handed_off) if owner is not None else None
+    except StoreBusy as exc:
+        reason, gap = None, exc
+    if reason:
+        return reason
+    if owner is not None:
+        from ouroboros.store import acquisition_budget
+        from ouroboros.work_diagnostics import control_reason, withdraw_revoked
+
+        with acquisition_budget(0):
+            reason = control_reason(owner.task, owner.canonical_root, before_handoff=not handed_off)
+        if reason == "cancelled":
+            withdraw_revoked(owner.task, owner.canonical_root)  # custody settles it; never a task exception
+        if reason:
+            if reason == RAIL_OWNER_PAUSE and before_task_start:
+                fence = read_fence(owner.canonical_root, owner.task["root_task_id"])
+                if not fence_closed(fence) or not fence.get("fence_id"):
+                    return "owner_launch_authority_unavailable:diagnostic_pause_unbound"
+                owner.prestart_pause_fence = dict(fence)
+            return reason
+    if handed_off:
+        if gap is not None:
+            raise gap
+        return None
+    try:
+        if before_task_start and owner is not None:
+            from ouroboros.owner_wait import governing_continuation
+            if governing_continuation(owner.task):
+                if gap is not None:
+                    raise gap
+                return None  # its existing grant consumer owns the saved fence
+            # No lifecycle row is required yet; an existing fence still binds this input.
+            meta = owner.task.get("metadata") or {}
+            root_id = str(owner.task.get("root_task_id") or meta.get("root_task_id") or owner.task_id)
+            fence = read_fence(owner.canonical_root, root_id)
+            paused = fence_closed(fence) and owner.task_id not in (fence.get("selected_members") or {})
+            if paused:
+                owner.prestart_pause_fence = dict(fence)
+        else:
+            paused = scope_fence()
+        if paused:
+            return RAIL_OWNER_PAUSE
+    except StoreBusy as exc:
+        gap = gap or exc
+    if gap is not None:
+        raise gap
+    return None
+
+
 def current_model_wait() -> TaskModelWait | None:
     return _CURRENT.get()
+
+
+_AFTER_THE_REPLY = frozenset({"post_task", "consolidation"})  # the post-task worker's usage categories
+
+
+def owner_awaits_current_call() -> bool:
+    """Whether this call prepares the reply of a direct turn the owner awaits (Main, a project room, a call): the
+    model queue lets it ahead of background calls that have not started (``model_concurrency``). The same turn's
+    work after its answer (synthesis, memory drafts, scratchpad consolidation) queues as background."""
+    task = getattr(_CURRENT.get(), "task", None)
+    if not isinstance(task, dict) or not task.get("_is_direct_chat"):
+        return False
+    from ouroboros.usage_accounting import current_usage_scope
+    from supervisor.active_activity import reply_expected
+
+    return getattr(current_usage_scope(), "category", "") not in _AFTER_THE_REPLY and reply_expected(task)
+
+
+def announce_capability_refusal(error: Exception, *, drive_root: Any) -> None:
+    """One owner notice per account/model episode when no account can serve a model.
+
+    An account-service fact, not a helper's answer and not a timer: the engine's
+    typed facts decide (``capability_notice``), its episode is the delivery id, and
+    the unchanged durable outbox sends one row however many helpers hit it; a
+    successful differential call never enters here. The task that first saw it is
+    named, not part of the id. A bare library caller gets the same diagnostics on
+    its error and no chat side effect.
+    """
+    from ouroboros.llm_substitution import capability_notice
+
+    owner = current_model_wait()
+    if owner is None or owner.closed:
+        return
+    notice = capability_notice(getattr(error, "problem", None) or {})
+    if notice is None:
+        return
+    delivery_id, text = notice
+    root = owner.canonical_root or drive_root
+    try:
+        from ouroboros.projects_registry import task_presentation_snapshot
+
+        label = task_presentation_snapshot(root, owner.task_id, task=owner.task).get("target_label") or ""
+    except Exception:
+        label = ""  # the notice outranks its label
+    try:
+        from supervisor.schedule_notes import owner_chat_id
+        from supervisor.terminal_delivery import enqueue_terminal_delivery_outcome
+
+        enqueue_terminal_delivery_outcome(root, {
+            "type": "send_message", "chat_id": owner_chat_id(root), "task_id": "",
+            "text": text + (f"\nFirst seen in {label}." if label else ""), "role": "system",
+            "system_type": "model_capability_notice", "delivery_id": delivery_id,
+        }, event_queue=owner.event_queue)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("Capability refusal notice could not be queued", exc_info=True)
 
 
 @contextlib.contextmanager
@@ -1138,7 +1325,7 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
             error.task_resource_wait_reason = classified
         reason = model_wait_reason(error)
         if not (context and not context.closed and values.get("model_role") and reason
-                and (classified or (isinstance(error, ClaudexorModelError)
+                and (classified or reason == "connection_unavailable" or (isinstance(error, ClaudexorModelError)
                                     and getattr(capture, "state", None) in {"released", "settled"}))):
             return False
         deferral = _deferral(values["model_role"])
@@ -1251,9 +1438,10 @@ def monotonic_now(review_slot_id: str | None = None) -> float:
     return now - context.paused_seconds(slot, now=now)
 
 
-def future_result(future: Any, timeout: float) -> Any:
-    """Keep the existing Future and its execution budget across a quota pause."""
-    if current_model_wait() is None:
+def future_result(future: Any, timeout: float | None) -> Any:
+    """Keep the existing Future and its execution budget across a quota pause. ``None`` is
+    no budget: a long-lived handler that observes its owner's controls is waited for itself."""
+    if timeout is None or current_model_wait() is None:
         return future.result(timeout=timeout)
     deadline = monotonic_now() + timeout
     while True:

@@ -158,12 +158,17 @@ def test_assignment_retains_pending_when_claim_authority_raises(qenv, monkeypatc
 def test_timeout_reaper_does_not_clone_over_unreadable_cancel_authority(
     tmp_path, monkeypatch,
 ):
-    """Every physical retry must prove that the old id has no cancel intent."""
+    """Every physical retry must prove that the old id has no cancel intent.
+
+    Silence alone reaps nothing (#1376); the task's explicit deadline is the timeout."""
+    import datetime as dt
+
     from supervisor import queue, workers
 
     now = 10_000.0
     task_id = "timeout-over-corrupt-intent-store"
-    task = {"id": task_id, "type": "task", "chat_id": 0}
+    task = {"id": task_id, "type": "task", "chat_id": 0,
+            "deadline_at": dt.datetime.fromtimestamp(now + 100.0, tz=dt.timezone.utc).isoformat()}
     meta = {
         "task": task,
         "started_at": now - 1000.0,
@@ -177,7 +182,6 @@ def test_timeout_reaper_does_not_clone_over_unreadable_cancel_authority(
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0.0)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 0.0)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10_000_000.0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": True)
@@ -190,11 +194,15 @@ def test_timeout_reaper_does_not_clone_over_unreadable_cancel_authority(
     projection.write_bytes(b'{"intents": [broken')
 
     queue._enforce_task_timeouts_locked(workers, now, 0, {})
+    assert jobs == [] and task_id in running  # silent before its deadline: attention only
+    assert meta["silence_attention"]["state"] == "pending_attention"
+
+    queue._enforce_task_timeouts_locked(workers, now + 200.0, 0, {})
 
     assert len(jobs) == 1
     assert jobs[0]["task_id"] == task_id
-    assert jobs[0]["will_retry"] is False
-    assert jobs[0]["retry_task_id"] == ""
+    assert jobs[0]["terminal_reason"] == "deadline"
+    assert not {"will_retry", "retry_task_id"} & set(jobs[0])  # a hard bound requests no retry
     assert task_id not in running
 
 def test_snapshot_restore_refuses_a_task_with_active_intent(qenv, monkeypatch):
@@ -416,6 +424,7 @@ def test_steering_is_refused_while_a_cancel_intent_is_active(tmp_path, monkeypat
     assert drain_owner_entries(tmp_path, "steerme") == []
     assert sent == [((1, "Task · Not delivered: that task is being stopped"), {
         "role": "system", "system_type": "steer_not_delivered", "task_id": "steerme",
+        "progress_meta": {"routing_notice_carrier": "system", "reply_to": {}},
     })]
 
 

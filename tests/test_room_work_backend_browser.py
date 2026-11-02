@@ -43,6 +43,7 @@ from ouroboros import dialogue_store
 from tests import test_ui_smoke_playwright as smoke
 from tests.test_room_work_browser import ROOM_FACTS
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
+from tests.ui_console_errors import PageErrors
 
 direct_server_with_data = smoke.direct_server_with_data
 
@@ -256,8 +257,7 @@ class Evidence:
 def _launch(pw, engine, *, width=1100, height=722, theme="dark"):
     browser = getattr(pw, engine).launch(headless=True)
     page = browser.new_page(viewport={"width": width, "height": height})
-    log = {"pageerrors": [], "console": [], "requests": []}
-    page.on("pageerror", lambda error: log["pageerrors"].append(str(error)))
+    log = {"pageerrors": PageErrors(page, engine), "console": [], "requests": []}
     page.on("console", lambda msg: log["console"].append(f"{msg.type}: {msg.text}")
             if msg.type in {"error", "warning"} else None)
     page.on("request", lambda request: log["requests"].append((request.method, request.url))
@@ -539,7 +539,7 @@ def test_main_view_question_goes_to_the_exact_waited_question(direct_server_with
                             and u.endswith(f"/api/tasks/{task_id}")]) > reads, "the reveal read the real detail"
                 assert _decision_posts(log) == [], "View question answers nothing"
                 assert _waiting_turn(url)["activity_id"] == task_id, "the turn still waits for the owner"
-                assert log["pageerrors"] == [], log["pageerrors"]
+                assert log["pageerrors"].unexpected() == [], log["pageerrors"]
             except Exception:
                 evidence.shot(page, "failure")
                 raise
@@ -556,7 +556,7 @@ _SHADE_RECORDER = """(ms) => {
     window.__rwShade = [];
     const start = performance.now();
     const tick = () => {
-        const shade = document.querySelector('#project-panel .rw-shade');
+        const shade = document.querySelector('#project-panel .rw-shade:not(.cx-shade)');
         const note = shade?.querySelector('.rw-note');
         window.__rwShade.push({ t: Math.round(performance.now() - start),
             note: note && !note.hidden ? note.textContent : '',
@@ -643,7 +643,8 @@ def test_project_shade_lists_only_its_room_and_survives_disconnect(direct_server
                 page.wait_for_selector(f"#panel-pchat-{second['id']}", state="attached", timeout=30_000)
                 other = _wait_facts(page, "project", lambda f: f["exists"], "the other Project's control")
                 evidence.record("switched", other)
-                assert other["disabled"] and not other["rows"], other
+                # A Project's title always opens its list (its whole name heads it), so the empty one stays enabled.
+                assert not other["disabled"] and not other["rows"], other
                 assert page.locator(f"#panel-pchat-{first['id']}").count() == 0
                 evidence.shot(page, "03-other-project")
 
@@ -655,12 +656,13 @@ def test_project_shade_lists_only_its_room_and_survives_disconnect(direct_server
                 page.wait_for_timeout(1500)
                 after = _facts(page, "project")
                 evidence.record("after_finish", after)
-                if not after["disabled"]:
-                    page.locator("#project-panel .project-panel-bar .rw-trigger").click()
-                    after = _wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the Shade after finish")
-                    evidence.record("after_finish_open", after)
-                    assert all(r["slot"] == "latest" or r["settled"] for r in after["rows"]), after
-                    assert not any(r["more"] or r["resume"] or r["question"] for r in after["rows"]), after
+                # The title still opens the list after the work finished: at most its latest root, settled, no controls.
+                assert not after["disabled"], after
+                page.locator("#project-panel .project-panel-bar .rw-trigger").click()
+                after = _wait_facts(page, "project", lambda f: not f["surfaceHidden"], "the Shade after finish")
+                evidence.record("after_finish_open", after)
+                assert all(r["slot"] == "latest" or r["settled"] for r in after["rows"]), after
+                assert not any(r["more"] or r["resume"] or r["question"] for r in after["rows"]), after
                 evidence.shot(page, "04-project-after-finish")
                 assert _decision_posts(log) == []
                 assert log["pageerrors"] == [], log["pageerrors"]

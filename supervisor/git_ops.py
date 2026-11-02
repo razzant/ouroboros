@@ -17,6 +17,7 @@ from supervisor.state import (
     append_jsonl, atomic_write_text, load_state, save_state, update_state,  # noqa: F401
 )
 from ouroboros import config as _config
+from ouroboros.git_observation import host_git_env
 from ouroboros.utils import utc_now_iso  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -229,37 +230,45 @@ def _clear_update_intent() -> bool:
 
 
 def _run_git_process_bounded(
-    cmd: List[str], *, timeout: float, cwd: Optional[pathlib.Path] = None,
+    cmd: List[str], *, timeout: Optional[float], cwd: Optional[pathlib.Path] = None,
     env: Optional[Dict[str, str]] = None, text: bool = True,
     input_data: Optional[Any] = None,
 ) -> Tuple[int, Any, Any]:
-    """Run one short-lived Git process and terminate its tree on timeout.
+    """Run one Git process through ``shell_process.tracked_start`` and terminate its tree on timeout.
 
+    ``timeout=None`` is ``git_capture``'s unbounded wait: no bound, the same
+    admission and publication, so Emergency Stop (and a begun stop outside
+    ``exit_finalization``) refuses the start as rc 127 or ends the child.
     ``input_data`` (str when ``text=True``, bytes otherwise) is fed to the
     process's stdin and the pipe is closed — the batch-stdin git plumbing
     (e.g. ``git cat-file --batch``) rides the same timeout/kill semantics."""
     from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-    from ouroboros.tools.shell import _active_subprocesses, _subprocess_lock
+    from ouroboros.tools.shell_process import (
+        CommandAdmissionClosed,
+        _active_subprocesses,
+        _subprocess_lock,
+        tracked_start,
+    )
 
-    limit = float(timeout)
+    limit = None if timeout is None else float(timeout)
+    cleanup_timeout = 10  # the existing post-kill wait, also used after communication failures
     empty = "" if text else b""
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd or current_repo_dir()),
-            stdin=subprocess.PIPE if input_data is not None else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=text,
-            env=env,
-            **subprocess_new_group_kwargs(),
-        )
-    except OSError as exc:
+        with tracked_start() as publish:
+            proc = publish(subprocess.Popen(
+                cmd,
+                cwd=str(cwd or current_repo_dir()),
+                stdin=subprocess.PIPE if input_data is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=text,
+                env=env,
+                **subprocess_new_group_kwargs(),
+            ))
+    except (OSError, CommandAdmissionClosed) as exc:  # no Git process started
         detail = str(exc)
         return 127, empty, detail if text else detail.encode("utf-8", "replace")
 
-    with _subprocess_lock:
-        _active_subprocesses.add(proc)
     try:
         try:
             stdout, stderr = proc.communicate(input=input_data, timeout=limit)
@@ -267,7 +276,7 @@ def _run_git_process_bounded(
             partial_error = getattr(exc, "stderr", None)
             kill_process_tree(proc)
             try:
-                _tail_out, tail_error = proc.communicate(timeout=10)
+                _tail_out, tail_error = proc.communicate(timeout=cleanup_timeout)
             except Exception:
                 tail_error = None
             raw_detail = tail_error or partial_error or empty
@@ -286,40 +295,49 @@ def _run_git_process_bounded(
                 empty,
                 message if text else message.encode("utf-8", "replace"),
             )
+        except BaseException:
+            # subprocess.run also cleans up on interruption/pipe errors. Keep that contract
+            # when using the tracked runner, without replacing the caller's original error.
+            try:
+                kill_process_tree(proc)
+                proc.wait(timeout=cleanup_timeout)
+            except BaseException:
+                log.warning("Git exception cleanup is unconfirmed; its child stays tracked", exc_info=True)
+            raise
         return (
             int(proc.returncode if proc.returncode is not None else 1),
             stdout if stdout is not None else empty,
             stderr if stderr is not None else empty,
         )
     finally:
-        with _subprocess_lock:
-            _active_subprocesses.discard(proc)
+        if proc.returncode is not None:
+            with _subprocess_lock:
+                _active_subprocesses.discard(proc)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        log.warning("Could not close an exited Git child's pipe", exc_info=True)
 
 
 def git_capture(
-    cmd: List[str], *, timeout: Optional[float] = None, repair_index: bool = True,
+    cmd: List[str], *, timeout: Optional[float] = None, repair_index: bool = False,
 ) -> Tuple[int, str, str]:
-    # A caller interpreting one physical command's effects can opt out of repair/retry;
-    # the final stderr alone cannot describe an earlier attempt or its index rebuild.
+    # Repair is a writer's explicit opt-in, never a side effect of observation.
+    # The final stderr alone cannot describe an earlier attempt or its index rebuild.
     # Same reason as utils.run_cmd: this stderr is PARSED (`_maybe_repair_git_index`
     # matches English git diagnostics), so the operator's locale must not decide
     # whether a repairable index error is recognised.
     # ``timeout`` is None for existing non-rescue call sites: a bound here is a
     # behavior change, so it stays opt-in rather than silently retiming them.
-    env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+    # Bounded or not, the process starts through the tracked runner: Panic is never bypassed.
+    env = host_git_env()
     repo = current_repo_dir()
     for _attempt in range(2):
-        if timeout is None:
-            result = subprocess.run(
-                cmd, cwd=str(repo), capture_output=True, text=True, env=env,
-            )
-            returncode, stdout, raw_stderr = (
-                result.returncode, result.stdout or "", result.stderr or "",
-            )
-        else:
-            returncode, stdout, raw_stderr = _run_git_process_bounded(
-                cmd, timeout=timeout, cwd=repo, env=env, text=True,
-            )
+        returncode, stdout, raw_stderr = _run_git_process_bounded(
+            cmd, timeout=timeout, cwd=repo, env=env, text=True,
+        )
         stderr = str(raw_stderr or "").strip()
         if returncode == 0:
             return returncode, str(stdout or "").strip(), stderr
@@ -389,21 +407,10 @@ def _maybe_repair_git_index(stderr: str, *, timeout: Optional[float] = None) -> 
 
     rebuild_cmd = ["git", "reset", "--mixed", "HEAD"]
     rebuild_env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
-    if timeout is None:
-        rebuild = subprocess.run(
-            rebuild_cmd,
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            env=rebuild_env,
-        )
-        rebuild_rc = rebuild.returncode
-        rebuild_error = (rebuild.stderr or "").strip() or (rebuild.stdout or "").strip()
-    else:
-        rebuild_rc, rebuild_stdout, rebuild_stderr = _run_git_process_bounded(
-            rebuild_cmd, timeout=timeout, cwd=repo, env=rebuild_env, text=True,
-        )
-        rebuild_error = str(rebuild_stderr or "").strip() or str(rebuild_stdout or "").strip()
+    rebuild_rc, rebuild_stdout, rebuild_stderr = _run_git_process_bounded(
+        rebuild_cmd, timeout=timeout, cwd=repo, env=rebuild_env, text=True,
+    )
+    rebuild_error = str(rebuild_stderr or "").strip() or str(rebuild_stdout or "").strip()
     if rebuild_rc == 0:
         log.warning("Rebuilt git index after corruption in %s", repo)
         return True
@@ -581,6 +588,7 @@ from supervisor.git_ops_reset import (  # noqa: E402,F401
     _preserve_branch_for_official_reset,
     _ref_points_at_ref,
     _run_git_resilient,
+    advance_recovery_point,
     checkout_and_reset,
     import_test,
     preserve_local_ref_branch,

@@ -105,7 +105,7 @@ def test_ln_source_is_not_a_write_target(tmp_path):
 
 def test_git_diff_output_limited_shapes_allowed_content_diff_blocked(tmp_path):
     ctx, ws = _ctx(tmp_path)
-    # Output-LIMITED diffs (names/stat only — the vcs_diff(stat=true) FP shape) pass.
+    # Output-LIMITED diffs (names/stat only — the vcs_read(action=diff, stat=true) FP shape) pass.
     assert _block(ctx, ws, ["git", "diff", "--stat"]) == ""
     assert _block(ctx, ws, ["git", "diff", "--staged", "--name-only"]) == ""
     assert _block(ctx, ws, ["git", "diff", "--stat", "HEAD"]) == ""  # limited output wins over rev
@@ -226,7 +226,7 @@ def test_git_diff_stat_with_patch_flag_dumps_content_blocks(tmp_path):
                 ["git", "diff", "--stat", "--patch"],
                 ["git", "diff", "--numstat", "-U5"]):
         assert "RESOURCE_POLICY_BLOCKED" in _block(ctx, ws, cmd), cmd
-    # content-free stat diffs (the real vcs_diff FP) still pass.
+    # content-free stat diffs (the real vcs_read diff FP) still pass.
     assert _block(ctx, ws, ["git", "diff", "--stat"]) == ""
     assert _block(ctx, ws, ["git", "diff", "--name-only"]) == ""
 

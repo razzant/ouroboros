@@ -175,8 +175,9 @@ def test_skill_preflight_reports_python_syntax_error(tmp_path, monkeypatch):
 
 def test_skill_preflight_file_limit_omission_is_degraded_not_blocked(tmp_path, monkeypatch):
     # A file count beyond the syntax-check headroom is a DEGRADED note, NOT a hard block:
-    # the skill-review pass now reads every file under a pack-level token budget (chunked
-    # when oversized), so preflight must not re-introduce an arbitrary file-count gate.
+    # the skill review judges every file (a packet seat gets the whole payload when it fits,
+    # else its index; retrieving seats read the frozen copy), so preflight must not
+    # re-introduce an arbitrary file-count gate.
     ctx = _make_ctx(tmp_path)
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
@@ -193,7 +194,8 @@ def test_skill_preflight_file_limit_omission_is_degraded_not_blocked(tmp_path, m
     assert result["ok"] is True  # proceeds to the authoritative token-budgeted review
     assert result["omitted_count"] > 0
     assert result.get("degraded") is True
-    assert "token budget" in result.get("degraded_note", "")
+    note = result.get("degraded_note", "")
+    assert "the skill review still judges every file" in note and "NOT delivered" in note, note
 
 
 def test_skill_preflight_missing_validator_runtime_is_tolerated(tmp_path, monkeypatch):
@@ -341,7 +343,7 @@ def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeyp
 @pytest.mark.serial
 def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     ctx = _make_ctx(tmp_path)
     marker = ctx.repo_dir / "example" / ".self_authored.json"
     marker.parent.mkdir()
@@ -617,12 +619,13 @@ def test_skill_exec_refuses_instruction_type_skill(tmp_path, monkeypatch):
     assert "'instruction'" in result, result
 
 
-def test_skill_exec_rejects_runtime_outside_allowlist(tmp_path, monkeypatch):
+@pytest.mark.parametrize("runtime", ["", "perl"])
+def test_skill_exec_rejects_runtime_outside_allowlist(tmp_path, monkeypatch, runtime):
     skills_root = tmp_path / "skills"
     skill_dir = _build_skill(
         skills_root,
         "hello",
-        manifest=_valid_script_manifest("hello", runtime="perl"),
+        manifest=_valid_script_manifest("hello", runtime=runtime),
     )
     ctx = _make_ctx(tmp_path)
     _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "hello")
@@ -632,6 +635,7 @@ def test_skill_exec_rejects_runtime_outside_allowlist(tmp_path, monkeypatch):
         ctx, skill="hello", script="scripts/hello.py"
     )
     assert "SKILL_EXEC_ERROR" in result
+    assert f"declared runtime {runtime!r}" in result
     assert "allowlist" in result
 
 

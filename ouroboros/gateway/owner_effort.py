@@ -1,4 +1,4 @@
-"""Save the composer's primary effort and independent helper bounds for its room."""
+"""Save the composer's effort and live Subagents choice for its room."""
 
 from __future__ import annotations
 
@@ -83,4 +83,38 @@ def _api_owner_effort_range_sync(request: Request, body: Any) -> JSONResponse:
     return JSONResponse({"ok": True, "project_id": project_id, "effort_range": current, "cognition": cognition})
 
 
-__all__ = ["RANGE_FIELDS", "api_owner_effort_range", "effort_range_refusal"]
+@owner_write_guard
+async def api_owner_subagents_mode(request: Request) -> JSONResponse:
+    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+
+    return await _run_settings_writer(_api_owner_subagents_mode_sync, request, await _json_body_or_empty(request))
+
+
+def _api_owner_subagents_mode_sync(request: Request, body: Any) -> JSONResponse:
+    from ouroboros.config import VALID_SUBAGENTS_MODES
+
+    mode = str(body.get("mode") or "").strip().lower() if isinstance(body, dict) else ""
+    if mode not in VALID_SUBAGENTS_MODES:
+        return unsaved_error("Mode must be off, auto or swarm.", 400, code="subagents_mode_invalid")
+    try:
+        project_id = request_project_id(body)
+    except ValueError as exc:
+        return unsaved_error(str(exc), 400, code="subagents_mode_invalid")
+    with settings_document_mutation():
+        if project_id:
+            try:
+                old, cognition = update_project_cognition(request_drive_root(request), project_id, subagents_mode=mode)
+            except ValueError as exc:
+                return unsaved_error(str(exc), 404, code="project_unavailable")
+            previous = old["subagents_mode"]
+        else:
+            previous = main_cognition()["subagents_mode"]
+            _owner_update_settings(lambda current: {**current, "OUROBOROS_SUBAGENTS_MODE": mode},
+                                   settings_document_digest(), authored_keys=("OUROBOROS_SUBAGENTS_MODE",))
+            os.environ["OUROBOROS_SUBAGENTS_MODE"] = mode
+            cognition = main_cognition()
+    _owner_audit(request, "subagents_mode", {"project_id": project_id, "subagents_mode": mode, "previous_subagents_mode": previous})
+    return JSONResponse({"ok": True, "project_id": project_id, "subagents_mode": mode, "cognition": cognition})
+
+
+__all__ = ["RANGE_FIELDS", "api_owner_effort_range", "api_owner_subagents_mode", "effort_range_refusal"]

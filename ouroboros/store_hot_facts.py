@@ -8,9 +8,11 @@ The request snapshot is short lived and released before any consumer runs.
 
 The schema gate adds the columns without decoding bodies. ``run_hot_facts`` classifies
 underived rows under a sequence/source CAS, so a racing writer's row is left to that
-writer and a damaged input waits for its own change. Stop's membership probe is the
-indexed root set plus parent ancestry, queue-only bridges included. The census copies
-its queue and owner registries before its one short transaction per addressed store.
+writer and a damaged input waits for its own change; a body that is not its own task's
+object (``own_document``) is such input and derives nothing, never another task's root.
+Stop's membership probe is the indexed root set plus parent ancestry, queue-only bridges
+included. The census copies its queue and owner registries before its one short
+transaction per addressed store.
 """
 from __future__ import annotations
 
@@ -27,12 +29,13 @@ from ouroboros import store_task_cards
 from ouroboros.utils import machine_json
 
 VERSION = 6
+LIST_VERSION = 9
 JOB = "hot_facts"
 TASK_COLUMNS = {
     "owner_pause_state": "TEXT", "owner_pause_fence_id": "TEXT", "owner_pause_facts": "TEXT",
     "budget_pause_state": "TEXT", "budget_pause_attempt": "INTEGER", "budget_pause_facts": "TEXT",
     "post_task_synthesis": "TEXT", "owner_wait_state": "TEXT", "owner_wait_reason": "TEXT",
-    "control_valid": "INTEGER",
+    "control_valid": "INTEGER", "list_stable": "INTEGER",
 }
 CUSTODY_COLUMNS = {
     "root_task_id": "TEXT", "billing_group_id": "TEXT", "output_unread": "INTEGER",
@@ -44,6 +47,7 @@ REQUEST_SETS = ("custody_open", "custody_refused")
 REQUEST_UNDERIVED = "set_name IN ('custody_open','custody_refused') AND request_root_task_id IS NULL"
 INDEXES = (
     f"CREATE INDEX IF NOT EXISTS tasks_underived_hot ON tasks(task_id) WHERE {TASK_UNDERIVED}",
+    "CREATE INDEX IF NOT EXISTS tasks_list_stable ON tasks(list_stable, status, ts, task_id)",
     "CREATE INDEX IF NOT EXISTS tasks_underived_root ON tasks(task_id) WHERE root_task_id IS NULL",
     "CREATE INDEX IF NOT EXISTS tasks_owner_pause ON tasks(owner_pause_state, task_id) WHERE owner_pause_state<>''",
     "CREATE INDEX IF NOT EXISTS tasks_budget_pause ON tasks(budget_pause_state, task_id) WHERE budget_pause_state<>''",
@@ -83,6 +87,8 @@ def upgrade(txn) -> None:
                 txn.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
     if "request_root_task_id" not in {row["name"] for row in txn.conn.execute("PRAGMA table_info(obligations)")}:
         txn.conn.execute("ALTER TABLE obligations ADD COLUMN request_root_task_id TEXT")
+    # Schema 9 extends the underived predicate; replace its schema-6 definition.
+    txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_hot")
     for sql in (*INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST):
         txn.conn.execute(sql)
     owed = any(txn.conn.execute(f"SELECT 1 FROM {table} INDEXED BY {index} WHERE {where} LIMIT 1").fetchone()
@@ -95,20 +101,44 @@ _UNDERIVED_PROBES = (("tasks", "tasks_underived_hot", TASK_UNDERIVED),
                      ("obligations", "custody_request_underived", REQUEST_UNDERIVED))
 
 
+def own_document(task_id: str, body: Any) -> tuple:
+    """``(document, "")`` when the stored BODY is TASK_ID's own JSON object, else ``(None, reason)``:
+    ``body_missing``, ``body_unreadable``, ``body_not_object``, ``identity_missing`` or ``identity_mismatch``.
+    Only such a document may derive this row's facts; another task's body would publish its root."""
+    if body is None:
+        return None, "body_missing"
+    try:
+        document = json.loads(body)
+    except (ValueError, TypeError, RecursionError):
+        return None, "body_unreadable"
+    if not isinstance(document, dict):
+        return None, "body_not_object"
+    if str(document.get("task_id") or "") != task_id:
+        return None, "identity_mismatch" if document.get("task_id") else "identity_missing"
+    return document, ""
+
+
+def lineage_root(document: dict) -> str:
+    """The tree a task's own document names: its top-level root, else its metadata root, else itself."""
+    meta = document.get("metadata")
+    return str(document.get("root_task_id") or (meta.get("root_task_id") if isinstance(meta, dict) else "")
+               or document["task_id"])
+
+
 def task_columns(document: dict) -> dict:
+    from ouroboros.task_status import stored_list_order_is_final
+
     fence = document.get("owner_pause") or {}
     pause = document.get("budget_pause")
     pause = pause if isinstance(pause, dict) else {}
     checkpoint = document.get("root_phase_checkpoint")
     wait = document.get("owner_wait")
-    meta = document.get("metadata")
     try:
         attempt = int(pause.get("task_attempt") or 0)
     except (TypeError, ValueError, OverflowError):
         attempt = 0  # the exact malformed value remains in budget_pause_facts
     return {
-        "root_task_id": str(document.get("root_task_id") or
-                            (meta.get("root_task_id") if isinstance(meta, dict) else "") or document["task_id"]),
+        "root_task_id": lineage_root(document),
         "owner_pause_state": str(fence.get("state") or "") if isinstance(fence, dict) else "",
         "owner_pause_fence_id": str(fence.get("fence_id") or "") if isinstance(fence, dict) else "",
         "owner_pause_facts": machine_json(fence),
@@ -118,6 +148,7 @@ def task_columns(document: dict) -> dict:
         "owner_wait_state": str(wait.get("state") or "") if isinstance(wait, dict) else "",
         "owner_wait_reason": str(wait.get("reason") or "") if isinstance(wait, dict) else "",
         "control_valid": int(isinstance(document.get("status"), str) and bool(document["status"].strip())),
+        "list_stable": int(stored_list_order_is_final(document)),
     }
 
 
@@ -179,7 +210,10 @@ def _read_rows(txn, ids) -> dict:
     if not ids:
         return {}
     modern = int(txn.meta("schema_version") or VERSION) >= VERSION
-    columns = "," + ",".join(f"t.{name}" for name in TASK_COLUMNS) if modern else ""
+    # Control readers do not need list selection; its backfill must not make
+    # already-derived pause/phase facts read bodies again.
+    names = [name for name in TASK_COLUMNS if name != "list_stable"]
+    columns = "," + ",".join(f"t.{name}" for name in names) if modern else ""
     cards, join = store_task_cards.select(txn)  # the card facts ride the hot row: the census needs no document
     # A derived row answers from its columns alone: the writer derived them from the body it validated in
     # its own transaction, and an action that needs body authority (Resume, adoption, every mutation)
@@ -189,20 +223,15 @@ def _read_rows(txn, ids) -> dict:
         f"{columns}{cards} FROM tasks AS t{join} WHERE t.task_id IN (SELECT value FROM json_each(?))",
         (json.dumps(ids),)).fetchall()
     found = {row["task_id"]: dict(row) for row in records}
-    # Underived rows alone pay their old strict read, coherent with their sequence; a body that does not
-    # parse keeps that row's authority unknown (no Resume is offered from it).
+    # Underived rows alone pay their old strict read, coherent with their sequence; a body that is not
+    # this task's object keeps that row's authority unknown (no Resume is offered from it), not its store's.
     for tid, row in found.items():
-        if not modern or any(row.get(name) is None for name in TASK_COLUMNS):
-            body = txn.body_text(tid)
-            try:
-                document = None if body is None else json.loads(body)
-            except ValueError:
-                document = None
-            if document is None:
+        if not modern or any(row.get(name) is None for name in names):
+            document, fault = own_document(tid, txn.body_text(tid))
+            if fault:
                 row["control_valid"] = 0
                 continue
             row.update(task_columns(document))
-            row["control_valid"] &= int(str(document.get("task_id") or "") == tid)
     if set(ids) - found.keys():
         from ouroboros.store_import import OCCUPIED
         occupied = txn.meta(OCCUPIED) or {}
@@ -369,11 +398,10 @@ def run_hot_facts(root: Any, *, progress=None, should_stop=None) -> dict:
                             if stop():
                                 break
                             waiting = {"table": scope, "id": tid, "stamp": input_stamp(seq)}
-                            document = json.loads(raw)
-                            values = derive(document)
-                            if table == "tasks":
-                                values["control_valid"] &= int(str(document.get("task_id") or "") == tid)
-                            derived.append((tid, seq, values))
+                            document, fault = own_document(tid, raw) if table == "tasks" else (json.loads(raw), "")
+                            if fault:  # never another task's root: this damaged input waits like any other
+                                raise ValueError(f"task body {fault}: task:{tid}")
+                            derived.append((tid, seq, derive(document)))
                     finally:  # what was derived before a stop or a damaged input commits with its cursor
                         if derived:
                             with store.open_store(root, write=True) as txn:

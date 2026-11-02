@@ -32,6 +32,7 @@ def prepared(host, tmp_path, monkeypatch, request):  # noqa: F811
 
     options = request.param if isinstance(request.param, tuple) else (request.param, False)
     scoped, timed = options[:2]
+    saved = len(options) > 2 and options[2] in {"saved", "saved_unreadable"}
     if timed:
         from datetime import datetime, timezone
         import time
@@ -48,15 +49,38 @@ def prepared(host, tmp_path, monkeypatch, request):  # noqa: F811
     if timed:
         assert task["deadline_at"] == deadline
     task["configured_subagent"] = _snapshot(_settings(_session_row()), "session-builder")
+    if saved:
+        from ouroboros.contracts.task_contract import build_task_contract
+        from ouroboros.tools.control_delegation import stamp_depth_provenance
+
+        task["delegation_role"] = "subagent"
+        task["parent_cognitive_route"] = {"model": "same-model", "effort": "high"}
+        # This is a newly admitted child, not a legacy row lacking depth authority.
+        contract = build_task_contract(task)
+        contract["delegation_budget"]["depth_remaining"] = 3
+        task["task_contract"], _ = stamp_depth_provenance(
+            contract, attempted_depth=task["depth"], max_depth=3)
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
     assert len(sent) == 1 and not host.pending
     task = host.running["child1"]["task"]
     from ouroboros.agent import OuroborosAgent
 
+    if saved:
+        from ouroboros import subagents
+        from ouroboros.agent_dispatch import resolve_dispatch_axes
+
+        # A real first worker resolves its profile before starting the leaf and
+        # recording the authority fingerprint; restore must compare that binding.
+        with monkeypatch.context() as first_dispatch:
+            first_dispatch.setattr(daemon, "ensure_owned_gateway", lambda: Gateway())
+            first_dispatch.setattr(subagents, "route_health", lambda *_a, **_kw: ("", ""))
+            assert resolve_dispatch_axes(task).executor == "harness"
     OuroborosAgent._persist_running_record(SimpleNamespace(env=SimpleNamespace(drive_root=host.root)), task)
     assert task["admitted_dispatch"] == "possible"
     assert load_task_result(host.root, "child1")["admitted_dispatch"] == "possible"
+    from ouroboros.contracts.task_contract import build_task_contract
+    initial_authority = build_task_contract(task)
     process = InertProcess()
     from supervisor import worker_pool_lifecycle
     for module in (workers, worker_pool_lifecycle):  # an inert handle's fake PID reaches no OS process
@@ -75,6 +99,10 @@ def prepared(host, tmp_path, monkeypatch, request):  # noqa: F811
     atomic_write_json(host.root / "state/delegate_supervision/child1.json", {
         "schema": 1, "run_id": "run-1", "status": "sleeping", "journal_cursor": 7,
     })
+    if saved:
+        from tests.test_working_checkpoint import _saved_working_state
+
+        _saved_working_state(host.root, monkeypatch, "child1")
     if len(options) > 2 and options[2] == "resumed":
         from ouroboros.budget_pause import STATE_RESUMED, set_budget_pause
 
@@ -90,6 +118,15 @@ def prepared(host, tmp_path, monkeypatch, request):  # noqa: F811
     selected = recovery.prepare_planned_restart_handoffs(host.root, host.running)
     assert selected == {"child1"}
     handoff = recovery._read(host.root, "child1")
+    if saved:
+        from supervisor.restart_retention import prepare_restart_returns
+
+        assert prepare_restart_returns(host.root, host.running, host.pending,
+            transaction_id=handoff["restart_transaction_id"]) == {"child1"}
+        if options[2] == "saved_unreadable":
+            from ouroboros.working_checkpoint import checkpoint_path
+
+            checkpoint_path(host.root, "child1", task["_attempt"]).write_text("{unreadable", encoding="utf-8")
     assert workers.kill_workers(
         terminal_status="cancelled", result_reason="Planned self-restart", preserve_pending=True,
         preserve_running_task_ids=selected, reconcile_delegate_custody=False, archive_service_logs=False,
@@ -99,7 +136,7 @@ def prepared(host, tmp_path, monkeypatch, request):  # noqa: F811
                 if json.loads(line).get("type") == "zombie_prevention_cleanup"]
     assert cleanups[-1]["preserved_successors"] == ["child1"]
     assert host.pending[0]["_attempt"] == handoff["new_attempt"]
-    if len(options) > 2:
+    if len(options) > 2 and options[2] == "resumed":
         assert host.pending[0]["_budget_pause_resume"]["grant_id"] == "spent-resume"
         assert workers.kill_workers(terminal_status="cancelled", result_reason="Second stop door",
                                     reconcile_delegate_custody=False, archive_service_logs=False)
@@ -110,7 +147,7 @@ def prepared(host, tmp_path, monkeypatch, request):  # noqa: F811
     monkeypatch.setattr(daemon, "ensure_owned_gateway", lambda: Gateway())
     monkeypatch.setenv(recovery.PLANNED_RESTART_TRANSACTION_ENV, handoff["restart_transaction_id"])
     windows_successor(monkeypatch, host.root, handoff["restart_transaction_id"])
-    return SimpleNamespace(host=host, task=task, handoff=handoff)
+    return SimpleNamespace(host=host, task=task, handoff=handoff, initial_authority=initial_authority)
 
 
 def restore(case):
@@ -129,6 +166,7 @@ def test_exact_planned_handoff_reaches_worker_once(prepared, monkeypatch, adopt_
     import ouroboros.tools.delegate as delegate
 
     case = prepared
+    assert "_working_recovery" not in case.host.pending[0], "no saved cognition keeps the existing handoff path"
     if adopt_before_restore:
         assert recovery.pre_adopt_planned_handoffs(case.host.root, case.host.pending) == {"child1"}
     restore(case)
@@ -159,12 +197,13 @@ def test_exact_planned_handoff_reaches_worker_once(prepared, monkeypatch, adopt_
 @pytest.mark.parametrize("reason", ["stale_queue_row_grant_consumed", "stale_resume_grant_superseded"])
 @pytest.mark.parametrize("basis", ["valid", "foreign", "unreadable"])
 def test_legacy_spent_hold_is_redecided_on_first_restore(prepared, monkeypatch, reason, basis):
-    from supervisor.events_budget import BUDGET_HOLD_KEY, budget_hold_fact, hold_budget_row, hold_selectable
+    from supervisor.events_budget import hold_budget_row
+    from ouroboros.work_stop import continuation_refusal
 
     case = prepared
     task = case.host.pending[0]
     hold_budget_row(task, reason=reason, extra={"pause_id": "prior-pause", "grant_id": "spent-resume"})
-    assert not hold_selectable(task, task[BUDGET_HOLD_KEY])
+    assert continuation_refusal(task)["grant_state"] in {"consumed", "superseded"}
     assert "_budget_pause_resume" not in task and "_budget_pause_consumed" not in task
     path = recovery._path(case.host.root, "child1")
     if basis == "foreign":
@@ -183,9 +222,9 @@ def test_legacy_spent_hold_is_redecided_on_first_restore(prepared, monkeypatch, 
         return
     assert count == 1
     if basis == "unreadable":
-        assert budget_hold_fact(case.host.pending[0])["reason"] == reason
+        assert continuation_refusal(case.host.pending[0])["reason"] == reason
         return
-    assert budget_hold_fact(case.host.pending[0]) is None
+    assert not continuation_refusal(case.host.pending[0])
     assert recovery.pre_adopt_planned_handoffs(case.host.root, case.host.pending) == {"child1"}
     sent = worker(case.host, monkeypatch)
     workers.assign_tasks()
@@ -200,10 +239,20 @@ def test_unproven_or_owner_stopped_restart_never_assigns(prepared, monkeypatch, 
     case = prepared
     if fault == "bad_proof":
         windows_successor(monkeypatch, case.host.root, case.handoff["restart_transaction_id"], binding={})
+    elif fault == "ordinary_restart":
+        # A new manual Restart supersedes the plan through its own transaction;
+        # an unbound old flag cannot rename an already prepared update.
+        recovery.prepare_owner_restart(case.host.root)
+        monkeypatch.setattr(recovery, "_PROCESS_GENERATION", "successor")
     else:
-        flag = "owner_restart_no_resume.flag" if fault == "ordinary_restart" else "panic_stop.flag"
-        (case.host.root / "state" / flag).write_text("stop", encoding="utf-8")
+        (case.host.root / "state/panic_stop.flag").write_text("panic", encoding="utf-8")
     restore(case)
+    if fault == "panic":
+        from ouroboros.work_stop import current_stop
+        assert current_stop(case.host.pending[0])["door"] == "panic"
+        assert current_stop(case.host.pending[0])["release"] == "resume"
+        # The installation input is no longer needed by the adoption decision.
+        (case.host.root / "state/panic_stop.flag").unlink()
     assert recovery.pre_adopt_planned_handoffs(case.host.root, case.host.pending) == set()
     sent = worker(case.host, monkeypatch)
     workers.assign_tasks()
@@ -234,7 +283,7 @@ def test_assignment_rechecks_exact_pre_adoption_and_independent_fences(prepared,
     elif fault in {"authority", "actor", "config", "work_order"}:
         key = {"authority": "authority_fingerprint", "actor": "selected_subagent_id",
                "config": "config_fingerprint", "work_order": "work_order_fingerprint"}[fault]
-        row[key] = "changed"
+        row["holders"][0][key] = "changed"
     elif fault.startswith("tx_"):
         transaction = recovery._read_restart_transaction(case.host.root, transaction_id)
         path = recovery._restart_transaction_path(case.host.root, transaction_id)
@@ -248,9 +297,12 @@ def test_assignment_rechecks_exact_pre_adoption_and_independent_fences(prepared,
                           "tx_membership": ("task_ids", [])}[fault]
             transaction[key] = value
             atomic_write_json(path, transaction)
-    elif fault in {"owner_restart", "panic"}:
-        flag = "owner_restart_no_resume.flag" if fault == "owner_restart" else "panic_stop.flag"
-        (case.host.root / "state" / flag).write_text("stop", encoding="utf-8")
+    elif fault == "owner_restart":
+        from tests._work_stop_helpers import live_restart
+        live_restart(case.host.root, monkeypatch)
+    elif fault == "panic":
+        from ouroboros.work_stop import stop_record
+        task["_budget_pause_hold"] = stop_record("panic_hold", held_at="test")
     elif fault == "owner_hold":
         task["_owner_hold"] = {"reason": "owner"}
     elif fault == "budget":
@@ -385,7 +437,7 @@ def test_expired_planned_grant_never_stands_in_for_a_carrier(prepared, expiry, m
 def test_held_planned_expiry_rereads_controls_and_handoff(prepared, expiry, monkeypatch, change, during):  # noqa: F811
     """Panic, a no-resume restart, Stop or a vetoed handoff wins before marking or while custody runs off Q."""
     from ouroboros.cancel_intents import request_cancel
-    from ouroboros.server_control import _write_panic_flag
+    from ouroboros.work_stop import stop_record
 
     case = prepared
     root = case.host.root
@@ -395,9 +447,10 @@ def test_held_planned_expiry_rereads_controls_and_handoff(prepared, expiry, monk
 
     def alter(*_a, **_k):
         if change == "panic":
-            _write_panic_flag(root)
+            task["_budget_pause_hold"] = stop_record("panic_hold", held_at="test")
         elif change == "owner_restart":
-            (root / "state" / "owner_restart_no_resume.flag").write_text("stop", encoding="utf-8")
+            from tests._work_stop_helpers import live_restart
+            live_restart(root, monkeypatch)
         elif change == "stop":
             request_cancel(root, "child1", source="test", reason="Stop the held planned task")
         else:
@@ -471,7 +524,7 @@ def composed(host, tmp_path, monkeypatch):  # noqa: F811
         host.root, host.running, restart_transaction_id=transaction_id, additional_task_ids=owner_waits)
     assert owner_waits == {"asker"} and planned == {"asker", "child1"}
     assert prepare_restart_returns(host.root, host.running, list(host.pending), transaction_id=transaction_id,
-                                   owner_wait_ids=planned) == {"saved-root"}
+                                   owner_wait_ids=owner_waits) == {"saved-root"}
     assert workers.kill_workers(
         force=True, terminal_status="cancelled", result_reason="Planned self-restart", stop_source="server_shutdown",
         preserve_running_task_ids=planned, retain_saved_work=True, preserve_pending=True,
@@ -557,15 +610,15 @@ def test_one_restart_returns_saved_work_planned_session_owner_wait_and_project_h
         assert task_id not in dispatched
     if variant == "later_process":
         assert transaction["status"] == "normal_exit_acknowledged" and not transaction.get("returns_restored_at")
-        # Undispatched S1 carriers still use the acknowledged transaction in a later process.
-        assert pre_adopted == {"child1"}
-        assert dispatched == ["asker", "child1"]  # each once in this process, no cross-process once claim
+        # The owner wait keeps its own gate; D1's holder needs the exact Windows successor.
+        assert pre_adopted == set()
+        assert dispatched == ["asker"]
         by_id = {row["id"]: row for row in sent}
         assert by_id["asker"]["_owner_wait_resume"]["wait_id"] == case.wait["wait_id"]
-        assert not by_id["child1"].get("_project_admission_restore_hold")
-        assert recovery.planned_handoff_resume_allowed(root, by_id["child1"])
-        assert recovery._read(root, "child1")["status"] == "pre_adopted"
-        assert set(row["id"] for row in case.host.pending) == {"saved-root", "queued"}
+        assert rows["child1"]["_project_admission_restore_hold"]
+        assert not recovery.planned_handoff_resume_allowed(root, rows["child1"])
+        assert recovery._read(root, "child1")["veto_reason"] == "restart_successor_generation_mismatch"
+        assert set(row["id"] for row in case.host.pending) == {"child1", "saved-root", "queued"}
         assert fresh_return_transaction(root) == {}
         return
     assert transaction["status"] == "prepared" and pre_adopted == set()

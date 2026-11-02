@@ -9,17 +9,19 @@ import { renderSegmentedField } from './page_header.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import {
     EFFORT_CHOICES, ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL,
-    compoundSessionEffort, compoundSessionEffortConflict, configuredApiProviders, changeRouteChoice, routeModelFields,
+    compoundSessionEffort, compoundSessionEffortConflict, apiConnections, configuredApiProviders, changeRouteChoice, routeModelFields,
     routeModelInputHtml, routeTargetFromModel, routeSupportsAccount, effortSelectHtml,
-    encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor, describeExecutionEvidence,
+    encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
 } from './route_editor_primitives.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog } from './settings_catalog.js';
 import {
-    harnessMap, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun, sessionRouteVerdict,
+    harnessMap, lastReviewRunText, reviewCostText, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
+    sessionRouteVerdict,
 } from './subagent_status_primitives.js';
+import { recheckMarkHtml } from './safety_recheck.js';
 import { revealNewRow } from './ui_helpers.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -32,7 +34,7 @@ const MINTED_FROM = { review_lane: 'From a former review lane', factory_default:
 const SETTING_KEYS = new Set(['enabled', 'items']);
 const ROW_KEYS = new Set([
     'subagent_id', 'name', 'recommended_use', 'route', 'effort', 'processing_preference', 'access', 'enabled',
-    'review_eligible', 'delivery', 'minted_from',
+    'review_eligible', 'delivery', 'minted_from', 'rechecks_flags',
 ]);
 const ROUTE_KEYS = new Set(['kind', 'target_id', 'credential_profile_id']);
 
@@ -68,6 +70,8 @@ function canonicalRow(row) {
         ...(marked ? { review_eligible: true } : {}),
         ...(route.kind === ROUTE_KIND_API_MODEL && row?.delivery === 'packet' ? { delivery: 'packet' } : {}),
         ...(row?.minted_from ? { minted_from: String(row.minted_from) } : {}),
+        // The second check's mark is the owner's (written only by its owner endpoint): kept as loaded.
+        ...(row?.rechecks_flags === true ? { rechecks_flags: true } : {}),
     };
 }
 
@@ -118,6 +122,7 @@ function rowParseError(row, index) {
     if (row.delivery !== undefined && !['native', 'packet'].includes(row.delivery)) return `${at} delivery must be native or packet`;
     if (row.delivery !== undefined && routeKind !== ROUTE_KIND_API_MODEL) return `${at} delivery requires an API model`;
     if (row.minted_from !== undefined && !Object.prototype.hasOwnProperty.call(MINTED_FROM, row.minted_from)) return `${at} has an unknown origin`;
+    if (row.rechecks_flags !== undefined && typeof row.rechecks_flags !== 'boolean') return `${at} second-check mark must be true or false`;
     return '';
 }
 
@@ -270,31 +275,6 @@ export function reviewPoolErrors(setting, { judged = false, allowEmpty = false }
     return [items.some((row) => row?.review_eligible === true)
         ? 'Every row marked Reviewer is switched off. Switch one on, or tick “Save without reviewers”.'
         : 'No row is marked Reviewer. Mark at least one row, or tick “Save without reviewers”.'];
-}
-
-/** What one review by this row actually cost — the median of its measured reviews with their count
- * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero. */
-export function reviewCostText(row, cost = null) {
-    if (routeSupportsAccount(row?.route || {})) return 'uses a session seat and time';
-    if (!cost) return 'price appears after saving';
-    if (cost.basis === 'local_route') return 'no API cost per review';
-    const usd = cost.usd_per_review;
-    if (cost.basis !== 'observed_reviews' || typeof usd !== 'number' || !Number.isFinite(usd)) return 'cost unknown';
-    const high = Number(cost.high);
-    if (usd === 0 && !(high > 0)) return 'no API cost per review';
-    const money = (value) => `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
-    const reviews = Number(cost.reviews) || 0;
-    return reviews < 2 ? `≈${money(usd)} per review (1 measured)`
-        : `≈${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
-}
-
-/** What actually ran the last time this row reviewed, with its review record (the card's "Last review"). */
-export function lastReviewRunText(entry) {
-    const text = describeExecutionEvidence(entry?.effective || !entry?.observed_model ? entry
-        : { ...entry, effective: { model: entry.observed_model } });
-    if (!text) return '';
-    const record = String(entry?.review_record_id || entry?.record_id || '');
-    return `${text}${record ? ` · record ${record}` : ''}`;
 }
 
 const reviewCostKey = (row, inherited) => JSON.stringify([
@@ -575,7 +555,7 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
     const harnesses = harnessMap(state.snapshot);
     const routeGroups = routeChoiceGroups({
         harnesses: state.catalogKnown ? (state.snapshot?.harnesses || []) : [],
-        modelSources: state.modelSources, providers: state.providers,
+        modelSources: state.modelSources, providers: state.providers, connections: state.connections,
         providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row),
         catalogKnown: state.catalogKnown, accountsKnown: state.accountsKnown,
     });
@@ -612,7 +592,7 @@ export function availableSubagentRowMarkup(row, state, index = 0) {
                     <span class="settings-inline-status" data-subagent-status data-tone="${escapeHtml(status.tone)}" title="${escapeHtml(status.text)}">${escapeHtml(status.label)}</span>
                 </div>
                 <div class="available-subagent-actions">
-                    <label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent ${ordinal} reviews"${row.review_eligible === true ? ' checked' : ''}> Reviewer</label>
+                    <label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent ${ordinal} reviews"${row.review_eligible === true ? ' checked' : ''}> Reviewer</label>${recheckMarkHtml(row, ordinal)}
                     <button type="button" class="btn btn-default" data-subagent-duplicate aria-label="Duplicate Subagent ${ordinal}">Duplicate</button>
                     <button type="button" class="btn btn-default" data-subagent-remove aria-label="Remove Subagent ${ordinal}">Remove</button>
                 </div>
@@ -662,7 +642,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         (state.setting?.items || []).map((row) => row?.route?.kind === ROUTE_KIND_AGENT_SESSION
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
         state.apiModels, state.modelSources, state.modelCatalogNote, state.processingPreference,
-        state.providers, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
+        state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
     ]);
 }
 
@@ -703,8 +683,8 @@ export function createAvailableSubagentsEditor({
         quotaKnown: false,
         snapshot: null,
         apiModels: [], modelSources: [], modelCatalogNote: '', processingPreference: '',
-        // Providers with a stored key, named by the contract (setSourceContext).
-        providers: [], providerProfiles: {},
+        // Sources with a stored key, and every connection for a saved one's label (setSourceContext).
+        providers: [], connections: [], providerProfiles: {},
         signature: '',
         statusDisposer: null,
         catalogDisposer: null,
@@ -1304,6 +1284,7 @@ export function createAvailableSubagentsEditor({
         setProcessingPreference(value) { state.processingPreference = String(value || ''); paint({ discoveryOnly: true }); },
         setSourceContext({ settings = {}, providerProfiles = {} } = {}) {
             state.providerProfiles = providerProfiles || {};
+            state.connections = apiConnections(settings, state.providerProfiles);
             state.providers = configuredApiProviders(settings, state.providerProfiles);
             paint({ discoveryOnly: true });
         },

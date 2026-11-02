@@ -355,17 +355,20 @@ def test_the_serving_artifact_is_the_live_launch_not_the_saved_settings(monkeypa
 
 
 @pytest.mark.parametrize("expired", [False, True])
-def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, monkeypatch, expired):
+@pytest.mark.parametrize("account", ["", "account-b"])
+def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, monkeypatch, expired, account):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
     from ouroboros.gateway import settings as gateway
     from ouroboros.llm import LLMClient
-    model, writes = "claudexor::test-source=exact-model", []
-    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda source, profile=None, **kw: {
-        "source": source, "credentialProfileId": profile or "account-a", "accountFingerprint": "fingerprint-a",
-        "observedAt": "2000-01-01T00:00:00Z" if expired else ce.utc_now_iso(), "provenance": "fixture",
-        "models": [{"id": "exact-model", "maxOutputTokens": 4096}]}))
+    model, writes, reads = "claudexor::test-source=exact-model", [], []
+    def catalog(source, profile=None, *, requested_model=None):
+        reads.append((source, profile, requested_model))
+        return {"source": source, "credentialProfileId": profile or "account-a", "accountFingerprint": "fingerprint-a",
+                "observedAt": "2000-01-01T00:00:00Z" if expired else ce.utc_now_iso(), "provenance": "fixture",
+                "models": [{"id": "exact-model", "maxOutputTokens": 4096}]}
+    monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(catalog))
     monkeypatch.setattr(gateway, "load_settings", lambda: {"OUROBOROS_MODEL": model})
     monkeypatch.setattr(gateway, "_owner_audit", lambda *a: None)
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
@@ -375,21 +378,27 @@ def test_settings_preview_binds_the_exact_account_and_stores_nothing(tmp_path, m
     client = TestClient(app)
     saved = ce._save
     monkeypatch.setattr(ce, "_save", lambda root, data: writes.append(root) or saved(root, data))
-    preview = client.get("/api/settings", params={"response_limit_preview": "1", "model": model, "local": "false"}).json()
+    params = {"response_limit_preview": "1", "model": model, "local": "false", "account": account}
+    preview = client.get("/api/settings", params=params).json()
     assert writes == []  # A passive Settings read writes no evidence.
-    assert preview["route"]["options"] == {"source_id": "test-source", "credential_profile_id": "account-a",
+    assert reads == [("test-source", account or None, "exact-model")]
+    assert not ce._store_path(tmp_path).exists()  # Even a cold preview reads the local catalog.
+    assert preview["route"]["options"] == {"source_id": "test-source", "credential_profile_id": account or "account-a",
                                            "account_fingerprint": "fingerprint-a"}
     assert preview["response_limit"]["max_output_tokens"] == 4096
     # An expired catalog is shown as such (Settings reads it as unknown), never as a current maximum.
     assert preview["response_limit"]["stale"] is expired
+    assert preview["window"]["reserve"] == (65536 if expired else 4096)
     acked = client.post("/api/owner/capability-ack", json={**preview["route"], "route_fp": preview["response_limit"]["route_fp"],
                                                            "max_output_tokens": 2048})
     if expired:  # nor can an expired account binding be acknowledged
         assert acked.status_code == 400 and "Refresh" in acked.text
         return
     assert acked.status_code == 200, acked.text
-    again = client.get("/api/settings", params={"response_limit_preview": "1", "model": model, "local": "false"}).json()
+    writes.clear()
+    again = client.get("/api/settings", params=params).json()
     assert again["response_limit"]["source"] == "owner_ack" and again["response_limit"]["max_output_tokens"] == 2048
+    assert again["window"]["reserve"] == 2048 and writes == []
 
 
 def test_a_malformed_subscription_identity_keeps_its_failed_window_evidence(tmp_path):
@@ -430,7 +439,7 @@ def test_light_consolidation_and_memory_fit_plan_the_route_maximum(monkeypatch):
         return {"model": task["model"], "provider": "openrouter"}, evidence
     monkeypatch.setattr(consolidator, "_consolidation_route", lambda: ("test/model", False))
     monkeypatch.setattr(context_fit, "resolve_context_fit_route", resolve)
-    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_: 1.0)
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_, **_kw: 1.0)
     llm = _LLM()
     consolidator._call_consolidation_llm(llm, prompt, "Probe")
     assert len(llm.calls) == 1 and llm.calls[0]["max_tokens"] == 4096

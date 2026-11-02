@@ -79,6 +79,18 @@ def admit_data_root(data_dir: pathlib.Path, *, wait_sec: float | None = None) ->
         _admission.update(root=root, fd=fd)
     if previous is not None:  # a second root in one process exists only in tests
         os.close(previous)
+    pin_work_root_basis(data_dir)
+
+
+def pin_work_root_basis(data_dir: pathlib.Path) -> str:
+    """Held now, so no other server writes this root's history: settle its work-root basis
+    before any boot step creates a file or a folder, for this process and every child it
+    starts (``launch_roots``). An unreadable witness, state or store answers ``unknown``,
+    never a guess; the store's chat rows are counted by their own reader."""
+    from ouroboros.launch_roots import pin_basis
+    from supervisor.state_initialization import supervisor_evidence
+
+    return pin_basis(data_dir, evidence=supervisor_evidence)
 
 
 def admission_held(data_dir: pathlib.Path) -> bool:

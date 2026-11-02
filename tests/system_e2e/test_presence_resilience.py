@@ -24,9 +24,14 @@ HOW THE WAITS ARE BUILT (event-gated, never a timed race):
   host's ``min(32, cpu + 4)``) by a child-only ``sitecustomize`` (``_HOOK_SOURCE``);
 * ``OUROBOROS_PRESENCE_MAX_ACTIVE=2``: e00/e01 are HELD at the loopback model by
   ``ModelGate``s (the two active turns), e02-e05 open four more rooms (slot
-  waits), e06-e11 are each room's second event (conversation waits);
+  waits), e06-e11 join those four waiting rooms (conversation waits). Arrivals
+  in an active author's room become its mail, so cannot establish a gate wait;
+* the owner enables consciousness before any place event: Off hears events
+  without starting a focus;
 * e00's HTTP client DISCONNECTS while its turn is at the model and a
-  transport-style retry of the SAME event follows (the 13th request);
+  transport-style retry of the SAME event follows (the 13th request). The hook
+  records all 13 at ``PresenceTurnExecutions.start_or_join`` before probing:
+  authentication alone precedes the place preparation and cannot prove a wait;
 * the slow authentication is the same hook: it reports every
   ``HostServiceContext.authenticate_token_payload`` to the test's loopback
   ``HostAuthGate``, which HOLDS one skill's call until released (the repro needed
@@ -110,11 +115,11 @@ CONTROL_MARKER = "[S33-CONTROL-TASK]"
 # refuses to Panic unless the server provably bound somewhere else.
 LIVE_DEFAULT_PORTS = frozenset({8765, 8766, 8767})
 
-# The host frames THIS turn's input with its exact source facts
-# (presence_context.frame_presence_user_content: "Source facts: {json}"); the
-# event id is ``<provider>:<run>:<label>``, so a model call names its event
-# exactly, and a reply or an earlier turn quoted into context never does.
-_SOURCE_EVENT_RE = re.compile(r'"source_event_id": "' + re.escape(PROVIDER) + r':([0-9a-f]{8}):([a-z0-9]+)"')
+# Focus framing no longer includes source_event_id. Put the fixture's marker
+# first in the event text and read only the start of THIS message's host frame;
+# a reply or earlier turn quoted into context must not match another event.
+_FOCUS_MESSAGE_PREFIX = "Their message, as data from that place:\n"
+_SOURCE_EVENT_RE = re.compile(r'\[S33-EVENT:' + re.escape(PROVIDER) + r':([0-9a-f]{8}):([a-z0-9]+)\]')
 
 # Loaded ONLY into the isolated server tree (a ``sitecustomize`` on the child's
 # PYTHONPATH), never into this process. Each knob is off unless its env var is set:
@@ -126,6 +131,8 @@ _SOURCE_EVENT_RE = re.compile(r'"source_event_id": "' + re.escape(PROVIDER) + r'
 #     each authenticated Host request (skill, and whether it ran ON the event-loop
 #     thread) to the test's HostAuthGate, which may hold it: the event-gated
 #     stand-in for a slow synchronous authentication.
+#   S33_TURN_LOG — records accepted requests after place preparation, at the
+#     turn registry, so the probes cannot outrun requests still reaching it.
 _HOOK_SOURCE = r'''"""S33 fixture hook: isolated server tree only (tests/system_e2e/test_presence_resilience.py)."""
 import os
 import sys
@@ -174,6 +181,9 @@ if _GATE:
             pass  # a vanished gate must never change what the product does
 
     def _patch(module):
+        if module.__name__ == "ouroboros.presence_runner":
+            _patch_turns(module)
+            return
         context = getattr(module, "HostServiceContext", None)
         original = getattr(context, "authenticate_token_payload", None)
         if original is None:
@@ -186,9 +196,30 @@ if _GATE:
 
         context.authenticate_token_payload = authenticate_token_payload
 
+    def _patch_turns(module):
+        executions = getattr(module, "PresenceTurnExecutions", None)
+        original = getattr(executions, "start_or_join", None)
+        if original is None:
+            return
+
+        def start_or_join(self, turn_id, **kwargs):
+            result = original(self, turn_id, **kwargs)
+            log_path = os.environ.get("S33_TURN_LOG", "").strip()
+            if log_path:
+                import json
+                try:
+                    with open(log_path, "a", encoding="utf-8") as fh:
+                        fh.write(json.dumps({"pid": os.getpid(), "turn_id": turn_id,
+                                             "accepted": result[0] is not None}) + "\n")
+                except OSError:
+                    pass
+            return result
+
+        executions.start_or_join = start_or_join
+
     class _Finder(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path=None, target=None):
-            if name != "ouroboros.gateway.host_service":
+            if name not in {"ouroboros.gateway.host_service", "ouroboros.presence_runner"}:
                 return None
             spec = importlib.machinery.PathFinder.find_spec(name, path)
             if spec is None or spec.loader is None:
@@ -285,8 +316,13 @@ def _user_texts(body: dict) -> list:
 def _event_labels(run: str, body: dict) -> list:
     """The S33 events a model call serves, read from the host's framing of the
     turn's own input (never from the system prompt, which may list other work)."""
-    return sorted({label for text in _user_texts(body)
-                   for rid, label in _SOURCE_EVENT_RE.findall(text) if rid == run})
+    labels = set()
+    for text in _user_texts(body):
+        _prefix, _separator, event_text = text.partition(_FOCUS_MESSAGE_PREFIX)
+        match = _SOURCE_EVENT_RE.match(event_text)
+        if match and match[1] == run:
+            labels.add(match[2])
+    return sorted(labels)
 
 
 def _event_id(run: str, label: str) -> str:
@@ -348,14 +384,14 @@ class _Transport:
 
 
 def _seed_behavior(data_root: pathlib.Path) -> None:
-    from ouroboros.presence_capabilities import (
+    from tests.frozen_presence_capabilities import (
         PresenceSelection,
         PresenceState,
         PresenceToolTarget,
         presence_state_fingerprint,
         save_presence_state,
     )
-    from ouroboros.presence_profile import parse_presence_profile, presence_request_fingerprint
+    from tests.frozen_presence_profile import parse_presence_profile, presence_request_fingerprint
     from ouroboros.skill_loader import SkillReviewState, load_skill, save_enabled, save_review_state
 
     skill_dir = data_root / "skills" / "external" / BEHAVIOR_SKILL
@@ -399,12 +435,8 @@ def _seed_behavior(data_root: pathlib.Path) -> None:
 
 def _seed_transport(data_root: pathlib.Path, name: str) -> _Transport:
     from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME
-    from ouroboros.presence_bindings import (
-        PresenceBinding,
-        PresenceEndpoint,
-        new_presence_binding_id,
-        save_presence_binding,
-    )
+    from ouroboros.presence_bindings import PresenceBinding, PresenceEndpoint
+    from tests.frozen_presence_bindings import new_presence_binding_id, save_presence_binding
     from ouroboros.skill_loader import (
         SkillReviewState,
         compute_content_hash,
@@ -477,7 +509,7 @@ def _event_body(transport: _Transport, event_id: str, room: str, text: str) -> d
             "conversation_key": "caller-controlled-key-is-ignored",
             "actor": {"platform_actor_id": "user-7", "username": "alex", "display_name": "Alex"},
             "conversation": {"title": "S33 room"}, "message": {"message_id": event_id[-8:]},
-            "text": text,
+            "text": f"[S33-EVENT:{event_id}]\n{text}",
         },
     }
 
@@ -544,6 +576,7 @@ def _run_s33(candidate, root: pathlib.Path, *, held_turns: bool, slow_auth: bool
     hook_dir.mkdir()
     (hook_dir / "sitecustomize.py").write_text(_HOOK_SOURCE, encoding="utf-8")
     executor_log = root / "executor_pools.jsonl"
+    turn_log = root / "turn_admissions.jsonl"
 
     arrivals = _Arrivals(run)
     # The control task's OWN input (other turns' system prompts may list it).
@@ -561,7 +594,8 @@ def _run_s33(candidate, root: pathlib.Path, *, held_turns: bool, slow_auth: bool
             [_reply_step(run)] * 400, gate=_AllGates(arrivals, *model_gates)) as stub:
         try:
             settings = keyless_settings(stub, OUROBOROS_PRESENCE_MAX_ACTIVE=S33_MAX_ACTIVE,
-                                        OUROBOROS_MAX_WORKERS=2)
+                                        OUROBOROS_MAX_WORKERS=2,
+                                        OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off")
             assert_settings_keyless(settings)
             write_settings_file(data_root / "settings.json", settings)
             _seed_behavior(data_root)
@@ -573,12 +607,17 @@ def _run_s33(candidate, root: pathlib.Path, *, held_turns: bool, slow_auth: bool
                 "S33_DEFAULT_EXECUTOR_WORKERS": str(S33_DEFAULT_EXECUTOR_WORKERS),
                 "S33_EXECUTOR_LOG": str(executor_log),
                 "S33_AUTH_GATE_URL": auth_gate.url,
+                "S33_TURN_LOG": str(turn_log),
                 # Inherited by every descendant: the Panic survivor scan's membership.
                 "S33_TREE": f"s33-tree-{run}",
             })
             server.start(ready_timeout=300)
             host_port = server.host_service_port
             oracle = ArtifactOracle(server.data_root)
+            enabled = _call(server.port, "POST", "/api/command", {"cmd": "/bg start"},
+                            timeout=S33_READ_WINDOW_SEC)
+            assert 200 <= enabled["status"] < 300, enabled
+            assert wait_until(lambda: oracle.state().get("bg_consciousness_enabled") is True, 10), enabled
 
             # PREMISE: the server process's default executor really is 12 threads.
             pools = [row for row in _jsonl_file(executor_log) if row.get("pid") == server.proc.pid]
@@ -594,6 +633,7 @@ def _run_s33(candidate, root: pathlib.Path, *, held_turns: bool, slow_auth: bool
                     "health": probes.get("health"),
                     "auth_ran_on_event_loop": on_loop,
                     "auth_calls": len(auth_gate.calls),
+                    "turn_admissions": _jsonl_file(turn_log),
                     "model_arrivals": arrivals.per_event(),
                     "answered_early": {label: turn.result for label, turn in turns.items()
                                        if not turn.is_alive()},
@@ -606,7 +646,10 @@ def _run_s33(candidate, root: pathlib.Path, *, held_turns: bool, slow_auth: bool
 
             if held_turns:
                 rooms = [f"s33-room-{i}" for i in range(6)]
-                plan = [(f"e{i:02d}", rooms[i % 6], transports[HELD_TRANSPORTS[i % 4]])
+                # Waiting rooms have no live author yet: their later events queue
+                # on the conversation gate instead of being accepted as author mail.
+                room_order = rooms + [rooms[2 + i % 4] for i in range(6)]
+                plan = [(f"e{i:02d}", room_order[i], transports[HELD_TRANSPORTS[i % 4]])
                         for i in range(S33_DEFAULT_EXECUTOR_WORKERS)]
                 bodies = {label: _event_body(transport, _event_id(run, label), room,
                                              f"S33 event {label}: say one short sentence.")
@@ -636,6 +679,9 @@ def _run_s33(candidate, root: pathlib.Path, *, held_turns: bool, slow_auth: bool
                     f"held turn requests (a blocked event loop, or the auth seam moved): {diagnosis()}")
                 assert arrivals.per_event() == {"e00": 1, "e01": 1}, (
                     f"exactly the two active turns may be at the model: {diagnosis()}")
+                assert wait_until(lambda: len(_jsonl_file(turn_log)) == len(plan) + 1, 60), (
+                    f"not every request reached the turn wait after place preparation: {diagnosis()}")
+                assert all(row.get("accepted") for row in _jsonl_file(turn_log)), diagnosis()
 
             if slow_auth:
                 auth_gate.hold_skill = SLOW_SKILL
@@ -859,12 +905,18 @@ def test_presence_resilience_fixture_seams_still_exist():
     source = (REPO_ROOT / "ouroboros" / "gateway" / "host_service.py").read_text(encoding="utf-8")
     assert "class HostServiceContext" in source
     assert "def authenticate_token_payload(self, raw_token" in source
+    from ouroboros.presence_runner import PresenceTurnExecutions
+    assert callable(PresenceTurnExecutions.start_or_join)
     run = "0123abcd"
     body = _event_body(_Transport("t", "a", "b"), _event_id(run, "e00"), "room", "hello")
+    quoted = f"{_FOCUS_MESSAGE_PREFIX}[S33-EVENT:{_event_id(run, 'e01')}]"
     framed = frame_presence_user_content(
-        {"_presence_turn": True, "metadata": {"presence": {"event": body["event"], "observed_text": "hello"}}},
-        f"hello {_reply(run, 'e01')}")
+        {"_presence_turn": True, "metadata": {"wake_cause": "focus", "presence": {
+            "event": body["event"], "observed_text": body["event"]["text"],
+            "previous_turn": {"message": quoted, "outcome": "message"},
+        }}}, body["event"]["text"] + f"\nQuoted reply: {quoted}")
     assert _event_labels(run, {"messages": [
-        {"role": "system", "content": f'"source_event_id": "{_event_id(run, "e02")}"'},
+        {"role": "system", "content": framed.replace(":e00]", ":e02]")},
+        {"role": "assistant", "content": framed.replace(":e00]", ":e03]")},
         {"role": "user", "content": framed},
     ]}) == ["e00"]

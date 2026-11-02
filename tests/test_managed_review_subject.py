@@ -248,6 +248,9 @@ def test_gate_subject_binding_mismatch_blocks_commit(tmp_path, monkeypatch):
         ctx._last_review_subject_trees = {recorded_tree["value"]}
         return None, None, "", []
 
+    # This scenario owns subject binding; release metadata has separate real-Git coverage.
+    monkeypatch.setattr("ouroboros.commit_admission.release_metadata_diagnostics", lambda *a, **kw: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
     monkeypatch.setattr(git_mod, "_run_review_preflight_tests", lambda *a, **kw: None)
     monkeypatch.setattr(git_mod, "_run_parallel_review", _fake_parallel)
     monkeypatch.setattr(

@@ -21,7 +21,6 @@ import hashlib
 import json
 import logging
 import time
-import uuid
 from typing import Callable, Any, Dict, List, Optional, Tuple
 
 from ouroboros.delegate_output import _PAYLOAD_ENVELOPE_HEADROOM, _stage_full_output
@@ -31,9 +30,11 @@ from ouroboros.delegate_shared import (
     _emit,
     _fail,
     _owned_run,
+    message_run,
     delegate_result,
     refusal_host_code,
 )
+from ouroboros.delegate_reply import addressed_questions, validate_answer_address, require_pending_address
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult
@@ -120,7 +121,7 @@ def _bounded_interactions(pending: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         } for question in questions[:_MAX_INLINE_QUESTIONS]]
         out.append({
             "interaction_id": str(row.get("interaction_id") or ""),
-            **{key: row[key] for key in ("run_id", "attempt_id", "harness_id") if key in row},
+            **{key: row[key] for key in ("run_id", "attempt_id", "harness_id", "reply_to") if key in row},
             "source_tool": _preview_scalar(row.get("source_tool"), _SCALAR_PREVIEW_CHARS),
             "requested_at": _preview_scalar(row.get("requested_at"), _SCALAR_PREVIEW_CHARS),
             "timeout_at": _preview_scalar(row.get("timeout_at"), _SCALAR_PREVIEW_CHARS),
@@ -144,7 +145,7 @@ def _waiting_on_user_note(pending: List[Dict[str, Any]]) -> str:
         "selected_labels, free_text}]) — answer from the task context you "
         "already hold. A question ABOVE your authority (spending money, "
         "changing scope, external actions) is not yours to guess: escalate it "
-        "with escalate(question, options, stake, assumption) — as a subagent "
+        "with escalate(question, options, stake, assumption, reply_to=<address above>) — as a subagent "
         "you escalate to your PARENT task (the owner sees only what no "
         "ancestor answers), the reply reaches your mailbox on a later round, "
         "and you relay it back with delegate_answer — meanwhile keep waiting "
@@ -187,6 +188,7 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
     journal advances ride the immediate return too — compact and bounded — so
     cutting the window short for a question does not lose the run's sequence.
     """
+    pending = addressed_questions(str(getattr(ctx, "task_id", "") or ""), run_id, pending)
     full: Dict[str, Any] = {
         "status": "waiting_on_user",
         "run_id": run_id,
@@ -449,8 +451,9 @@ _ANSWER_HANDSHAKE_MAX_SEC = 30.0
 
 
 def _delegate_answer(
-    ctx: ToolContext, run_id: str, interaction_id: str, answers: Any,
+    ctx: ToolContext, run_id: str, interaction_id: str = "", answers: Any = None,
     source_response: Optional[Dict[str, Any]] = None,
+    reply_to: Optional[Dict[str, Any]] = None,
 ) -> ToolResult:
     """Answer a delegated run's pending interactive question (B4, owner 7=A).
 
@@ -479,13 +482,19 @@ def _delegate_answer(
     if not rid:
         return _fail("delegate_answer", "missing_run_id", "run_id is required")
     iid = str(interaction_id or "").strip()
-    if not iid:
-        return _fail("delegate_answer", "missing_interaction_id",
-                     "interaction_id is required (from the waiting_on_user payload)")
     not_mine, entry = _owned_run(ctx, "delegate_answer", rid)
     if not_mine or entry is None:
         return not_mine or _fail("delegate_answer", "run_ownership_unknown",
                                  "custody unresolved", run_id=rid)
+    if entry.mode == "plan":
+        from ouroboros.delegate_plan import answer_plan
+
+        if iid or source_response is not None:
+            return _fail("delegate_answer", "plan_answer_conflict", "Plan questions are artifacts; omit interaction_id and source_response.")
+        return answer_plan(ctx, entry, answers, reply_to)
+    if not iid:
+        return _fail("delegate_answer", "missing_interaction_id",
+                     "interaction_id is required (from the waiting_on_user payload)")
     verified_source = None
     if source_response is not None:
         from ouroboros.subagent_work_order import validate_work_order_source_response
@@ -512,6 +521,10 @@ def _delegate_answer(
     wire, arg_error = _normalized_answers(answers, source_response)
     if arg_error or wire is None:
         return arg_error
+    try:
+        address = validate_answer_address(reply_to, entry.task_id, rid, iid, wire)
+    except ValueError as exc:
+        return _fail("delegate_answer", "reply_to_mismatch", str(exc), run_id=rid)
     deadline = time.monotonic() + _ANSWER_DEADLINE_SEC
 
     def _left() -> float:
@@ -532,7 +545,21 @@ def _delegate_answer(
                     TimeoutError(f"local time budget ({_ANSWER_DEADLINE_SEC:.0f}s) "
                                  "exhausted before the answer POST was sent"),
                     seconds_left=0.0)
-            body = gateway.answer_interaction(rid, iid, wire)
+            if address is not None:
+                from ouroboros.delegate_progress import _strict_poll
+                from ouroboros.gateways.claudexor import pending_interactions
+
+                try:
+                    detail = _strict_poll(gateway, rid, poll_bound(_left(), strict=True))
+                    require_pending_address(address, pending_interactions(detail, strict=True))
+                except (ValueError, ClaudexorUnavailable) as exc:
+                    return _fail("delegate_answer", "reply_to_unresolved", str(exc), run_id=rid)
+                if _left() <= 0:
+                    return _fail("delegate_answer", "reply_to_unresolved",
+                                 "Question validation exhausted the deadline; no answer was sent.", run_id=rid)
+                body = gateway.answer_interaction(rid, iid, wire, timeout_sec=poll_bound(_left(), strict=True))
+            else:
+                body = gateway.answer_interaction(rid, iid, wire)
         except ClaudexorUnavailable as exc:
             status_code = int(getattr(exc, "status_code", 0) or 0)
             if isinstance(exc, ClaudexorSubscriptionWindowExhausted):
@@ -844,7 +871,7 @@ def _bounded_message_envelope(payload: Dict[str, Any], budget: int) -> Dict[str,
     This measures the final JSON, including delivery and omission metadata.
     """
     fields = ("detail", "run_id", "message_id", "attempt_id", "harness_id",
-              "live_input", "native_turn_id")
+              "live_input", "native_turn_id", "frame")
     while len(json.dumps(payload, ensure_ascii=False, indent=2)) > budget:
         present = [key for key in fields if key in payload]
         if not present:
@@ -870,6 +897,13 @@ def _message_result(ctx: ToolContext, facts: Dict[str, Any], *, outcome: str,
     """Record the receipt (``delegate_message_outcome``, digest and size, never
     the text) and render the typed result. ``host_code`` marks a refusal;
     ``delivery_unknown`` and the two positive outcomes are OK observations."""
+    if "frame" in facts:
+        from ouroboros.delegate_message_store import record_outcome
+
+        try:
+            record_outcome(ctx, facts["run_id"], facts["message_id"], outcome, reason)
+        except Exception:
+            log.warning("Could not retain message outcome; prepared frame remains", exc_info=True)
     _emit(ctx, "delegate_message_outcome", {
         **facts, "outcome": outcome, "reason": reason, "http_status": int(http_status),
         "attempt_id": str(engine.get("attempt_id") or ""),
@@ -877,6 +911,7 @@ def _message_result(ctx: ToolContext, facts: Dict[str, Any], *, outcome: str,
     })
     payload: Dict[str, Any] = {
         "status": outcome, "run_id": facts["run_id"], "message_id": facts["message_id"],
+        **({"frame": facts["frame"]} if "frame" in facts else {}),
         "accepted": outcome in ("delivered", "accepted"), "reason": reason or None,
         "attempt_id": str(engine.get("attempt_id") or "") or None,
         "harness_id": str(engine.get("harness_id") or "") or None,
@@ -913,11 +948,12 @@ def _message_result(ctx: ToolContext, facts: Dict[str, Any], *, outcome: str,
 
 
 def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
-                      message_id: str = "") -> ToolResult:
+                      message_id: str = "", reply_to: Optional[Dict[str, Any]] = None) -> ToolResult:
     """Place one live message into a delegated run's running turn.
 
-    Custody-gated like answer/cancel: only the task that started the run may
-    speak into it. The outcome is TYPED end to end and mirrors the engine's
+    Same-tree tasks and ancestors may send context; lifecycle control remains
+    with the starter. The persisted host frame identifies the actual sender.
+    The outcome is TYPED end to end and mirrors the engine's
     ``LiveMessageOutcome`` 1:1 (``delivered`` / ``accepted`` / ``rejected`` /
     ``not_active`` / ``unsupported`` / ``delivery_unknown``) plus the host's own
     ``not_found``; the engine's ``reason`` rides verbatim. Two host short-circuits
@@ -943,16 +979,26 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
         return _fail("delegate_message", "message_text_required",
                      "text is required: the message to place into the run's live "
                      "session, a non-empty string (nothing is coerced).", run_id=rid)
-    not_mine, entry = _owned_run(ctx, "delegate_message", rid)
+    not_mine, entry, relation = message_run(ctx, "delegate_message", rid)
     if not_mine or entry is None:
         return not_mine or _fail("delegate_message", "run_ownership_unknown",
                                  "custody unresolved", run_id=rid)
     mid = str(message_id or "").strip()
     replay = bool(mid)
-    if not replay:
-        mid = uuid.uuid4().hex
+    from ouroboros.delegate_message_store import prepare
+    from ouroboros.delegate_reply import normalize_reply_to
+
+    try:
+        address = normalize_reply_to(reply_to)
+        record = prepare(ctx, entry, relation, body_text, mid, address)
+    except ValueError as exc:
+        return _fail("delegate_message", "message_frame_conflict", str(exc), run_id=rid, message_id=mid)
+    except Exception as exc:
+        return _fail("delegate_message", "message_frame_unwritten", str(exc), run_id=rid, message_id=mid)
+    mid = record["frame"]["message_id"]
     facts = {"run_id": rid, "message_id": mid, "text_chars": len(body_text),
-             "text_sha256": hashlib.sha256(body_text.encode("utf-8", "replace")).hexdigest()}
+             "text_sha256": hashlib.sha256(body_text.encode("utf-8", "replace")).hexdigest(),
+             "frame": record["frame"]}
     if not replay and entry.settled:
         return _message_result(
             ctx, facts, outcome="not_active", reason="run_settled",
@@ -987,7 +1033,7 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
                     detail=(f"local time budget ({_MESSAGE_DEADLINE_SEC:.0f}s) spent before "
                             "the message POST was sent; nothing was sent"), live_input=live_input)
             try:
-                body = gateway.send_run_message(rid, body_text, idempotency_key=mid,
+                body = gateway.send_run_message(rid, record["wire_text"], idempotency_key=mid,
                                                 timeout_sec=poll_bound(_left()))
             except ClaudexorUnavailable as exc:
                 outcome, reason, host_code = _message_problem_outcome(exc)
@@ -1011,6 +1057,9 @@ def _delegate_message(ctx: ToolContext, run_id: str, text: Any,
         if outcome == "not_active" and reason == "interaction_pending":
             try:
                 questions = _message_pending_observation(gateway, rid, _left)
+                if "pending_interactions" in questions:
+                    questions["pending_interactions"] = addressed_questions(
+                        entry.task_id, rid, questions["pending_interactions"])
             except Exception as exc:
                 # Enrichment is after the known POST verdict, outside its catch-all.
                 questions = {"interaction_observation": {

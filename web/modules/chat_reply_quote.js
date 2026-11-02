@@ -1,7 +1,8 @@
 // The quote panel (docs/DESIGN.md "Replies"): the one component that shows another message inside a bubble.
 // A reply shows one ellipsized line and is a button that jumps to the quoted message; with a cancel control it
-// is the strip above the composer while the owner replies. A relay shows the owner's complete words (they ARE
-// the instruction) clamped to six lines, with a real `Show all` control in its head. The bar and the author
+// is the strip in the composer's field while the owner replies. A relay shows the owner's complete words (they ARE
+// the instruction) clamped to six lines, with a real `Show all` control in its head; inside a relay note card it
+// clamps to three lines and the card's `more`/`less` (chat_relay_deck.js) owns its expansion. The bar and the author
 // line wear the QUOTED author's ink; the bubble around keeps its own voice. Every string is set as text: the
 // quoted words are data, never markup.
 import { fmt, tr } from './i18n.js';
@@ -87,7 +88,7 @@ export function normalizeRelay(raw) {
 }
 
 /**
- * The panel for one reply reference. `composer: true` is the strip above the field: a lead word
+ * The panel for one reply reference. `composer: true` is the field's first line: a lead word
  * (`Replying to`) and a cancel button beside the jump button; otherwise it is the quote inside a bubble.
  * Returns null for a reference with nothing to show.
  */
@@ -143,6 +144,8 @@ export function createReplyQuote(raw, { onJump = null, onCancel = null, composer
 // ---- The clamp of a long quotation (a relay panel's text) ----
 let nextClampId = 0;
 const CLAMP_LINES = 6;
+/** His words on a note card (chat_relay_deck.js): two lines until the note is opened, which the deck fits them to. */
+export const RELAY_CARD_LINES = 2;
 
 /**
  * Clamp `text` to six lines (cut on a word, never `.…`; text_fit.js) and add a `Show all` / `Show less` toggle
@@ -177,7 +180,7 @@ export function clampWithToggle(text, host, { onDomWrite = (write) => write() } 
 }
 
 /** One quoted message of a relay: who wrote it, where and when, his words (clamped) and the files that came with them. */
-function createRelayPanel(quote, relayId, { onDomWrite, formatTime }) {
+function createRelayPanel(quote, relayId, { onDomWrite, formatTime, card }) {
     const author = authorOf('user');
     const place = [quote.where, formatTime(quote.ts)?.short || ''].filter(Boolean);
     const root = node('div', 'chat-quote');
@@ -192,19 +195,25 @@ function createRelayPanel(quote, relayId, { onDomWrite, formatTime }) {
     const text = quote.text ? node('div', 'chat-quote-text', quote.text) : null;
     root.append(head, ...(text ? [text] : []));
     if (quote.files.length) root.append(node('div', 'chat-quote-files', fmt('Attached: {names}', { names: quote.files.join(', ') })));
-    if (text) clampWithToggle(text, head, { onDomWrite });
+    if (text) {
+        if (card) {
+            text.classList.add('chat-clamp');
+            fitText(text, quote.text, RELAY_CARD_LINES);
+        } else clampWithToggle(text, head, { onDomWrite });
+    }
     return root;
 }
 
 /**
  * A relay's panel: the owner's complete words, labelled with where and when he wrote them (`You · Main · 00:37`),
- * clamped to six lines with `Show all` in the head. The words stay selectable text (not inside a button). A relay
+ * clamped to six lines with `Show all` in the head, or two lines when a note card owns their expansion.
+ * The words stay selectable text (not inside a button). A relay
  * that passes several of his messages shows one such panel per message, in the host's order, inside one block.
  */
-export function createRelayQuote(raw, { onDomWrite, formatTime = formatMsgTime } = {}) {
+export function createRelayQuote(raw, { onDomWrite, formatTime = formatMsgTime, card = false } = {}) {
     const relay = normalizeRelay(raw);
     if (!relay) return null;
-    const panels = relay.quotes.map((quote) => createRelayPanel(quote, relay.relayId, { onDomWrite, formatTime }));
+    const panels = relay.quotes.map((quote) => createRelayPanel(quote, relay.relayId, { onDomWrite, formatTime, card }));
     if (panels.length === 1) return panels[0];
     const group = node('div', 'chat-relay-quotes');
     group.append(...panels);

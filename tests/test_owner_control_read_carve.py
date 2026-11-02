@@ -30,6 +30,7 @@ def test_owner_control_example_reaches_a_registered_result(tmp_path, monkeypatch
     reg.set_context(ctx)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
     script = "import sys; from pathlib import Path; Path('example.txt').write_text(sys.argv[1], encoding='utf-8')"
 
     result = reg.execute("run_command", {

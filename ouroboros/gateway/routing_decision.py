@@ -84,7 +84,9 @@ def handle_routing_decision(
         return 400, {"ok": False, "error": "malformed_decision_id",
                      "decision_id": decision_id}
     from ouroboros.project_dialogue import (
+        ROUTING_DESTINATION_FIELDS,
         append_chat_annotation,
+        chat_annotation_receipt,
         latest_chat_annotations,
         routing_refusal_cause,
     )
@@ -321,19 +323,23 @@ def handle_routing_decision(
             except Exception:
                 log.debug("admitted effort read failed for %s", derived_task_id, exc_info=True)
         try:
-            # The closing row IS the presentation receipt after hydration, so
-            # it wears the real routing action + label ("Steered task · X"),
-            # plus the request id the replay path reads back.
+            # The closing row IS the presentation receipt after hydration, so it wears the real routing action + label
+            # ("Steered task · X"), plus the request id the replay path reads back, and where the dispatched act's own
+            # receipt says the words landed (#968): a reload names the room its live frame did.
+            try:
+                landed = chat_annotation_receipt(drive_root, client_message_id, dispatch_token)
+            except OSError:  # the closing row is still written, without the destination, as before
+                landed = {}
             append_chat_annotation(
                 drive_root, client_message_id,
                 action="steer_task" if action == "steer_task" else "promote_chat_to_task",
                 target=str(chosen.get("task_id") or chosen.get("project_id") or ""),
-                target_label=str(chosen.get("label") or chosen.get("title")
-                                 or chosen.get("project_name") or ""),
+                target_label=str(chosen.get("label") or chosen.get("title") or chosen.get("project_name") or ""),
                 status=expected, routing_token=token,
                 detail=f"request:{request_id}",
                 reason=f"answered_option:{int(option_index)}",
                 reasoning_effort=admitted_effort,
+                **{key: landed[key] for key in ROUTING_DESTINATION_FIELDS if key in landed},
             )
         except Exception:
             log.debug("closing annotation append failed", exc_info=True)

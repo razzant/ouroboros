@@ -98,6 +98,7 @@ def _episode(tmp_path, monkeypatch, model, selection):
 
     repo, drive, workspace = tmp_path / "repo", tmp_path / "data", tmp_path / "workspace"
     cfg = keyless_settings(model, OUROBOROS_CONTEXT_MODE="max", OUROBOROS_REASONING_SUMMARY="off",
+        OUROBOROS_CONSCIOUSNESS_SAFETY_MODE="off",
         OUROBOROS_MODEL_LIGHT="openai-compatible::mock-model-rebound",
         OUROBOROS_SUBAGENTS={"enabled": True, "items": [{"subagent_id": "scout",
             "recommended_use": "Inspect declared observations", "effort": "medium",
@@ -144,7 +145,10 @@ def _episode(tmp_path, monkeypatch, model, selection):
         "context": "INHERITED_PARENT_CONTEXT", "notes": "INHERITED_PARENT_NOTES",
         "review_notes": "INHERITED_PARENT_REVIEW", "constraints": "AUTHORITY_CONSTRAINT",
         "predecessor_authority": {"task_id": "previous", "result": "INHERITED_PREDECESSOR_BODY",
-                                  "authority_sha256": "a" * 64},
+                                  "authority_sha256": "a" * 64,
+                                  "source": {"kind": "task_result", "task_id": "previous",
+                                             "reader": "get_task_result", "arguments": {
+                                                 "task_id": "previous", "include_authority": True}}},
     }})
     from ouroboros.artifacts import stage_task_attachments
     _write(workspace / "prior-note.txt", "READ_PREVIOUS_CASE_CONCLUSION")
@@ -172,6 +176,7 @@ def _episode(tmp_path, monkeypatch, model, selection):
                           drive_path=lambda p: drive / p)
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
     registry._ctx.task_id = task["id"]
+    registry._ctx.task_attempt = task.get("_attempt") or 1
     registry._ctx.task_constraint = task["task_constraint"]
     registry._ctx.workspace_root = workspace
     registry._ctx.workspace_mode = "external"
@@ -270,7 +275,8 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
         assert not model.errors, model.errors
         assert final == "Cooperation complete.", (final, usage, trace)
         assert model.script_consumed()
-        assert all(not row["is_error"] for row in trace["tool_calls"]), trace["tool_calls"]
+        errors = [row for row in trace["tool_calls"] if row["is_error"]]
+        assert not errors, errors
         assert len(model.received) == 8
         assert model.first_retained_at == 6
         bodies = [json.loads(Path(row["path"]).read_bytes()) for row in model.received]
@@ -289,8 +295,14 @@ def test_native_loop_retains_first_position_then_cooperates_over_http(tmp_path, 
                     assert all(marker not in text for marker in FORBIDDEN)
                 # A helper's view keeps knowledge out of the request: it reads it on demand.
                 knowledge = ("INHERITED_GLOBAL_KNOWLEDGE", "INHERITED_PROJECT_KNOWLEDGE", "INHERITED_WORKPAD")
-                assert all(marker in text for marker in FORBIDDEN if marker not in ("OTHER_TASK_PROCESS", *knowledge)), n
-                assert not any(marker in text for marker in knowledge), n
+                addressed = ("INHERITED_PREDECESSOR_BODY",)
+                assert all(marker in text for marker in FORBIDDEN
+                           if marker not in ("OTHER_TASK_PROCESS", *knowledge, *addressed)), n
+                assert not any(marker in text for marker in (*knowledge, *addressed)), n
+                brief = ep.task["task_contract"]["predecessor_authority"]
+                assert brief["omitted_fields"]["result"] == len("INHERITED_PREDECESSOR_BODY")
+                assert brief["source"]["arguments"] == {"task_id": "previous", "include_authority": True}
+                assert "previous" in text
             assert (PEER in text) == (n >= 7), n
             if n >= 3:
                 assert "TOOL_DECLARED_OBSERVATION" in text

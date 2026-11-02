@@ -18,7 +18,7 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
     """Rich chat markdown renders every supported format without activating HTML."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
@@ -261,9 +261,10 @@ def test_ui_browser_marked_rich_markdown_and_security(direct_server_with_data): 
                 oversized.wait_for(state="visible", timeout=30_000)
                 oversized.locator(".md-mermaid-error").wait_for(state="visible", timeout=10_000)
                 assert oversized.locator(".md-mermaid").count() == 0
-                assert oversized.locator(".md-diagram-error-note").inner_text() == (
-                    "Diagram could not be rendered."
-                )
+                # Distant rows sleep under content-visibility and wake on the observer's next frame.
+                diagnostic = oversized.locator(".md-diagram-error-note")
+                diagnostic.scroll_into_view_if_needed()
+                expect(diagnostic).to_have_text("Diagram could not be rendered.", use_inner_text=True)
 
                 security = page.locator(".chat-bubble.assistant", has_text="Security literal").first
                 security.wait_for(state="visible", timeout=30_000)

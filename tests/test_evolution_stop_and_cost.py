@@ -5,9 +5,9 @@ Covers:
   - reconstruct_task_cost using the durable physical-attempt ledger by task_id;
   - stop_evolution_tasks cancelling only evolution tasks (pending AND running)
     through the durable-intent + typed-custody ingress;
-  - the hard-timeout retry gate: a killed evolution task is NOT re-enqueued when
-    the campaign is stopped, IS re-enqueued when still enabled, and either way
-    records reconstructed cost/rounds (never zeros).
+  - the hard timeout: an evolution task killed at its execution ceiling is NOT
+    re-enqueued whether the campaign is stopped or still enabled (no timeout
+    retries since #1376), and records reconstructed cost/rounds (never zeros).
 """
 
 import json
@@ -167,11 +167,9 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     if not evolution_enabled:
         state.update_state(lambda live: live.update(evolution_mode_enabled=False))
     monkeypatch.setattr(q, "FINALIZATION_GRACE_SEC", 0)
-    # Activity model: drive an IDLE kill (no progress for the idle window), not a flat
-    # wall-clock/ceiling kill — small idle/ceiling getters + a recent started_at keep
-    # terminal_reason == "idle_timeout" so the evolution retry path is exercised.
-    monkeypatch.setattr(q, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(q, "get_per_call_timeout_ceiling_sec", lambda: 1)
+    # Silence only brings attention (#1376), so the kill comes from the execution
+    # ceiling: the task started 1000 s ago and its lifetime is 300 s.
+    monkeypatch.setattr(q, "get_task_abs_ceiling_sec", lambda: 300)
     monkeypatch.setattr(q, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(q, "_reap_queue", q._stdqueue.Queue())
     # Three distinct legacy usage rows totalling $1.50 are imported into the
@@ -218,8 +216,8 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
                        "BUDGET_ROOT_FENCES": {}}.items():
         monkeypatch.setattr(q, key, value)
     real_enqueue = q.enqueue_task
-    def enqueue(task, front=False, timeout_retry=False):
-        admitted = real_enqueue(task, front=front, timeout_retry=timeout_retry)
+    def enqueue(task, front=False):
+        admitted = real_enqueue(task, front=front)
         assert not admitted.get("_admission_blocked"), admitted
         assert any(row is admitted for row in q.PENDING)
         enqueued.append(admitted)
@@ -229,7 +227,7 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     monkeypatch.setattr(q, "load_state", lambda: {"evolution_mode_enabled": evolution_enabled, "owner_chat_id": 0})
 
     q.enforce_task_timeouts()
-    # Variant A: terminal write + retry happen in the off-loop reaper; drain it here.
+    # Variant A: the terminal write happens in the off-loop reaper; drain it here.
     while not q._reap_queue.empty():
         q._reap_timed_out_task(q._reap_queue.get_nowait())
 
@@ -344,14 +342,14 @@ def test_handle_task_done_reconstructs_cost_from_physical_ledger(tmp_path):
     assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 1
 
 
-def test_hard_timeout_evolution_enabled_requeues(tmp_path, monkeypatch):
+def test_hard_timeout_evolution_enabled_settles_without_requeue(tmp_path, monkeypatch):
     enqueued, emitted, written = _drive_hard_timeout(tmp_path, monkeypatch, evolution_enabled=True)
 
-    # Campaign still enabled: the timed-out task is re-enqueued (one retry).
-    assert len(enqueued) == 1
-    assert enqueued[0].get("type") == "evolution"
-    assert enqueued[0].get("_attempt") == 2 and enqueued[0]["id"] == "evo1"
-    # A retry keeps the live card active, so no terminal task_done is emitted.
-    assert [e for e in emitted if e.get("type") == "task_done"] == []
-    # The interrupted rollup still records reconstructed cost (not zeros).
+    # An enabled campaign buys no timeout retry: the ceiling is terminal.
+    assert enqueued == []
+    assert written.get("status") == "failed"
+    assert written.get("reason_code") == "absolute_ceiling"
+    # The terminal task_done carries the reconstructed cost (not zeros).
+    done = [e for e in emitted if e.get("type") == "task_done"]
+    assert done and round(float(done[0].get("accounted_upper_bound_usd") or 0), 6) == 1.5
     assert round(float(written.get("accounted_upper_bound_usd") or 0), 6) == 1.5

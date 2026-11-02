@@ -1,21 +1,47 @@
-"""Find the wake itself after its direct actor handed the same id to the pool."""
+"""Own-clock custody and the wider autonomous census across turn carriers."""
+
+from ouroboros.consciousness_authority import (
+    WORK_KIND_CONSCIOUSNESS, is_consciousness_origin, is_own_clock_wake, work_kind,
+)
 
 
-class WakeCensusBusy(RuntimeError):
-    """A caller holding the direct gate must retry rather than invert Q -> gate."""
-
-
-def queued_wakes(*, blocking=True) -> list[str]:
+def queued_wakes(*, held_only: bool = False) -> list[str]:
+    """Own-clock wakes the pool carries; ``held_only``: those in PENDING (paused, held, not yet dispatched)."""
     from supervisor import queue as q
 
-    if not q._queue_lock.acquire(blocking=blocking):
-        raise WakeCensusBusy("queue census busy")
-    try:
+    with q._queue_lock:
+        tasks = [*q.PENDING, *([] if held_only else (meta.get("task") or {} for meta in q.RUNNING.values()))]
+        return list(dict.fromkeys(str(task["id"]) for task in tasks if task.get("id")
+                                 and is_own_clock_wake(task.get("metadata"))))
+
+
+def is_autonomous_work(metadata) -> bool:
+    """Work consciousness itself started, its tree included: the only work its switch stops.
+
+    Unmarked work is checked at the consciousness Safety level, but it is not
+    autonomous: Off must never stop system, owner or historical work.
+    """
+    return is_consciousness_origin(metadata) and work_kind(metadata) == WORK_KIND_CONSCIOUSNESS
+
+
+def autonomous_tasks() -> list[str]:
+    """All live autonomous pool members, including children and retained returns."""
+    from supervisor import queue as q
+
+    with q._queue_lock:
         tasks = [*q.PENDING, *(meta.get("task") or {} for meta in q.RUNNING.values())]
         return list(dict.fromkeys(str(task["id"]) for task in tasks if task.get("id")
-                                 and (task.get("metadata") or {}).get("usage_category") == "consciousness"))
-    finally:
-        q._queue_lock.release()
+                                 and is_autonomous_work(task.get("metadata"))))
+
+
+def autonomous_work_enabled(task: dict, drive_root) -> bool:
+    """Recheck Off/Panic at selection and launch, including restored autonomous work."""
+    if not is_autonomous_work(task.get("metadata") or {}):
+        return True
+    from ouroboros.consciousness import panic_blocks_wake
+    from supervisor.state import control_is, load_state
+
+    return not panic_blocks_wake(drive_root) and control_is(load_state(), "bg_consciousness_enabled", True)
 
 
 def stop_pooled_wake(task_id: str) -> None:
@@ -25,14 +51,30 @@ def stop_pooled_wake(task_id: str) -> None:
     # The ordinary cancellation sweep owns the actual stop, including a row
     # still queued and the transition from inline park to a pooled attempt.
     request_cancel(q.DRIVE_ROOT, task_id, reason="background_consciousness_stopped",
-                   source="owner", requested_by="owner", requested_stop_policy=STOP_POLICY_FINALIZE)
+                   source="owner", requested_by="owner", scope="cascade",
+                   requested_stop_policy=STOP_POLICY_FINALIZE)
 
 
-def finish_pooled_wake(ctx, task_id: str, result: dict) -> None:
-    """The detached attempt's end starts the ordinary next-wake interval."""
+def pooled_terminal_ok(result: dict):
+    """A pooled attempt's recorded end as the clock reads it; None while nothing settled it
+    (``interrupted`` stays with its restore owner, an inline carrier with its own callback).
+    An early ``completed`` keeps its sticky lifecycle beside the fault's ``infra_failed`` axis."""
+    from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes
     from ouroboros.task_carrier import execution_kind
+    from ouroboros.task_status import SETTLED_STATUSES
 
+    status = result.get("status")
+    if status not in SETTLED_STATUSES or execution_kind(result) != "pooled":
+        return None
+    return status == "completed" and normalize_outcome_axes(result)["execution"]["status"] != EXECUTION_INFRA_FAILED
+
+
+def finish_pooled_wake(ctx, task_id: str, result: dict, known: dict | None = None) -> None:
+    """The detached attempt's end starts the ordinary next-wake interval. ``known``: the identity
+    its RUNNING row or terminal event still carries when the durable result lost it."""
+    known = known or {}
     clock = getattr(ctx, "consciousness", None)
-    if (clock is not None and execution_kind(result) == "pooled"
-            and (result.get("metadata") or {}).get("usage_category") == "consciousness"):
-        clock._wake_finished(task_id, result.get("status") == "completed")
+    metadata = result.get("metadata") or known.get("metadata")
+    ok = pooled_terminal_ok({**known, **result, "status": result.get("status")})
+    if clock is not None and ok is not None and is_own_clock_wake(metadata):
+        clock._wake_finished(task_id, ok, metadata=metadata, pooled=True)

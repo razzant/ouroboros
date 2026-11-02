@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "7.7.0"
+version = "7.9.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -70,7 +70,7 @@ dependencies = [
 
 [project.scripts]
 ouroboros = "ouroboros.cli:main"
-ouroboros-web = "server:main"
+ouroboros-web = "server:executable_main"
 
 [project.urls]
 Homepage = "https://github.com/razzant/ouroboros"
@@ -84,6 +84,11 @@ desktop = [
     "pywebview==5.4",
     "pythonnet==3.0.5; platform_system == 'Windows'",
     "clr_loader==0.2.7.post0; platform_system == 'Windows'",
+]
+# Built against the AppImage's GTK3/girepository-1.0 baseline, in both Pythons.
+linux-desktop = [
+    "PyGObject==3.46.0; sys_platform == 'linux'",
+    "pycairo==1.26.1; sys_platform == 'linux'",
 ]
 local-model = ["llama-cpp-python"]
 build = ["pyinstaller>=6.0"]

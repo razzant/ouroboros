@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 
+from ouroboros.provider_models import legacy_openai_base
+
 SEARCH_MODELS = {"openai": "gpt-5.2", "openrouter": "openai/gpt-5.2", "anthropic": "claude-sonnet-4-6", "ddgs": ""}
 SEARCH_BACKENDS = {"openai": "openai_responses", "openrouter": "openrouter_server_tool", "anthropic": "anthropic_server_tool", "ddgs": "ddgs"}
 
@@ -25,10 +27,16 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict
               "note": "Applies only to built-in web_search; skills, MCP and browser tools remain independent choices."}
     if source not in {"auto", *SEARCH_MODELS}:
         return {**result, "error": "Unknown web search source"}
-    prefix, sep, native = selected.partition("::")
+    from ouroboros.provider_models import parse_model_route
+
+    sep, parsed = "::" in selected, parse_model_route(selected)
+    # A known route head (``kind[@name]::``) names its connection; an unknown one stays its own text.
+    prefix, native = ((parsed.kind, parsed.model) if sep and parsed.model != selected
+                      else selected.partition("::")[::2])
+    connection = parsed.connection if parsed.valid else ""
     legacy_anthropic = selected.partition("/")[2] if not sep and selected.startswith("anthropic/") else ""
     unsupported = ("This model route has no built-in search transport"
-                   if sep and (prefix not in {"openai", "anthropic", "openrouter"} or not native) else
+                   if sep and (prefix not in {"openai", "anthropic", "openrouter"} or not native or not parsed.valid) else
                    "Direct search sources require a native model id"
                    if sep and prefix in {"openai", "anthropic"} and "/" in native else "")
     if source == "ddgs":
@@ -76,11 +84,10 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict
                 return {**result, "error": "Anthropic search requires its native model id"}
         candidates = [(source, chosen or SEARCH_MODELS[source])]
     for name, wire_model in candidates:
-        reason = ""
-        if name != "ddgs" and not setting({"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY",
-                                           "anthropic": "ANTHROPIC_API_KEY"}[name]):
+        reason, leg_connection = "", connection if name == prefix else ""
+        if name != "ddgs" and not _leg_configured(name, leg_connection, settings):
             reason = "no_credentials"
-        elif name == "openai" and setting("OPENAI_BASE_URL"):
+        elif name == "openai" and not leg_connection and legacy_openai_base(settings):
             reason = "legacy_openai_base_url"  # Legacy compatible credentials are not official Responses access.
         elif name in _SDK_PACKAGES and not _package_discoverable(_SDK_PACKAGES[name]):
             reason = "package_missing"  # discoverable is not proof of a working import; dispatch still reports that
@@ -89,9 +96,18 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None) -> dict
         if source == "auto" and name == "anthropic" and prefix != "anthropic" and not legacy_anthropic:
             explicit_model = False
         leg = {"source": name, "backend": SEARCH_BACKENDS[name], "model": wire_model,
-               "model_source": "selection" if explicit_model else "provider_default"}
+               "model_source": "selection" if explicit_model else "provider_default",
+               **({"connection": leg_connection} if leg_connection else {})}
         result["unavailable" if reason else "legs"].append({**leg, "unavailable_reason": reason} if reason else leg)
     return result
+
+
+def _leg_configured(source: str, connection: str, settings) -> bool:
+    """Whether the search leg's connection (built-in unless the selection named one) can serve."""
+    from ouroboros.provider_models import connection_id, model_has_credentials, model_has_credentials_in_settings
+
+    route = f"{connection_id(source, connection)}::search"
+    return model_has_credentials(route) if settings is None else model_has_credentials_in_settings(route, settings)
 
 
 # The optional SDKs a leg imports itself; openai and openrouter use installed dependencies.

@@ -22,9 +22,14 @@ def _snapshot(target="claude=claude-fable-5-1", *, kind="agent_session", enabled
     })}, {})
 
 
+# A measured window for every model and kind: an engine "available" is a claim
+# about this request only with one (OB1851); its ratio sets no headroom policy.
+MEASURED = {"used_ratio": 0.2, "resets_at": "2099-01-01T00:00:00Z"}
+
+
 def _quota(*, scope=None, state="exhausted", fresh="fresh"):
     return {"snapshots": [{"subject": {"harness": "claude", "subject_id": "chosen"},
-        "freshness": fresh, "constraints": [],
+        "freshness": fresh, "constraints": [dict(MEASURED)],
         "availability": {"state": state, "resets_at": "2099-01-01T00:00:00Z"}}],
         "absences": [], "resources": [],
         "availability_scope": scope or {"model": "claude-fable-5-1", "requestKind": "text", "basis": "quota_block"}}
@@ -55,6 +60,9 @@ def test_engine_verdict_not_raw_ratio_or_money_controls_availability():
     value = _quota(state="available")
     value["snapshots"][0]["constraints"] = [{"used_ratio": 1, "applies_to_models": ["fable"]}]
     value["resources"] = [_resource(harness="claude")]
+    # A model-scoped window alone witnesses no applicable measurement.
+    assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
+    value["snapshots"][0]["constraints"].append(dict(MEASURED))
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "available"
     value["snapshots"][0]["freshness"] = "stale"
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
@@ -69,7 +77,11 @@ def test_pin_and_absences_are_subject_exact():
     assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "available"
     assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen")["state"] == "exhausted"
     value["absences"] = [{"subject": {"harness": "claude", "subject_id": "chosen"}}]
-    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen")["state"] == "unknown"
+    # The pin's own dated block outlives its refresh gap; its gap still blocks a positive claim.
+    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen")["state"] == "exhausted"
+    value["absences"] = [{"subject": {"harness": "claude", "subject_id": "healthy"}}]
+    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="healthy")["state"] == "unknown"
+    assert quota_availability(value, "claude", model="claude-fable-5-1")["state"] == "unknown"
 
 
 @pytest.mark.parametrize("failure", ["timeout", "malformed", 403, 500])
@@ -133,22 +145,6 @@ def test_api_actor_without_managed_route_never_reads_engine(monkeypatch):
     assert "engine" not in result
 
 
-def test_literal_native_default_alias_needs_positive_roster_and_never_a_sibling():
-    from ouroboros.claudexor_observations import default_subject_aliases
-    roster = {"accountPools": [], "profiles": [{"profile": {
-        "harness_id": "claude", "profile_id": "claude-default"}}]}
-    aliases = default_subject_aliases(roster, "claude", "claude-default")
-    value = _quota()
-    value["snapshots"][0]["subject"]["subject_id"] = None
-    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="claude-default",
-                              aliases=aliases)["state"] == "exhausted"
-    assert quota_availability(value, "claude", model="claude-fable-5-1", profile="chosen",
-                              aliases=())["state"] == "unknown"
-    assert default_subject_aliases({"profiles": roster["profiles"]}, "claude", "claude-default") == ()
-    assert default_subject_aliases({**roster, "accountPools": None}, "claude", "claude-default") == ()
-    assert default_subject_aliases(roster, "claude", "healthy") == ()
-
-
 def test_public_registry_consumer_works_without_any_quota_skill(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.gateway import claudexor_passive
@@ -204,3 +200,57 @@ def test_complete_engine_combined_golden_passes_through_unchanged():
             assert scope == {"view": "resources_freshness", "model": "auto", "request_kind": "text"}
             return deepcopy(golden)
     assert read_quota(Gateway(), model="auto") == golden
+
+
+# -- #244: a quota subject is matched exactly; `<harness>-default` borrows no null window ----------
+
+def _pinned(pin):
+    return task_settings_snapshot({"OUROBOROS_SUBAGENTS": json.dumps({
+        "enabled": True, "items": [{"subagent_id": "builder", "enabled": True, "recommended_use": "fixture",
+            "access": "readonly", "route": {"kind": "agent_session", "target_id": "claude=claude-fable-5-1",
+                                            "credential_profile_id": pin}}],
+    })}, {})
+
+
+def _window(subject, state):
+    return {"subject": {"harness": "claude", "subject_id": subject}, "freshness": "fresh", "constraints": [dict(MEASURED)],
+            "availability": {"state": state, "resets_at": "2099-01-01T00:00:00Z"}}
+
+
+def _unified_payload(*windows):
+    return {"reads": {"quota": "ok", "accounts": "ok"}, "read_errors": {}, "timings_ms": {},
+            "quota": list(windows), "quota_absences": [], "resources": [], "unified_accounts": True,
+            "availability_scope": {"model": "claude-fable-5-1", "requestKind": "text", "basis": "quota_block"},
+            "profiles": {"profiles": [{"profile": {"harness_id": "claude", "profile_id": "claude-default",
+                                                   "enabled": True}}],
+                         "harnessAccounts": [], "accountPools": []}}
+
+
+def test_an_unprofiled_window_never_answers_for_a_pinned_default(monkeypatch):
+    """A current explicit API-key route writes a fresh NULL-subject window; the named
+    `claude-default` profile has none of its own. The pin stays unknown."""
+    from ouroboros.gateway import claudexor_passive
+    payload = _unified_payload(_window(None, "exhausted"))
+    monkeypatch.setattr(claudexor_passive, "_quota_payload", lambda **kw: deepcopy(payload))
+    with task_settings_scope(_pinned("claude-default")):
+        result = inspect_subagent("builder")
+    assert result["availability"]["state"] == "unknown"
+    assert result["availability"]["reason"] == "quota_evidence_missing"
+    assert result["engine"]["snapshots"] == []
+    assert "subject_aliases" not in result["engine"] and "native_accounts" not in result["engine"]
+
+
+@pytest.mark.parametrize("pin,state,subjects", [
+    ("claude-default", "exhausted", ["claude-default"]),
+    ("claude-default-2", "available", ["claude-default-2"]),
+    ("", "available", [None, "claude-default", "claude-default-2"]),
+], ids=["exact-default", "reused-suffix-id", "auto-keeps-unprofiled"])
+def test_exact_subjects_still_answer_and_auto_keeps_unprofiled_windows(monkeypatch, pin, state, subjects):
+    from ouroboros.gateway import claudexor_passive
+    payload = _unified_payload(_window(None, "exhausted"), _window("claude-default", "exhausted"),
+                               _window("claude-default-2", "available"))
+    monkeypatch.setattr(claudexor_passive, "_quota_payload", lambda **kw: deepcopy(payload))
+    with task_settings_scope(_pinned(pin)):
+        result = inspect_subagent("builder")
+    assert result["availability"]["state"] == state
+    assert [row["subject"]["subject_id"] for row in result["engine"]["snapshots"]] == subjects

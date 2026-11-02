@@ -389,6 +389,34 @@ class TestBudgetDriftOpenRouterOnly:
         assert st["budget_drift_pct"] is None
         assert st["session_openrouter_settled_snapshot"] == 40.0
 
+    @pytest.mark.parametrize("rows,alerts", [
+        ([{"kind": "openrouter", "name": "claude-credits", "label": "Claude credits"}], False),
+        ('[{"kind": "openrouter", "name": "byok", "enabled": true}]', False),  # an environment-shaped value
+        ([{"kind": "openrouter", "name": "byok", "enabled": False}], True),
+        ([{"kind": "openai", "name": "second"}, {"kind": "openrouter", "name": "default", "enabled": False}], True),
+    ])
+    def test_another_enabled_openrouter_connection_skips_the_percentage(self, tmp_path, monkeypatch, rows, alerts):
+        """Every OpenRouter connection settles into the ledger's one ``openrouter`` bucket while
+        the diagnostic queries only the built-in key: with another enabled one the comparison is
+        no longer like for like, so it rebaselines instead of raising a false drift alarm."""
+        import ouroboros.config as config
+
+        sup_state = self._setup_state(tmp_path, monkeypatch, or_settled=40.0, accounted=40.0)
+        self._seed_session(sup_state, total_snap=1000.0, or_snap=0.0)
+        monkeypatch.setattr(config, "runtime_settings", lambda: {"OUROBOROS_CONNECTIONS": rows})
+        monkeypatch.setattr(
+            sup_state, "check_openrouter_ground_truth",
+            lambda _key: {"total_usd": 1100.0, "daily_usd": 100.0},
+        )
+
+        self._update_budget(sup_state)
+        st = sup_state.load_state()
+        assert st["budget_drift_alert"] is alerts
+        assert (st["budget_drift_pct"] is None) is not alerts
+        assert st["openrouter_total_usd"] == 1100.0  # the key observation is still published
+        if not alerts:
+            assert (st["session_total_snapshot"], st["session_openrouter_settled_snapshot"]) == (1100.0, 40.0)
+
     def test_integrity_degraded_suppresses_comparison(self, tmp_path, monkeypatch):
         sup_state = self._setup_state(
             tmp_path, monkeypatch, or_settled=40.0, accounted=40.0, integrity_degraded=True,

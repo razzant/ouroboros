@@ -300,6 +300,7 @@ class FakeElement {
     }
     getAttribute(name) { return this.attrs.has(name) ? this.attrs.get(name) : null; }
     removeAttribute(name) { this.attrs.delete(name); if (name === 'open') this.open = false; }
+    hasAttribute(name) { return this.attrs.has(name); }
     append(...nodes) { for (const node of nodes) { node.parentNode?.childNodes?.splice(node.parentNode.childNodes.indexOf(node), 1); node.parentNode = this; this.childNodes.push(node); } }
     appendChild(node) { this.append(node); return node; }
     before(node) { node.remove?.(); node.parentNode = this.parentNode; this.parentNode.childNodes.splice(this.parentNode.childNodes.indexOf(this), 0, node); }

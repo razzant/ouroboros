@@ -10,6 +10,19 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ouroboros.subagents import DelegatedRunShape
 
+# The thread answer/implement contract verified against the serving engine.
+PLAN_THREAD_MIN_VERSION = "4.5.0"
+
+
+def plan_capability(gateway: Any, catalog: dict, entry: dict, *, promotion: bool = False) -> str:
+    """A plan needs the advertised mode and the versioned thread-turn contract."""
+    from ouroboros.gateways.claudexor import engine_at_least
+
+    supported = (engine_at_least(str(getattr(gateway, "engine_version", "") or ""), PLAN_THREAD_MIN_VERSION)
+                 and "plan" in catalog.get("modes", [])
+                 and ("modes" not in entry or "plan" in entry["modes"]))
+    return "" if supported else ("same_session_promotion_unsupported" if promotion else "plan_thread_unsupported")
+
 
 def route_health(
     gateway: Any, route_id: str, shape: DelegatedRunShape, *, route_model: str = "",
@@ -34,6 +47,8 @@ def route_health(
         return "route_not_in_capability_catalog", ""
     if not pinned_profile and entry.get("enabled") is False:
         return "route_disabled", ""
+    if shape.mode == "plan" and (reason := plan_capability(gateway, catalog, entry)):
+        return reason, ""
     supported = [str(v) for v in entry.get("accessProfilesSupported") or []]
     # Old engines translate delegated workspace_write to their confined full
     # adapter profile. Full itself must be advertised literally.
@@ -54,20 +69,17 @@ def _exhausted_window(gateway: Any, route_id: str, route_model: str = "",
     """Read exact engine scope; no host aliases, prefix table or monetary admission.
 
     A legacy/unhonored selector supplies observations, not exact availability.
-    A stale/missing subject stays unknown and fail-open; a healthy sibling cannot
-    rescue a strict pin. Unsupported embedded gateways likewise prove nothing.
+    A stale/missing subject without a live dated block stays unknown and fail-open;
+    a healthy sibling cannot rescue a strict pin. Unsupported gateways prove nothing.
     """
-    from ouroboros.claudexor_observations import default_subject_aliases, quota_availability, read_quota
+    from ouroboros.claudexor_observations import quota_availability, read_quota
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     if not callable(getattr(gateway, "quota_state", None)):
         return False, ""
     try:
         value = read_quota(gateway, model=route_model or None)
-        aliases = ()
-        if pinned_profile == f"{route_id}-default" and callable(getattr(gateway, "credential_profiles", None)):
-            aliases = default_subject_aliases(gateway.credential_profiles(), route_id, pinned_profile)
     except ClaudexorUnavailable:
         return False, ""
-    verdict = quota_availability(value, route_id, model=route_model or None, profile=pinned_profile, aliases=aliases)
+    verdict = quota_availability(value, route_id, model=route_model or None, profile=pinned_profile)
     return verdict["state"] in ("exhausted", "cooldown"), verdict.get("resets_at") or ""

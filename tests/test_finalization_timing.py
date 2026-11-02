@@ -578,8 +578,9 @@ def test_agent_scope_keeps_post_loop_child_lookups_and_resets_reused_workers(tmp
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.setattr(agent_module.subagent_runtime, "apply_task_start_settings_or_disclose",
                         lambda *args: task_settings_snapshot({}, os.environ))
-    host = SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path), _event_queue=None,
-                           _emit_live_log=lambda *args, **kwargs: None, _handle_task_scoped=task_body)
+    from tests._agent_entry_helpers import task_entry_agent
+
+    host = task_entry_agent(tmp_path, task_body)
     first = agent_module.OuroborosAgent.handle_task(host, {"id": "one", "type": "task"})
     assert obs.task_timing() is None
     second = agent_module.OuroborosAgent.handle_task(host, {"id": "two", "type": "task"})
@@ -670,5 +671,5 @@ def test_final_answer_discloses_own_custody_before_annotation_and_keeps_failed_p
     assert stored.get("delegate_terminal_reconciliation", {}).get("open_run_ids", []) == (["leaf"] if own_run else [])
     assert stored.get("delegated_runs_unreconciled", []) == (["leaf"] if own_run else [])
     assert ("delegate_terminal_reconciliation" in stored) is own_run
-    assert (stored["reason_code"] == "delegated_custody_unreconciled") is own_run
+    assert stored["reason_code"] == "final_message", "an open debt rides beside the cause, never as it (#1583)"
     assert pending[0]["text"] == "Answer."

@@ -57,6 +57,7 @@ def _legacy_store(root, *rows, owned_root, tier=store.TIER_ENFORCED, shape="v1")
         if column not in known:
             schema = re.sub(rf",\s*{column} INTEGER", "", schema).replace(index, "")
     schema = re.sub(r",\s*drive_retention_at TEXT", "", schema)
+    schema = re.sub(r",\s*terminal_seq INTEGER", "", schema).replace(store.TERMINAL_SEQ_INDEX, "")  # schema 8's column
     conn = store.connect(path, tier, create=True)
     try:
         conn.executescript(schema)
@@ -99,9 +100,9 @@ def _combined_schema(txn):
     assert txn.meta("schema_version") == store.SCHEMA_VERSION
     columns = {row["name"]: row for row in txn.conn.execute("PRAGMA table_info(tasks)")}
     assert all(columns[name]["notnull"] == 0 for name in (
-        "has_owner_questions", "review_collection_pending", "plan_collection_pending"))
+        "has_owner_questions", "review_collection_pending", "plan_collection_pending", "terminal_seq"))
     indexes = {row["name"] for row in txn.conn.execute("PRAGMA index_list(tasks)")}
-    assert {"tasks_has_owner_questions", "tasks_review_collection", "tasks_plan_collection"} <= indexes
+    assert {"tasks_has_owner_questions", "tasks_review_collection", "tasks_plan_collection", "tasks_terminal_seq"} <= indexes
 
 
 def _question_document(task_id):

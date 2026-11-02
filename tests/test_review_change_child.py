@@ -274,7 +274,7 @@ def test_child_cold_rejoin_survives_drive_removal_at_cap(tree, monkeypatch, surf
         retained = [ref for row in record['rows'] for ref in row['source_refs'] if ref['status'] == 'retained']
         assert 'response' in {ref['role'] for ref in retained}
         prompts = [ref for ref in record['rows'][0]['source_refs'] if ref['role'] == 'observability_prompt']
-        assert prompts and prompts[0]['ref']['call_id'] == operation + '_prompt'
+        assert prompts and prompts[0]['ref']['call_id'] == operation + '_prompt', record['rows'][0]
         assert all(read_source(parent.drive_root, child.task_id, ref) for ref in retained)
         assert not checkout.exists()
         # The addressed-wait finalizer has to find the same attempt after the
@@ -374,12 +374,25 @@ def test_restricted_children_never_dispatch(tree, constraint):
 
 
 def test_review_grants_no_commit_control_or_self_approval(tree):
+    from ouroboros.tools.tool_discovery import bind_resident_schemas
+
     _, child, _ = tree
     reg = _registry(child)
+    # #1860: the child carries the schema selector, which loads only schemas it may already call.
+    assert reg.get_schema_by_name('enable_tools') is not None
+    resident = []
+    bind_resident_schemas(reg, resident)  # as the child's loop binds it
     for tool in ('commit_reviewed', 'vcs_commit_reviewed', 'request_restart',
-                 'promote_to_stable', 'enable_tools', 'skill_review'):
+                 'promote_to_stable', 'skill_review'):
         assert reg.get_schema_by_name(tool) is None, tool
         assert 'BLOCKED' in reg.execute(tool, {}), tool
+        selected = reg.execute_result('enable_tools', {'tools': tool})  # hidden by policy, or an unloadable alias
+        assert selected.status in ('blocked', 'error') and '✅' not in selected.text, (tool, selected.text)
+        assert reg.get_schema_by_name(tool) is None and 'BLOCKED' in reg.execute(tool, {}), tool
+    assert not resident
+    allowed = reg.schemas()[0]['function']['name']  # and a schema the role may call does load
+    assert 'Call schemas loaded' in reg.execute('enable_tools', {'tools': allowed})
+    assert [schema['function']['name'] for schema in resident] == [allowed]
     assert not _starts()
 
 

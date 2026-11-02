@@ -12,9 +12,8 @@ from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 
 REPO = Path(__file__).resolve().parents[1]
 PAYLOADS = {
-    "ui_design": ("SKILL.md", "references/craft.md", "references/browser.md",
-                  "references/measure.js", "references/freeze.js"),
-    "design_demo": ("SKILL.md", "references/brief.md", "assets/compare.html"),
+    "ui_design": ("SKILL.md", "references/craft.md", "references/browser.md", "references/measure.js",
+                  "references/freeze.js", "references/brief.md", "assets/compare.html"),
 }
 
 @pytest.mark.parametrize("name", PAYLOADS)
@@ -49,8 +48,8 @@ def test_referenced_design_files_are_in_the_bundled_payload(name):
         assert (root / relative).is_file(), relative
     text = (root / "SKILL.md").read_text(encoding="utf-8")
     paths = set(re.findall(
-        r"(?:skills/|(?:\.\./)*)(?:(?:ui_design|design_demo)/)?(?:references|assets)/[\w./-]+", text))
-    paths.update(re.findall(r"(?:\.\./)+(?:ui_design|design_demo)/SKILL\.md", text))
+        r"(?:skills/|(?:\.\./)*)(?:ui_design/)?(?:references|assets)/[\w./-]+", text))
+    paths.update(re.findall(r"(?:\.\./)+ui_design/SKILL\.md", text))
     for relative in paths:
         target = (REPO / relative if relative.startswith("skills/") else root / relative).resolve()
         assert target.is_relative_to((REPO / "skills").resolve()) and target.is_file(), relative

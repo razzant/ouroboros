@@ -15,7 +15,8 @@ from ouroboros import obligations as o
 
 log = logging.getLogger(__name__)
 
-UPGRADE_TYPES = frozenset({"reviewer_default_notice", "optional_bounds_notice", "legacy_memory_notice"})
+UPGRADE_TYPES = frozenset({"reviewer_default_notice", "optional_bounds_notice", "legacy_memory_notice",
+                           "command_timeout_notice"})
 PAUSE_TYPE = "task_pause_notice"
 
 

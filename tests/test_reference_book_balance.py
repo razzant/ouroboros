@@ -22,6 +22,9 @@ from ouroboros.reference_books import (
     composed_size,
     load_reference_book,
     render_book_balance,
+    ruled_text_of,
+    ruled_text_paths,
+    ruled_text_sizes,
 )
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -206,7 +209,7 @@ def test_note_states_the_rule_when_owed_and_one_quiet_line_when_paid(tmp_path):
     assert "Architecture book" in grown and "+7 B vs HEAD" in grown and BOOK_GROWTH_RULE in grown
     (repo / CHAPTER).write_text(BODY.replace(" and long enough to shorten", ""), encoding="utf-8", newline="\n")
     paid = book_balance_note(repo, [CHAPTER])
-    assert paid.startswith("ℹ️ Reference book:") and "nothing owed" in paid
+    assert paid.startswith("ℹ️ Text growth:") and "nothing owed" in paid
     assert BOOK_GROWTH_RULE not in paid and "\n" not in paid
     assert book_balance_note(repo, ["notes.md"]) == ""
 
@@ -299,7 +302,7 @@ def test_a_body_book_edit_carries_the_balance(tmp_path, monkeypatch, tool):
     monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
     result = str(_registry(tmp_path, external=False).execute(tool, GROW[tool]))
     assert result.startswith("✅"), result[:300]
-    assert "ℹ️ Reference books:" in result and BOOK_GROWTH_RULE in result
+    assert "ℹ️ Text growth:\n" in result and BOOK_GROWTH_RULE in result
 
 
 @pytest.mark.serial
@@ -309,13 +312,13 @@ def test_a_foreign_project_or_a_non_book_path_gets_no_balance(tmp_path, monkeypa
 
     monkeypatch.setattr(safety, "check_safety", lambda *args, **kwargs: (True, ""))
     foreign = str(_registry(tmp_path / "a", external=True).execute(tool, GROW[tool]))
-    assert foreign.startswith("✅") and "Reference book" not in foreign, foreign[:300]
+    assert foreign.startswith("✅") and "Text growth" not in foreign, foreign[:300]
     plain = {"write_file": {"path": "notes.md", "content": "notes, more\n"},
              "edit_text": {"path": "notes.md", "old_str": "notes", "new_str": "notes, more"},
              "apply_patch": {"patch": "*** Update File: notes.md\n-notes\n+notes, more\n"},
              "edit_batch": {"edits": [{"path": "notes.md", "old_str": "notes", "new_str": "notes, more"}]}}[tool]
     body = str(_registry(tmp_path / "b", external=False).execute(tool, plain))
-    assert body.startswith("✅") and "Reference book" not in body, body[:300]
+    assert body.startswith("✅") and "Text growth" not in body, body[:300]
 
 
 @pytest.mark.serial
@@ -338,3 +341,45 @@ def test_the_commit_gate_states_the_staged_books_balance_in_its_diff_pulse(tmp_p
         assert "Diff pulse since canonical/ouroboros merge-base" in size and "Architecture book" in size
         assert (BOOK_GROWTH_RULE in size) is owed and ("nothing owed" in size) is not owed
         assert not [w for w in check_worktree_readiness(repo, paths=[CHAPTER]) if "book" in w]
+
+
+@pytest.mark.serial
+def test_bible_and_the_prompts_follow_the_book_rule(tmp_path):
+    """BIBLE.md and the prompt files (one text) carry the same balance and rule as a book."""
+    for path, text in {"BIBLE.md": "# BIBLE\n\nP0.\n", "prompts/SYSTEM.md": "system words\n",
+                       "prompts/SAFETY.md": "safety\n", "prompts/notes/extra.md": "not a prompt\n",
+                       "notes.md": "notes\n"}.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text, encoding="utf-8", newline="\n")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    _git(tmp_path, "remote", "add", "canonical", "https://github.com/razzant/ouroboros.git")
+    _git(tmp_path, "update-ref", "refs/remotes/canonical/ouroboros", "HEAD")
+    assert [ruled_text_of(path) for path in ("BIBLE.md", "prompts/SYSTEM.md", "prompts\\SAFETY.md",
+                                             "prompts/notes/extra.md", "docs/BIBLE.md")] == [
+        "constitution", "prompts", "prompts", "", ""]
+    assert ruled_text_sizes(tmp_path, "prompts", "HEAD") == {"prompts/SAFETY.md": 7, "prompts/SYSTEM.md": 13}
+    # Words moved between prompt files cost nothing.
+    (tmp_path / "prompts/SYSTEM.md").write_text("system\n", encoding="utf-8", newline="\n")
+    (tmp_path / "prompts/SAFETY.md").write_text("safety words\n", encoding="utf-8", newline="\n")
+    (prompts,) = book_balances(tmp_path, ["prompts/SYSTEM.md"])
+    assert (prompts.book_id, prompts.size, prompts.vs_head, prompts.vs_upstream, prompts.owed) == ("prompts", 20, 0, 0, 0)
+    quiet = book_balance_note(tmp_path, ["prompts/SYSTEM.md"])
+    assert quiet.startswith("ℹ️ Text growth: Prompts 20 B") and "nothing owed" in quiet
+    # A new prompt file and a longer BIBLE are growth, and the note states the rule.
+    (tmp_path / "prompts/NEW.md").write_text("new\n", encoding="utf-8", newline="\n")
+    (tmp_path / "BIBLE.md").write_text("# BIBLE\n\nP0. P1.\n", encoding="utf-8", newline="\n")
+    grown = book_balance_note(tmp_path, ["prompts/NEW.md", "BIBLE.md"])
+    assert grown.startswith("ℹ️ Text growth:\n") and grown.endswith(BOOK_GROWTH_RULE)
+    assert "BIBLE.md 17 B: +4 B vs HEAD" in grown and "Prompts 24 B: +4 B vs HEAD" in grown
+    assert "(NEW +4, SAFETY +6, SYSTEM -6)" in grown
+    # Other Markdown is not a ruled text.
+    assert book_balance_note(tmp_path, ["prompts/notes/extra.md", "notes.md"]) == ""
+    # A Windows checkout's CRLF copy of an unchanged file is not growth.
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "grown")
+    (tmp_path / "BIBLE.md").write_bytes(b"# BIBLE\r\n\r\nP0. P1.\r\n")
+    assert ruled_text_sizes(tmp_path, "constitution") == {"BIBLE.md": 17}
+    assert "BIBLE.md 17 B: +0 B vs HEAD" in book_balance_note(tmp_path, ["BIBLE.md"])
+    assert ruled_text_paths(tmp_path) == ["BIBLE.md", "prompts/NEW.md", "prompts/SAFETY.md", "prompts/SYSTEM.md"]

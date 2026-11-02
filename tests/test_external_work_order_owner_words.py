@@ -4,9 +4,11 @@ A task scheduled with the words carries them right after PARENT CONTEXT / REFERE
 a task scheduled before the field keeps the exact bytes and fingerprint it had, so a
 nanny that started before the update still recovers. The payload, the flat task
 metadata and the stored record render one work order. A direct delegate start appends
-the same section after the host contract. A declared task's work order and direct start
-carry none: its receipt names them among the omitted inputs. Every rule is checked in
-both directions.
+the same section after the host contract. A declared task scheduled with
+``DECLARED_WORDS_FACT`` carries them in both, its receipt naming them included; one
+scheduled before keeps a work order and direct start that carry none, its receipt naming
+them among the omitted inputs (``tests/test_declared_owner_words.py`` pins its bytes).
+Every rule is checked in both directions.
 """
 from __future__ import annotations
 
@@ -15,10 +17,12 @@ import json
 
 from ouroboros import owner_words as ow
 from ouroboros.subagent_work_order import (
+    DECLARED_WORDS_FACT,
     _source_task_from_context,
     assignment_instructions,
     canonical_work_order_source,
     compile_external_work_order,
+    input_source_selection_receipt,
     work_order_fingerprint,
     work_order_source_projection,
 )
@@ -143,25 +147,42 @@ def test_a_direct_start_appends_the_words_after_the_host_contract(tmp_path):
     assert assignment_instructions(root) == ""  # no contract: no assignment block, words or not
 
 
-def test_a_declared_work_order_holds_no_words_and_its_receipt_names_them(tmp_path):
-    """A declared child keeps its parent's selection; the words ride its task, unread."""
+def test_a_declared_work_order_carries_the_words_and_one_scheduled_before_holds_none(tmp_path):
+    """A declared child scheduled now carries the words in its work order and direct start, its receipt
+    naming them included; the same child scheduled before the fact keeps its parent's selection."""
     marker = "HOST TASK CONTRACT AUTHORITY (normalized JSON; predecessor is a brief):\n"
+    words_item = "the owner's words that caused this work"
     root = _root(tmp_path)
-    _event, _stored, declared = _schedule(root, input_sources="declared")
-    assert declared["metadata"][ow.FIELD]  # the words ride with every child
+    _event, stored, declared = _schedule(root, input_sources="declared")
+    assert declared["metadata"][ow.FIELD] and declared["metadata"][DECLARED_WORDS_FACT] is True
+    assert stored[DECLARED_WORDS_FACT] is True and DECLARED_WORDS_FACT not in declared["task_contract"]
     rendered = compile_external_work_order(declared)
-    receipt = rendered.split("INPUT SOURCE SELECTION\n", 1)[1].split("\n\nOBJECTIVE\n", 1)[0]
-    assert "the owner's words that caused this work" in receipt
-    assert "the memory marks of that room and the global ones" in receipt  # marks a shared child loads
-    assert SESSION_HEADING not in rendered and ASKED not in rendered and LATER not in rendered
-    bare = {**declared, "metadata": {key: value for key, value in declared["metadata"].items() if key != ow.FIELD}}
-    assert compile_external_work_order(bare) == rendered  # the carried field changes nothing here
+    receipt = input_source_selection_receipt(declared)
+    assert [item for item in receipt["included"] if item.startswith(words_item)]
+    assert not [item for item in receipt["omitted_automatic"] if item.startswith(words_item)]
+    assert "the memory marks of that room and the global ones" in str(receipt["omitted_automatic"])  # still not loaded
+    order = _sections(rendered)
+    assert order[order.index(SESSION_HEADING) - 1] == "OBJECTIVE"  # no parent context: right after the objective
+    assert rendered.split("\n\n" + SESSION_HEADING, 1)[1].split("\n\nEXPECTED OUTPUT", 1)[0].endswith(LATER)
     child = _child(tmp_path, declared)
     assert compile_external_work_order(_source_task_from_context(child, declared["id"])) == rendered  # flat
     direct = assignment_instructions(child)
-    assert direct.startswith(marker) and json.loads(direct[len(marker):])["input_sources"] == "declared"
-    # The other side: a shared sibling's work order and direct start carry the words.
-    _e, _s, shared = _schedule(root, objective="Collect the Q4 figures")
+    contract_json, words = direct[len(marker):].split("\n\n", 1)
+    assert direct.startswith(marker) and json.loads(contract_json)["input_sources"] == "declared"
+    assert words.startswith(SESSION_HEADING + "\nHost fact, carried by value from task root.\n") and ASKED in words
+    # The other side: scheduled before the fact, the same child keeps its parent's selection; the words ride unread.
+    older = {**declared, "metadata": {key: value for key, value in declared["metadata"].items()
+                                      if key != DECLARED_WORDS_FACT}}
+    older_text = compile_external_work_order(older)
+    assert SESSION_HEADING not in older_text and ASKED not in older_text and LATER not in older_text
+    assert [item for item in input_source_selection_receipt(older)["omitted_automatic"] if item.startswith(words_item)]
+    bare = {**older, "metadata": {key: value for key, value in older["metadata"].items() if key != ow.FIELD}}
+    assert compile_external_work_order(bare) == older_text  # the carried field changes nothing there
+    child.task_metadata.pop(DECLARED_WORDS_FACT)
+    assert assignment_instructions(child) == marker + contract_json
+    # A shared sibling's work order and direct start carry the words, and no fact rides with it.
+    _e, shared_stored, shared = _schedule(root, objective="Collect the Q4 figures")
+    assert DECLARED_WORDS_FACT not in shared["metadata"] and DECLARED_WORDS_FACT not in shared_stored
     assert SESSION_HEADING in compile_external_work_order(shared) and ASKED in compile_external_work_order(shared)
     assert assignment_instructions(_child(tmp_path, shared)).split("\n\n", 1)[1].startswith(SESSION_HEADING)
 
@@ -179,7 +200,7 @@ def test_the_authority_fingerprint_does_not_move_with_the_words(tmp_path):
 
 
 def test_the_parent_is_told_what_a_child_and_a_session_start_with():
-    """The parameter texts the parent reads say what the host guarantees and what it must write itself."""
+    """The emitted contract says what the host supplies and what the parent writes."""
     from ouroboros.tools import delegate
     from ouroboros.tools.control import get_tools
 
@@ -187,11 +208,15 @@ def test_the_parent_is_told_what_a_child_and_a_session_start_with():
     start = next(tool for tool in delegate.get_tools() if tool.name == "delegate_start")
     prompt = start.schema["parameters"]["properties"]["prompt"]["description"]
     context, selection = schedule["context"]["description"], schedule["input_sources"]["description"]
-    for text in (context, selection, prompt):
+    for text in (context + "\n" + selection, prompt):
         assert "my human's originating words" in text
+    assert "input_sources says what it starts with" in context
     assert "write the orientation it lacks" in context and "none of my memory" in context
     assert "why the work exists" in prompt and "the host supplies the canonical work order" in prompt
     assert selection.startswith("Omit or shared: the child starts with ") and "one read away" in selection
-    # The declared half keeps its own contract: no automatic shared memory, the assignment governs exchange.
-    declared = selection.split("declared selects only the authored ", 1)[1]
-    assert "excludes automatic shared memory" in declared and "originating words" not in declared
+    # The declared half carries the words too and keeps its own contract: no automatic shared memory, dialogue,
+    # project knowledge, parent context or attachments; the assignment governs exchange.
+    shared, declared = selection.split("declared selects only the authored ", 1)
+    assert "my human's originating words verbatim" in shared and "my human's originating words verbatim" in declared
+    assert ("excludes automatic shared memory, dialogue, project knowledge, inherited parent context and attachments"
+            in " ".join(declared.split()))

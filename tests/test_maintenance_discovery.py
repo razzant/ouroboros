@@ -227,7 +227,7 @@ def test_actual_exit_consumers_keep_a_blocked_dispatch_visible_then_accept_exit(
     spawns = []
     monkeypatch.setattr(maintenance, "spawn_maintenance_job", lambda *a: spawns.append(a) or _FakeChild(_QUIET))
     monkeypatch.setattr(server, "DATA_DIR", root)
-    monkeypatch.setattr(server, "begin_owned_stop", lambda *_: None)
+    monkeypatch.setattr(server, "begin_owned_stop", lambda *_, **__: None)
     monkeypatch.setattr(server, "stop_owned_work", lambda *_: {"state": "completed", "unconfirmed": []})
     monkeypatch.setattr(server, "_stop_owned_daemon_for_new_pin", lambda: None)
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **_: None)

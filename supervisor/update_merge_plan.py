@@ -421,17 +421,17 @@ def materialize_assisted_merge_live(
     # Clean the worktree first (dirty + untracked are all captured in the stash — legacy: in
     # local_snapshot — plus the rescue snapshot) so `checkout -B` cannot fail on "untracked file
     # would be overwritten". A real 3-way merge needs a clean tree to run.
-    rc_reset, _ro, reset_error = _g.git_capture(["git", "reset", "--hard", "HEAD"])
+    rc_reset, _ro, reset_error = _uc.capture_update_step(["git", "reset", "--hard", "HEAD"], first=True)
     if rc_reset != 0:
         return False, f"could not clean tracked files before assisted merge: {reset_error}", ""
-    rc_clean, _co, clean_error = _g.git_capture(["git", "clean", "-fd"])
+    rc_clean, _co, clean_error = _uc.capture_update_step(["git", "clean", "-fd"])
     if rc_clean != 0:
         return False, f"could not clean untracked files before assisted merge: {clean_error}", ""
-    rc_c, _o, e_c = _g.git_capture(["git", "checkout", "-B", branch, local_snapshot])
+    rc_c, _o, e_c = _uc.capture_update_step(["git", "checkout", "-B", branch, local_snapshot])
     if rc_c != 0:
         return False, f"checkout -B {branch} {local_snapshot[:12]} failed: {e_c}", ""
     # Ignore the merge return code; conflicts are expected. Judge by MERGE_HEAD.
-    rc_m, _mo, merge_error = _g.git_capture(
+    rc_m, _mo, merge_error = _uc.capture_update_step(
         ["git", *_uc._MERGE_NEUTRAL_FLAGS, "merge", "--no-commit", "--no-ff", target_sha]
     )
     if rc_m not in (0, 1):

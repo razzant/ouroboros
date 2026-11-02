@@ -36,10 +36,17 @@ def hit_box(locator):
 
 
 @pytest.mark.parametrize("width", [390, 1440])
-def test_chat_header_decoration_does_not_clip_menu_and_system_actions_keep_gap(subscription_ui, width):
+def test_chat_header_decoration_does_not_clip_its_shade_and_system_actions_keep_gap(subscription_ui, width):
     ui = subscription_ui
     page = ui["page"]
     page.set_viewport_size({"width": width, "height": 600})
+    page.add_init_script("Date.now = () => Date.parse('2026-10-25T12:00:00Z')")
+    # Consciousness sleeps until its next wake: the bar's chip says it and opens its Shade.
+    page.route("**/api/state", lambda route: route.fulfill(json={
+        "supervisor_ready": True, "active_chat_activities": [], "projects": [], "bg_consciousness_enabled": True,
+        "bg_consciousness_state": {"status": "sleeping", "detail": "Sleeping until 14:20.", "next_wake_at": "2026-10-25T14:20:00+00:00",
+                                   "spent_24h_usd": 1.5, "daily_usd": 20}}))
+    page.route("**/api/consciousness", lambda route: route.fulfill(json={"enabled": True, "recent_wakes": []}))
     rows = [{"role": "system", "text": text, "markdown": markdown,
              "system_type": "project_completion_summary", "project_id": "fixture-project",
              "project_name": "Fixture project", "ts": f"2026-09-09T00:00:0{i}Z"}
@@ -68,21 +75,27 @@ def test_chat_header_decoration_does_not_clip_menu_and_system_actions_keep_gap(s
         assert metrics["below"] == pytest.approx(12, abs=0.5), metrics
     header = page.locator(".chat-page-header")
     paint = header.evaluate("""el => ({mask:getComputedStyle(el).maskImage,
-        overflow:getComputedStyle(el).overflow, fade:getComputedStyle(el,'::before').maskImage,
-        blur:getComputedStyle(el,'::before').backdropFilter,
-        pointer:getComputedStyle(el,'::before').pointerEvents})""")
+        overflow:getComputedStyle(el).overflow, background:getComputedStyle(el).backgroundColor,
+        before:getComputedStyle(el,'::before').content})""")
     assert paint["mask"] == "none" and paint["overflow"] == "visible", paint
-    assert "gradient" in paint["fade"] and "blur" in paint["blur"], paint
-    assert paint["pointer"] == "none"
+    # The full-width fade gave way to individually backed capsules (#2193); menus still escape the bar.
+    assert paint["background"] == "rgba(0, 0, 0, 0)" and paint["before"] in ("none", "normal"), paint
+    backing = header.locator('.app-page-title-row').evaluate("""el => {
+        const s = getComputedStyle(el), channels = s.backgroundColor.match(/[0-9.]+/g).map(Number);
+        return {alpha: channels[3] ?? 1, blur: s.backdropFilter, shadow: s.boxShadow};
+    }""")
+    assert backing["alpha"] >= 0.98 and "blur" in backing["blur"] and backing["shadow"] != "none", backing
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=0")
     setup_browser.capture(page, f"shell-chat-actions-{width}")
     page.locator("#chat-messages").evaluate("el=>el.scrollTop=160")
-    page.locator(".chat-header-more > summary").click()
-    for item in page.locator(".chat-header-menu-item").all():
+    page.locator("#page-chat .cx-chip:not([hidden])").click()
+    controls = page.locator("#page-chat .cx-shade button:visible").all()
+    assert len(controls) >= 2, "Start or Stop, and Dashboard ›"
+    for item in controls:
         box = hit_box(item)
         assert box["reachable"] and box["bottom"] <= 600 and box["right"] <= width, box
-    setup_browser.capture(page, f"shell-chat-menu-{width}")
-    page.locator(".chat-header-more > summary").click()
+    setup_browser.capture(page, f"shell-chat-shade-{width}")
+    page.locator("#page-chat .cx-chip").click()
 
 
 def test_scroll_fade_tracks_edges_late_content_and_stops_after_disposal(subscription_ui):
@@ -157,7 +170,7 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
                 active:document.activeElement?.outerHTML.slice(0,100),time:performance.now()}),true);
     }""")
     trigger.click()
-    menu = page.locator('body > .chat-photo-menu[role="menu"]')
+    menu = page.locator('body > .chat-photo-menu[role="menu"]:not([inert])')
     setup_browser.capture(page, f"shell-photo-open-{height}")
     assert menu.is_visible(), json.dumps(page.evaluate("shellPhotoEvents"))
     assert menu.evaluate("el=>el.closest('.chat-gallery-item')===null")
@@ -174,7 +187,7 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
     assert trigger.evaluate("el=>document.activeElement===el")
     trigger.click()
     with page.expect_download() as download:
-        page.locator('body > .chat-photo-menu [data-photo-action="download"]').click()
+        menu.locator('[data-photo-action="download"]').click()
     assert download.value.suggested_filename == "image.png"
     assert download.value.failure() is None
     assert not menu.count()
@@ -187,6 +200,8 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
     assert menu.is_visible()
     page.evaluate("shellPhoto.media.destroy()")
     assert not menu.count() and page.locator(".chat-gallery-item").count() == 0
+    # A leaving menu's inert picture must also leave the DOM once its fade ends.
+    page.wait_for_function("!document.querySelector('body > .chat-photo-menu')", timeout=5_000)
 
 
 def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscription_ui):
@@ -502,12 +517,15 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
     open_app(ui)
     mirrors = page.locator('#chat-messages .chat-bubble.project-question')
     card = lambda qid: page.locator(f'#chat-messages .project-question-card[data-quiz-id="{qid}"]')
+    # A copy names its Project in its bubble's voice line, beside `Ouroboros` (owner 19.10, A).
+    reference = lambda qid: page.locator('#chat-messages .chat-bubble.project-question').filter(
+        has=page.locator(f'.project-question-card[data-quiz-id="{qid}"]')).locator('.chat-bubble-voice > .chat-quiz-project')
     ids = lambda: mirrors.evaluate_all("els => els.map(el => el.querySelector('.chat-quiz-card').dataset.quizId)")
     card('waiting').wait_for()
     assert ids() == ['second', 'passed', 'finished', 'replaced', 'waiting'], 'an answered question never enters Main'
     forms = page.evaluate("""() => [...document.querySelectorAll('#chat-messages .project-question-card')].map(el => ({
         id: el.dataset.quizId, status: el.querySelector('.chat-quiz-status-text').textContent,
-        chip: el.querySelector('.chat-quiz-project .chat-live-project-name')?.textContent,
+        chip: el.closest('.chat-bubble').querySelector('.chat-bubble-voice > .chat-quiz-project .chat-live-project-name')?.textContent,
         question: el.querySelector('.chat-quiz-question').textContent.trim().slice(0, 24),
         details: [...el.querySelectorAll('.chat-quiz-option-detail')].map(n => n.textContent),
         stake: el.querySelector('.chat-quiz-stake')?.textContent.trim() || '',
@@ -539,8 +557,8 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
         const code = question.querySelector('.md-code-block pre');
         return {overflow: scroller.scrollWidth - scroller.clientWidth, page: document.documentElement.scrollWidth - innerWidth,
             right: Math.max(...cards.map(el => box(el).right)), viewport: innerWidth,
-            chipInside: cards.every(el => box(el.querySelector('.chat-quiz-project')).right <= box(el).right + 0.5),
-            chipCut: (() => { const n = cards[0].querySelector('.chat-quiz-project .chat-live-project-name'); return n.scrollWidth > n.clientWidth; })(),
+            chipInside: cards.every(el => box(el.closest('.chat-bubble').querySelector('.chat-quiz-project')).right <= box(el).right + 0.5),
+            chipCut: (() => { const n = cards[0].closest('.chat-bubble').querySelector('.chat-quiz-project .chat-live-project-name'); return n.scrollWidth > n.clientWidth; })(),
             richHost: question.classList.contains('ui-rich-content'),
             listPadding: getComputedStyle(list).paddingInlineStart,
             nestedOffset: box(list.querySelector('ul').querySelector('li')).left - box(list.querySelector('li')).left,
@@ -554,16 +572,17 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
             codeOverflow: getComputedStyle(code).overflowX,
             codeReachable: code.scrollWidth <= code.clientWidth || getComputedStyle(code).overflowX === 'auto',
             sizes: [...new Set(cards.map(el => getComputedStyle(el.querySelector('.chat-quiz-status')).fontSize))],
-            capsule: [...new Set(cards.map(el => el.querySelector('.chat-quiz-project')).map(el => JSON.stringify([
+            capsule: [...new Set(cards.map(el => el.closest('.chat-bubble').querySelector('.chat-bubble-voice > .chat-quiz-project')).map(el => JSON.stringify([
                 getComputedStyle(el).fontSize, getComputedStyle(el).borderTopWidth, getComputedStyle(el).borderRadius,
-                box(el).height >= parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--touch-target-min'))])))]};
+                Math.round(box(el).height), el.classList.contains('ui-hit-area')])))]};
     }""")
     print(json.dumps({'question_mirror_geometry': geometry, 'viewport': [width, height]}))
     assert geometry['overflow'] <= 1 and geometry['page'] <= 0 and geometry['right'] <= width, geometry
-    # The head's status is meta; its Project reference is the ONE inline capsule (owner 17.10, Q2 C): reading size,
-    # no outline, a capsule's radius and a full target, the same as under a System row or on a receipt line.
+    # The head's status is meta; the Project reference is the ONE inline capsule (owner 17.10, Q2 C) beside
+    # `Ouroboros` in the voice line (owner 19.10, A): no outline, a capsule's radius, the line's 28px row and meta size,
+    # a finger's target through `.ui-hit-area`; it never passes the card's edge.
     assert geometry['chipInside'] and geometry['sizes'] == ['12px'], geometry
-    assert [json.loads(shape) for shape in geometry['capsule']] == [['14px', '0px', '999px', True]], geometry
+    assert [json.loads(shape) for shape in geometry['capsule']] == [['12px', '0px', '999px', 28, True]], geometry
     assert geometry['richHost'] and geometry['listPadding'] == '24px', geometry
     assert geometry['listTextOffset'] >= 20 and geometry['taskListStyle'] == 'none', geometry
     assert geometry['codeHasOverflow'] and geometry['codeReachable'] and geometry['codeOverflow'] == 'auto', geometry
@@ -587,7 +606,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
     assert card('second').locator('.chat-quiz-wait-ended').count() == 1
 
     # The chip opens the exact question in its Project: the same form, node for node.
-    card('waiting').locator('.chat-quiz-project').click()
+    reference('waiting').click()
     own = page.locator('.chat-quiz-card[data-task-id="proof-task"][data-quiz-id="waiting"]:not(.project-question-card)')
     own.get_by_text('Publication slips by about a week.', exact=True).wait_for()
     assert own.evaluate(CARD_FORM_JS) == card('waiting').evaluate(CARD_FORM_JS)
@@ -673,7 +692,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
     card('late-form').wait_for(timeout=15000)
     assert card('late-form').locator('.chat-quiz-option').count() == 0
     assert card('late-form').locator('.chat-quiz-question').inner_text() == 'Open the original question for its text.'
-    assert card('late-form').locator('.chat-quiz-project').count() == 1
+    assert reference('late-form').count() == 1
     setup_browser.capture(page, f'question-mirror-partial-{width}')
     late.update(state='answered', answered_index=1)
     sockets[-1].send(json.dumps({'type': 'chat', 'content': f"You answered in {project['name']}", 'is_progress': False,
@@ -740,6 +759,7 @@ def test_question_mirrors_full_form_settle_and_reload(subscription_ui, width, he
     mode['stale'] = False
     activities[0]['required_question'] = pointer('waiting', blocks['waiting'])
     activities[1]['required_question'].update(quiz_state='answered', answered_index=1, owner_wait_state='resumed')
+    ui['errors'].watch(page)  # the reload may cut off the page's own reads; the reconnect above stays strict
     page.reload()
     page.wait_for_selector('#chat-input', state='attached')
     card('replaced').wait_for()
@@ -942,13 +962,18 @@ def test_shared_dialog_head_wraps_a_long_title_and_keeps_close_inside(subscripti
 
 
 def test_quiz_dot_and_evolution_facts_keep_their_shape_in_narrow_columns(subscription_ui):
-    """The quiz status dot stays round in a 320px column; a long Evolution fact wraps inside its card."""
+    """The quiz status dot stays round in a 320px column; long Evolution campaign facts wrap inside their card."""
     page = subscription_ui['page']
     page.set_viewport_size({'width': 390, 'height': 844})
+    objective = 'Keep the Evolution history fast: ' + 'measure-every-tagged-commit-once-' * 6
     page.route('**/api/state', lambda route: route.fulfill(json={
         'supervisor_ready': True, 'active_chat_activities': [], 'projects': [], 'runtime_mode': 'advanced',
-        'bg_consciousness_enabled': True, 'bg_consciousness_state': {'status': 'sleeping', 'spent_24h_usd': 1.25,
-                                                                     'daily_usd': 10, 'unknown_unmetered': 1, 'integrity_degraded': True}}))
+        'evolution_enabled': True, 'evolution_state': {'status': 'running', 'enabled': True, 'cycle': 12,
+                                                       'detail': 'Evolution task is running now.',
+                                                       'campaign': {'objective': objective, 'cycles_done': 3}},
+        'bg_consciousness_enabled': True, 'bg_consciousness_state': {
+            'status': 'wake_paused', 'spent_24h_usd': 1.25, 'daily_usd': 10, 'unknown_unmetered': 1, 'integrity_degraded': True,
+            'detail': 'The last wake-up returned while paused; its task card shows the current state. Next wake check at 18:00.'}}))
     open_app(subscription_ui)
     page.evaluate("""async () => {
         const { createChatDecision } = await import('/static/modules/chat_decision.js');
@@ -968,15 +993,17 @@ def test_quiz_dot_and_evolution_facts_keep_their_shape_in_narrow_columns(subscri
     page.locator('#page-chat [data-mobile-nav-toggle]').click()  # a phone keeps navigation behind its menu
     page.click('[data-nav-page="dashboard"]')
     page.locator('[data-dashboard-tab="evolution"]').click()
-    chip = page.locator('.evo-runtime-chip', has_text='ledger integrity degraded')
-    chip.wait_for()
-    metrics = page.locator('#evo-chart-content').evaluate("""box => {
-        const card = box.querySelector('.evo-runtime-card').getBoundingClientRect();
+    fact = page.locator('.evo-campaign-lines p', has_text='measure-every-tagged-commit-once')
+    fact.wait_for()
+    page.locator('#evo-consciousness-allowance', has_text='≥ $1.25 / $10.00 (ledger integrity degraded)').wait_for()
+    metrics = page.locator('#page-evolution .costs-scroll').evaluate("""box => {
+        const card = box.querySelector('.evo-campaign').getBoundingClientRect();
         return {scroll: box.scrollWidth - box.clientWidth,
-            outside: [...box.querySelectorAll('.evo-runtime-chip')].filter(c => c.getBoundingClientRect().right > card.right + 0.5).length};
+            outside: [...box.querySelectorAll('.evo-campaign p, .evo-campaign .btn')]
+                .filter(c => c.getBoundingClientRect().right > card.right + 0.5).length};
     }""")
     assert metrics == {'scroll': 0, 'outside': 0}, metrics
-    chip.scroll_into_view_if_needed()
+    fact.scroll_into_view_if_needed()
     setup_browser.capture(page, 'evolution-facts-390')
 
 
@@ -987,6 +1014,7 @@ def test_evolution_start_says_a_refused_send_and_returns_focus(subscription_ui):
     page.route('**/api/command', lambda route: held.append(route))
     open_app(subscription_ui, '/#dashboard')
     page.locator('[data-dashboard-tab="evolution"]').click()
+    page.wait_for_function('() => !document.getElementById("evo-start").disabled')  # Start waits for a current state
     page.locator('#evo-start').focus()
     page.keyboard.press('Enter')
     page.locator('.confirm-dialog [data-confirm-ok]').click()

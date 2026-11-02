@@ -8,7 +8,10 @@ Windows keeps its one icon for the whole desktop run, because system notificatio
 balloons on it (owner decision 1A); macOS shows its item only while background is on.
 Until the owner decides, the first close asks once and stores the answer; dismissing
 the question quits. A quit request (the indicator's Quit, Cmd+Q, sign-out, shutdown)
-and Panic never reach the question and are never cancelled. An alert never raises a
+and Panic never reach the question and are never cancelled. A quit latches shutdown at
+once and runs the launcher's close body once, off the UI/STA thread that received it; the
+window, its event loop and the indicator with its Panic stay until that body's terminal
+exit, which an accepted Panic overrides (``exit_launcher``, ``leave``). An alert never raises a
 window hidden on purpose. Linux and other hosts have no indicator: closing quits.
 
 Second launch: a manual one shows the running window (``activate_running_instance`` -> ``Background.listen``),
@@ -18,11 +21,12 @@ ignores it). A lock loser never truncates the lock file. The listener starts rig
 taken; a request that arrives before pywebview has shown the window is kept until then and cancels a
 quiet start.
 
-``DesktopApi`` is the page's alert half of the window bridge (``launcher.MainApi`` inherits it): the
-attention cue, the shell's own facts, and the system notifications of ``desktop_notifications``,
+``DesktopApi`` is inherited by ``launcher.MainApi``: the independent Panic stop,
+attention cue, shell facts, and system notifications of ``desktop_notifications``,
 whose click opens the window and hands the page its token; it also carries the painted palette to
 the window's native caption (``launcher_appearance``). On macOS the window's title bar and appearance
-follow each document it shows (``launcher_window_chrome``).
+follow each document it shows (``launcher_window_chrome``). The owner's Interface size is the window's own page zoom
+(``launcher_page_zoom``).
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import signal
 import sys
 import threading
@@ -39,6 +44,7 @@ from ouroboros.config import PANIC_EXIT_CODE, read_version
 from ouroboros.desktop_autostart import BACKGROUND_ENV, keep_running_choice, set_keep_running
 from ouroboros.desktop_notifications import UNAVAILABLE, capability, native_notifier, platform_name, refused
 from ouroboros.launcher_appearance import NativeAppearance
+from ouroboros.launcher_page_zoom import PageZoom
 from ouroboros.launcher_window_chrome import WindowChrome
 from ouroboros.platform_layer import request_native_attention, signal_pid
 
@@ -147,6 +153,39 @@ def activate_running_instance(lock_path) -> bool:
         return False
     # SIGURG is ignored by default, so an older launcher without a handler survives it.
     return pid > 0 and pid != os.getpid() and signal_pid(pid, signal.SIGURG)
+
+
+def other_copy_line(lock_path, port_file, bundle_dir) -> str:
+    """The one line a manual second launch of a packaged copy shows first when the running instance is another
+    copy, from that instance's own report: its command line names its copy (the text after its last
+    ``--seed-bundle``, which the source handoff appends, else its executable) and its ``/api/health`` its
+    ``app_version``. ``""`` when this copy's path occurs in that command line as a whole path (at its start or
+    after a space or a quote, so ``~/Applications/Ouroboros.app`` is not ``/Applications/Ouroboros.app``), for an
+    unreadable instance, a source run (no bundle manifest here), or this app's own AppImage, whose per-launch
+    mount names no copy. ``ps`` joins argv without quoting, so the command line is never split into arguments."""
+    from ouroboros.desktop_autostart import app_copy, own_appimage
+    from ouroboros.platform_layer import process_command
+
+    bundle = pathlib.Path(bundle_dir)
+    if own_appimage(bundle) or not (bundle / "repo_bundle_manifest.json").is_file():
+        return ""
+    try:
+        command = process_command(int(pathlib.Path(lock_path).read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        return ""
+    mine = app_copy(bundle)
+    if not command or any(re.search(r'(?:^|[\s"])' + re.escape(os.path.normcase(path) + os.sep), os.path.normcase(command))
+                          for path in (str(mine), os.path.realpath(mine))):
+        return ""
+    _, seeded, tail = command.rpartition(" --seed-bundle ")
+    theirs = app_copy(pathlib.Path((tail if seeded else command.split(" --", 1)[0]).strip().strip('"')))
+    try:
+        port = int(pathlib.Path(port_file).read_text(encoding="utf-8").strip())
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2) as response:
+            version = str(json.loads(response.read().decode("utf-8")).get("app_version") or "") + " "
+    except Exception:
+        version = ""
+    return f"Ouroboros {version}is already running from {theirs}. Quit it, then open this copy."
 
 
 def request_tray_cleanup() -> None:
@@ -332,12 +371,13 @@ class Indicator:
 class Background:
     """The desktop window's close policy, its indicator (None where there is none) and the way back."""
 
-    def __init__(self, exit_launcher, read_port, shutdown_event, *, panic_port=lambda: None,
-                 panic_child=lambda: (None, None)) -> None:
+    def __init__(self, exit_launcher, read_port, shutdown_event, *, panic_child=lambda: (None, None)) -> None:
         cls = indicator_class()
-        self.exit_launcher = exit_launcher  # stop the agent, clean up, os._exit
+        self._close = exit_launcher  # the launcher's close body: stop the agent, clean up, ``leave``
+        self._closing = False  # that body runs now, on the one closer thread
+        self._closer_lock = threading.Lock()
+        self._terminal = threading.Lock()  # orders the ordinary exit against an accepted Panic; held for no I/O
         self.read_port = read_port
-        self.panic_port = panic_port  # only this generation's measured binding, never the default port
         self.panic_child = panic_child  # snapshot of this launcher's Popen and optional Job, not a PID scan
         self.shutdown = shutdown_event
         self.quit = threading.Event()  # a quit request: never asked, never cancelled
@@ -347,6 +387,7 @@ class Background:
         self.indicator = cls(self) if cls is not None else None
         self.appearance = NativeAppearance()  # the window's caption tint follows its page (Windows)
         self.chrome = WindowChrome()  # the main window's title bar follows its document (macOS)
+        self.zoom = PageZoom(on_changed=lambda: self.chrome.zoom_changed())  # the owner's Interface size here
         self.notifications = native_notifier(self.open_notification, self.indicator)
         self._asking = threading.Lock()
         self._poller = None
@@ -394,6 +435,7 @@ class Background:
         self.window = window
         self.appearance.attach(window)  # every window, indicator or not: its own before_show and close
         self.chrome.attach(window)
+        self.zoom.attach(window)
         window.events.closing += self.closing
         window.events.shown += self._window_shown  # set for a hidden window too (pywebview 5.4)
         if self.indicator is not None:
@@ -410,12 +452,42 @@ class Background:
             self.indicator.show_if_unavailable(self.window)
 
     def closing(self):
-        """pywebview ``closing``; False keeps the process, every other outcome quits."""
+        """pywebview ``closing``; False keeps the window (hidden, asking, or quitting through the closer)."""
         if self.indicator is None or not self.native_ready or self.quit.is_set():
             return self.exit_launcher()
         if self.indicator.decides_natively:
             return None  # Windows: its FormClosing handler holds the close reason
         return self.window_closed()
+
+    def exit_launcher(self):
+        """Quit: latch shutdown now and run the close body, off the calling UI/STA thread and never twice
+        at once. False: the caller's window and event loop stay, so Panic keeps its ingress until the
+        body's exit. A body that returned without exiting (a startup close) lets a later quit run it again."""
+        self.shutdown.set()
+        with self._closer_lock:
+            if self._closing:
+                return False
+            self._closing = True
+        try:  # not a daemon: a main() that returns meanwhile still lets the body finish its stop
+            threading.Thread(target=self._run_close, name="ouroboros-quit", daemon=False).start()
+        except RuntimeError:
+            self._run_close()  # thread admission failure cannot turn the owner's quit into a no-op
+        return False
+
+    def _run_close(self) -> None:
+        try:
+            self._close()
+        finally:
+            with self._closer_lock:
+                self._closing = False
+
+    def leave(self, release_lock, code: int = 0) -> None:
+        """The close body's terminal exit: remove the icon, release the lock, then exit, unless an accepted
+        Panic owns persistence and the exit (it is decided under the lock Panic is accepted under)."""
+        stop_tray_before_exit(release_lock)
+        with self._terminal:
+            if not self.panic.is_set():
+                os._exit(code)
 
     def window_closed(self):
         """The owner closed the window (never a quit request). False cancels the close."""
@@ -429,60 +501,67 @@ class Background:
         return self.exit_launcher()
 
     def request_quit(self) -> None:
-        """The indicator's Quit: a plain exit; no Panic flag, sign-in startup untouched."""
+        """The indicator's Quit: a plain exit; no Panic flag, sign-in startup untouched. Returns at once."""
         self.shutdown.set()
         self.quit.set()
         self.exit_launcher()
 
-    def request_panic(self) -> None:
-        """Fence startup synchronously; send only to our live server, else use local Panic."""
-        if self.panic.is_set():
-            return
-        self.panic.set()
-        proc, job = self.panic_child()
+    def request_panic(self, ingress="launcher_tray") -> None:
+        """Latch this launcher closed, request captured stops, then persist and exit.
+
+        No callback registration, server port, HTTP request or reconnect is needed.
+        The upstream emergency coordinator owns installation custody and hard exit.
+        Accepted under the terminal lock: an ordinary exit either already committed or never will.
+        """
+        from ouroboros.launcher_bootstrap import source_handoff
+
+        with self._terminal:
+            if self.panic.is_set():
+                return
+            source_handoff.claim_stop()  # serialize with normal handoff exit, never with Popen
+            self.panic.set()
         self.shutdown.set()
         self.quit.set()
         request_tray_cleanup()
-
-        def post() -> None:
-            try:
-                port = self.panic_port()
-                if port is None:
-                    raise ConnectionError("No live owned server binding")
-                request = urllib.request.Request(
-                    f"http://127.0.0.1:{port}/api/command", method="POST",
-                    data=json.dumps({"cmd": "/panic"}).encode("utf-8"), headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(request, timeout=10):
-                    pass
-                if proc is not None:
-                    from ouroboros.runtime_limits import LAUNCHER_STOP_GRACE_SEC
-
-                    if proc.wait(timeout=LAUNCHER_STOP_GRACE_SEC) != PANIC_EXIT_CODE:
-                        raise RuntimeError("The captured server exited without completing Panic")
-            except Exception:
-                from ouroboros.config import DATA_DIR
-                from ouroboros.launcher_bootstrap import stop_bootstrap_commands
-                from ouroboros.server_control import execute_panic_stop
-
-                log.error("Panic cannot reach an owned server; using installation emergency stop.")
-                try:
-                    if proc is not None and proc.poll() is None:
-                        from ouroboros.platform_layer import kill_process_tree, terminate_job
-
-                        terminate_job(job) if job is not None else kill_process_tree(proc)
-                except Exception:
-                    log.exception("Captured server stop request failed; installation Panic continues.")
-                try:
-                    log.error("Bootstrap stop requests: %s", stop_bootstrap_commands())
-                finally:
-                    execute_panic_stop(None, None, data_dir=DATA_DIR, panic_exit_code=99, log=log)
-
-        # If main returns at a shutdown fence, keep the bounded persistence/exit
-        # owner alive until it finishes; a daemon could lose the stop marker.
         try:
-            threading.Thread(target=post, name="ouroboros-indicator-panic", daemon=False).start()
+            proc, job = self.panic_child()
+            if proc is not None and proc.poll() is None:
+                from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree, request_process_tree_kill
+
+                if IS_WINDOWS:
+                    log.error("Panic captured server stop: %s", request_process_tree_kill(proc, job_handle=job))
+                else:
+                    # Capture descendants before server exit orphans workers' separate-session children.
+                    kill_process_tree(proc)
+        except Exception:
+            log.exception("Captured server stop request failed; installation Panic continues.")
+        try:
+            from ouroboros.launcher_bootstrap import stop_bootstrap_commands
+
+            log.error("Bootstrap stop requests: %s", stop_bootstrap_commands())
+        except Exception:
+            log.exception("Bootstrap stop request failed; installation Panic continues.")
+
+        def stop() -> None:
+            from ouroboros.config import DATA_DIR
+            from ouroboros.server_control import execute_panic_stop
+
+            try:
+                from ouroboros.panic_source import record_source
+
+                record_source(DATA_DIR, ingress=ingress, owner_surface="owner", receiver_is_server=False,
+                              peer={"pid": os.getpid(), "ppid": os.getppid(),
+                                    "executable": sys.executable[:2048], "command": str(sys.argv)[:2048]})
+            except Exception:
+                log.exception("Launcher Panic source evidence unavailable")
+            execute_panic_stop(None, None, data_dir=DATA_DIR, panic_exit_code=PANIC_EXIT_CODE, log=log)
+
+        # A main() returning at the shutdown latch must not lose the stop marker.
+        try:
+            threading.Thread(target=stop, name="ouroboros-indicator-panic", daemon=False).start()
         except RuntimeError:
-            post()  # thread admission failure must not turn the emergency gesture into a no-op
+            stop()  # thread admission failure cannot turn the owner gesture into a no-op
+
 
     def show_window(self) -> None:
         """Open the window: the icon or its Open, a banner, the Dock, a second launch.
@@ -584,11 +663,16 @@ class Background:
 
 
 class DesktopApi:
-    """The page's alert half of the window bridge. A page feature-detects each method per call: a launcher
+    """The page's alerts, shell facts and emergency stop. A page feature-detects each method per call: a launcher
     built before one of them simply lacks it (the page then falls back and says so, DESIGN §9)."""
 
     _background = None  # set by the inheriting MainApi; a leading underscore keeps it off the bridge
     _shell_facts = {}  # installed seed and loaded source, supplied by launcher.MainApi
+
+    def panic_stop(self) -> dict:
+        """Independent desktop emergency door; no server or reconnect dependency."""
+        self._background.request_panic("desktop_bridge")
+        return {"status": "stopping"}
 
     def request_attention(self, sound: bool = True, title: str = "", body: str = "", cue_when_visible: bool = True) -> dict:
         return self._background.attention(bool(sound), str(title or ""), str(body or ""), bool(cue_when_visible))
@@ -599,10 +683,19 @@ class DesktopApi:
         """The page's painted palette for this window's native caption; the newest request wins."""
         return self._background.appearance.request(theme, page, sequence)
 
+    def set_interface_size(self, percent: int = 100, page: float | None = None, sequence: int | None = None) -> dict:
+        """The owner's Interface size for this window, in percent (Settings → Appearance, ⌘/Ctrl + − 0); the newest
+        request wins, and the next window opens at it."""
+        return self._background.zoom.request(percent, page, sequence)
+
     def shell_info(self) -> dict:
         """Installed bundle and loaded shell are separate facts; capabilities are read from this process."""
         return {"shell_version": _SHELL_VERSION, **self._shell_facts, "persistent_storage": PERSISTENT_WEBVIEW_STORAGE,
-                "native_notifications": self._notifier_answer("status")}
+                "native_notifications": self._notifier_answer("status"), "interface_size": self._zoom_info()}
+
+    def _zoom_info(self) -> dict:
+        zoom = getattr(self._background, "zoom", None)
+        return zoom.info() if zoom is not None else {"supported": False}
 
     def request_native_notifications(self) -> dict:
         """The system's one permission question. The page asks it only from the owner's own gesture

@@ -4,7 +4,7 @@ Copies and new projects keep one FIFO lane of the preparation generation; an
 ``external_workspace`` claim, whose resolver only validates the folder and pins
 its HEAD, runs on the second lane. Admission, controls, generation close,
 recovery and cleanup keep their meaning on both. Real dispatch, queue maps,
-reservations, receipts and a held real worktree operations lock.
+reservations, receipts and real copies held at their snapshot step.
 """
 from __future__ import annotations
 
@@ -14,13 +14,12 @@ import time
 
 import pytest
 
-from ouroboros import artifacts
 from ouroboros import subagent_worktrees as trees
 from ouroboros.task_results import STATUS_REQUESTED, STATUS_SCHEDULED
 from supervisor import events_subagent_admission as admission
 from supervisor import queue
 from supervisor import workspace_preparation as prep
-from tests.test_workspace_preparation import _WAIT_SEC, git, spy_provisions
+from tests.test_workspace_preparation import _WAIT_SEC, spy_provisions
 from tests.test_workspace_preparation import env as env
 
 pytestmark = pytest.mark.serial
@@ -54,7 +53,7 @@ def held_validation(monkeypatch, env):
 
 def test_existing_folder_is_admitted_while_another_task_copy_waits(env, monkeypatch):
     calls = spy_provisions(monkeypatch)
-    with env.ops_lock_held():
+    with env.copy_blocked():
         assert env.dispatch_returns(env.request("slowcopy", root="slow-root"))
         env.wait_phase("slowcopy", "copying")
         assert env.dispatch_returns(env.readonly("readcontrol"))  # a readonly request rides the admission lane
@@ -102,7 +101,7 @@ def test_closing_the_generation_settles_both_lanes_and_admits_nothing(env, monke
     calls = spy_provisions(monkeypatch)
     reached, release, executors = held_validation(monkeypatch, env)
     try:
-        with env.ops_lock_held():
+        with env.copy_blocked():
             assert env.dispatch_returns(env.request("copy1", root="r1"))
             env.wait_phase("copy1", "copying")
             assert env.dispatch_returns(env.request("copy2", root="r2"))
@@ -138,7 +137,7 @@ def test_stop_during_existing_folder_validation_beside_a_held_copy_is_never_admi
     monkeypatch.setattr(workers, "WORKERS", {})
     reached, release, _executors = held_validation(monkeypatch, env)
     try:
-        with env.ops_lock_held():
+        with env.copy_blocked():
             assert env.dispatch_returns(env.request("copy1", root="r1"))
             env.wait_phase("copy1", "copying")
             assert env.dispatch_returns(env.request("stopext", root="r2", surface="external_workspace"))
@@ -176,38 +175,26 @@ def test_validation_lane_that_cannot_start_refuses_only_its_own_request(env, mon
     assert env.pending_ids() == ["copy1"] and env.row("copy1")["status"] == STATUS_SCHEDULED
 
 
-def test_stop_while_a_task_copy_is_half_populated_frees_it_only_after_it_returns(env, monkeypatch):
+def test_stop_while_a_task_copy_is_still_provisioning_frees_it_only_after_it_returns(env, monkeypatch):
     from ouroboros import cancel_intents
     from supervisor import workers
 
     monkeypatch.setattr(workers, "WORKERS", {})
-    src = env.source
-    (src / ".gitattributes").write_bytes(b"*.txt text eol=crlf\n")
-    git(src, "add", ".gitattributes")
-    git(src, "commit", "-qm", "checkout rewrites text")
-    reset_done, parked, release = threading.Event(), threading.Event(), threading.Event()
-    real_git, real_stream = trees._git, artifacts.stream_artifact_file
+    parked, release = threading.Event(), threading.Event()
+    real_check_out = trees._check_out
 
-    def reset_spy(repo_dir, *args, **kwargs):
-        result = real_git(repo_dir, *args, **kwargs)
-        if args[:1] == ("reset",):
-            reset_done.set()
-        return result
+    def park_after_checkout(*args, **kwargs):
+        real_check_out(*args, **kwargs)
+        parked.set()  # recorded and checked out; provisioning has not returned
+        assert release.wait(_WAIT_SEC)
 
-    def stream(path, sink=None, **kwargs):
-        if reset_done.is_set() and sink is not None and not parked.is_set():
-            parked.set()
-            assert release.wait(_WAIT_SEC)
-        return real_stream(path, sink, **kwargs)
-
-    monkeypatch.setattr(trees, "_git", reset_spy)
-    monkeypatch.setattr(artifacts, "stream_artifact_file", stream)
+    monkeypatch.setattr(trees, "_check_out", park_after_checkout)
     try:
         assert env.dispatch_returns(env.request("half1"))
         assert parked.wait(_WAIT_SEC)
         [entry] = [row for row in trees.list_worktrees() if row.get("task_id") == "half1"]
         copy = pathlib.Path(entry["path"])
-        assert (copy / "a.txt").read_bytes() == b"base\r\n"  # checkout's bytes, not yet the source's
+        assert (copy / "a.txt").read_bytes() == b"base\n"  # the files are there; the copy is not ready
         assert env.row("half1")["status"] == STATUS_REQUESTED and env.phase("half1") == "copying"
         assert "half1" not in env.pending_ids()
         assert prep.recover_interrupted_preparations(env.data)["live"] == ["half1"]

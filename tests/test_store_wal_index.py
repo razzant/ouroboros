@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import pathlib
 import sqlite3
+import stat
 import subprocess
 import sys
 
@@ -44,6 +46,25 @@ def _reset_refused(database) -> bool:
     out = subprocess.run([sys.executable, "-c", _RESET, str(database)], capture_output=True, text=True,
                          timeout=60, check=True).stdout.strip()
     return out == "1"
+
+
+_SHARED = ("import fcntl, os, sys\n"  # SQLite's unix SHARED range: PENDING_BYTE + 2, 510 bytes
+           "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+           "try:\n"
+           "    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 510, 0x40000002)\n"
+           "    print('free')\n"
+           "except OSError:\n"
+           "    print('held')\n")
+
+
+def _shared_held(database) -> bool:
+    """Whether this process's connection still holds its SHARED lock on DATABASE, which closing any
+    descriptor of the file drops; Windows locks belong to their handle, so there it always holds."""
+    if os.name == "nt":
+        return True
+    out = subprocess.run([sys.executable, "-I", "-c", _SHARED, str(database)], capture_output=True, text=True,
+                         timeout=60, check=True).stdout.strip()
+    return out == "held"
 
 
 def _live_store(root):
@@ -194,7 +215,8 @@ def test_the_index_is_refused_by_any_name_that_reaches_it(tmp_path, monkeypatch)
         assert _reset_refused(database)
 
 
-def test_a_spelling_the_volume_keeps_apart_from_the_index_is_the_user_s_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"], ids=["LF", "CRLF"])
+def test_a_spelling_the_volume_keeps_apart_from_the_index_is_the_user_s_file(tmp_path, monkeypatch, ending):
     """``x.db-SHM`` is an index only where the volume resolves it to ``x.db-shm``'s own file: on a
     case-sensitive volume it is the user's file, read, copied and listed as one (folding its name made
     it an index by name alone, so every reader refused it and every copy left it out). A host volume that
@@ -208,15 +230,16 @@ def test_a_spelling_the_volume_keeps_apart_from_the_index_is_the_user_s_file(tmp
     with contextlib.closing(sqlite3.connect(folder / "x.db")) as conn:
         conn.execute("CREATE TABLE t(v)")
     notes = folder / "x.db-SHM"
-    notes.write_text("the user's notes\n", encoding="utf-8")
+    payload = b"the user's notes" + ending
+    notes.write_bytes(payload)
     if (folder / "x.db-shm").exists():  # the host volume folds case: emulate one that does not
         same = os.path.samefile
         monkeypatch.setattr(os.path, "samefile", lambda a, b: same(a, b) and all(
             pathlib.Path(p).name in os.listdir(pathlib.Path(p).parent) for p in (a, b)))
     assert store.is_wal_index(notes) is False
-    assert store.read_file_bytes(notes) == b"the user's notes\n"
+    assert store.read_file_bytes(notes) == payload
     files._copy_path(folder, tmp_path / "copy")
-    assert (tmp_path / "copy" / "x.db-SHM").read_text(encoding="utf-8") == "the user's notes\n"
+    assert (tmp_path / "copy" / "x.db-SHM").read_bytes() == payload
     assert sorted(task_custody._listed(folder)) == ["x.db", "x.db-SHM"]
 
 
@@ -427,7 +450,8 @@ def test_a_directory_artifact_leaves_the_index_out_as_an_excluded_member(tmp_pat
     assert ledger["excluded"] == [{"path": "current.sqlite-shm", "reason": "SQLite WAL index"}]
 
 
-def test_a_base_linked_back_to_its_own_index_name_is_no_index_and_never_recurses(tmp_path):
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"], ids=["LF", "CRLF"])
+def test_a_base_linked_back_to_its_own_index_name_is_no_index_and_never_recurses(tmp_path, ending):
     """A regular ``b-shm`` and a link ``b`` naming it: probing ``b-shm`` led to ``b``, whose real name
     is ``b-shm`` again, without end (a RecursionError out of every reader: the panel answered 500, the
     capture failed, a snapshot was refused). A base whose real name ends in ``-shm`` is never probed."""
@@ -441,21 +465,24 @@ def test_a_base_linked_back_to_its_own_index_name_is_no_index_and_never_recurses
                             "commit", "--allow-empty", "-m", "base"]):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     (repo / "fix.py").write_text("def fixed():\n    return 1\n", encoding="utf-8")
+    payload = b"notes" + ending
     for place in (folder, repo):
-        (place / "b-shm").write_text("notes\n", encoding="utf-8")
+        (place / "b-shm").write_bytes(payload)
         try:
             (place / "b").symlink_to("b-shm")
         except OSError:
             pytest.skip("symbolic links need a privilege here")
     assert store.is_wal_index(folder / "b-shm") is False and store.is_wal_index(folder / "b") is False
-    assert store.read_file_bytes(folder / "b-shm") == b"notes\n"
+    assert store.read_file_bytes(folder / "b-shm") == payload
     files._copy_path(folder, tmp_path / "odd-copy")
     assert sorted(path.name for path in (tmp_path / "odd-copy").iterdir()) == ["b", "b-shm"]
+    assert (tmp_path / "odd-copy" / "b-shm").read_bytes() == payload
     _, manifest = capture.write_workspace_patch_artifacts(repo, tmp_path / "capture", task={})
     assert manifest["status"] == "ready_with_changes", manifest["errors"]
 
 
-def test_a_file_named_like_the_index_of_a_link_to_a_database_is_an_ordinary_file(tmp_path):
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"], ids=["LF", "CRLF"])
+def test_a_file_named_like_the_index_of_a_link_to_a_database_is_an_ordinary_file(tmp_path, ending):
     """SQLite names an index after its database's real path, so it sits beside the real file, never
     beside a link to it: a ``report-shm`` next to a link ``report -> actual.sqlite`` is the user's own
     file (actual.sqlite's index would be actual.sqlite-shm). It reads, copies and is listed for the
@@ -471,11 +498,12 @@ def test_a_file_named_like_the_index_of_a_link_to_a_database_is_an_ordinary_file
         (folder / "report").symlink_to("actual.sqlite")
     except OSError:
         pytest.skip("symbolic links need a privilege here")
-    (folder / "report-shm").write_text("the user's report\n", encoding="utf-8")
+    payload = b"the user's report" + ending
+    (folder / "report-shm").write_bytes(payload)
     assert store.is_wal_index(folder / "report-shm") is False and store.is_wal_index(folder / "report") is False
-    assert store.read_file_bytes(folder / "report-shm") == b"the user's report\n"
+    assert store.read_file_bytes(folder / "report-shm") == payload
     files._copy_path(folder, tmp_path / "copy")
-    assert (tmp_path / "copy" / "report-shm").read_text(encoding="utf-8") == "the user's report\n"
+    assert (tmp_path / "copy" / "report-shm").read_bytes() == payload
     assert sorted(task_custody._listed(folder)) == ["actual.sqlite", "report-shm"]
 
 
@@ -507,6 +535,270 @@ def test_a_child_s_artifact_listing_leaves_a_left_behind_index_out(tmp_path):
     (source / "x.db-shm").write_bytes(b"\0" * 32768)  # left behind by a killed opener
     (source / "report.txt").write_text("done\n", encoding="utf-8")
     assert sorted(task_custody._listed(source)) == ["report.txt", "x.db"]
+
+
+def test_a_child_whose_wal_writer_was_killed_captures_copies_back_and_settles(tmp_path):
+    """A child's WAL-mode SQLite writer killed mid-task leaves its log and index beside the database.
+    The finalization capture lists the database and its log, never the index, so copy-back, the
+    promotion retry and the drive settlement publish them and remove the drive (the held walk
+    recorded the index, copy-back could not copy it, and every settlement kept the drive)."""
+    from ouroboros import artifacts, headless, task_custody
+    from ouroboros.observability import retry_pending_child_ref_promotions
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    data, task = tmp_path / "data", "killed1"
+    drive = headless.prepare_task_drive(data, task, "empty")
+    folder = artifacts.task_artifact_dir_path(drive, task, create=True)
+    (folder / "report.txt").write_text("done\n", encoding="utf-8")
+    database = folder / "results.db"
+    writer = subprocess.Popen([sys.executable, "-I", "-c", _UPDATER, str(database)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert writer.stdout.readline().strip() == "ready"
+    finally:
+        writer.kill()  # killed while it holds the database: no close removes the log or the index
+        writer.wait()
+        writer.stdin.close()
+        writer.stdout.close()
+    assert store.is_wal_index(folder / "results.db-shm") and (folder / "results.db-wal").stat().st_size
+    expected = ["report.txt", "results.db", "results.db-wal"]
+    captured = artifacts.collect_task_artifact_records(drive, task)  # the finalization capture
+    assert sorted(row["name"] for row in captured) == expected and all(row["sha256"] for row in captured)
+    write_task_result(drive, task, "completed", result="done", artifacts=captured)
+    write_task_result(data, task, "running", headless_child_drive_root=str(drive))
+    headless.copy_child_task_result(data, {"id": task, "drive_root": str(drive)})
+    retry_pending_child_ref_promotions(data)
+    assert task_custody.settle_child_drive(data, task, drive, live=lambda _task: False)["status"] == "removed"
+    canonical = artifacts.task_artifact_dir_path(data, task)
+    rows = load_task_result(data, task)["artifacts"]
+    assert sorted(row["name"] for row in rows) == expected and not drive.exists()
+    assert {pathlib.Path(row["path"]).parent.resolve() for row in rows} == {canonical.resolve()}
+    assert not (canonical / "results.db-shm").exists()
+    with contextlib.closing(sqlite3.connect(canonical / "results.db")) as conn:  # its index rebuilt from the log
+        assert conn.execute("SELECT count(*) FROM t").fetchone() == (300,)
+
+
+@pytest.mark.parametrize("listing", ["capture", "strict_capture", "unmeasured", "view", "rescued"])
+def test_a_task_artifact_listing_leaves_a_held_index_unopened_and_keeps_both_locks(tmp_path, monkeypatch, listing):
+    """A store this process holds inside a task's artifact folder (its read transaction locks the
+    index's read mark and the database's SHARED range): every listing over the held walk leaves the
+    index out unread (POSIX opens no descriptor of it) and reads the database through the store's
+    shared descriptor, so neither lock drops; the walk opened and closed a fresh descriptor of each,
+    and a header probe by a fresh open of the database would still drop the second. The view also
+    meets a row the unrepaired capture recorded for the index, and leaves it out unread too."""
+    from ouroboros import artifacts, task_custody
+    from ouroboros.task_finalization import rescued_files_fact
+
+    use_journal(monkeypatch, "WAL")
+    data, task = tmp_path / "data", "listing1"
+    folder = artifacts.task_artifact_dir_path(data, task, create=True)
+    database = _live_store(folder)
+    (folder / "notes").write_text("a sibling that is not a database", encoding="utf-8")
+    (folder / "notes-shm").write_text("the user's notes\n", encoding="utf-8")
+    stale = {"kind": "task_artifact", "name": database.name + "-shm", "path": f"{database}-shm",
+             "relpath": f"state/{database.name}-shm", "size": 32768, "sha256": "0" * 64}
+    run = {"capture": lambda: artifacts.collect_task_artifact_records(data, task),
+           "strict_capture": lambda: artifacts.collect_task_artifact_records(data, task, strict=True),
+           "unmeasured": lambda: artifacts.collect_task_artifact_records(data, task, measure=False, strict=True),
+           "view": lambda: task_custody.store_artifact_view(data, task, [stale]),
+           "rescued": lambda: rescued_files_fact(task, [folder])}[listing]
+    with store.open_store(folder, write=False):
+        files = {path.relative_to(folder).as_posix() for path in folder.rglob("*") if path.is_file()}
+        assert _reset_refused(database) and _shared_held(database)
+        result = run()
+        assert _reset_refused(database), "the listing opened and closed a descriptor of the index"
+        assert _shared_held(database), "the listing closed a fresh descriptor of the database"
+    index = database.relative_to(folder).as_posix() + "-shm"
+    if listing == "rescued":
+        assert (result["state"], result["count"]) == ("positive", len(files) - 1)
+        return
+    assert {row.get("relpath") or row["name"] for row in result} == files - {index}
+    assert {"notes-shm", "state/current.sqlite", "state/current.sqlite-wal"} <= files
+    assert listing in {"unmeasured", "view"} or all(row["sha256"] for row in result)
+
+
+def _matrix(root):
+    """Every name the index rule tells apart, in one task artifact folder; only links may be missing."""
+    def database(path):
+        with contextlib.closing(sqlite3.connect(path)) as conn:  # rollback journal: no sidecar stays
+            conn.execute("CREATE TABLE t(v)")
+
+    for name in ("x.db", "данные.db", "y.db", "z.db", "w", "actual.sqlite"):
+        database(root / name)
+    for name in ("x.db-shm", "данные.db-shm", "-shm", ".-shm", "..-shm", ".-SHM"):
+        (root / name).write_bytes(b"\0" * 32768)  # left behind by killed openers; a lone -shm names none
+    (root / "x.db-wal").write_bytes(b"a log reads as any file does")
+    (root / "y.db-SHM").write_text("a spelling the volume may keep apart\n", encoding="utf-8")
+    (root / "z.db-ſhm").write_text("or fold onto the index\n", encoding="utf-8")
+    (root / "notes").write_text("a sibling that is not a database", encoding="utf-8")
+    (root / "notes-shm").write_text("the user's notes\n", encoding="utf-8")
+    (root / "w-shm").mkdir()
+    (root / "w-shm" / "report.txt").write_text("a directory named like an index\n", encoding="utf-8")
+    for folder, names in (("pair", ["current-shm"]), ("triple", ["current", "current-shm"])):
+        (root / folder).mkdir()
+        for name in names:
+            database(root / folder / name)
+        (root / folder / "current-shm-shm").write_bytes(b"\0" * 32768)
+    (root / "report-shm").write_text("beside a link to a database\n", encoding="utf-8")
+    (root / "b-shm").write_text("beside a link back to itself\n", encoding="utf-8")
+    for link, target in (("report", "actual.sqlite"), ("b", "b-shm")):
+        with contextlib.suppress(OSError):  # Windows without the symbolic-link privilege
+            (root / link).symlink_to(target)
+
+
+class _NtShaped:
+    """``_Win32Files``' relative calls served by POSIX descriptors, so ``ConfinedDirectory``'s Windows
+    branch runs anywhere; each file is recorded, by identity, under the access it got."""
+
+    def __init__(self):
+        self.data, self.attributes = set(), set()
+
+    def open_root(self, path):
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+
+    def open_relative(self, parent, name, *, directory, metadata=False):
+        assert not metadata, "attributes are asked through identity()"
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+        info = os.fstat(fd)
+        self.data.add((info.st_dev, info.st_ino))
+        return fd
+
+    def identity(self, parent, name):
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)  # an attribute-only handle reads nothing
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.ELOOP if stat.S_ISLNK(info.st_mode) else errno.EISDIR, name)
+        self.attributes.add((info.st_dev, info.st_ino))
+        return info.st_dev, info.st_ino
+
+    def to_fd(self, handle):
+        return handle
+
+    def close(self, handle):
+        os.close(handle)
+
+
+@contextlib.contextmanager
+def _windows_branch():
+    """``ConfinedDirectory``'s Windows branch: NT handles on Windows; elsewhere ``_NtShaped`` (yielded)."""
+    from ouroboros import confined_files
+
+    if confined_files.IS_WINDOWS:
+        yield None
+        return
+    api = _NtShaped()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(confined_files, "IS_WINDOWS", True)
+        patch.setattr(confined_files._Win32Files, "load", staticmethod(lambda: api))
+        yield api
+
+
+@pytest.mark.parametrize("measure", [True, False], ids=["measured", "unmeasured"])
+@pytest.mark.parametrize("alias", [False, True], ids=["physical-root", "configured-alias"])
+def test_the_held_walk_names_each_index_as_the_path_rule_does(tmp_path, measure, alias):
+    """The walk asks the rule through each held directory, never by a descendant path, and answers as
+    ``is_wal_index`` does for every name: a database's own index (left behind, Unicode-named, an index's
+    database's, or a database itself named like an index) is left out; the database, its log, a
+    sidecar-named file beside a text, a lone ``-shm``, a directory named like an index, files beside
+    links and a spelling the volume keeps apart are listed; a spelling it folds is the index. The
+    Windows branch gives the same answers and refuses each index having asked it by attributes only."""
+    from ouroboros import artifacts, confined_files
+    from tests.test_task_download_confinement import _junction_or_link
+
+    data = tmp_path / "data"
+    folder = artifacts.task_artifact_dir_path(data, "matrix1", create=True)
+    _matrix(folder)
+    files = {path.relative_to(folder).as_posix(): store.is_wal_index(path)
+             for path in folder.rglob("*") if path.is_file() and not path.is_symlink()}
+    excluded = {"x.db-shm", "данные.db-shm", "pair/current-shm-shm", "triple/current-shm"}
+    assert {name for name, index in files.items() if index} - {"y.db-SHM", "z.db-ſhm"} == excluded
+    assert {"y.db-SHM", "z.db-ſhm"} <= set(files) and "w-shm/report.txt" in files
+    for spelling in ("y.db-SHM", "z.db-ſhm"):  # the volume decides: folded onto the index, or the user's
+        assert files[spelling] == (folder / spelling).with_name(spelling[:-4] + "-shm").exists()
+    if alias:
+        configured = tmp_path / "configured"
+        _junction_or_link(configured, data)
+        data = configured
+    rows = artifacts.collect_task_artifact_records(data, "matrix1", measure=measure, strict=True)
+    assert {row.get("relpath") or row["name"] for row in rows} == {name for name, index in files.items() if not index}
+    assert all(pathlib.Path(row["path"]).is_relative_to(artifacts.task_artifact_dir_path(data, "matrix1"))
+               for row in rows)  # recorded through the root as configured
+    with _windows_branch() as audit:
+        for parent in {name.rpartition("/")[0] for name in files}:
+            local = {name.rpartition("/")[2]: index for name, index in files.items()
+                     if name.rpartition("/")[0] == parent}
+            with confined_files.confined_directory(folder, parent.split("/") if parent else []) as held:
+                assert {name: held._wal_index(name) for name in local} == local, parent
+                for name in (name for name, index in local.items() if index):
+                    with pytest.raises(store.WalIndexRefused):
+                        held.open_for_read(name)
+    indexes = {(info.st_dev, info.st_ino) for info in (os.stat(folder / name) for name, index in files.items()
+                                                        if index)}
+    assert audit is None or (indexes <= audit.attributes and not indexes & audit.data)  # never a data handle
+
+
+def test_a_recorded_index_row_is_no_deliverable_in_the_task_view(tmp_path):
+    """Rows recorded for an index before the walk applied the rule (a capture's measured row, an
+    immutable one, a registration) name shared memory, not a deliverable: the view leaves them out
+    unread, as it leaves a linked placement out, because serving or verifying their identity would
+    read the index. The view rewrites nothing, and a recorded row whose file is missing still shows
+    its identity; a user's ``notes-shm`` beside a text is a deliverable."""
+    from ouroboros import artifacts, task_custody
+
+    data, task = tmp_path / "data", "stale1"
+    folder = artifacts.task_artifact_dir_path(data, task, create=True)
+    with contextlib.closing(sqlite3.connect(folder / "x.db")) as conn:
+        conn.execute("CREATE TABLE t(v)")
+    (folder / "x.db-shm").write_bytes(b"\0" * 32768)  # left behind by a killed writer
+    (folder / "notes").write_text("a sibling that is not a database", encoding="utf-8")
+    (folder / "notes-shm").write_text("the user's notes\n", encoding="utf-8")
+
+    def recorded(name, **fields):
+        return {"kind": "task_artifact", "name": name, "path": str(folder / name), "size": 32768,
+                "sha256": "0" * 64, **fields}
+
+    registration = {"schema_version": 1, "artifacts": {"x.db-shm": recorded("x.db-shm", immutable=True)}}
+    (folder / ".artifact_manifest.json").write_text(json.dumps(registration), encoding="utf-8")
+    rows = [recorded("x.db-shm"), recorded("x.db-shm", immutable=True), recorded("notes-shm"), recorded("gone.txt")]
+    view = {row["name"]: row for row in task_custody.store_artifact_view(data, task, rows)}
+    assert sorted(view) == ["gone.txt", "notes", "notes-shm", "x.db"]
+    assert view["gone.txt"]["sha256"] == "0" * 64
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="NT share modes")
+def test_windows_asks_the_index_by_attribute_only_handles(tmp_path):
+    """NT checks no share mode for a handle without data access, and such a handle reads nothing.
+    With the index held by a handle that shares nothing, a data open of it fails, yet the rule still
+    names it and strict listings still leave it out: a data handle anywhere in the probe would have
+    met that share mode, failing the probe and the listings."""
+    import ctypes
+    from ctypes import wintypes
+
+    from ouroboros import artifacts, confined_files
+
+    data, task = tmp_path / "data", "deny1"
+    folder = artifacts.task_artifact_dir_path(data, task, create=True)
+    with contextlib.closing(sqlite3.connect(folder / "x.db")) as conn:
+        conn.execute("CREATE TABLE t(v)")
+    (folder / "x.db-shm").write_bytes(b"\0" * 32768)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    holder = kernel32.CreateFileW(str(folder / "x.db-shm"), 0x80000000, 0, None, 3, 0, None)  # shares nothing
+    assert holder not in (None, wintypes.HANDLE(-1).value), ctypes.get_last_error()
+    try:
+        with confined_files.confined_directory(folder) as held:
+            with pytest.raises(OSError):
+                held.open("x.db-shm")  # a data handle meets the holder's share mode
+            assert held._wal_index("x.db-shm")
+            with pytest.raises(store.WalIndexRefused):
+                held.open_for_read("x.db-shm")
+        for measure in (True, False):
+            rows = artifacts.collect_task_artifact_records(data, task, measure=measure, strict=True)
+            assert [row["name"] for row in rows] == ["x.db"], measure
+    finally:
+        kernel32.CloseHandle(holder)
 
 
 def test_a_folder_copy_leaves_the_index_behind_and_the_copy_opens_whole(tmp_path, monkeypatch):

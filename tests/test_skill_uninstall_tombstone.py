@@ -219,6 +219,8 @@ def test_every_reconcile_pass_runs_the_tombstone_sweep(tmp_path, monkeypatch):
     monkeypatch.setattr(sm, "DATA_DIR", tmp_path)
 
     sm._run_reconcile_prunes()
+    from ouroboros.maintenance import run_job
+    run_job(tmp_path, "runtime_retirement")
 
     assert sorted(path.name for path in state.iterdir()) == ["grants.json", UNINSTALL_TOMBSTONE_FILENAME]
     assert (state / "grants.json").read_bytes() == grants
