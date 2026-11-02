@@ -177,3 +177,22 @@ def test_a_capture_outside_one_pins_its_own_state(tmp_path, captures):
     assert ChronicleStore(tmp_path).stored_state() is None
     first = _story(tmp_path)
     assert _story(tmp_path) == first and len(captures) == 1
+
+
+def test_view_receipts_keep_story_tokens_and_live_room_coverage(tmp_path, captures):
+    """E8: the ``context_memory_view`` receipt of a build that reused the story (story tokens, room tokens, live
+    rooms, marks) equals the receipt of a fresh build of the same state."""
+    from ouroboros import memory_floor
+
+    shared.world(tmp_path)
+    _page(tmp_path, "1", 10, 12, author=WRITER)
+    _story(tmp_path)  # the story a later build reuses
+
+    def receipt():
+        snapshot = mv.capture_memory_view(tmp_path, MAIN, mv.view_spec_for_task(MAIN, tmp_path))
+        return memory_floor.view_receipt(snapshot, mv.render_story(snapshot), mv.render_room(snapshot), {})
+
+    reused = receipt()
+    assert len(captures) == 1
+    assert reused == _fresh(receipt)
+    assert reused["blocks"]["story_tokens"] > 0 and reused["blocks"]["live_rooms"] > 0
