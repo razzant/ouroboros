@@ -504,11 +504,14 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         from ouroboros.utils import get_git_info as _get_git_info
         from ouroboros.utils import utc_now_iso as _utc_now_iso
 
+        from supervisor.conversation_lane import carrier_rss
+
         _branch, _sha = _get_git_info(_pathlib.Path(repo_dir))  # best-effort, diagnostic only
         _append_jsonl(_drive / "logs" / "events.jsonl", {
             "ts": _utc_now_iso(), "type": "worker_ready", "worker_id": wid,
             "pid": _os.getpid(), "process_birth": birth, "kernel_birth": kernel_birth,
             "git_branch": _branch, "git_sha": _sha,
+            **carrier_rss(),  # a fresh worker's own size, on every install (the plan's per-install measurement)
         })
     except Exception as _e:
         _log_worker_crash(wid, _drive, "worker_ready", _e, _tb.format_exc())

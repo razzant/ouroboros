@@ -239,14 +239,16 @@ _STORE_SITES_STARTED = [time.monotonic()]
 
 def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     """The row's further sections: a name and a zero-argument drain of its own window, one line each
-    (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead)."""
+    (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead, and
+    ``conversation_lane`` the lane's carriers now, each with its last own RSS report)."""
     from ouroboros import dialogue_retry, store_timing
-    from supervisor import queue
+    from supervisor import conversation_lane, queue
 
     return {
         "queue_lock": lambda: queue._queue_lock.drain(),
         "store_locks": store_timing.drain,
         "dialogue_retry": dialogue_retry.snapshot,
+        "conversation_lane": conversation_lane.carrier_vitals,
     }
 
 

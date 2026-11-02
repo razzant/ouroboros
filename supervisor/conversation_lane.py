@@ -23,7 +23,8 @@ one, replenishes it when a turn claims it, retires acknowledged surplus through
 the existing quiescence probe and never spawns while the repo-writer gate is
 closed (a fresh carrier would import a conflicted tree; admission then takes the
 disclosed degraded executor). No number bounds concurrent carriers: the bound is
-spawn success, and the vitals show the carrier count. Called from
+spawn success, and the vitals show the carriers and each one's own RSS, reported
+on its turn's heartbeat (``carrier_vitals``). Called from
 ``reconcile_worker_capacity`` under the lifecycle serializer, before the project
 pool's own growth.
 """
@@ -92,6 +93,36 @@ def idle_carriers() -> list:
     return [slot for slot in lane_carriers()
             if slot.busy_task_id is None and worker_ready(slot) and not slot.retiring
             and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", "")]
+
+
+def carrier_rss() -> Dict[str, Any]:
+    """In a carrier: its own resident size now, measured in-process (``update_generation_facts._rss``:
+    psutil's current figure where it ships, else the lifetime peak, labelled); {} when unobserved."""
+    try:
+        from ouroboros.update_generation_facts import _rss
+
+        rss, measure = _rss()
+    except Exception:
+        return {}
+    return {"rss_bytes": int(rss), "rss_measure": measure} if rss is not None else {}
+
+
+def note_carrier_rss(slot: Any, sample: Any) -> None:
+    """In the server: a lane carrier's own report (``carrier_rss``, riding its turn's heartbeat) stays on its slot."""
+    if (isinstance(sample, dict) and type(sample.get("rss_bytes")) is int
+            and getattr(slot, "lane", "") == LANE_CONVERSATION):
+        slot.rss = {"rss_bytes": sample["rss_bytes"], "rss_measure": str(sample.get("rss_measure") or "")}
+
+
+def carrier_vitals() -> Dict[str, Any]:
+    """The lane's carriers for the vitals (owner decision 4A: no number bounds them; the vitals show their
+    count and RSS): how many, how many idle, and each one's last own report in MiB, in slot order (None
+    before its first turn's heartbeat). A section of the per-minute ``supervisor_load`` row; memory only."""
+    carriers = lane_carriers()
+    reports = [getattr(slot, "rss", None) or {} for slot in carriers]
+    return {"carriers": len(carriers), "idle": sum(1 for slot in carriers if slot.busy_task_id is None),
+            "rss_mib": [report["rss_bytes"] // 1048576 if report else None for report in reports],
+            "rss_measure": sorted({report["rss_measure"] for report in reports if report})}
 
 
 def owner_turn(task: Dict[str, Any]) -> bool:
