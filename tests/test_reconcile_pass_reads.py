@@ -79,7 +79,8 @@ def test_a_damaged_member_stays_a_repair_gap_and_hides_no_other(tmp_path):
 # ---- the queue's own rows are not the sweep's ------------------------------------------------------------------------
 
 def test_the_periodic_sweep_excludes_what_the_queue_owns_unread(monkeypatch):
-    from ouroboros import projects_registry, server_maintenance as sm, skill_review_runner
+    from ouroboros import projects_registry, skill_review_runner
+    from ouroboros import server_maintenance as sm
     from supervisor import queue, workers
 
     monkeypatch.setattr(queue, "INITIALIZED", True)

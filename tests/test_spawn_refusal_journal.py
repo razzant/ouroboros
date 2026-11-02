@@ -14,7 +14,8 @@ import pytest
 
 from ouroboros.task_carrier import LANE_CONVERSATION
 from supervisor import queue, task_reaper, worker_health, workers
-from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
+from tests.test_owner_wait_pool import InputQueue, Process
+from tests.test_owner_wait_pool import pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
 pytestmark = pytest.mark.serial
