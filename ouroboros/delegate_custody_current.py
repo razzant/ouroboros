@@ -134,6 +134,24 @@ HELD_WHERE = "unlikely(state=?)"
 # next listing. Below the stamped schema nothing is kept and every row is read, as before.
 _HELD_SEEN: Dict[str, Dict[str, tuple]] = {}
 _HELD_LOCK = threading.Lock()
+# The custody commits this process made (``publish``): a reader on its own cadence (the body's tick) lists the held
+# set again at once after one, and at that cadence for another process's writes.
+_LOCAL_WRITES = [0]
+
+
+def local_writes() -> int:
+    return _LOCAL_WRITES[0]
+
+
+def held_stamped(root) -> Optional[Dict[str, tuple]]:
+    """Every held row's stamp and facts in one read (``_held_listing``; the facts are shared: decode before any
+    change), so a reader keeping its own decoded rows decodes only those whose stamp moved; None below the schema."""
+    with store.open_store(root, write=False) as txn:
+        listing = _held_listing(txn, root)
+    if listing is None:
+        return None
+    facts = _held_facts(root, listing)
+    return {rid: (listing[0][rid], facts[rid]) for rid in facts}
 
 
 def _held_listing(txn, root, also: str = "", params: tuple = ()):
@@ -509,6 +527,8 @@ def publish(root, event: Dict[str, Any], *, propagate_contention: bool = False) 
             raise
         log.warning("Custody %s not recorded under %s (%s)", event.get("type"), root, type(exc).__name__)
         return False
+    with _HELD_LOCK:
+        _LOCAL_WRITES[0] += 1
     flush_outbox(root)
     if owed:
         _refresh_owed_receipt(root, owed)

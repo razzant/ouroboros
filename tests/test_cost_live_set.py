@@ -64,7 +64,6 @@ GAPS: Dict[tuple, str] = {
     ("running", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.16 -> 0.21 MB)",
     ("paused", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (0.21 -> 4.3 MB)",
     ("pending", "custody-maintenance"): f"{LB} L5: {QUEUE_DOC_PER_PASS}, the owner's text by value in every row (4.3 -> 7.2 MB)",
-    ("held", "delegated-body"): f"{UNASSIGNED}: the body's tick decodes every held run to find the ones it owes (decodes 5 -> 504)",
 }
 REST_GAPS: Dict[str, str] = {
     "owner_pause_settlement": f"{LC} L1: 20 settled trees re-derived on every pass (122 task bodies, 20 usage reads)",
