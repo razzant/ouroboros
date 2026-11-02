@@ -73,13 +73,30 @@ def _recent_incidents(api, window_sec: float = 3600.0) -> tuple[Dict[str, int], 
     return counts, omitted_prefix
 
 
+def _presence_row(row: dict) -> bool:
+    """A correspondent's carried Presence turn: its place's conversation, never the owner's running work.
+
+    Mirrors ``ouroboros.task_carrier.execution_kind`` on the published row (its execution owner's kind,
+    else the legacy ``_presence_turn`` flag)."""
+    task = row.get("task") if isinstance(row.get("task"), dict) else row
+    owner = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    kind = owner.get("kind")
+    return kind == "presence" if kind in {"direct", "presence", "pooled"} else bool(task.get("_presence_turn"))
+
+
+def _owner_running(snap: dict) -> list:
+    rows = snap.get("running") if isinstance(snap.get("running"), list) else []
+    return [row for row in rows if not (isinstance(row, dict) and _presence_row(row))]
+
+
 def _collect_health(api, lang: str = "en") -> str:
     """Health snapshot from durable files — queue, workers, incidents, disk. Read-only."""
     s = _HEALTH[lang]
     data = _data_dir(api)
     out = []
     snap = _read_json_file(data / "state" / "queue_snapshot.json")
-    rc = int(snap.get("running_count") or 0)
+    listed = snap.get("running") if isinstance(snap.get("running"), list) else []
+    rc = max(0, int(snap.get("running_count") or 0) - (len(listed) - len(_owner_running(snap))))
     pc = int(snap.get("pending_count") or 0)
     q_icon = "🟢" if (rc + pc) == 0 else "🟡"
     q_state = s["idle"] if (rc + pc) == 0 else s["busy"]
@@ -111,7 +128,7 @@ def _collect_tasks_text(api, lang: str = "en") -> str:
     """Read-only list of running/pending tasks from queue_snapshot.json."""
     s = _HEALTH[lang]
     snap = _read_json_file(_data_dir(api) / "state" / "queue_snapshot.json")
-    running = snap.get("running") if isinstance(snap.get("running"), list) else []
+    running = _owner_running(snap)
     pending = snap.get("pending") if isinstance(snap.get("pending"), list) else []
     if not running and not pending:
         return s["tasks_idle"]
