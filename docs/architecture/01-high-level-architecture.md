@@ -211,7 +211,7 @@ ouroboros/ — agent core and shared runtime (§6)
   chat_chain.py, chat_references.py, chronicle_store.py, chronicle_quotes.py — addressed dialogue reads: content identities, legacy `(gen, line)` hints, Reply facts, `retain_memory_source`; append-only chronicle: pages/parts, version-bound accounts, separate common-view selections, disposable index (§6)
   mark_anchors.py — a mark tied to a tool (optional call text) or a path trails that call's result once per task (§6 Post-task work)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — one model-free import of prior dialogue memory as `legacy` records; nominations imported once as marks; what is open or folded (§6)
-  consolidator.py, memory_fallback.py — shared Light transport, writes no knowledge; one signed Light draft per root with wakes OFF (§6)
+  consolidator.py, memory_fallback.py — Light transport, one signed draft per root with wakes OFF; no knowledge writes (§6)
   memory.py — scratchpad, identity, chat history
   knowledge.py, memory_publication.py — linked-Markdown notes, shelf indexes and revision-checked writes; per-file revision-checked identity/world-map/registry publication, atomic source replacement and origin-stamped history (§6)
   project_facts.py — project_id resolution and per-project knowledge under `projects/<id>/knowledge`, isolated from `memory/knowledge`
@@ -561,7 +561,7 @@ ouroboros/ — agent core and shared runtime (§6)
     presence.py — configure_presence (the place verb: list, inspect, state, wakes, notes, folder, model, owner accounts) and presence_cancel_work
     task_tree.py — tree_note/tree_read (storage SSOT: task_tree_ledger.py)
     followup.py — the agent's two schedule tools over `state/scheduled_tasks.json`: `manage_schedules` (list/get; root-only audited update/disable/delete/restore) and `schedule_followup` (`notify=true` leaves a note)
-    join_ledger.py — tree-note exact-hash absorption, peek_task and discard_child_result (§6)
+    join_ledger.py — direct children's tree-note dispositions, peek_task, discard_child_result (§6)
     delegate.py — Delegation facade verbs `delegate_start` (with `retry_of`), `delegate_wait`, `delegate_cancel`, `delegate_answer`, `delegate_message`; the host pre-start rides the same wrapper (§6 Delegated subagents)
     delegate_integration.py — Delegated mutation authority, snapshots and terminal capture; skill-payload CAS apply with extension reconciliation (§6 Snapshots, capture and disposition)
     delegate_payload_patch.py, delegate_terminal_evidence.py, subagent_integration_delegated.py — Delegation leaves: the skill-payload patch pipeline, the terminal story of one delegated run, `integrate_delegated_patch`
