@@ -264,8 +264,9 @@ class BackgroundConsciousness:
         """Settle its own known wake from a pooled terminal no dispatcher reported (an orphan sweep, a
         boot restore, a lost event): one addressed row and one ownership probe, only when this tick
         would otherwise start over it. True while that wake's effects may still live: the next one
-        waits. An unreadable, absent, unsettled or inline row settles nothing and blocks nothing; a
-        cancelled one is no runner failure, and its stop door's next start stands."""
+        waits. An unreadable, absent or unsettled row settles nothing and blocks nothing (whichever carrier
+        ran it, the disclosed degraded executor included); a cancelled one is no runner failure, and its
+        stop door's next start stands."""
         from ouroboros.task_results import load_task_result
         from supervisor.consciousness_carriers import pooled_terminal_ok
         from supervisor.queue import task_settlement_liveness

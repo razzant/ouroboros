@@ -237,6 +237,33 @@ def test_a_restart_accepted_after_the_row_finds_a_started_wake(race, monkeypatch
     assert before + DEFAULT <= race.clock.next_wake_at <= after + DEFAULT
 
 
+@pytest.mark.parametrize("delivery", ["task_done_reported", "terminal_unreported"])
+def test_a_wake_on_the_degraded_executor_settles_the_clock_like_a_carried_one(race, monkeypatch, delivery):
+    """Review M2: a wake no carrier could take runs on the disclosed degraded executor, and its terminal settles
+    the clock exactly as a carrier's does (the task_done delivery, or the clock's own read at the tick that would
+    start over it). The next tick then waits the interval instead of launching another paid wake in the server."""
+    from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
+    from tests.conversation_carrier_support import inline_synchronously
+
+    workers = race.runtime.workers
+    workers.WORKERS.pop(race.spare.wid)  # only the owner's reserved spare is idle: the wake cannot take it
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: race.actor)  # the degraded executor's in-process actor
+    inline_synchronously(monkeypatch)
+    assert race.clock.tick(race.start) == "launched"
+    task, = race.ran
+    assert task["_execution_owner"]["executor"] == EXECUTOR_INLINE_DEGRADED  # it really ran degraded, disclosed
+    assert [n for n in race.notices if "No conversation carrier could start" in n]
+    if delivery == "task_done_reported":
+        _settle(race, task["id"])
+    else:
+        workers.RUNNING.pop(task["id"])  # the row released, the clock never told
+        assert race.clock.tick(race.start) == "not_due"  # settled at the tick that would have started over it
+    assert race.finished.is_set() and race.clock.live_wake() == ""
+    assert race.clock.tick(race.start + 1) == "not_due" and race.ran == [task]  # no back-to-back wake
+    assert race.clock.next_wake_at > race.start + DEFAULT - 1
+    assert race.state.load_state()[OWN_WAKE_STATE_KEY]["finished"] is True
+
+
 @pytest.mark.parametrize("outcome", ["ok", "runner_failure"])
 @pytest.mark.parametrize("delivery", ["task_done_reported", "terminal_unreported"])
 def test_a_started_wake_settles_once_however_its_terminal_reaches_the_clock(race, monkeypatch, delivery, outcome):
