@@ -109,7 +109,7 @@ _SQL_ONLY = "db, query, max_rows, snapshot and timeout_sec are op=sql only"
 # wait_tasks: + view, sleep_mode, wake_after_sec, wake_at and no timeout_sec default (an omitted
 # window stays distinguishable, PR1696 native task wait); before it c806a86311a0a965.
 _STRUCTURE = {
-    "query_data": {"full": "1408c97acc31b0f7", "readonly": "1408c97acc31b0f7", "acting": "1408c97acc31b0f7"},
+    "query_data": {"full": "afe57ddd5ee0c17c", "readonly": "afe57ddd5ee0c17c", "acting": "afe57ddd5ee0c17c"},
     "delegate_start": {"full": "5e25716838978044", "readonly": "1326e91ef42b3cea", "acting": "1326e91ef42b3cea"},
     "delegate_wait": {"full": "60ab2c0f421da812", "readonly": "60ab2c0f421da812", "acting": "60ab2c0f421da812"},
     "wait_tasks": {"full": "50667317e4bef21f", "readonly": "50667317e4bef21f", "acting": "50667317e4bef21f"},
