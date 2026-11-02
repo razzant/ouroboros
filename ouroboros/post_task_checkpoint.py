@@ -260,7 +260,8 @@ def project_replica_task_result_fields(
     accounting snapshot. Canonical custody also retains non-regressing delegation
     receipts and canonical-if-present reconciliation disclosures under the narrow
     rules below. The replica continues to own result and trace fields;
-    review snapshots retain the newest host publication of each panel.
+    review snapshots retain the newest host publication of each panel, and a
+    verification ledger stays canonical while the replica carries the same capture.
     ``updated_at`` is monotonic metadata only; it never selects field authority.
     """
     from ouroboros.terminal_time import preserve_terminal_attempt, replica_terminal_time
@@ -293,6 +294,14 @@ def project_replica_task_result_fields(
         overlay["review_projection"] = merge_review_projection(
             canonical_fields.get("review_projection"), overlay["review_projection"],
         )
+    # Each producer call dates its ledger capture (``created_at``). The canonical copy of the same
+    # capture holds the host's refreshed summary (#2472) and any refs retention rebound; only a
+    # later capture from the child replaces it.
+    ledger = canonical_fields.get("verification_ledger")
+    if (isinstance(ledger, dict) and ledger.get("created_at")
+            and isinstance(overlay.get("verification_ledger"), dict)
+            and overlay["verification_ledger"].get("created_at") == ledger["created_at"]):
+        overlay.pop("verification_ledger")
     canonical_checkpoint = canonical_fields.get("root_phase_checkpoint")
     canonical_post_task = (
         str(canonical_checkpoint.get("post_task_synthesis") or "")

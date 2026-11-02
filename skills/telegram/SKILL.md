@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.0
+version: 1.4.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -9,11 +9,13 @@ runtime: python3
 os: any
 permissions: [net, read_settings, widget, route, supervised_task, subscribe_event, inject_chat, subprocess, companion_process]
 env_from_settings: [TELEGRAM_BOT_TOKEN]
+secret_fields:
+  botToken: TELEGRAM_BOT_TOKEN
 subscribe_events: [chat.outbound, chat.typing, chat.photo, chat.video, chat.document, chat.links, chat.quiz, chat.quiz_state]
 conflicts: [telegram-bridge, telegram-miniapp-poc]
 when_to_use: The owner wants to communicate with and control Ouroboros through Telegram.
 model_experience:
-  what_model_sees: No new tools; Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
+  what_model_sees: No new tools; setup can ask for the bot token with showSecretHitl('telegram', ['botToken']), whose protected form saves it to Settings and grants or connects nothing. Telegram owner text, photos and files enter normal chat. Replies to mirrored messages carry host reply references for the mind to interpret, never routing instructions. Quiz answers use the web card's decision ingress. Answers to earlier owner messages use native Telegram replies.
   token_effect: Near-zero while idle — no per-round schema cost; incoming Telegram media arrive as ordinary attachments and cost what any chat attachment costs.
 timeout_sec: 60
 companion_processes:
@@ -94,6 +96,15 @@ belongs to one server and one bot: a newly chosen server or another bot's token
 is read from its oldest pending update, and a batch already handled is not
 handled again.
 
+Version 1.4.1 declares `secret_fields` (`botToken` → `TELEGRAM_BOT_TOKEN`), so setup can
+ask for the bot token with `showSecretHitl('telegram', ['botToken'])`: the owner types it
+into Ouroboros's protected form in the web or desktop app, it goes to Settings, and the
+agent learns only that it was saved. Saving grants, enables and connects nothing. Another
+secret request mirrored here arrives as a short note saying where to enter it, without
+buttons; a reply to that note, whatever it holds (text, a photo, a file, a voice message, a
+slash-looking token), is answered here and sent nowhere, apart from the local `/menu`, `/help`,
+bare `/language` and `/panic`.
+
 Version 1.2.1 marks questions that wait for an owner answer and clears the
 waiting line after an answer submitted through Telegram.
 Version 1.2.3 serves the stored settings on GET settings/save so the Settings
@@ -148,16 +159,19 @@ owner-authenticated sidecar and a pinned Cloudflare Quick Tunnel. It is enabled
 by default after owner binding and can be turned off independently without
 stopping the text bridge. Disabling the skill destroys process-memory Mini App
 sessions, stops public exposure, and best-effort restores the prior Telegram
-menu button. Rotate the bot token only while the skill is disabled, then
-re-enable it.
+menu button. The bot token can be replaced while the skill is enabled, but the
+running poller keeps polling with the token it started with until it restarts,
+while every send already uses the new one; rotate it with the skill disabled, or
+disable and re-enable the skill right after the change.
 
 Delegated task cards lead with the executor's latest words (marked earlier
 when retained), followed by problems and compact activity counts. These are
 attributed observations, not the supervising task's narration or a completion
 receipt; journal gaps and preview omissions remain visible.
 
-Set `TELEGRAM_BOT_TOKEN` in Settings, grant it to this skill, enable the skill,
-and send the bot a private message to bind the owner. No legacy Telegram skill
+Set `TELEGRAM_BOT_TOKEN` in Settings (or enter it in the form setup asks with),
+grant it to this skill, enable the skill, and send the bot a private message to
+bind the owner. No legacy Telegram skill
 state is copied or changed. Installations that use `telegram-bridge` or
 `telegram-miniapp-poc` must disable or remove those skills before enabling this
 one.

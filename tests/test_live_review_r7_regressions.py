@@ -3,6 +3,7 @@ import asyncio
 import errno
 import json
 import ssl
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -53,20 +54,23 @@ def test_owner_can_disable_when_old_settings_cannot_be_read(config_api, tmp_path
     path = tmp_path / "feature/conversation.json"
     fields = {"provider": "fixture-engine:voice", "model": "fixture-model"}
     assert request(api, {**fields, "enabled": True})[0] == 200
-    ended = []
+    ended, refused = [], []
     monkeypatch.setattr(plugin, "end_feature_calls", ended.append)
     if file_state == "malformed":
         path.write_text("{incomplete", encoding="utf-8")
     elif file_state == "permission":
-        path.chmod(0o200)  # Parent remains writable: atomic replacement is permitted.
-        with pytest.raises(PermissionError):
-            path.read_text(encoding="utf-8")
-    try:
-        status, result = request(api, {**fields, "enabled": False})
-    finally:
-        path.chmod(0o600)
+        # A chmod cannot make a file unreadable on Windows (nor for root): refuse exactly this file's read.
+        read_text = Path.read_text
+        def unreadable(self, *args, **kwargs):
+            if self == path:
+                refused.append(self)
+                raise PermissionError(errno.EACCES, "Permission denied", str(self))
+            return read_text(self, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", unreadable)
+    status, result = request(api, {**fields, "enabled": False})
     assert status == 200 and result["enabled"] is False
     assert ended == ["live_conversation:call"]
+    assert bool(refused) == (file_state == "permission"), "the endpoint itself met the unreadable file"
 
 
 @pytest.mark.parametrize("rotation", ["closed", "go_away"])

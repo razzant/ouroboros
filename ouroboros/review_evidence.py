@@ -335,16 +335,16 @@ def collect_review_evidence(
     scoped_continuations.sort(key=lambda item: str(item.updated_ts or item.created_ts or ""), reverse=True)
     # The marker speaks only when it staled the checkout's preflight look; one no look
     # precedes is the retired advisory lane's history (owner decision: archive only).
-    marker_current, look_unreadable = stale_marker_status(state, drive_root_path, repo_key)
+    marker, look_unreadable = stale_marker_status(state, drive_root_path, repo_key)
 
     evidence = {
         "task_id": task_id,
         "repo_key": repo_key,
         "current_repo": {
-            "stale_reason": str(getattr(state, "last_stale_reason", "") or "") if marker_current else "",
-            "stale_ts": str(getattr(state, "last_stale_from_edit_ts", "") or "") if marker_current else "",
+            "stale_reason": str(marker.get("reason") or ""),
+            "stale_ts": str(marker.get("ts") or ""),
             # Whose mutation or review wrote the marker; it never hides the marker.
-            **{key: value if marker_current else "" for key, value in state.stale_marker_provenance(task_id).items()},
+            **state.stale_marker_provenance(task_id, marker=marker),
         },
         "recent_attempts": [_attempt_to_dict(item) for item in (scoped_attempts[-max_attempts:] if max_attempts > 0 else [])],
         "omitted_attempts": max(0, len(scoped_attempts) - max_attempts) if max_attempts > 0 else len(scoped_attempts),

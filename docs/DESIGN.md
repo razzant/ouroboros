@@ -1379,11 +1379,13 @@ owner's own Stop press (moving), and `Starting…` with the boot phases that ref
 (no mark). The transcript's typing bubble shows only while the room's work moves and
 no card speaks for it. The title
 ellipsizes first, and a new word never moves a neighbour or resizes the bar.
-When there is work to show, pressing the status, or ↓/↑ on it, opens that
+Pressing the status, or ↓/↑ on it, opens that
 room's work and only that room's as one floating list under the bar's capsules, the same in every
 room (an opaque sheet of its own from the status capsule to the bar's last control, Main's history note waiting behind it): one row per work, the owner's unconfirmed sends, and unfinished cards an
 incomplete read has not confirmed (shown unknown, without controls). A Project
-with nothing else keeps its latest represented root card. A row names its work (its
+with nothing else keeps its latest represented root card. Main's list opens when there is work to show; a
+Project's starts with the room's whole name, wrapped (its title in the bar keeps one line, §10), so its title
+opens it even when nothing is listed, and the list then says `Nothing running or queued.` A row names its work (its
 coined name or the request's title, never `Continue: …`, else the owner's
 message) in two lines that keyboard focus or open details show whole, with the
 state under the name and its quiet line beside it, the row's mark before it (an
@@ -1466,8 +1468,11 @@ reviews create child tasks or prove execution.
   tray. A reviewer is two lines: model (else the requested one, `requested · not
   reported`), counted or adviser, outcome; then its critical finding (or that it
   is only in the full answer), else a note, else the engine's own cause, with
-  Read. A narrow card (its own width) puts the state under the subject and wraps
-  reviewer lines to two.
+  Read. A review Ouroboros itself could not complete (owner 01.11, #2516 taken:
+  the review reaches the parent with its cause) says so in one line before its
+  reviewers, with Read of its saved note, secrets masked; a reviewer it never
+  sent, or whose outcome it lost, then adds no cause line. A narrow card (its own
+  width) puts the state under the subject and wraps reviewer lines to two.
 - Rows speak one table's words (`review_record_card.js`): `passed`, `rejected`,
   `no verdict`, `not sent`, `verdict not recorded`; a reviewer `passed it` (with
   notes), `rejected it`, `inconclusive`, `outcome unknown`, `awaiting`, `not
@@ -1496,13 +1501,14 @@ reviews create child tasks or prove execution.
   Document reading. An unavailable original is named so; normalized saved
   skill/applied detail is labelled so, read through its task's review door.
 - One Record facts per row lists the record (label, value): identities, verdict
-  tokens, pool, strictness, reason, not-reached causes, costs (measured, zero,
-  subscription or unknown; wave totals over priced seats), failure codes,
-  requested and observed models apart; PASS may have findings. It scrolls in its
-  own box; the row's foot says the panel line. One unreadable record is a local
-  `could not be read` row beside readable neighbours (Logs print it too); older
-  records have a paged Read (`may be` when a rotated index cannot say); an older
-  count alone makes no row or door. A preflight stays one informational seat.
+  tokens, pool, strictness, reason, not-reached causes, a stopped wave's code
+  and words, costs (measured, zero, subscription or unknown; wave totals over
+  priced seats), failure codes, requested and observed models apart; PASS may
+  have findings. It scrolls in its own box; the row's foot says the panel line.
+  One unreadable record is a local `could not be read` row beside readable
+  neighbours (Logs print it too); older records have a paged Read (`may be` when
+  a rotated index cannot say); an older count alone makes no row or door. A
+  preflight stays one informational seat.
 - Start progress labels the frozen model/route/profile as requested; settlement
   reports that same slot's observed execution or says it was not reported. An API
   model sent in a request is not an independently observed provider label, and
@@ -1641,6 +1647,34 @@ Inside a bubble the card adds no box: the bubble is its object. Its × is a quie
 control, without a body until hover. The card uses tokens for every
 type size and colour, including pill radius and option gap. Every focusable control shares the 2px `--focus-accent-border` ring
 with 2px offset; the answer's frame wears the field idiom instead (§3 Focus). Component min/max widths keep local literals, as elsewhere in chat.
+
+**Secret request.** A question asked with `showSecretHitl(pluginName, fields)` is the same card with the
+same head, status and waiting line; its question is the host's sentence (`Secret needed for <plugin>: <fields>.`).
+It has no options, no free answer and no ×: a field list (each id in `--text-primary` at 600, then `Saved in
+Settings as <KEY>` in meta ink) and two actions, `Enter secret…` (primary) and `Cancel request`. The form is the
+shared modal: title `<plugin>: secret needed`, the sentence `The value is saved to Settings. It is not sent in this
+conversation.`, then per field Settings' own secret row (masked `.ui-control.secret-input` labelled by its id,
+`Show`/`Hide` of the typed draft only, never a saved value) with `Saved in Settings as <KEY> · not set` or `· a
+value is set (hidden)` (`· could not be read` when its read failed: an earlier form's read never shows as current), the skills that read the key (`name · enabled|disabled · its grant covers it|needs <KEY>
+granted in Skills`; an enabled reader missing its grant explains that it cannot run after saving until the keys
+are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
+the enabled readers: they may use the new value on their next call, some keep the old one until disabled and
+re-enabled. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
+refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
+the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
+disabled while a save or cancel is in flight, for at most 15 s as on a quiz card: a save with no reply or no readable body by then is shown as unconfirmed (Save blocked, `Check status` offered, Close available, nothing resent), a stalled cancel frees the card's actions and a stalled status read offers `Check status`; the call itself is never abandoned, and its late reply still settles the request but never rewrites a form it was not made for); only the card's `Cancel request` cancels. A finished task's card keeps both actions and says that saving
+stores the key and resumes nothing. Saving shows `Saving…` with read-only fields; while a save is in flight or of
+unknown outcome the head's mark is neutral, as for any answer in flight. A refusal that saved nothing is one
+`.ui-status` sentence of fixed copy under the fields (never the reply's own text) and keeps the entries; an unknown
+outcome (no reply, an unconfirmed attempt, a value written but not verified or recorded) disables Save and offers
+`Check status`, which never says nothing was saved: an unconfirmed earlier attempt allows saving again as a new
+request, no recorded save allows resending the same request (it cannot save twice), a recorded result settles the
+card. The form belongs to the request: a re-rendered card keeps it, another
+window's save or cancel closes it with a toast, and moves focus to the question only if the form held it. Success closes the form; the card says `Saved to Settings:
+<fields>. Saving connects nothing and grants nothing.` (or `Replaced in Settings: …`) with the readers' lines, or
+`Which skills read this key could not be read.` when the host could not read them.
+Values live only in the form's controls (never a draft, storage, toast or the card), and every close empties them.
+A chat transport shows such a request as the host's note on where to enter it, without buttons or a reply prompt.
 
 **Project question mirror.** Main is the list of what needs the owner; nothing waits in a section of its own. A Project question's Main copy is the Project's own `buildQuizCard` card, whole as anatomized above, in an assistant bubble at its ask time in the feed; the Project reference in its voice line opens the exact original, and answers, materials and recovery controls work in Main. It uses the shared ring and `--project` tints; names ellipsize (full titles); the head stays the room's own row. History, live pointers and the census share one task/quiz card and lifecycle wording; the canonical current questions only confirm or settle copies the feed holds, never mount them, and an incomplete read withholds only what its typed gaps name. Optional, resumed and terminal-author questions stay answerable until answered or closed; no display/history cap drops them. Replaced questions stay read-only. The owner closes from the card; a model closes its own or a host-proven continued task line's question, or a finished task's, always with its own reason. Closure records a reason, never an answer/approval. A late answer left delivery-unknown by a restart offers Remove from pending (no resend, never marked delivered). Publication destination stays fixed across Project conversion; current room membership controls display. Explicit materials use registered task artifacts and the existing reader.
 
@@ -2945,10 +2979,13 @@ layout the row is at most 56 px: ☰, the place's name, its status, then a room'
 consciousness chip and Panic, with the page's tabs, or Files' location and its actions, under it
 (`bindPageHeader` moves those nodes); the name wins over the status word, which a short row
 drops whole after its start step, keeping its mark, and Main's title ellipsizes before its chip or Panic yields.
-A Project's name then takes a second line inside its capsule (on a desk only that capsule grows the bar); only a
-name still cut there leaves the consciousness chip its brain and mark, its accessible name keeping the whole state,
-before the name ellipsizes; Panic and × never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for
-the navigation decision).
+A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
+in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
+2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
+whole name stays reachable: it is the title's hover text and accessible name, and the room's work list, which the
+title opens even in an empty Project, starts with it, wrapped. On a phone a name still cut leaves the consciousness
+chip its brain and mark, its accessible name keeping the whole state; a desk keeps the chip's word. Panic and ×
+never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Navigation sharing a toolbar also returns below the bar when the
 content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
 own row. Files' location and actions return above the list, folder names fit and actions wrap.
@@ -2970,8 +3007,8 @@ Its word uses the viewer's zone and a short date when not today; passed explaine
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
 Running shows moving dots, never a breathing glyph; held shows pause bars without time; unknown a ring,
-failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where a
-Project's name still cut on its second line leaves the chip its brain and mark (above).
+failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except on a phone
+while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
 A press opens its own sheet of the work list's material (the Shade), hung under the
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
@@ -2981,7 +3018,8 @@ and, during a campaign, `Evolution ›`
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
-(owner 21.10). A failure or approximation note hangs under the bar; a page
+(owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
+(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 **Doors and containers.** An object whose only job is to take you somewhere is a

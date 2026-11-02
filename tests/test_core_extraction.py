@@ -164,8 +164,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # description also explains that a new wait after timeout needs a new key.
     # Rolled for the decision-quality review fixes: escalate's description names a helper's
     # proposal as a fork source and makes a set-aside position one of the options; nothing else changed.
+    # Rolled for #2577: the send_photo, send_video and send_file `file_path` descriptions now say the path
+    # is relative to the active workspace or absolute; nothing else changed (c624c58e... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "c624c58e06228b4f0079bcbaafac846c6eb2a59ade38300a2d7fd528895a39fb"
+        "7d991f0bddf319856037e5648a5906428126937e10c481285968a3a0b96db9ed"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

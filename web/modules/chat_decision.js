@@ -11,6 +11,7 @@ import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionMark, questionPresentat
     appendQuestionReplyControls, paintChosenAnswer } from './question_presentation.js';
 import { fmt, tr, tx } from './i18n.js';
 import { syncQuestionMaterials } from './result_files.js';
+import { createSecretRequestForms } from './secret_hitl.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 
 // A question head's mark: its lifecycle's dot (question_presentation.questionMark), neutral while an answer is in
@@ -25,7 +26,8 @@ function paintQuestionHead(card, row = HEAD_ROWS.get(card)) {
 }
 
 // What one observation of a question carries: its identity, lifecycle, recorded answer and wait facts.
-const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery', ...WAIT_FIELDS];
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
+    'secret_outcome', 'secret_save', ...WAIT_FIELDS];
 const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
     .map((field) => [field, row[field]]));
 // How many questions one chat instance remembers; least recently touched first.
@@ -216,8 +218,8 @@ export function createChatDecision({
     const MIRROR_SETTLE_MS = 5000;
     // Display fields a narrower delivery (the census, a lifecycle frame) may lack: an empty value
     // there never blanks what a complete row already carried.
-    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index', 'materials'];
-    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', 'closed_reason', 'question_delivery', ...WAIT_FIELDS];
+    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index', 'materials', 'secret_request'];
+    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', 'closed_reason', 'question_delivery', 'secret_outcome', 'secret_save', ...WAIT_FIELDS];
     // The pointer row in the shape of the Project's quiz row, so one normalizer reads both.
     const mirrorQuiz = (row) => ({ ...row, type: 'quiz', role: 'assistant', state: row.quiz_state });
     // An empty recorded comment and no comment are the same fact.
@@ -285,6 +287,7 @@ export function createChatDecision({
                 view.disposeMarkdown?.();
                 releaseMaterials(bubble);
                 submissions.release(card);
+                secretForms.release(card);
                 if (quizViews.get(view.key) === card) quizViews.delete(view.key);
                 const next = mountMirror(view);
                 if (!next) return false;
@@ -311,7 +314,7 @@ export function createChatDecision({
         clearTimeout(view.timer);
         view.timer = null;
         view.disposeMarkdown?.();
-        if (view.card) submissions.release(view.card);
+        if (view.card) { submissions.release(view.card); secretForms.release(view.card); }
         view.disposeMarkdown = null;
         if (mirrors.get(view.key) === view) mirrors.delete(view.key);
         if (quizViews.get(view.key) === view.card) quizViews.delete(view.key);
@@ -505,14 +508,19 @@ export function createChatDecision({
     const submissions = createQuizSubmission({ apiFetch, onDomWrite, showToast, paintHead: paintQuestionHead,
         canUse: card => !disposed && (!isMain || (connected && card.dataset.authorityStale !== '1')),
         readQuestion: quiz => readQuestion(quiz.taskId, quiz.quizId, quiz.projectId, { fresh: true }),
-        accept(card, body) {
-            if (body) {
-                const current = observe({ ...body, task_id: card.dataset.taskId, quiz_id: card.dataset.quizId });
-                if (Object.hasOwn(current, 'comment')) card.dataset.ownerComment = current.comment || '';
-                setCardState(card, current.state, current.answered_index);
-            } else setCardState(card, card.dataset.state, null);
-        },
+        accept: acceptReceipt,
     });
+    function acceptReceipt(card, body) {
+        if (body) {
+            const current = observe({ ...body, task_id: card.dataset.taskId, quiz_id: card.dataset.quizId });
+            if (Object.hasOwn(current, 'comment')) card.dataset.ownerComment = current.comment || '';
+            setCardState(card, current.state, current.answered_index);
+        } else setCardState(card, card.dataset.state, null);
+    }
+    // The protected form of an integration-secret request: no draft storage, no free answer.
+    const secretForms = createSecretRequestForms({ apiFetch, showToast, accept: acceptReceipt, paintHead: paintQuestionHead,
+        canUse: card => !disposed && (!isMain || (connected && card.dataset.authorityStale !== '1')),
+        readQuestion: quiz => readQuestion(quiz.taskId, quiz.quizId, quiz.projectId, { fresh: true }) });
     function submitAnswer(card, quiz, index, comment, _settle = setCardState, action = 'answer') {
         if (action !== 'answer') {
             if (card.dataset.submission) return;
@@ -666,6 +674,7 @@ export function createChatDecision({
                 changed = true;
             }
             if (remove) remove.disabled = isMain && (!connected || card.dataset.authorityStale === '1');
+            if (card.dataset.secretRequest === '1' && secretForms.sync(card, state, current)) changed = true;
             const buttons = card.querySelectorAll('.chat-quiz-option');
             buttons.forEach((btn, i) => {
                 const chosen = state === 'answered' && answeredIndex !== null && i === answeredIndex;
@@ -824,7 +833,8 @@ export function createChatDecision({
             card.append(note);
         }
 
-        if (complete && ANSWERABLE_QUIZ_STATES.includes(quiz.state))
+        if (quiz.secretRequest) secretForms.mount(card, quiz);
+        else if (complete && ANSWERABLE_QUIZ_STATES.includes(quiz.state))
             commentField = appendQuestionReplyControls(card, quiz, { showToast, onDomWrite,
                 submit: text => submitAnswer(card, quiz, null, text),
                 close: reason => submitAnswer(card, quiz, null, reason, setCardState, 'close') });
@@ -847,7 +857,7 @@ export function createChatDecision({
 
         if (quiz.comment) card.dataset.ownerComment = quiz.comment;
         setCardState(card, quiz.state, quiz.answeredIndex);
-        if (complete) submissions.attach(card, quiz);
+        if (complete && !quiz.secretRequest) submissions.attach(card, quiz);
         // The bubble says who asks and when: a Main copy's Project reference joins its voice line beside
         // `Ouroboros` (the mirror's one addition to the Project form), and its time line is the time alone.
         const framed = frameNode(msg, card, { voice: mirror ? [mirrorChip(mirror)] : [] });
@@ -1063,7 +1073,7 @@ export function createChatDecision({
 
     // A released node takes its views with it: a mirror's countdown and rendered markdown go too.
     function releaseViews(root) {
-        for (const [key, card] of quizViews) if (root.contains(card)) { submissions.release(card); quizViews.delete(key); }
+        for (const [key, card] of quizViews) if (root.contains(card)) { submissions.release(card); secretForms.release(card); quizViews.delete(key); }
         for (const view of [...mirrors.values()]) if (root.contains(view.bubble)) releaseMirror(view);
     }
 
@@ -1085,6 +1095,7 @@ export function createChatDecision({
         destroy() {
             disposed = true;
             submissions.destroy();
+            secretForms.dispose();
             for (const view of [...mirrors.values()]) releaseMirror(view);
             observations.clear(); quizViews.clear(); detailReads.clear();
         },

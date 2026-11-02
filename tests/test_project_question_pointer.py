@@ -330,7 +330,13 @@ def test_project_question_pointer_display_fields_share_one_contract():
              "materials": [{"task_id": "t", "name": "brief.md", "label": "brief.md"}]}
     pointer = project_question_pointer({"task_id": "t", "quiz_id": "q"}, block,
                                        {"id": "p", "chat_id": 12, "name": "Project"}, None)
-    assert browser_fields <= set(pointer), sorted(browser_fields - set(pointer))
+    # Secret metadata is optional on ordinary questions, but must survive the same producer.
+    assert browser_fields - {"secret_request"} <= set(pointer), sorted(browser_fields - set(pointer) - {"secret_request"})
+    secret_request = {"plugin_name": "telegram", "fields": [{"id": "botToken", "setting_key": "TELEGRAM_BOT_TOKEN"}]}
+    protected = project_question_pointer({"task_id": "t", "quiz_id": "q"},
+                                        {**block, "options": [], "secret_request": secret_request},
+                                        {"id": "p", "chat_id": 12, "name": "Project"}, None)
+    assert protected["secret_request"] == secret_request
     assert pointer["option_details"] == ["A detail", ""] and pointer["stake"] == "What rides on it"
     assert pointer["host_facts"] == "Asked by task t, origin unknown."
     assert pointer["materials"] == block["materials"]

@@ -1,6 +1,6 @@
 """Cross-owner regressions of the shared Light call: actual fit/cache, local wire and typed interruption.
 
-Reflection, scratchpad and knowledge upkeep send through ``_call_consolidation_llm``;
+The fallback memory writer sends through ``_call_consolidation_llm``;
 the retired dialogue writer's split/retry tests left with it.
 """
 from copy import deepcopy

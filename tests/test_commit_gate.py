@@ -9,8 +9,7 @@ Verifies (Phase 4):
 - New tools in CORE_TOOL_NAMES
 
 Verifies (Phase 5):
-- Auto-push wired into commit functions
-- legacy token-in-URL credential migration is retired
+- Auto-push stays out of rollback tools and is best-effort
 - ARCHITECTURE.md version sync in startup checks
 """
 import importlib
@@ -272,8 +271,15 @@ def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
     assert "_run_reviewed_stage_cycle" in source
     assert '"reviewed"' in source
     assert '"review_only"' in source
-    assert '["git", "reset", "HEAD"]' in source
     assert '["git", "commit"' not in source
+
+
+def _staged_whole_tree(ctx, outcome):
+    """What the real stage cycle records after ``git add -A`` (paths omitted): the finally undoes it."""
+    from ouroboros.tools.git_plumbing import WHOLE_INDEX
+
+    ctx._staged_selection = WHOLE_INDEX
+    return outcome
 
 
 def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tmp_path):
@@ -288,12 +294,12 @@ def test_non_committing_review_cycle_runtime_unstages_on_success(monkeypatch, tm
     monkeypatch.setattr(
         git_mod,
         "_run_reviewed_stage_cycle",
-        lambda *args, **kwargs: {
+        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
             "status": "passed",
             "message": "stage cycle passed",
             "pre_fingerprint": {"fingerprint": "pre"},
             "post_fingerprint": {"fingerprint": "post"},
-        },
+        }),
     )
     monkeypatch.setattr(
         git_mod,
@@ -334,11 +340,11 @@ def test_non_committing_review_cycle_runtime_unstages_on_block(monkeypatch, tmp_
     monkeypatch.setattr(
         git_mod,
         "_run_reviewed_stage_cycle",
-        lambda *args, **kwargs: {
+        lambda ctx, *args, **kwargs: _staged_whole_tree(ctx, {
             "status": "blocked",
             "message": "review blocked",
             "block_reason": "critical_findings",
-        },
+        }),
     )
     monkeypatch.setattr(
         git_mod,
@@ -371,13 +377,6 @@ def test_restore_to_head_blocks_protected_paths():
 
 
 # --- Confirm gates ---
-
-def test_revert_commit_has_confirm_gate():
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._revert_commit)
-    assert "confirm" in source
-    assert "Call again with confirm=true" in source
-
 
 def test_restore_to_head_has_confirm_gate():
     git_mod = _get_git_module()
@@ -487,14 +486,8 @@ def test_restore_to_head_blocks_safety_critical_full_restore():
 
 # --- Auto-push ---
 # test_auto_push_function_exists removed in v5.15.x — callable-existence
-# check superseded by the behavioral tests below that exercise _auto_push
-# wiring inside the commit functions.
-
-
-def test_auto_push_called_in_commit_functions():
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._repo_commit_push)
-    assert "_auto_push" in source, "_repo_commit_push must call _auto_push after successful commit"
+# check superseded by the behavioral wiring test
+# tests/test_evolution_publication.py::test_only_evolution_push_stays_under_git_lock.
 
 
 def test_auto_push_not_in_rollback_tools():
@@ -515,23 +508,7 @@ def test_auto_push_is_best_effort():
     assert "non-fatal" in source.lower() or "non_fatal" in source.lower()
 
 
-def test_only_evolution_authority_recheck_and_auto_push_hold_git_lock():
-    """Evolution push stays inside the lock; ordinary push returns outside it."""
-    git_mod = _get_git_module()
-    source = inspect.getsource(git_mod._repo_commit_push)
-    authority_pos = source.find("_evolution_publication_stopped_result")
-    evolution_push_pos = source.find("_auto_push", authority_pos)
-    lock_release_pos = source.find("_release_git_lock", evolution_push_pos)
-    ordinary_push_pos = source.find("_auto_push", lock_release_pos)
-    assert authority_pos < evolution_push_pos < lock_release_pos < ordinary_push_pos
-
-
 # --- Credential configuration (legacy token-in-URL migration retired) ---
-
-def test_migrate_remote_credentials_is_retired():
-    git_ops = _get_git_ops_module()
-    assert not hasattr(git_ops, "migrate_remote_credentials")
-
 
 def test_configure_remote_remains_credential_helper_surface():
     git_ops = _get_git_ops_module()

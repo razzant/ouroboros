@@ -254,10 +254,9 @@ the last `X-Forwarded-For` entry that is not such a proxy:
   without it the path-addressed `/api/files/*` operations refuse them.
 
 With or without a password, on loopback too, the core answers another site's
-page with 403 (a WebSocket closes with 4403) and a body that is not JSON where
-the API expects JSON with 415. Pages and files any page may load (the interface,
-setup and login pages, their static files, extensions' reviewed widget files)
-pass this check; the password gate above still applies. A request with neither
+page with 403 (a WebSocket closes with 4403). Pages and files any page may load
+(the interface, setup and login pages, their static files, extensions' reviewed
+widget files) pass this check; the password gate above still applies. A request with neither
 `Origin` nor `Sec-Fetch-Site` counts as a native client (the CLI, sidecars,
 skills). Browsers send Fetch Metadata only to HTTPS, `localhost` and loopback
 addresses and omit `Origin` on simple GET/HEAD loads, so through a plain-HTTP

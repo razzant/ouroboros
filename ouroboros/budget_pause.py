@@ -1005,8 +1005,9 @@ def enter_owner_pause(limit_ctx: Any) -> None:
 
 
 def _hold_until(ctx: Any, usage: Dict[str, Any], reason: str, attempt: Callable[[], Any], *,
-                rail: str = RAIL_OWNER_PAUSE, state: str = STATE_PAUSING) -> Any:
-    """Retry one durable step as a visible typed HOLD; the task's own controls end it."""
+                rail: str = RAIL_OWNER_PAUSE, state: str = STATE_PAUSING, owner_pause_context: Any = None) -> Any:
+    """Retry one durable step as a visible typed HOLD; the task's own controls end it. A pre-send
+    handoff passes its loop context: between retries the owner's Pause takes that boundary too."""
     published = ""
     while True:
         try:
@@ -1014,17 +1015,17 @@ def _hold_until(ctx: Any, usage: Dict[str, Any], reason: str, attempt: Callable[
             usage.pop("budget_pause_hold", None)
             return result
         except Exception as exc:
-            hold = _hold_row(reason, exc=exc)
-            usage["budget_pause_hold"] = dict(hold)
+            usage["budget_pause_hold"] = hold = _hold_row(reason, exc=exc)
             if str(hold.get("error") or "") != published:
                 published = str(hold.get("error") or "")
                 _publish_hold(ctx, {"rail": rail, "state": state, **hold})
-            control = _hold_control_reason(ctx)
-            if control:
+            if control := _hold_control_reason(ctx):
                 from ouroboros.model_wait import ModelWaitInterrupted
 
                 raise ModelWaitInterrupted(control) from exc
-            time.sleep(_HOLD_POLL_SEC)
+        if owner_pause_context is not None:  # outside the step's catch: an exact park unwinds, Resume retries
+            enter_owner_pause(owner_pause_context)
+        time.sleep(_HOLD_POLL_SEC)
 
 
 from ouroboros.model_sleep import enter_cold_sleep  # noqa: E402, F401 -- existing public seam

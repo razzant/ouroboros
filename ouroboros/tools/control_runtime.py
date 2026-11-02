@@ -82,22 +82,35 @@ def _prepare_self_change(ctx: ToolContext, resume: str = "", in_place: bool = Fa
     except body_candidate.CandidateRefused as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="blocked", code=exc.code, text=f"⚠️ {exc.code}: {exc.text}"))
+    from ouroboros.tools.plan_ask import planning_roots
     from ouroboros.tools.tool_resolution import active_repo_dir_for
     from ouroboros.workspace_copies import same_directory
 
-    active = active_repo_dir_for(ctx)  # a room or external workspace stays this task's own folder
-    users = ("Body writes, default process cwd, child copies, review and commit_reviewed now use it"
-             if same_directory(active, bound["path"]) else
-             f"Writes and review_change with root='system_repo', commit_reviewed and self_worktree children given "
-             f"workspace_root={bound['path']} now use it, while default writes, reviews, commands without cwd and "
-             f"delegate_start runs still use {active} (pass cwd={bound['path']} for commands in the candidate)")
+    explicit = (f"Writes and review_change with root='system_repo', commit_reviewed and self_worktree children given "
+                f"workspace_root={bound['path']} now use it")
+    try:
+        active = active_repo_dir_for(ctx)  # a room or external workspace stays this task's own folder
+    except ValueError as exc:  # a room whose folder is unavailable: the candidate is bound, nothing replaces the room
+        users = (f"{explicit}; this task's own folder is unavailable ({exc}): defaults that need it fail until it "
+                 "returns, never using another folder")
+    else:
+        if same_directory(active, bound["path"]):
+            users = "Body writes, default process cwd, child copies, review and commit_reviewed now use it"
+        else:
+            try:
+                plan = f"plan_task reviews {planning_roots(ctx)[1]}"  # the task's own folder first, else the candidate
+            except ValueError as exc:
+                plan = f"plan_task refuses ({exc})"
+            users = (f"{explicit}, while default writes, review_change without root, commands without cwd and "
+                     f"delegate_start runs still use {active}; {plan} (pass cwd={bound['path']} for commands in the "
+                     "candidate)")
     return (
         f"OK: body candidate {bound['candidate_id']} is {bound['state']} — path {bound['path']}, branch "
         f"{bound['branch']}, base {str(bound['base_sha'])[:12]}. {users}; processes started inside it get an "
         f"isolated HOME/data/settings environment. The running body at {bound['repo_dir']} is unchanged until "
         "an exact reviewed commit is adopted with request_restart(adopt_commit=...), or published through the Git/PR tools."
         + (f" The earlier checkout of this task was gone; its commits remain on branch {bound['previous_branch']}."
-           if bound.get("previous_branch") else "")
+           if bound.get("previous_branch") else "") + body_candidate.attribution_note(bound.get("attribution"))
     )
 
 

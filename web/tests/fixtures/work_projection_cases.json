@@ -2896,6 +2896,9 @@
   },
   "turn_context_built": {
    "": "Context ready"
+  },
+  "stop_requested": {
+   "": "Stop requested: it ends at its next step"
   }
  }
 }

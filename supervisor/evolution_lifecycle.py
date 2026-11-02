@@ -144,7 +144,9 @@ def _deliver_pending_owner_report() -> None:
 
 
 def enqueue_evolution_task_if_needed() -> None:
-    """Queue evolution only when idle, enabled, within budget, and not failure-paused."""
+    """Queue evolution only when idle, enabled and admitted by the global budget limit.
+
+    Failure and repeat counts are evidence for the mind, never a stop (owner, 2026-11-02)."""
     from supervisor import queue as q
 
     q._deliver_pending_owner_report()
@@ -188,44 +190,8 @@ def enqueue_evolution_task_if_needed() -> None:
         q.send_with_budget(int(owner_chat_id), block, role="system", system_type="evolution_notice")
         return
 
-    consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
-    if consecutive_failures >= 3:
-        q.pause_evolution_campaign("paused after consecutive failures")
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
-            f"Use /evolve start to resume after investigating the issue.",
-            role="system", system_type="evolution_notice")
-        return
-
-    # Objective repeats count non-consecutive no-ops by the transaction's canonical
-    # fingerprint, clearing only on absorption. The failure streak cannot catch
-    # these loops because every non-failing cycle resets it (events.py).
-    objective_repeat_counts = campaign.get("objective_repeat_counts") or {}
-    active_objective_fp = canonical_objective_fingerprint(
-        str(campaign.get("objective") or ""),
-    )
-    objective_repeats = (
-        int(objective_repeat_counts.get(active_objective_fp, 0))
-        if active_objective_fp else 0
-    )
-    if objective_repeats >= q.OBJECTIVE_REPEAT_CAP:
-        q.pause_evolution_campaign(
-            "paused: objective re-proposed without ever absorbing",
-        )
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"🧬⚠️ Evolution paused: the current objective ran {objective_repeats} reviewed "
-            f"cycles WITHOUT ever being absorbed — it keeps getting re-proposed and never lands "
-            f"(a self-maintenance loop, not progress). A plain resume won't help; use "
-            f"/evolve start with a DIFFERENT objective.",
-            role="system", system_type="evolution_notice")
-        return
-
-    try:  # on the supervisor loop: ride the snapshot, decide the reserve refusal on the exact read
-        remaining = q.budget_remaining(st, strict=True, allow_stale=True, refuse_below=q.EVOLUTION_BUDGET_RESERVE)
+    try:  # on the supervisor loop: ride the snapshot; an exhausted answer is decided on the exact read
+        remaining = q.budget_remaining(st, strict=True, allow_stale=True)
     except Exception:
         log.error("Evolution scheduling deferred: cost accounting unavailable", exc_info=True)
         q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl", {
@@ -233,15 +199,8 @@ def enqueue_evolution_task_if_needed() -> None:
             "action": "dispatch_deferred", "owner_visible": True,
         })
         return
-    if remaining < q.EVOLUTION_BUDGET_RESERVE:
-        q.pause_evolution_campaign("budget reserve reached")
-        q.disable_evolution_projection()
-        q.send_with_budget(
-            int(owner_chat_id),
-            f"💸 Evolution stopped: ${remaining:.2f} remaining "
-            f"(reserve ${q.EVOLUTION_BUDGET_RESERVE:.0f} for conversations).",
-            role="system", system_type="evolution_notice")
-        return
+    if remaining <= 0:
+        return  # the limit refuses new paid admission; the campaign and its switch stay as they are
     cycle = int(st.get("evolution_cycle") or 0) + 1
     tid = uuid.uuid4().hex[:8]
     transaction = q.begin_evolution_transaction(tid, cycle=cycle, campaign=campaign)
@@ -441,8 +400,8 @@ def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
 
     RESUMABLE: a later ``/evolve start`` resumes the SAME campaign in place
     (start_evolution_campaign treats ``paused`` as resumable). Used by the system
-    breakers (light mode, consecutive failures, objective-repeat cap, budget reserve,
-    restart-blocked) — NOT by an owner stop. For an owner stop use
+    breakers (light mode, a refused consciousness admission, blocked bootstrap or
+    restart) — NOT by an owner stop. For an owner stop use
     ``complete_evolution_campaign`` (terminal).
     """
     from supervisor import state
@@ -905,9 +864,9 @@ def link_evolution_rescue(drive_root: pathlib.Path, rescue_info: Dict[str, Any])
 def _bump_objective_repeat_count(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
     """BUG3: count one non-absorbing cycle against its objective fingerprint.
 
-    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed blocked objective
-    still accumulates toward the pause gate. A transaction without an ``objective_fp`` is
-    skipped, never bucketed under the empty key.
+    Cumulative PER-FINGERPRINT (not a consecutive streak), so a re-proposed objective keeps
+    its whole unabsorbed record as evidence; nothing pauses on it. A transaction without an
+    ``objective_fp`` is skipped, never bucketed under the empty key.
     """
     fp = str((tx or {}).get("objective_fp") or "")
     if not fp:

@@ -1,6 +1,7 @@
 import { tr } from './i18n.js';
 import { MAX_QUIZ_OPTIONS, MAX_DECISION_COMMENT } from './api_types.js';
 import { bindEnterSubmit } from './ui_interactions.js';
+import { secretRequestOf } from './secret_hitl.js';
 
 export const WAIT_FIELDS = ['wait_for_answer', 'wait_ended_at', 'owner_wait_state', 'owner_wait_resume_reason'];
 
@@ -114,13 +115,16 @@ export function normalizeQuiz(msg) {
         state: String(src.state || 'open'),
         taskId: String(msg.task_id || ''),
         ts: msg.ts || null,
-        answerFields: Object.fromEntries(['answered_index', 'comment', 'question_delivery'].filter((key) => Object.hasOwn(src, key))
+        answerFields: Object.fromEntries(['answered_index', 'comment', 'question_delivery', 'secret_outcome', 'secret_save']
+            .filter((key) => Object.hasOwn(src, key))
             .map((key) => [key, src[key]])),
         answeredIndex: Number.isInteger(src.answered_index) ? src.answered_index : null,
         // The owner's verbatim words on a settled card (history replay
         // merges them from the projection). With no answeredIndex they
         // ARE the answer, not a remark beside one.
         comment: String(src.comment || ''),
+        // An integration-secret request (showSecretHitl): its protected form replaces the free answer.
+        secretRequest: secretRequestOf(src),
         detailsUnavailable: src.option_details === undefined && raw.every((option) => typeof option === 'string'),
     };
 }

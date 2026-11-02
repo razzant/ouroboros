@@ -672,3 +672,18 @@ test('the line\'s clock: the time today, the date as well on another day; second
     assert.equal(workLine(work('paused_by_owner')), `You paused it · ${clock(work('paused_by_owner').because[0].since)}`);
     assert.equal(workLine(work('spending_limit')), 'Spending limit reached');
 });
+
+test('a recorded Stop says itself on the row and the card of a press no card saw, beside the word it still is', () => {
+    const work = { activity: 'working', transition: 'none', call: '', confirmed: true, mark: 'moving', turn: [], tails: [],
+        episode: { task_id: 'turn', live: true },
+        because: [{ code: 'stop_requested', text: 'Stop requested: it ends at its next step' }] };
+    const row = workRowView(work);
+    assert.equal(row.word, 'Working');
+    assert.equal(row.secondary, 'Stop requested: it ends at its next step');
+    assert.equal(cardWorkView(work).secondary, 'Stop requested: it ends at its next step');
+    // The owner's own press on a loaded card keeps its immediate word, and says nothing twice.
+    assert.equal(workRowView(work, { stopping: 'immediate' }).word, 'Cancelling…');
+    assert.equal(workRowView(work, { stopping: 'immediate' }).secondary, '');
+    // Without the fact a working work's card keeps its own chip: nothing invents a Stop.
+    assert.equal(cardWorkView({ ...work, because: [] }), null);
+});

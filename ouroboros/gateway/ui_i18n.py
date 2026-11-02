@@ -325,9 +325,11 @@ async def api_ui_i18n_export_get(request: Request) -> JSONResponse:
 
 
 async def api_ui_i18n_regenerate_post(request: Request) -> JSONResponse:
-    body = await request_json_or(request, {}) or {}
+    body = await request_json_or(request, {})
+    if not isinstance(body, dict):
+        return json_error("request body must be a JSON object", 400)
     drive_root = request_drive_root(request)
-    requested = body.get("language") if isinstance(body, dict) else None
+    requested = body.get("language")
     tag = normalize_language_tag(requested) if requested else memory.current_language()
     if not tag or is_english(tag):
         return json_error("nothing to regenerate for English", 400, code="no_memory")

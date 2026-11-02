@@ -595,7 +595,8 @@ def read_view(record: Mapping[str, Any], legacy: Optional[Mapping[str, Any]] = N
         "asks": [{"ask_id": a.get("ask_id"), "ts": a.get("ts"), "revision": a.get("revision"), "message": a.get("message"),
                   "participants": [{**{k: p.get(k) for k in ("seat_id", "model", "owner_marked", "status", "dispatched",
                                                                "not_dispatched_reason", "error", "parse_error",
-                                                               "failure_code", "reported_cause", "reset_at", "unresolved")},
+                                                               "failure_code", "reported_cause", "reset_at", "unresolved",
+                                                               "room_delivery", "room_read_coverage")},
                                     "ignored_items": len((p.get("reply") or {}).get("ignored") or []) if isinstance(p.get("reply"), dict) else 0}
                                    for p in a.get("participants") or []],
                   "record_id": a.get("record_id")} for a in record.get("asks") or []],

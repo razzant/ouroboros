@@ -548,10 +548,9 @@ def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
     written outside the store). The census answers from typed hot facts and never decodes bodies
     (task cards, PERSISTENCE), so that corruption reaches only the action's strict authority read:
     Resume refuses, writes no fence and sends nothing; it never invents a resumable member."""
-    import sqlite3
-
     from ouroboros.owner_pause import read_fence
     from supervisor import workers
+    from tests._store_shared import independent_writer
     from tests.test_project_hold_recovery import worker
     from tests.test_resume_handover import _stop_boot
 
@@ -561,7 +560,7 @@ def test_an_unreadable_root_refuses_its_members_resume_at_the_action(
         _settle_owner_fence(host.root, ROOT)
     client = _member_http(host.root)
     assert _attention_rows(_member_state(client), CHILD), "offered while its facts read"
-    with sqlite3.connect(host.root / "state" / "current.sqlite") as conn:
+    with independent_writer(host.root / "state" / "current.sqlite") as conn:
         conn.execute("UPDATE task_bodies SET body = CAST(X'7B22FF' AS TEXT) WHERE task_id = ?", (ROOT,))
     with pytest.raises(Exception):
         load_task_result(host.root, ROOT, strict=True)

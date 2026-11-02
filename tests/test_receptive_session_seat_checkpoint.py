@@ -180,7 +180,9 @@ def test_a_helper_finishing_while_the_seat_checkpoints_still_lets_it_send(sessio
     real_update = review_state.update_state
 
     def seat_checkpoint_waits(*args, **kwargs):  # the seat's start checkpoint, before its lock and load
-        if kwargs.get("lock_timeout_sec") == review_state_custody.SEAT_LAUNCH_LOCK_WAIT_SEC:
+        mutator = getattr(args[1] if len(args) > 1 else None, "__qualname__", "")
+        if (kwargs.get("lock_timeout_sec") == review_state_custody.SEAT_LAUNCH_LOCK_WAIT_SEC
+                and mutator.startswith("checkpoint_pending_review_invocation.")):  # not the launch's paid merge
             waiting.set()
             assert resume.wait(60), "the seat's checkpoint was never resumed"
         return real_update(*args, **kwargs)

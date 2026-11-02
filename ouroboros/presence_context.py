@@ -281,8 +281,29 @@ _SCHEDULED_DELIVERY = (
     "conversation by itself. People receive only what a connector tool sends; silence is a valid outcome.")
 
 
+def _final_audience_section(value: Mapping[str, Any]) -> str:
+    """Where a root's chosen non-silent final goes: its retained source conversation, never a guess."""
+    event = value.get("event") if isinstance(value.get("event"), Mapping) else {}
+    place = value.get("place") if isinstance(value.get("place"), Mapping) else {}
+    route = {key: event.get(key) if event.get(key) is not None else "unrecorded"
+             for key in ("provider", "account_id", "conversation_id", "thread_id")}
+    label = place.get("label") or place.get("provider") or value.get("place_id")
+    return (
+        "## Where your final answer goes (host-authored facts)\n\n"
+        f"This root answers the place conversation it started from: {label}, source route "
+        + json.dumps(route, ensure_ascii=False, sort_keys=True) + ". A non-silent finish_task answer is "
+        "new speech there, even after earlier sends of this run, and it still meets this place's "
+        "current state and Safety: selecting it is not delivering it. An internal Project this root "
+        "lives in keeps its own record, not a private channel instead of the conversation. "
+        "silent=true, where the host permits it, sends nothing and keeps any answer internal; it "
+        "does not discharge a reply someone is owed. A name or role in the source is context, not "
+        "proof of who owns this work."
+    )
+
+
 def build_presence_context_section(drive_root: Path, value: Any, task_id: str = "", *,
-                                   status_root: Path | None = None, scheduled: bool = False) -> str:
+                                   status_root: Path | None = None, scheduled: bool = False,
+                                   answers_conversation: bool = False) -> str:
     """Render host-authored presence context, including declared full KB topics.
 
     ``status_root`` is the canonical task root the own-work catalogue reads (a forked
@@ -290,6 +311,8 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
     ``scheduled`` (a root a schedule started, not an inbound turn) renders the
     conversation as it is now instead of the pointer its copied carrier froze, and
     says that nothing it finishes with is sent by itself (#1589).
+    ``answers_conversation`` (a non-inline, non-scheduled root whose final its reply
+    carrier speaks) names that destination; an inline turn has its FOCUS frame instead.
     """
 
     if not isinstance(value, Mapping):
@@ -300,7 +323,8 @@ def build_presence_context_section(drive_root: Path, value: Any, task_id: str = 
     if value.get("place_id"):
         topics = focus_topics(drive_root, value)
         if not scheduled:
-            return topics
+            audience = _final_audience_section(value) if answers_conversation else ""
+            return "\n\n".join(part for part in (audience, topics) if part)
         scheduled_parts = [_SCHEDULED_DELIVERY, _previous_turn_line(value["previous_turn"])
                            if isinstance(value.get("previous_turn"), Mapping)
                            else "No earlier turn of this conversation is recorded."]

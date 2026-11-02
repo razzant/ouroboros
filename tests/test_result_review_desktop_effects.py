@@ -160,7 +160,7 @@ def test_required_reviews_a_root_result_whose_only_material_is_a_desktop_input(t
     assert rr.result_review_at_delivery(ctx, "Done on the desktop.", trace_of(ctx), shown.append) is True
     assert len(sends) == 3 and "FAIL" in shown[0], "Required: the host reviewed it and shows the findings first"
     subject = subject_text(ctx)
-    assert f"- effect declared by {row['tool']}: " in subject and '"observed_effect": true' in subject
+    assert f"- effect declared by {row['tool']}: {produced['effects'][0]['receipt']}" in subject
     assert "tool producer's reports of execution, not proof of a UI change or goal success" in subject
 
 
@@ -192,7 +192,7 @@ def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch,
     assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is False
     assert len(sends) == 3, "the host reviewed the partial run under Required"
     subject = subject_text(ctx)
-    assert effect["receipt"] in subject and '"ok": false' in subject and '"steps_done"' in subject
+    assert f"- effect declared by {effect['tool']}: {effect['receipt']}" in subject
 
 
 def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_review(tmp_path, monkeypatch):
@@ -340,10 +340,13 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
         row = desktop.call("click", warning=WARNING, x=1, y=2, raw=True)
         path = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id) / row["producer_source_ref"]["path"]
         if damage == "corrupt":
-            path.write_bytes(path.read_bytes().replace(b'"ok": true', b'"ok": TRUE'))
+            retained = path.read_bytes()
+            path.write_bytes(retained.replace(b"true", b"TRUE", 1))
+            assert path.read_bytes() != retained
         else:
             path.unlink()
-    assert '"observed_effect": true' in row["result"], "the annotated preview still reads like a receipt"
+    preview, _end = json.JSONDecoder().raw_decode(row["result"])
+    assert preview["observed_effect"] is True, "the annotated preview still reads like a receipt"
 
     produced = rr.produced_material(ctx)
     assert produced["effects"] == [], "an unverifiable receipt is never read from the preview"

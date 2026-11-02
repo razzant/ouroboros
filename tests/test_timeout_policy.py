@@ -669,6 +669,7 @@ def test_commit_pending_retry_reconciles_same_paid_attempt(tmp_path, monkeypatch
             operation_id = run_ctx._review_reserved_operations[
                 "multi_model_review"
             ]["slot_1"]
+            run_ctx._review_paid_stamp()  # the seat's physical dispatch, before it went pending
             run_ctx._last_triad_raw_results = [{
                 "slot_id": "slot_1", "model_id": "m1", "status": "error",
                 "operation_id": operation_id, "operation_state": "in_flight",

@@ -1,13 +1,13 @@
 """Refused fits remain inspectable; the fresh Max/Gemini probe fits offline."""
 import asyncio
 import json
-import socket
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions
+from tests._socket_seal import block_network_except_socketpair
 from tests.test_live_conversation import ROOT, VoiceWire, host_world as host_world
 
 
@@ -88,7 +88,7 @@ def test_fresh_default_max_connects_with_real_gemini_envelope_and_allowance(tmp_
 
     def no_network(*args, **kwargs):
         pytest.fail('fresh-install fit test attempted a network connection')
-    monkeypatch.setattr(socket.socket, 'connect', no_network)
+    block_network_except_socketpair(monkeypatch, no_network)
     root = tmp_path / 'fresh'
     root.mkdir()
     monkeypatch.setattr(config, 'DATA_DIR', root)

@@ -444,7 +444,12 @@ def _selected_session(task: Mapping[str, Any]) -> dict[str, Any]:
 def unsettled_start_ids(
     drive_root: Any, task_id: str, *, rows: Optional[list[dict[str, Any]]] = None, continuing: str = "",
 ) -> dict[str, list[str]]:
-    """Durable run/start obligations from one consistent custody-log snapshot.
+    """Durable run/start obligations from one consistent custody snapshot.
+
+    The store answers from ONE transaction of this task's runs and open requests
+    (``task_snapshot``): STARTED moves a start from its request to its run in one
+    commit, which two reads could straddle and see in neither; no other task's
+    request is decoded. ``rows`` folds an explicit chain snapshot instead.
 
     A review run is the review substrate's obligation, not the actor's
     delegation slot, so it never blocks the actor's own start; nor does the
@@ -456,12 +461,14 @@ def unsettled_start_ids(
 
     mine = str(task_id or "")
     if rows is not None:
-        snapshot: Optional[list[dict[str, Any]]] = list(rows)
+        snapshot = list(rows)
         runs = custody.replay(drive_root, rows=snapshot)
+        pending = custody.pending_invocations(drive_root, rows=snapshot)
     else:
-        from ouroboros.delegate_custody_current import runs as current_runs
+        from ouroboros.delegate_custody_current import task_snapshot
 
-        snapshot, runs = None, current_runs(drive_root, "task_id=?", (mine,))
+        view = task_snapshot(drive_root, mine)
+        runs, pending = view["runs"], view["pending"]
     return {
         "open_run_ids": [
             row.run_id for row in runs.values()
@@ -470,7 +477,7 @@ def unsettled_start_ids(
         ],
         "pending_invocation_ids": [
             str(row.get("invocation_id") or "")
-            for row in custody.pending_invocations(drive_root, rows=snapshot)
+            for row in pending
             if str(row.get("task_id") or "") == mine
             and not custody.review_owned_source(row.get("source"))
         ],

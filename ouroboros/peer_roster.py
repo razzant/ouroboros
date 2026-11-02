@@ -433,11 +433,9 @@ def _compact_root(task_id: str, task: Dict[str, Any], *, status: str, direct: bo
 def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
     """Every host-listed active independent root, compact (id, title, room, status).
 
-    Pooled rows come from the queue snapshot (running, then pending); a
-    subagent -- a row with a parent or the subagent role -- is not an
-    independent root.  ``incomplete`` is the ONE aggregate fact: the snapshot
-    is missing, unreadable or stale, the direct-roots fragment could not
-    read every actor, or delegated custody was unreadable.  Never raises.
+    Pooled rows come from the queue snapshot (running, then pending), inline moved authors from the Presence census.
+    Subagents (a parent or the subagent role) are not independent roots. ``incomplete`` combines missing/unreadable/stale
+    snapshots, incomplete direct/Presence observations, unreadable bindings and delegated custody. Never raises.
     """
     root = pathlib.Path(drive_root)
     snapshot = _load_queue_snapshot(root)
@@ -471,13 +469,43 @@ def independent_roots(drive_root: pathlib.Path) -> Dict[str, Any]:
         if task_id and task_id not in seen:
             seen.add(task_id)
             rows.append(_compact_root(task_id, row, status="running", direct=True, canonical_root=root, trees=trees))
+    from ouroboros.conversation_lease import resolved_presence_turns
+
+    presence = resolved_presence_turns(root)
+    rows += _moved_presence_roots(root, presence, seen, trees, gaps)
     return {
         "roots": rows,
+        "presence_turns": presence["roots"],
         "incomplete": bool(fragment.get("incomplete")) or not bool(observation.get("fresh"))
         or not bool(direct_observation.get("fresh")) or bool(gaps) or any(row.get("unavailable") for row in rows),
         "queue_snapshot": observation,
         "direct_roots": direct_observation,
     }
+
+
+def _moved_presence_roots(root: pathlib.Path, presence: Dict[str, Any], seen: set, trees: Dict[str, Any],
+                          gaps: List[str]) -> List[Dict[str, Any]]:
+    """Live inline Presence authors a move bound to a Project, wherever they run (``resolved_presence_turns``):
+    Project works addressed like any root. An unmoved turn stays its place's, never a roster row."""
+    from ouroboros.projects_registry import project_id_for_task
+
+    if not presence["complete"]:
+        gaps.append("presence_observation_incomplete")
+    rows = []
+    for fact in presence["roots"]:
+        task_id = fact["task_id"]
+        if task_id in seen or fact["state"] != "running":
+            continue
+        try:
+            moved = project_id_for_task(root, task_id, strict=True)
+        except Exception:
+            gaps.append("presence_binding_unreadable")
+            continue
+        if moved:
+            seen.add(task_id)
+            rows.append({**_compact_root(task_id, fact["row"], status="running", canonical_root=root, trees=trees),
+                         "inline_presence": True})
+    return rows
 
 
 def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, Any]]:
@@ -486,6 +514,7 @@ def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, 
     Pause has not parked, external runs, review work, runs nobody can confirm). Facts only, never a tell_task
     target (``independent_roots`` stays the address book). Never raises; an unreadable source yields no rows (the
     roster discloses freshness)."""
+    from ouroboros.projects_registry import project_binding_for_task
     from ouroboros.task_results import load_task_result
     from ouroboros.work_stop import stop_presentation
 
@@ -504,9 +533,14 @@ def unlisted_live_work(drive_root: pathlib.Path, listed: set) -> List[Dict[str, 
             stored = load_task_result(root, root_id, strict=True) or {}
         except Exception as exc:
             stored, unavailable = {}, {"task_result": type(exc).__name__}
+        try:  # a moved root's tree lives in its Project, whatever room its own row still names
+            binding = project_binding_for_task(root, root_id, strict=True) or {}
+        except Exception as exc:
+            binding, unavailable = {}, {**unavailable, "project": type(exc).__name__}
         view = stop_presentation({**stored, "id": root_id}, {"owner": stored.get("owner_pause") or {}})
         rows.append({"work_id": root_id, "title": str(stored.get("suggested_name") or stored.get("title") or ""),
-                     "room": {"chat_id": stored.get("chat_id"), "project_id": str(stored.get("project_id") or "")},
+                     "room": {"chat_id": binding.get("project_chat_id") or stored.get("chat_id"),
+                              "project_id": str(binding.get("project_id") or stored.get("project_id") or "")},
                      **({"waiting": waiting} if (waiting := _queue_hold_facts({"id": root_id}, stored, [])) else {}),
                      **({"stop": view["stop"], "release": view["release"], "refusal": view["refusal"]}
                         if view["stop"] or view["refusal"] else {}),
@@ -547,9 +581,10 @@ def independent_message_target(
     Presence stays outside the owner-addressable roster. Its retained RUNNING
     record admits a peer write, not a claim that another process is alive or has
     read it; the shared execution observation travels with the write receipt.
+    A moved author is listed (``_moved_presence_roots``) yet answers as this same mailbox.
     """
     listed = host_listed_independent_root(drive_root, task_id)
-    if listed is not None:
+    if listed is not None and not listed.get("inline_presence"):
         return listed
     from ouroboros.dialogue_provenance import presence_record_binding, presence_target_record
 
@@ -634,7 +669,8 @@ def render_roster_note(roster: Dict[str, Any], *, exclude: str = "") -> str:
         room = f"project={row['project_id']}" if row["project_id"] else f"chat={row.get('chat_id')}"
         suggested = str(row.get("suggested_name") or "")
         title = row["title"] or (f"suggested name {json.dumps(suggested, ensure_ascii=False)}" if suggested else "(untitled)")
-        direct = " · live direct conversation" if row.get("direct_chat") else ""
+        direct = (" · live direct conversation" if row.get("direct_chat")
+                  else " · live place conversation turn" if row.get("inline_presence") else "")
         lines.append(f"- {row['task_id']} · {title} · {room} · {row['status']}{direct}")
         facts = [f"started_at={row['started_at']}"] if row.get("started_at") else []
         if row.get("origin"):
