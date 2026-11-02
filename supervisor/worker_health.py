@@ -619,7 +619,7 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
             )
             reason_code = "worker_crash_retry_exhausted"
         try:
-            from ouroboros.task_results import STATUS_FAILED, write_task_result
+            from ouroboros.task_results import STATUS_FAILED, STATUS_RUNNING, write_task_result
             write_task_result(
                 root, task_id, STATUS_FAILED,
                 result=result_text,
@@ -627,6 +627,9 @@ def _recover_crashed_task_without_terminal(job: dict, queue: Any) -> None:
                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_FAILED, execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
                 crash_signal=crash_signal,
                 crash_exitcode=exitcode if isinstance(exitcode, int) else None,
+                # The host reconciled a running attempt whose executor ended without its own terminal: a
+                # Presence turn reads this as a settled loss (unknown outcome, retained), never a recorded answer.
+                status_reconciled_from=STATUS_RUNNING,
                 **r_cost_fields, **execution_close(task, meta),  # the dead attempt's #939 clock
             )
         except Exception as exc:

@@ -27,6 +27,11 @@ class PresenceTurnNotStarted(RuntimeError):
     """Nothing ran: admission was interrupted or no thread could start; retry the same event."""
 
 
+class PresenceTurnInterrupted(RuntimeError):
+    """The turn's carrier ended without reporting it (a Stop's kill, a crash, a pool stop) and the server has
+    published its terminal; resend the same event: its durable row answers (a replay, or a retained refusal)."""
+
+
 class PresenceTurnExecution:
     """One live host turn: the results every waiter shares and the admission that starts it.
 
@@ -296,5 +301,6 @@ def _find_execution(turn_id: str) -> tuple[PresenceTurnExecutions | None, Presen
 
 
 __all__ = [
-    "PROACTIVE_TURNS", "PresenceTurnExecution", "PresenceTurnExecutions", "PresenceTurnNotStarted",
+    "PROACTIVE_TURNS", "PresenceTurnExecution", "PresenceTurnExecutions", "PresenceTurnInterrupted",
+    "PresenceTurnNotStarted",
 ]

@@ -269,3 +269,45 @@ def test_the_intake_writers_liveness_is_the_platform_layers_probe(tmp_path, monk
     assert probed == [os.getpid()]
     monkeypatch.setattr(platform_layer, "pid_is_alive", lambda pid: True)
     assert author_intake_accepting(tmp_path, "author", "key")
+
+
+def test_a_presence_turn_whose_carrier_ended_unreported_settles_at_its_published_terminal(tmp_path):
+    """Review C2: a Stop's custody kill (or a crash, or a pool stop) ends a Presence carrier before its
+    ``presence_turn_settled`` frame. The server's published terminal (the ``task_done`` dispatch, once the row left
+    RUNNING) settles the Host waiter with a typed retry: its in-flight reservation returns, and a retry of the same
+    event starts a fresh execution instead of joining the dead one forever. A turn its carrier already settled
+    keeps its own answer: the terminal finds no live waiter to overwrite."""
+    from ouroboros.presence_executions import PresenceTurnInterrupted
+    from ouroboros.task_results import write_task_result
+    from ouroboros.utils import append_jsonl
+    from supervisor import events
+
+    (tmp_path / "memory" / "owner_mailbox").mkdir(parents=True)
+    metadata = {"source": "presence", "presence": {"binding_id": "b"}}
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={}, WORKERS={}, append_jsonl=append_jsonl,
+                          persist_queue_snapshot=lambda reason="": None)
+    registry, released = PresenceTurnExecutions(), []
+
+    def start(turn_id):
+        return registry.start_or_dispatch(turn_id, identity="i", reserve=lambda: True,
+                                          release=lambda: released.append(turn_id), dispatch=lambda execution: None)
+
+    killed, started = start("pres-killed")
+    assert started and registry.live() == ["pres-killed"]
+    write_task_result(tmp_path, "pres-killed", "cancelled", result="Running task cancelled and worker terminated.",
+                      metadata=metadata)  # the custody's terminal; the row already left RUNNING
+    events._handle_task_done({"task_id": "pres-killed", "status": "cancelled", "task_type": "presence",
+                              "chat_id": 5}, ctx)
+    with pytest.raises(PresenceTurnInterrupted):
+        killed.result.result(timeout=1)
+    assert released == ["pres-killed"] and registry.live() == []
+    retry, started_again = start("pres-killed")
+    assert started_again and retry is not killed  # the resend is admitted afresh; its durable row answers it
+
+    answered, _ = start("pres-answered")
+    handle_presence_turn_settled({"turn_id": "pres-answered", "physical_id": "pres-answered", "error": None,
+                                  "result": {"outcome": "message", "text": "hello", "task_id": "pres-answered"}}, ctx)
+    write_task_result(tmp_path, "pres-answered", "completed", result="hello", metadata=metadata)
+    events._handle_task_done({"task_id": "pres-answered", "status": "completed", "task_type": "presence",
+                              "chat_id": 5}, ctx)
+    assert answered.result.result(timeout=1).text == "hello" and released.count("pres-answered") == 1

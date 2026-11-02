@@ -137,6 +137,7 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
     from ouroboros.presence_admission import PresenceAdmissionError
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_continuation import continuation_version, turn_response
+    from ouroboros.presence_executions import PresenceTurnInterrupted
     from ouroboros.presence_runner import (
         PresenceTurnError,
         PresenceTurnEvent,
@@ -295,6 +296,8 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
                                    else 429 if exc.code == "presence_capacity_full" else 409)
     except PresenceTurnNotStarted as exc:
         return _presence_error(str(exc), 503, "presence_turn_not_started", "retry")
+    except PresenceTurnInterrupted as exc:  # its carrier ended unreported: the resend reads the durable row
+        return _presence_error(str(exc), 503, "presence_turn_interrupted", "retry")
     except OSError as exc:
         return _presence_error(str(exc), 400, "presence_io_unavailable", "retry")
     except ValueError as exc:

@@ -9,7 +9,9 @@ the durable facts (``admit_presence_turn``, ``presence_turn_event``), acquires t
 runs ``presence_runner.run_presence_turn`` and reports ONE ``presence_turn_settled`` frame —
 the result, or the error by value — that resolves the Host's ``PresenceTurnExecution``
 future and releases the row and the slot; a continuing author's initial envelope is a
-``presence_turn_initial`` frame (``FrameExecution``). Retry identity and ``heard_replay``
+``presence_turn_initial`` frame (``FrameExecution``). A carrier that ends without that frame
+(a Stop's kill, a crash) leaves its waiter to the server's published terminal
+(``settle_ended_turn``, from the ``task_done`` dispatch). Retry identity and ``heard_replay``
 dedup stay the gate's, inside the body.
 """
 
@@ -22,7 +24,9 @@ from typing import Any, Mapping, Sequence
 
 from ouroboros.presence_admission import PresenceAdmission
 from ouroboros.presence_events import PresenceTurnError, PresenceTurnEvent
-from ouroboros.presence_executions import PresenceTurnExecution, PresenceTurnNotStarted, _find_execution
+from ouroboros.presence_executions import (
+    PresenceTurnExecution, PresenceTurnInterrupted, PresenceTurnNotStarted, _find_execution,
+)
 from ouroboros.presence_runner import (
     PresenceTurnLease, PresenceTurnResult, _configured_gate, _task_id, presence_chat_id, presence_event_identity,
     run_presence_turn,
@@ -303,5 +307,26 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
             log.debug("presence settlement snapshot failed for %s", turn_id, exc_info=True)
 
 
+def settle_ended_turn(turn_id: str) -> bool:
+    """The server published this turn's terminal and released its row (``task_done``): a Host waiter still live
+    heard nothing from the carrier (a Stop's kill, a crash, a pool stop never send ``presence_turn_settled``).
+
+    It settles now with ``PresenceTurnInterrupted``: its in-flight reservation returns, retries stop joining a
+    dead execution, and the transport's resend reads the turn's durable row (a replay, or the retained refusal).
+    A settlement the carrier sent before it ended rides the same control lane ahead of this terminal and
+    already retired the execution, so it is never overwritten. Called after the row left RUNNING, so a resend
+    admits a fresh row. Never raises."""
+    try:
+        registry, execution = _find_execution(str(turn_id or ""))
+        if execution is None or registry is None:
+            return False
+        registry.settle_from_frame(execution, error=PresenceTurnInterrupted(
+            f"presence turn {turn_id} ended in its carrier without a settlement; resend the same event"))
+        return True
+    except Exception:
+        log.warning("presence turn %s: its Host waiter could not be settled at its terminal", turn_id, exc_info=True)
+        return False
+
+
 __all__ = ["PRESENCE_RUN_KEY", "FrameExecution", "carry_presence_turn", "dispatch_presence_turn", "set_presence_runner",
-           "handle_presence_turn_initial", "handle_presence_turn_settled", "presence_seed_task"]
+           "handle_presence_turn_initial", "handle_presence_turn_settled", "presence_seed_task", "settle_ended_turn"]
