@@ -383,6 +383,46 @@ def test_l14_membership_and_the_cadence_each_bring_the_pass_back(tmp_path, monke
     assert tick(BODY_MAINTENANCE_INTERVAL_SEC) == 1, "what no clock names (a setting, silence) is seen within the cadence"
 
 
+class _Visited(dict):
+    """RUNNING that counts the walks over it (a membership read that visits every key)."""
+
+    visits = 0
+
+    def __iter__(self):
+        self.visits += 1
+        return super().__iter__()
+
+
+class _VisitedList(list):
+    visits = 0
+
+    def __iter__(self):
+        self.visits += 1
+        return super().__iter__()
+
+
+def test_l14_a_quiet_tick_visits_no_row_at_any_live_set_size(tmp_path, monkeypatch):
+    """Astra m2: the skip itself is O(1). Membership and clocks unchanged, the gate compares the queue's
+    change mark and sizes and walks neither queue, at 1+1 rows and at 50+61; a mark brings the pass back."""
+    queue, workers = _clocked(tmp_path, monkeypatch)
+    rows = {"running": dict(workers.RUNNING), "pending": [{"id": "queued"}]}
+    for size in ((1, 1), (50, 61)):
+        running, pending = _Visited(rows["running"]), _VisitedList(rows["pending"])
+        for index in range(len(running), size[0]):
+            running[f"task-{index}"] = {**running["task"], "task": {"id": f"task-{index}", "root_task_id": f"task-{index}"}}
+        pending.extend({"id": f"queued-{index}"} for index in range(len(pending), size[1]))
+        for module in (workers, queue):
+            monkeypatch.setattr(module, "RUNNING", running)
+            monkeypatch.setattr(module, "PENDING", pending)
+        tick = _Tick(monkeypatch, queue)
+        assert tick() == 1, "the first tick judges every row once"
+        running.visits = pending.visits = 0
+        assert tick(1.0) == 0 and tick(1.0) == 0
+        assert (running.visits, pending.visits) == (0, 0), size
+        queue.persist_queue_snapshot(reason="hold_changed")  # any marked change of the queue
+        assert tick() == 1 and tick(1.0) == 0
+
+
 def test_l14_a_clock_set_back_cannot_park_the_pass(tmp_path, monkeypatch):
     queue, _workers = _clocked(tmp_path, monkeypatch)
     tick = _Tick(monkeypatch, queue)

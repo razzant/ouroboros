@@ -107,9 +107,13 @@ _clocks: Dict[str, Any] = {"due": 0.0, "members": None}
 
 
 def _live_members() -> tuple:
-    """Which rows are live, in one cheap comparison: no clock of a row nobody has judged yet is known."""
+    """Whether the live rows can have changed, without visiting one: no clock of a row nobody has judged yet
+    is known. Every change of either queue marks it (``queue_publication.queue_revision``: one bump under Q),
+    and the sizes also catch a row added or removed before its caller marked; a quiet tick reads four values."""
+    from supervisor.queue_publication import queue_revision
+
     q = _queue()
-    return (q.DRIVE_ROOT, tuple(q.RUNNING), tuple(map(id, q.PENDING)))
+    return (q.DRIVE_ROOT, queue_revision(), len(q.RUNNING), len(q.PENDING))
 
 
 def enforce_due_task_timeouts(read_pending_events: Any) -> None:
