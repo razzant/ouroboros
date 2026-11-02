@@ -18,9 +18,9 @@ uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``).
 Durability before an effect is an explicit barrier (``publish_queue_snapshot``), used only
 where a caller acts on the publication. A process with no live tick publisher (startup
 before the loop, shutdown after it, tests) publishes synchronously from every mark, so the
-boot and exit doors keep their semantics without a second protocol. ``rollback_readable``
-publishes embedded rows without the shared table (the restart exit and the shutdown kill),
-so an older body restores after a rollback.
+boot and exit doors keep their semantics without a second protocol. A process-ending door
+(``pre_restart_exit``; the shutdown kill as ``server_shutdown``) publishes embedded rows
+without the shared table, so an older body restores after a rollback.
 """
 
 from __future__ import annotations
@@ -53,17 +53,19 @@ log = logging.getLogger(__name__)
 
 #: ``queue.alive`` is refreshed inside the readers' freshness bound (``task_status``), without fsync.
 QUEUE_ALIVE_REFRESH_SEC = QUEUE_ALIVE_FRESH_SEC / 4
-#: A task value whose JSON is at least this long is published once, by content address.
-SHARED_MIN_BYTES = 1024
+#: A task value whose JSON is at least this many characters long may be shared by content address.
+SHARED_MIN_LENGTH = 1024
 #: Publications that always open a new generation, whatever the bytes.
-_FORCED_REASONS = frozenset({"startup", "pre_restart_exit"})
+_FORCED_REASONS = frozenset({"startup", "pre_restart_exit", "server_shutdown"})
+#: The process-ending doors: their publication embeds every row whole, without the shared table,
+#: so an older body restores it after a rollback (the restart exit; the shutdown kill of every door).
+_EXPORT_REASONS = frozenset({"pre_restart_exit", "server_shutdown"})
 _ALIVE_NAME = "queue.alive"
-_DOCUMENT_NAMES = ("queue_snapshot.json", "queue_dispatch.json", "direct_roots.json")
 
 # Revision: bumped under Q by every mark and capture. Published: the revision of the last
 # capture written. Kept: the (revision, custody) at which the saved queue was last kept.
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None,
-                          "alive_heartbeats": None, "alive_written_at": 0.0, "rollback_readable": False}
+                          "alive_heartbeats": None, "alive_written_at": 0.0}
 _PUBLISHER: Optional[threading.Thread] = None
 _PUBLISH_LOCK = threading.Lock()
 
@@ -71,8 +73,7 @@ _PUBLISH_LOCK = threading.Lock()
 def reset() -> None:
     """A new queue generation (``queue.init``): nothing marked, nothing published, no tick publisher."""
     global _PUBLISHER
-    _STATE.update(revision=0, published=0, reason="", kept=None, alive_heartbeats=None,
-                  alive_written_at=0.0, rollback_readable=False)
+    _STATE.update(revision=0, published=0, reason="", kept=None, alive_heartbeats=None, alive_written_at=0.0)
     _PUBLISHER = None
 
 
@@ -107,16 +108,24 @@ def persist_queue_snapshot(reason: str = "") -> Optional[bool]:
         _STATE["reason"] = reason
     if tick_publisher_alive():
         return True
-    return publish_queue_snapshot(reason)
+    return _publish_now(reason)
 
 
-def publish_queue_snapshot(reason: str = "", *, rollback_readable: bool = False) -> Optional[bool]:
+def publish_queue_snapshot(reason: str = "") -> Optional[bool]:
     """The barrier: capture under Q, write outside it, return only when the documents landed.
 
     True when published, False when the publication failed (the documents on disk are the
-    previous generation's), None when they are kept. ``rollback_readable`` embeds every row
-    whole, without the shared table, so an older body restores after a rollback.
+    previous generation's), None when they are kept. Without a live tick publisher the
+    barrier and the mark are one operation, so it goes through the queue's own
+    ``persist_queue_snapshot`` name: whatever stands in for the mark there (a test's stub)
+    stands in for the barrier too. A reason in ``_EXPORT_REASONS`` embeds every row.
     """
+    if not tick_publisher_alive():
+        return _queue().persist_queue_snapshot(reason=reason)
+    return _publish_now(reason)
+
+
+def _publish_now(reason: str) -> Optional[bool]:
     if not _queue().INITIALIZED:
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
         return None
@@ -125,7 +134,7 @@ def publish_queue_snapshot(reason: str = "", *, rollback_readable: bool = False)
     direct = collect_direct_roots()  # Never wait for an actor while holding Q.
     with _queue()._queue_lock:
         _STATE["revision"] += 1
-        capture = _capture(reason, direct, rollback_readable=rollback_readable)
+        capture = _capture(reason, direct)
     if capture is None:
         return None
     return _publish(capture)
@@ -163,7 +172,7 @@ def _frozen(value: Any) -> Any:
     return value
 
 
-def _capture(reason: str, direct: Dict[str, Any], *, rollback_readable: bool = False) -> Optional[Dict[str, Any]]:
+def _capture(reason: str, direct: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
@@ -212,8 +221,8 @@ def _capture(reason: str, direct: Dict[str, Any], *, rollback_readable: bool = F
     from ouroboros.server_restart import _AGENT_RESTART_REPLY, agent_restart_snapshot
 
     return {
-        "revision": _STATE["revision"], "reason": reason, "rollback_readable": rollback_readable,
-        "forced": reason in _FORCED_REASONS or rollback_readable,
+        "revision": _STATE["revision"], "reason": reason, "rollback_readable": reason in _EXPORT_REASONS,
+        "forced": reason in _FORCED_REASONS,
         "pending": pending_rows, "running": running_rows,
         "acceptance_fences": acceptance_fences, "budget_root_fences": budget_root_fences,
         "pool": _pool_counts(), "direct": direct,
@@ -313,12 +322,12 @@ def _share_replicated(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _digest(value: Any) -> str:
     """The content address of a large value, or "" for one too small to be worth sharing."""
     if isinstance(value, str):
-        if len(value) < SHARED_MIN_BYTES:
+        if len(value) < SHARED_MIN_LENGTH:
             return ""
         canonical = json.dumps(value, ensure_ascii=False)
     elif isinstance(value, (dict, list)) and value:
         canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        if len(canonical) < SHARED_MIN_BYTES:
+        if len(canonical) < SHARED_MIN_LENGTH:
             return ""
     else:
         return ""
@@ -331,8 +340,7 @@ def _publish(capture: Dict[str, Any]) -> bool:
     encoded = {name: machine_json(document) for name, document in documents.items()}
     with _PUBLISH_LOCK:
         previous = _queue().QUEUE_PUBLICATION
-        if (previous is not None and _STATE["published"] > capture["revision"] and not capture["forced"]
-                and not (capture["rollback_readable"] and not _STATE["rollback_readable"])):
+        if previous is not None and _STATE["published"] > capture["revision"] and not capture["forced"]:
             return True  # a later capture of this process already published newer documents
         changed = previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
         generation = uuid.uuid4().hex if changed else previous[2]
@@ -348,7 +356,6 @@ def _publish(capture: Dict[str, Any]) -> bool:
                 _certify(state, generation, capture["heartbeats"])
             if changed:
                 _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generation)
-                _STATE["rollback_readable"] = capture["rollback_readable"]
             _STATE["published"] = max(_STATE["published"], capture["revision"])
             return True
         except Exception:

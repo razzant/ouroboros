@@ -104,7 +104,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # capture reads the live maps and the publication record through the same handle.
     "supervisor/queue_publication.py": ("supervisor/queue.py", "_queue", frozenset({
         "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "INITIALIZED", "PENDING", "QUEUE_PUBLICATION",
-        "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock", "atomic_write_text",
+        "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock", "atomic_write_text", "persist_queue_snapshot",
     })),
     "supervisor/queue_timeouts.py": ("supervisor/queue.py", "_queue", frozenset({
         "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "FINALIZATION_GRACE_SEC", "HEARTBEAT_STALE_SEC", "PENDING",

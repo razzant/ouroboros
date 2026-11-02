@@ -966,8 +966,7 @@ def _perform_supervisor_restart(server,
             server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
         from supervisor.queue import publish_queue_snapshot
 
-        # Embedded rows: an older body after a rollback restores this document (queue_publication).
-        publish_queue_snapshot(reason="pre_restart_exit", rollback_readable=True)
+        publish_queue_snapshot(reason="pre_restart_exit")  # embedded rows: an older body restores it after a rollback
     except BaseException:
         from supervisor.queue import reopen_queue_returns
 
