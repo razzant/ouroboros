@@ -2,9 +2,9 @@
 
 Browser/CLI routes: `gateway/router.py`; Host Service: §12. Tests check this table in both directions. Shapes: `GET /api/contract`.
 
-`NetworkAuthGate` runs `browser_boundary.py` first on every request and handshake, loopback included: another site's or an opaque page gets 403 (WebSocket 4403), a non-JSON body on a JSON endpoint 415; passive files pass (limits: DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback access; loopback bypasses it. Health, login/logout, the widget bridge and GET/HEAD of the selected public `/auth/` assets stay reachable. A trusted proxy supplies client/TLS facts (`FORWARDED_ALLOW_IPS`; DEPLOYMENT). Sessions use an expiring HttpOnly HMAC cookie, `Secure` only under TLS. A pre-accept 4401 close reads as a refused handshake (1006); an HTTP 401 confirms sign-out, opens `/auth/login?next=`, resends nothing. Without a password, remote access stays open by operator choice. Widget lease reads take only their lease (§3) and authenticate nothing else.
+`NetworkAuthGate` runs `browser_boundary.py` first on every request and handshake, loopback included: another site's or an opaque page gets 403 (WebSocket 4403), a non-JSON body on a JSON endpoint 415; passive files pass (limits: DEPLOYMENT). `OUROBOROS_NETWORK_PASSWORD` gates non-loopback access with an expiring HMAC session cookie; a refused socket closes pre-accept (4401). Public routes (the widget bridge too), proxies, the cookie, sign-in and 401 handling: CLIENT_CONTRACT §3; DEPLOYMENT. Without a password, remote access stays open by operator choice. Widget lease reads take only their lease (§3) and authenticate nothing else.
 
-`server_web.ServedUI` applies `OUROBOROS_UI_DIR` (§7) once per generation for `/`, `/static/*` and optional directory pages `onboarding.html` and `auth/index.html`. The same record reaches the outer auth gate, the builtin index's response-only owner marker and `StateResponse.served_ui` (source, not asset digest). Selected files are trusted and unrewritten; invalid main selection falls back with a reason. `/onboarding` and `/auth/login` choose whole selected or builtin pages; `?builtin=1` forces recovery, including through authentication. `/auth/*` publishes only the selected public login bundle; login/logout operations precede it. Missing assets never mix clients. Builtin `/onboarding/static/*` and the author kit remain independent. Topology, recovery and client-owned releases: CLIENT_CONTRACT §2–4.
+`server_web.ServedUI` applies `OUROBOROS_UI_DIR` (§7) once per generation for `/`, `/static/*` and optional directory pages `onboarding.html` and `auth/index.html`. The same record reaches the outer auth gate, the builtin index's response-only owner marker and `StateResponse.served_ui` (source, not asset digest). Builtin `/onboarding/static/*` and the author kit remain independent. Selection and fallback, whole pages, `?builtin=1` recovery, the `/auth/*` bundle, topology and client-owned releases: CLIENT_CONTRACT §2–4.
 
 Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11). `gateway/host_service.py::create_host_service_app` builds the separate token-authenticated loopback Host Service, not a public owner API (§12).
 
@@ -217,7 +217,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 
 Update-status, log-tail and schedule-list reads run off the event loop.
 
-`/api/state` adds `current_questions`/`main_attention` and the work projection (`works`, `rooms`), each with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes; requests share one display publication per app, rebuilt only when its probed revision moved (`gateway/state_publication.py`), never an authority; actions reuse `/api/decisions` and task endpoints.
+`/api/state` adds `current_questions`/`main_attention` and the work projection (`works`, `rooms`), each with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes; requests share one display publication, rebuilt only when its revision moved (`gateway/state_publication.py`), never an authority; actions reuse `/api/decisions` and task endpoints.
 
 ### WebSocket protocol
 
@@ -235,7 +235,7 @@ Frames sent while disconnected wait in a bounded process-local queue (oldest dro
 
 Off-loop acceptance confines attachment specs to upload-root basenames bound to measured `size`/`sha256`, so bytes swapped under the path afterwards are rejected rather than staged; model pixels come only from staged files. The web owner identity is fixed: `chat_id` selects a thread and cannot mint an external owner identity.
 
-A `command` frame routes through the bridge without rebroadcast; authorization, queue authority and outcomes remain outside the socket module. Panic bypasses the queue; `panic_accepted` acknowledges its latch, never exit. The browser uses its existing connection without replay (§9); other header controls retain ordinary command routing. Prose never implies a command (BIBLE P5).
+A `command` frame routes through the bridge without rebroadcast; authorization, queue authority and outcomes remain outside the socket module. Panic bypasses the queue on the existing connection (`panic_accepted`, no replay: §9); other header controls retain ordinary command routing. Prose never implies a command (BIBLE P5).
 
 #### Frame addressing
 
@@ -245,7 +245,7 @@ Project chat, typing, media and log frames carry `chat_id`; each Project panel c
 
 Extension WebSocket traffic is namespaced by `extension_loader.extension_surface_name()`, so an extension cannot shadow a built-in type. Each incoming extension frame resolves its owning skill and rechecks that the extension is still desired, reviewed, granted, enabled and live; out-of-process handlers run in their extension child off the event loop. A non-`None` result returns as `<request-type>.reply`; a missing or failed handler becomes a typed error log frame, never ending the socket loop.
 
-Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open browser delays only itself; a broadcast is encoded once, only while a socket is open, a burst reaching the loop in one flush. A failed send retires its socket and writes `broadcast_partial_failure` off the loop; the domain event stays owned by its durable producer. Restart shutdown closes remaining clients with code 1012 so they enter the ordinary reconnect path.
+Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open browser delays only itself; a broadcast is encoded once, for open sockets only, one loop wake per burst (`ws.py`). A failed send retires its socket and writes `broadcast_partial_failure` off the loop; the domain event stays owned by its durable producer. Restart shutdown closes remaining clients with code 1012 so they enter the ordinary reconnect path.
 
 #### Reconnect and recovery
 

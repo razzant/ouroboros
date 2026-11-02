@@ -94,10 +94,10 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   address (`dialogue_store.py::append`) or reduces current rows (`delegate_custody_current.py`);
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
   one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3); one
-  census per tree for every consumer (`tree_census.writer_facts`); exact reuse by source identity,
-  never time, pinned against a fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`);
-  rows kept by stamp, each reader deriving its own verdict (`delegate_custody_current.held_runs`,
-  `task_store.owing_documents`); stored results admitted in one batch (`obligations.result_rows`).
+  census per tree (`tree_census.writer_facts`); reuse by source identity, never time, against a
+  fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`); rows kept by stamp, verdicts
+  per reader (`delegate_custody_current.held_runs`, `task_store.owing_documents`); one batch of
+  stored results (`obligations.result_rows`).
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
@@ -189,10 +189,9 @@ never call it; no notification state survives reload.
 
 The room gate refuses hidden, A2A and unknown chats. Each task ending has one key;
 a direct ending is an ordinary reply. Frame lineage excludes child banners.
-Activation resolves exact Project identity through `GET /api/projects?chat_id=…`,
-independent of the capped sidebar. Missing, inactive or unreadable destinations show
-unavailable without navigating. Established Main notices, including Telegram, open Main.
-A later click supersedes an unfinished lookup; hydration stays silent.
+Activation follows ARCHITECTURE §3 (exact registry identity, never the capped sidebar;
+an unresolved destination shows unavailable, keeping the view; Main notices open
+Main); a later click supersedes an unfinished lookup; hydration stays silent.
 
 Classification and gating are pure over a frame and stored preferences, testable
 without DOM or socket. Preferences stay client-local, outside `s-`, settings-dirty
