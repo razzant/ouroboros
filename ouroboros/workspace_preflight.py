@@ -208,7 +208,11 @@ _SESSION_TOOLS = ("uv", "git", "python3", "node", "npm")
 PACKAGE_DOWNLOADS_DIRNAME = "package-downloads"
 _CACHE_VARIABLES = (("uv", "UV_CACHE_DIR"), ("pip", "PIP_CACHE_DIR"), ("npm", "npm_config_cache"))
 _LISTED_DEPENDENCY_FILES = 16
-SNAPSHOT_ENVIRONMENT_NOTE = "inside this copy, where a top-level .venv and any node_modules are never captured as work product"
+# Where a root-started Git copy may build an environment (#2642); its evidence folder consults no ignore rule.
+SNAPSHOT_ENVIRONMENT_NOTE = ("either outside every Git working tree or inside this copy as new files Git ignores "
+                             "here, never in its evidence folder: generated build/dependency output is not "
+                             "automatically excluded from the capture; Git ignore rules keep new untracked files out, "
+                             "and tracking overrides them")
 ENVIRONMENT_FACTS_HEADING = (
     "\n\nPROJECT ENVIRONMENT (host facts observed when this session started; nothing was installed for it)\n")
 
@@ -717,7 +721,8 @@ def session_service_facts(service: ServiceDirectories, data_root: Any) -> str:
     caches = service.roots[1:] if service.roots else [str(cache / name) for name, _variable in _CACHE_VARIABLES]
     links = "" if sys.platform == "darwin" else "; with it set UV_LINK_MODE=copy so no installed file is shared"
     held = (f"the scratch {service.scratch} for disposable process state (test temporaries, package-manager "
-            f"temporaries through TMPDIR, a folder session's environment), {DISPOSABLE_SCRATCH}.")
+            f"temporaries through TMPDIR, build output and tool caches, a folder session's environment), "
+            f"{DISPOSABLE_SCRATCH}.")
     grant = (f"- Writes your engine grants this run outside this copy (execution.auxiliaryWritableRoots): {held} "
              "The three download-cache folders are listed below.\n" if service.roots else
              "- Outside this copy the host made this run's own scratch; no engine grant is sent, since full "
