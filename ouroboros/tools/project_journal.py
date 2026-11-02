@@ -30,6 +30,7 @@ from ouroboros.project_facts import (
 )
 from ouroboros.dialogue_provenance import is_presence_task, presence_caller_binding
 from ouroboros.focus import normalize_focus
+from ouroboros.task_carrier import inline_execution
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import completed_local_read
 from ouroboros.utils import (
@@ -621,6 +622,17 @@ def _retain_focus_source(canonical: pathlib.Path, task_id: str, source: Dict[str
     return {key: ref[key] for key in ("kind", "root", "path", "size", "sha256")}
 
 
+def _bound_project(root: Any, task_id: str) -> str:
+    """This task's own durable Project binding; an unreadable registry binds nothing here."""
+    from ouroboros.projects_registry import project_id_for_task
+
+    try:
+        return project_id_for_task(root, task_id, strict=True)
+    except Exception:
+        log.debug("focus project binding unreadable for %s", task_id, exc_info=True)
+        return ""
+
+
 def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
     """Publish one short authored focus onto this live root's existing records."""
     metadata = getattr(ctx, "task_metadata", {})
@@ -631,9 +643,17 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             "_presence_turn": bool(getattr(ctx, "_presence_turn", False)),
             "_presence_origin": getattr(ctx, "_presence_origin", None)}
     authority, _ = _scope_authority(ctx)
-    if authority != "root" or is_presence_task(task):
-        return "⚠️ TOOL_FORBIDDEN (update_focus): only an independent project/root task may publish focus"
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    import pathlib
+
+    canonical = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
+    # A live inline Presence speaker a move bound to a Project is that Project's work: its focus is
+    # dated context there, never authority, a new principal or speech outside (``presence_turn_is_live``).
+    inline = bool(authority == "presence" and is_presence_task(task) and task_id
+                  and metadata.get("presence_event_identity") and not metadata.get("parent_task_id")
+                  and _bound_project(canonical, task_id))
+    if not inline and (authority != "root" or is_presence_task(task)):
+        return "⚠️ TOOL_FORBIDDEN (update_focus): only an independent project/root task may publish focus"
     if not task_id:
         return "⚠️ TOOL_ARG_ERROR (update_focus): task_id is required"
     # The schema requires only ``reader``; a project reader without an explicit
@@ -644,11 +664,24 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
         own_project = str(placed_project_id(ctx) or "").strip()
         if own_project:
             source_ref = {**source_ref, "project_id": own_project}
+    from ouroboros.presence_runner import presence_turn_is_live
     from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
-    import pathlib
 
-    canonical = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or getattr(ctx, "drive_root", "")))
-    direct = bool(getattr(ctx, "is_direct_chat", False))
+    # The current carrier owns liveness; ``is_direct_chat`` keeps the origin after
+    # continue_in_background hands the same work to the pool. A bound inline Presence
+    # author is live by its own runner, never by the direct registry.
+    direct = inline_execution(ctx) and not inline
+    attempt_owner = metadata.get("_execution_owner")
+
+    def _live(row: Dict[str, Any]) -> bool:
+        """RUNNING and, for a pooled attempt, still the one the row names: a new attempt rebinds it."""
+        recorded = row.get("execution_owner")
+        superseded = (isinstance(attempt_owner, dict) and attempt_owner.get("kind") == "pooled"
+                      and isinstance(recorded, dict) and recorded != attempt_owner)
+        return str(row.get("status") or "") == STATUS_RUNNING and not superseded
+
+    if inline and not presence_turn_is_live(task_id, drive_root=canonical):
+        return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current Presence turn is no longer live"
     if direct:
         try:
             from supervisor.workers import direct_chat_turn
@@ -658,7 +691,7 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
             return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current direct turn is no longer live"
     else:
         current = load_task_result(canonical, task_id)
-        if isinstance(current, dict) and str(current.get("status") or "") != STATUS_RUNNING:
+        if isinstance(current, dict) and not _live(current):
             return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
     try:
         focus = normalize_focus(text, source_ref, task_id=task_id)
@@ -681,7 +714,7 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
         return f"⚠️ FOCUS_SOURCE_UNRETAINED (update_focus): the source answer could not be retained ({type(exc).__name__})"
 
     def _project(current: Dict[str, Any], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if str(current.get("status") or "") != STATUS_RUNNING:
+        if not _live(current):
             return None
         prior = current.get("focus")
         if prior:
@@ -694,7 +727,7 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
     # A direct turn is owned by the live ingress actor rather than the queue.
     # Hold its existing admission lock across the liveness check and the locked
     # result write, then require the same actor projection to accept the stamp.
-    lock = getattr(ctx, "owner_message_admission_lock", None) if direct else None
+    lock = getattr(ctx, "owner_message_admission_lock", None) if direct or inline else None
     guard = lock if lock is not None else nullcontext()
     try:
         with guard:
@@ -702,11 +735,13 @@ def _update_focus(ctx: ToolContext, text: str, source_ref: Any) -> str:
                 from supervisor.workers import direct_chat_turn, stamp_direct_chat_turn
                 if direct_chat_turn(task_id) is None:
                     return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current direct turn is no longer live"
+            if inline and not presence_turn_is_live(task_id, drive_root=canonical):
+                return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current Presence turn is no longer live"
             current = load_task_result(canonical, task_id)
-            if not isinstance(current, dict) or str(current.get("status") or "") != STATUS_RUNNING:
+            if not isinstance(current, dict) or not _live(current):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
             stored = write_task_result(canonical, task_id, STATUS_RUNNING, focus=focus, _field_projector=_project)
-            if not isinstance(stored, dict) or str(stored.get("status") or "") != STATUS_RUNNING:
+            if not isinstance(stored, dict) or not _live(stored):
                 return "⚠️ FOCUS_TASK_NOT_LIVE (update_focus): the current task is no longer live"
             if stored.get("focus") != focus:
                 return "⚠️ FOCUS_STALE (update_focus): a newer focus already exists"

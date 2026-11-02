@@ -775,13 +775,12 @@ def save_skill_grants(
     granted_permissions: Optional[List[str]] = None,
     requested_permissions: Optional[List[str]] = None,
 ) -> None:
-    """Persist grants, merging partial approvals only for the same request hash."""
+    """Persist grants, merging partial approvals only for the same content hash. The same bytes keep
+    earlier approvals of items still requested: a key set grown by saved Settings adds a missing key,
+    never revokes another or grants it (``_merge_allowed`` keeps only the current request)."""
     allowed = set(requested_core_setting_keys(requested_keys))
     existing = load_skill_grants(drive_root, name)
-    persisted_match = (
-        str(existing.get("content_hash") or "") == str(content_hash or "")
-        and sorted(existing.get("requested_keys") or []) == sorted(allowed)
-    )
+    persisted_match = str(existing.get("content_hash") or "") == str(content_hash or "")
     merged = _merge_allowed(
         existing.get("granted_keys") if persisted_match else [],
         granted_keys,
@@ -838,9 +837,10 @@ def grant_status_for_skill(drive_root: pathlib.Path, skill: LoadedSkill) -> Dict
     )
     grants = load_skill_grants(drive_root, skill.name)
     grant_hash_ok = str(grants.get("content_hash") or "") == str(skill.content_hash or "")
-    grant_request_ok = sorted(grants.get("requested_keys") or []) == sorted(requested)
     permission_request_ok = sorted(grants.get("requested_permissions") or []) == sorted(requested_permissions)
-    persisted_grants = set(grants.get("granted_keys") or []) if grant_hash_ok and grant_request_ok else set()
+    # Same bytes: an approved key stays approved while still requested, whatever else saved Settings
+    # now adds to the request (a newly present custom key joins it missing, never granted).
+    persisted_grants = set(grants.get("granted_keys") or []) if grant_hash_ok else set()
     persisted_permissions = (
         set(grants.get("granted_permissions") or [])
         if grant_hash_ok and permission_request_ok
@@ -924,22 +924,19 @@ def auto_grant_if_enabled(drive_root: pathlib.Path, skill: LoadedSkill) -> AutoG
     )
 
 
-def _safe_listdir(root: pathlib.Path) -> List[pathlib.Path]:
+def _safe_listdir(root: pathlib.Path, *, strict: bool = False) -> List[pathlib.Path]:
     try:
         return sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
     except OSError:
+        if strict:
+            raise
         log.warning("Failed to list skills repo %s", root, exc_info=True)
         return []
 
 
 def _looks_like_skill_dir(path: pathlib.Path) -> bool:
     """Return True when ``path`` directly contains a skill manifest."""
-    if not path.is_dir():
-        return False
-    for candidate in _MANIFEST_NAMES:
-        if (path / candidate).is_file():
-            return True
-    return False
+    return path.is_dir() and any((path / candidate).is_file() for candidate in _MANIFEST_NAMES)
 
 
 def load_skill(
@@ -1124,12 +1121,8 @@ def _classify_skill_location(
             return SKILL_SOURCE_EXTERNAL
         except ValueError:
             pass
-    if user_repo_root is not None:
-        try:
-            resolved.relative_to(user_repo_root.resolve())
-            return SKILL_SOURCE_USER_REPO
-        except ValueError:
-            pass
+    if user_repo_root is not None and resolved.is_relative_to(user_repo_root.resolve()):
+        return SKILL_SOURCE_USER_REPO
     return SKILL_SOURCE_EXTERNAL
 
 
@@ -1138,6 +1131,7 @@ def _skill_location_inventory(
     repo_path: str | None = None,
     *,
     selected_manifestless_name: str = "",
+    listdir: Optional[Callable[[pathlib.Path], List[pathlib.Path]]] = None,
 ) -> tuple[_SkillLocationCandidate, ...]:
     """Inventory data buckets and connected local roots, using the projected settings without disk reads."""
     from ouroboros.config import SKILL_SOURCE_SUBDIRS
@@ -1173,6 +1167,7 @@ def _skill_location_inventory(
             selected_manifestless_name=selected_manifestless_name,
             include_manifestless_root=include_manifestless_root,
             excluded_manifestless_children=excluded_children,
+            listdir=listdir,
         ):
             try:
                 resolved = entry.resolve()
@@ -1387,9 +1382,12 @@ def _load_skill_location_candidates(
 def discover_skills(
     drive_root: pathlib.Path,
     repo_path: str | None = None,
+    *,
+    strict: bool = False,
 ) -> List[LoadedSkill]:
-    """Scan data-plane skills plus the optional user checkout."""
-    candidates = _skill_location_inventory(drive_root, repo_path=repo_path)
+    """Scan data-plane skills plus the optional user checkout; ``strict`` raises on an unlistable directory."""
+    candidates = _skill_location_inventory(
+        drive_root, repo_path=repo_path, listdir=(lambda root: _safe_listdir(root, strict=True)) if strict else None)
     return _load_skill_location_candidates(candidates, drive_root=drive_root)
 
 

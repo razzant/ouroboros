@@ -6,17 +6,19 @@ Q16/Q17; Max-Review-Cycles fix round).
 The ``paid`` fact of Max-Review-Cycles accounting is recorded at PHYSICAL
 dispatch: a gate that must durably record "this wave spent reviewer money"
 installs a :class:`ReviewPaidStamp` on ``ctx._review_paid_stamp`` for the
-duration of its wave, and the shared reviewer transport entry
-(``review_custody.run_custodied_review_slots``) invokes it after slot resolution and
-immediately before worker fan-out. The coordinator also captures that exact
-once-only object: session routes invoke it before their replayable
-``START_REQUESTED`` row, while API routes bind it for the canonical physical-
-attempt boundary. Assembly-only refusals (triad fit ladder, scope pack signals,
-skill prompt building) exit before the seam, so a $0 attempt stays outside
-every ceiling; a worker that outlives its logical caller cannot race the
-write-ahead fact, and a crash after dispatch keeps the durable paid fact.
-Commit review verifies this write fail-closed; other callers retain historical
-fail-open accounting. This seam also hosts the L-review lane's two-phase admission.
+duration of its wave. Its optional reservation write records the wave's roster
+before any worker starts (``parallel_review``); the coordinator captures the
+once-only stamp itself: session routes invoke it before their replayable
+``START_REQUESTED`` row, API routes bind it for the canonical physical-attempt
+boundary, and the custody entry (``review_custody.run_custodied_review_slots``)
+invokes it only for an executor that owns no route stamp. Assembly-only
+refusals, replays and refusals before a send never reach it (a rejoin's own
+send stamps the attempt it collects), so a $0 attempt stays outside every
+ceiling; a worker that outlives its logical caller stamps the row its
+reservation wrote, and a crash after dispatch keeps the durable paid fact.
+Commit review verifies these writes fail-closed; other callers retain
+historical fail-open accounting. This seam also hosts the L-review lane's
+two-phase admission.
 """
 
 from __future__ import annotations
@@ -68,8 +70,12 @@ class ReviewPaidStamp:
 
     def __init__(
         self, write: Callable[[], None], *, fail_closed: bool = False,
+        reserve: Callable[[], None] | None = None,
     ) -> None:
         self._write = write
+        # The wave's roster row, written before any worker starts; ``write`` then
+        # adds only the paid fact to it at the first physical send.
+        self.reserve = reserve
         self._lock = threading.Lock()
         self.fail_closed = bool(fail_closed)
         self._failure: Exception | None = None
@@ -154,6 +160,13 @@ def stamp_review_paid_on_dispatch(ctx: Any) -> None:
     invoke_review_paid_stamp(
         getattr(ctx, "_review_paid_stamp", None) if ctx is not None else None
     )
+
+
+def reserve_review_roster(ctx: Any) -> None:
+    """Write the caller-installed stamp's roster reservation; its failure propagates."""
+    reserve = getattr(getattr(ctx, "_review_paid_stamp", None), "reserve", None) if ctx is not None else None
+    if callable(reserve):
+        reserve()
 
 
 def review_operation_binding(request: Any, slot: Any, operation_id: str) -> dict:

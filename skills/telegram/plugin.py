@@ -942,15 +942,6 @@ async def _handle_owner_message(
         header, keyboard = _build_language_keyboard(lang)
         await client.send_message_with_inline_keyboard(chat_id, header, keyboard)
         return
-    if cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@"):
-        requested = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
-        if requested:
-            async def _reply(message: str) -> None:
-                await client.send_message(chat_id, message)
-
-            await _choose_language(api, requested, lang, _reply)
-            return
-
     # Handle /help command locally — always allowed
     is_help_cmd = _is_exact_bot_command(cleaned_text, "/help")
     if is_help_cmd:
@@ -977,6 +968,25 @@ async def _handle_owner_message(
             await client.send_message(chat_id, _LOCALIZED_TEXTS[lang]["panic_unconfirmed"])
         return
 
+    # Local commands are done. Look up the replied-to card once, before any payload forwarding;
+    # a secret reply stays local even when it has no text or resembles a slash command.
+    reply_to = message.get("reply_to_message") or {}
+    quiz_ref = None
+    if isinstance(reply_to, dict) and reply_to:
+        quiz_ref = telegram_quiz.quiz_for_message(api, chat_id, int(reply_to.get("message_id") or 0))
+    if quiz_ref and quiz_ref.get("secret"):
+        await telegram_quiz.answer_from_reply(api, client, quiz_ref, "", chat_id=chat_id,
+                                              update_id=update_id, lang=lang, post=_host_post)
+        return
+
+    if cleaned_text.startswith("/language ") or cleaned_text.startswith("/language@"):
+        requested = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+        if requested:
+            async def _reply(message: str) -> None:
+                await client.send_message(chat_id, message)
+
+            await _choose_language(api, requested, lang, _reply)
+            return
 
     # Translate commands to safe natural-language text.
     # _translate_command returns None when the command is rejected.
@@ -995,11 +1005,7 @@ async def _handle_owner_message(
             )
         return
 
-    reply_to = message.get("reply_to_message") or {}
     if safe_text and not _SLASH_COMMAND_RE.match(text) and isinstance(reply_to, dict) and reply_to:
-        quiz_ref = telegram_quiz.quiz_for_message(
-            api, chat_id, int(reply_to.get("message_id") or 0),
-        )
         if quiz_ref is not None:
             # A reply to a quiz card is the owner's own answer to
             # that question, not a new chat turn (#472).
@@ -1368,7 +1374,9 @@ def _make_quiz(api, cue: TypingCue | None = None):
             question = str(event.get("question") or "").strip()
             raw_options = event.get("options") if isinstance(event.get("options"), list) else []
             # Shared quiz contract cap: ouroboros.tools.core._MAX_QUIZ_OPTIONS.
-            plain_labels, details, recommended_index = telegram_quiz.card_options(raw_options, limit=6)
+            # A secret request is a note on where to enter it: no options, no reply prompt.
+            secret = isinstance(event.get("secret_request"), dict)
+            plain_labels, details, recommended_index = telegram_quiz.card_options([] if secret else raw_options, limit=6)
             # Buttons and the remembered record keep the starred caption; an open
             # question (no options) is a card without buttons (TZ-2 B1).
             labels = telegram_quiz.button_labels(plain_labels, recommended_index)
@@ -1382,7 +1390,7 @@ def _make_quiz(api, cue: TypingCue | None = None):
             stake = str(event.get("stake") or "").strip()
             assumption = str(event.get("assumption") or "").strip()
             lang = _poller_preferences(api)[4]
-            wait_for_answer = event.get("wait_for_answer") is True
+            wait_for_answer = event.get("wait_for_answer") is True and not secret
             # Both optional: events from an older host carry neither.
             project_name = str(event.get("project_name") or "").strip()
             host_facts = str(event.get("host_facts") or "").strip()
@@ -1403,7 +1411,8 @@ def _make_quiz(api, cue: TypingCue | None = None):
             async with telegram_quiz.card_lock(token), _cue_message(cue, chat_id) as delivered:
                 message_id, overflowed = await telegram_quiz.send_quiz_card(
                     client, chat_id, body=body, compact=compact,
-                    hint_text=telegram_quiz.hint(lang) if labels else telegram_quiz.hint_open(lang),
+                    hint_text=(telegram_quiz.hint_secret(lang) if secret else telegram_quiz.hint(lang) if labels
+                               else telegram_quiz.hint_open(lang)),
                     keyboard=telegram_quiz.quiz_keyboard(token, labels),
                     reserve=telegram_quiz.answered_edit_reserve(lang),
                 )
@@ -1418,7 +1427,7 @@ def _make_quiz(api, cue: TypingCue | None = None):
                 telegram_quiz.remember_quiz(api, token, {
                     "task_id": task_id, "quiz_id": quiz_id, "chat_id": chat_id,
                     "message_id": int(message_id or 0), "options": labels,
-                    "text": settled_text,
+                    "text": settled_text, **({"secret": True} if secret else {}),
                 })
                 await telegram_quiz.apply_retained_fact(api, token, lang, client_factory=lambda: client, published=event)
         except Exception as exc:

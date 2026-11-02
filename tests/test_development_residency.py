@@ -14,6 +14,8 @@ import pytest
 
 from ouroboros.context_input_selection import development_resident
 
+KEY = "context_requires_development"
+
 
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
@@ -109,3 +111,31 @@ def test_start_task_carries_an_explicit_answer_to_the_admitted_task_and_absence_
 
     task, _row, _workers = _promoted(tmp_path, monkeypatch, **({} if flag is None else {"context_requires_development": flag}))
     assert task.get("context_requires_development", "absent") == ("absent" if flag is None else flag)
+
+
+# --- What the caller reads ------------------------------------------------------------------------------------------
+
+def test_the_public_schema_says_what_true_costs_and_a_subject_caller_omits_it():
+    from ouroboros.openai_chat_custom import project_function_tools_to_openai_custom
+    from ouroboros.tools.control import get_tools
+
+    schema = next(tool for tool in get_tools() if tool.name == "start_task").schema
+    description = schema["parameters"]["properties"][KEY]["description"]
+    assert "every mode" in description and "chapter map" in description
+    # The custom codec drops parameter descriptions: the lead it actually sends carries the conditions, once.
+    wire = project_function_tools_to_openai_custom([{"type": "function", "function": schema}]).wire_tools()[0]
+    lead = (wire.get("custom") or wire)["description"].split("\n")[0]
+    clause = ("Set context_requires_development=true only when the task itself needs the whole development handbook in "
+              "every mode, never for its subject; a route too small for it refuses the task.")
+    assert clause in lead and lead.count("context_requires_development") == 1
+    assert "default" not in schema["parameters"]["properties"][KEY] and KEY not in schema["parameters"]["required"]
+    assert "Low/Nano and helpers keep their usual book maps" in schema["parameters"]["properties"][
+        "context_requires_self_body_docs"]["description"]
+
+
+def test_no_public_door_gained_the_requirement():
+    from ouroboros.gateway import tasks as api
+    from ouroboros.tools import control_subagent_spec
+
+    assert "task_contract" in api._RESERVED_METADATA_KEYS
+    assert KEY not in control_subagent_spec.schedule_subagent_properties()

@@ -23,6 +23,8 @@ ORIGIN = "https://ouroboros-agent.ai"
 INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
+    "/privacy/": SITE / "privacy" / "index.html",
+    "/terms/": SITE / "terms" / "index.html",
     "/paper/": SITE / "paper" / "index.html",
     "/install/": SITE / "install" / "index.html",
     "/benchmarks/": SITE / "benchmarks" / "index.html",

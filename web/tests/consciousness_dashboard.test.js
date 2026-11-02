@@ -11,7 +11,7 @@ import {
     countedRootsText, dashboardPlaceRowHtml, factsLineParts, headlineView, initConsciousnessDashboard, liveWake,
     paintWakeRows, placesCardHtml, summaryHtml, wakeRowHtml, wakesCardHtml,
 } from '../modules/consciousness_dashboard.js';
-import { noteLeadText, wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
+import { wakeCheckText, wakeCostText } from '../modules/consciousness_words.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 const FIXTURE = JSON.parse(fs.readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
@@ -439,12 +439,18 @@ test('a failed read keeps the earlier values and says so', async () => {
     }
 });
 
-test('the relay note lead keeps every word and only trims its edges', () => {
-    assert.equal(noteLeadText('  First words\n\nThen the whole note.  '), 'First words\n\nThen the whole note.');
-    assert.equal(noteLeadText(null), '');
-    assert.equal(noteLeadText(wake('214a31b6').note), wake('214a31b6').note);
-    const relay = fs.readFileSync(new URL('../modules/chat_relay_deck.js', import.meta.url), 'utf8');
-    assert.match(relay, /words: noteLeadText\(/, 'the relay and Dashboard share the lead implementation');
+test('a wake without a summary leads with its whole note, edges trimmed; a summary leads instead; more holds the note', () => {
+    // A short first paragraph, then the part that matters: the lead holds every word; CSS alone cuts it to one line.
+    const note = '\n  Swept the stale ports.\n\nThe tail that matters: the Slack token expires on Friday.  \n';
+    const lead = wakeRowHtml({ ...wake('214a31b6'), note });
+    const [collapsed, disclosed] = [lead.split('<details')[0], lead.slice(lead.indexOf('<details'))];
+    assert.ok(collapsed.includes(`<p class="consciousness-wake-lead" data-i18n-authored>${note.trim()}</p>`), collapsed);
+    assert.ok(disclosed.includes(`data-i18n-authored>${note}</div>`), 'more holds the note as stored');
+    const named = wakeRowHtml({ ...wake('214a31b6'), note, summary: 'Ports swept; one token to renew.' });
+    const summary = '<p class="consciousness-wake-summary" data-i18n-authored>Ports swept; one token to renew.</p>';
+    assert.ok(named.split('<details')[0].includes(summary), 'the summary leads, whole');
+    assert.doesNotMatch(named, /consciousness-wake-lead/, 'a summary leads instead of the note');
+    assert.ok(named.includes(`data-i18n-authored>${note}</div>`), 'and more still holds the whole note');
 });
 
 test('unavailable wakes keep the authored reason and painted rows, unlike an absent key or empty window', (t) => {

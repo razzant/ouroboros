@@ -48,6 +48,40 @@ def changed_worktree_paths(
     return parse_changed_paths_from_porcelain(stdout)
 
 
+def _version_sync_due(repo_dir: pathlib.Path, paths: list[str] | None) -> bool:
+    """The staging sync's trigger: VERSION is selected or changed in the worktree."""
+    selected = set(str(p) for p in (paths or []) if str(p).strip())
+    return "VERSION" in selected or "VERSION" in set(changed_worktree_paths(repo_dir))
+
+
+def version_sync_refusal(repo_dir: pathlib.Path, paths: list[str], attribution: dict) -> str:
+    """The refusal owed before the sync due for this staging would carry work its selection does not take:
+    a carrier it would rewrite and stage whole, or VERSION when it would rewrite carriers from that value,
+    holding known foreign changes or uncertain ones the selection left out. Read only; "" lets the sync
+    run, clean and selected carriers included."""
+    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS, sync_release_metadata
+
+    foreign = set(attribution.get("excluded_preexisting_dirty") or [])
+    held = foreign | set((attribution.get("selection") or {}).get("left_out") or [])
+    if not held & CARRIER_SPAN_PATHS or not _version_sync_due(repo_dir, paths):
+        return ""
+    try:
+        writes = set(sync_release_metadata(str(repo_dir), write=False))
+    except Exception:  # the sync would stop at the same unreadable carrier, after rewriting those before it
+        writes = set(CARRIER_SPAN_PATHS) - {"VERSION"}
+    carried = sorted(held & (writes | ({"VERSION"} if writes else set())))
+    if not carried:
+        return ""
+    facts = "; ".join(f"{path} (" + ("already changed when this task's baseline was captured" if path in foreign
+                                     else "attribution uncertain, not in paths") + ")" for path in carried)
+    remedies = [text for text, owed in (
+        ("name an uncertain carrier in paths to review it with that gap disclosed", set(carried) - foreign),
+        ("retry known foreign work once it is committed or set aside", set(carried) & foreign)) if owed]
+    return ("⚠️ GIT_ATTRIBUTION_BLOCKED: this commit's VERSION sync would rewrite release carriers and stage them "
+            f"whole, with work this selection does not take: {facts}. Nothing was synced, staged or reviewed; "
+            f"{'; '.join(remedies)}.")
+
+
 def auto_sync_release_metadata_if_needed(
     ctx: ToolContext,
     repo_dir: pathlib.Path,
@@ -55,9 +89,7 @@ def auto_sync_release_metadata_if_needed(
     paths: list[str] | None,
 ) -> list[str]:
     """Sync VERSION-derived carriers before admission snapshot hashing."""
-    selected = set(str(p) for p in (paths or []) if str(p).strip())
-    touched = set(changed_worktree_paths(repo_dir))
-    if "VERSION" not in selected and "VERSION" not in touched:
+    if not _version_sync_due(repo_dir, paths):
         return []
     try:
         from ouroboros.tools.release_sync import sync_release_metadata

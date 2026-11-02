@@ -195,8 +195,8 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_reset_commit_review_state",
         "_review_binding_precondition_error", "_review_custody_pending",
         "_review_cycle_infra_failure", "_run_parallel_review",
-        "_run_reviewed_stage_cycle", "_stage_candidate_for_review",
-        "_subject_binding_mismatch_outcome", "_unstage_binaries",
+        "_run_reviewed_stage_cycle", "_stage_candidate_for_review", "_staged_index",
+        "_subject_binding_mismatch_outcome", "_unstage_binaries", "_unstage_candidate",
         "classify_review_block", "handle_revalidation_failure",
         "mode_allows_protected_write", "paths_from_name_status",
         "protected_paths_in", "run_cmd", "safe_relpath",
@@ -403,7 +403,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "review_executions_from_actor_usage",
     })),
     "ouroboros/review_state_custody.py": ("ouroboros/review_state.py", "_rs", frozenset({
-        "_truncate_review_artifact", "_utc_now", "update_state",
+        "ReviewStateMutation", "_truncate_review_artifact", "_utc_now", "load_state", "update_state",
     })),
     "ouroboros/review_state_model.py": ("ouroboros/review_state.py", "_rs", frozenset({
         "CommitReadinessDebtItem", "ObligationItem", "_DEFAULT_TOOL_NAME",

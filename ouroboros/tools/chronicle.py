@@ -20,7 +20,12 @@ choice of the common view: show the account (``shown``) in place of the records 
 names (``replaces``), or withdraw it. ``memory_read`` of an account names who wrote
 it, which versions informed it, what changed in a source since (a later correction,
 a decision, a local fold, a missing record) and how to read each original;
-``revision`` reads a record as of one of its revisions.
+``revision`` reads a record as of one of its revisions. ``proposed_selection`` reads,
+before the choice, what a selection would change in my story and a room's page and
+every record it would tell or stop telling, from one state, checked by the write's own rules and
+writing nothing; its pages continue one document (``fingerprint``, named in every page's header). The selection's
+write returns a counted receipt of the teller relations read after it, never a claim about display.
+An account's verified ``quotes`` are checked as a page's are.
 
 A delegated child or nanny is not the integrating mind: the host signs its
 page or part as a helper's draft carrying its own focus, which acts at once until
@@ -62,11 +67,12 @@ from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recor
                                           row_author, wordless_reaction)
 from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
-from ouroboros.memory_view_account import source_change_lines
+from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
+                                         told_records)
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import sha256_text, utc_now_iso
 
 _LINEAGE = ("task_id", "parent_task_id", "root_task_id")
 _ORDER = "older to newer"
@@ -437,7 +443,8 @@ def _write_account(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str
     sources = a["sources"]
     if not isinstance(sources, list) or not sources:
         return _arg_error(ctx, "an account needs sources: the records it is based on, each {id, revision?} or an id")
-    result = store.publish_account(room_id=_room(ctx, root, a["room_id"]), text=a["text"], sources=sources, author=author)
+    result = store.publish_account(room_id=_room(ctx, root, a["room_id"]), text=a["text"], sources=sources, author=author,
+                                   quotes=a["quotes"] or (), quote_resolver=_quote_resolver(root, row_lineage(root)))
     ids = [src.get("id") if isinstance(src, dict) else src for src in sources]
     return _published(ctx, result, sources=len(sources) if result.ok else None, effect=_fold_effect(
         store, "wrote an account over", ids, a["text"]) + " It tells nothing in their place until a selection shows it."
@@ -455,10 +462,41 @@ def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[s
     result = store.select_account(str(a["target_id"]), replaces=[str(r) for r in replaces], author=author,
                                   reason=str(a["reason"] or ""), shown=shown)
     effect = (_fold_effect(store, "the account now tells", replaces, str((store.get(str(a["target_id"])) or {}).get("text") or ""))
-              if shown else "withdrawn: the account leaves the common view and the records it told return there. This "
+              if shown else "withdrawal saved: other selections and folds still determine what appears. This "
               "task's view is not refreshed; the next start re-measures its Max room.")
     return _published(ctx, result, replaces=len(replaces) if result.ok else None, shown=shown if result.ok else None,
-                      effect=effect if result.ok else None)
+                      effect=effect if result.ok else None,
+                      receipt=_selection_receipt(root, store, result.record) if result.ok else None)
+
+
+def _selection_receipt(root: Path, store: ChronicleStore, selection: Dict[str, Any]) -> str:
+    """After the write, counted from one capture (``selection_facts``): what the account tells then, their rooms,
+    how many a version its sources cite holds, and the exact readers; never their words, never a claim about
+    display or about what this write displaced."""
+    account = selection["target_id"]
+    try:
+        with capture(root, tail="none"):
+            current = store.interpret([store.get(account)], sources=False)[0].get("selection") or {}
+            if current.get("id") != selection["id"]:
+                return ("Selection saved; another selection is now acting, so its displacement is not attributed to "
+                        f"this write. Read the current choices with memory_read(node_id='{account}').")
+            facts = selection_facts(store, account)
+    except (OSError, TimeoutError, ValueError) as exc:
+        return (f"Selection saved; its post-write composition could not be read ({type(exc).__name__}). "
+                f"Do not repeat the write; memory_read(node_id='{account}') reads its recorded choices.")
+    now, named, changes = facts["tells"], len(facts["named"]), facts["uncited_changes"]
+    where = ", ".join(f"{room} ({n})" for room, n in sorted(Counter(facts["rooms"].values()).items())) or "none"
+    readers = ", ".join(f"memory_read(room_id='{room}')" for room in sorted({*facts["rooms"].values()}))
+    return ("counted from the chronicle as read after this write: teller relations only, never display or what this "
+            "write displaced (a later choice by any account changes them; what my story and a room's page show is read "
+            "there, memory_read(story=true) and memory_read(room_id=…); memory_read(proposed_selection=…) compares "
+            f"the views before a choice); the account tells {len(now)} record{'' if len(now) == 1 else 's'}, {named} named "
+            f"by this selection and {len(now) - named} through accounts it tells and parts' members (rooms: {where}); "
+            f"{len(now) - len(facts['uncited'])} at a version its sources cite and {len(facts['uncited'])} at none, with my "
+            f"{changes} signed change{'' if changes == 1 else 's'} to those beside it"
+            + (f"; the account itself is told in my story by account {facts['teller']}" if facts["teller"] else "")
+            + (f". Each record with its words and teller: {readers}" if readers else "")
+            + f"; composition, source versions and selections: memory_read(node_id='{account}')")
 
 
 _WRITERS = {"page": _write_page, "part": _write_part, "note": _write_note,
@@ -610,7 +648,7 @@ def _target_label(target: Any) -> str:
     return f"source {target.get('path') or target.get('kind') or '?'}{location}"
 
 
-def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Period] = None) -> str:
+def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Period] = None, told: str = "") -> str:
     parts = [f"{record.get('kind')} {record.get('id')}", f"room {record.get('room_id')}",
              _author_label(record.get("author"))]
     if record.get("kind") == "mark":
@@ -625,6 +663,8 @@ def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Per
         parts.append(f"target {record['target_id']}")
     if record.get("folded_into"):
         parts.append(f"folded into {record['folded_into']}")
+    if told:  # the common view shows the account's words in its place: memory_view_account.told_map
+        parts.append(f"told in my story by account {told}")
     fixes = record.get("corrections") or []
     if fixes:  # the acting revision is the last correction's, signed by its own author, not the record's
         parts.append(f"revision {record.get('revision')} (corrected by {_author_label(fixes[-1].get('author'))})")
@@ -634,9 +674,9 @@ def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Per
     return "[" + "; ".join(parts) + "]"
 
 
-def _listed(record: Dict[str, Any], periods: Dict[str, memory_inventory.Period]) -> str:
+def _listed(record: Dict[str, Any], periods: Dict[str, memory_inventory.Period], told: Optional[Dict[str, Any]] = None) -> str:
     """One record as listed in its room: the header, then the text that acts."""
-    header = _record_header(record, periods.get(record["id"]))
+    header = _record_header(record, periods.get(record["id"]), (told or {}).get(record["id"]) or "")
     if record.get("kind") == "mark":
         quote = record.get("quote") if record.get("visibility") == "full" else None
         return header + "\n" + str(record.get("text") or "") + (f"\nquote: {quote}" if quote else "")
@@ -705,7 +745,8 @@ def _read_records(root: Path, room: str, after_seq: int, limit: int) -> str:
         entries = sorted(store.room_records(room, after_seq=after_seq) + _active_marks(store, room, after_seq),
                          key=lambda record: record["sequence"])
         periods = _periods(store, root, entries)
-    kept, texts, exhausted = _collect(iter(entries), lambda record: _listed(record, periods), limit)
+    told = told_by(store, [record["id"] for record in entries if record["kind"] in STORY_KINDS]) if entries else {}
+    kept, texts, exhausted = _collect(iter(entries), lambda record: _listed(record, periods, told), limit)
 
     def continuation(k: int, done: bool) -> str:
         last = kept[k - 1]["sequence"] if k else after_seq
@@ -718,7 +759,7 @@ def _read_records(root: Path, room: str, after_seq: int, limit: int) -> str:
         return text
     big = kept[0]  # one record larger than a page is read through its own address
     size = len(str(big.get("current_text", big.get("text")) or ""))
-    stub = (f"{_record_header(big, periods.get(big['id']))}\n(text of {size} chars does not fit this page: "
+    stub = (f"{_record_header(big, periods.get(big['id']), told.get(big['id']) or '')}\n(text of {size} chars does not fit this page: "
             f"memory_read(node_id={big['id']}) pages it)")
     return f"{head}\n{continuation(1, exhausted and len(kept) == 1)}\n{stub}"
 
@@ -895,7 +936,8 @@ def _read_node(root: Path, node_id: str, start: int, limit: int, revision: str =
     links = terminal_links(root, shown)
     if links:
         document += "\n\nHost-linked terminal facts (outside page coverage):\n" + "\n".join(links)
-    header = _record_header(shown, _periods(store, root, [shown]).get(shown["id"]))
+    told = told_by(store, [shown["id"]]).get(shown["id"]) if shown.get("kind") in STORY_KINDS else None
+    header = _record_header(shown, _periods(store, root, [shown]).get(shown["id"]), told or "")
     at = f", revision={revision}" if revision else ""
     return _window(header, document, start, limit, lambda end: f"memory_read(node_id={node_id}{at}, start={end})")
 
@@ -935,17 +977,128 @@ def _read_story(root: Path, store: ChronicleStore, start: int, limit: int) -> st
                    start, limit, lambda n: f'memory_read(story=true, start={n})')
 
 
+def _proposal(value: Any) -> Dict[str, Any]:
+    """``{target_id, replaces, shown}`` of a selection read before it is written, as chronicle_write takes them."""
+    replaces, shown = (value.get("replaces", []), value.get("shown", True)) if isinstance(value, dict) else (None, None)
+    if (not isinstance(value, dict) or set(value) - {"target_id", "replaces", "shown"} or not isinstance(shown, bool)
+            or not isinstance(value.get("target_id"), str) or not value["target_id"].strip()
+            or not isinstance(replaces, list) or not all(isinstance(ident, str) for ident in replaces)):
+        raise ValueError("proposed_selection is {target_id, replaces?, shown?}: the account, the record ids it would "
+                         "tell in their place and whether it is shown, as chronicle_write kind=selection takes them")
+    return {"target_id": value["target_id"].strip(), "replaces": replaces, "shown": shown}
+
+
+def _diff(before: str, after: str) -> List[str]:
+    """The rendered lines that change, ``-`` leaving and ``+`` arriving, one line of context; none when equal."""
+    import difflib
+
+    return list(difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=1))[2:]
+
+
+def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[str, Any], room: str, start: int,
+                   limit: int, fingerprint: str = "") -> Any:
+    """What a selection would change in the common view, read before the choice; nothing is written.
+
+    One capture of the chronicle answers all of it: the selection checked by the rules of ``select_account``,
+    my story and this room's page as they are and, in the proposal's capture of that same state
+    (``capture(proposed=…)``), with it acting, compared line by line by the view's own renderers; then every
+    record the account would tell and every one it tells now and would stop telling (``told_records`` of each
+    view), whole as it acts now with its readers, whatever lines the comparison matched. A later page
+    continues only the same document: every page's header names the document's ``fingerprint``, complete or
+    not, and a page of another one is refused, never joined. A refusal is returned as the ``PublishResult``
+    it is (the write's own, or ``position_mismatch``).
+    """
+    from ouroboros import memory_view as mv
+    from ouroboros.memory_floor import view_tokens
+
+    spec = mv.ViewSpec("integrator", room_id=room, room_lanes=False, origin_words=False, live_rooms="none",
+                       marks="none", knowledge=False)
+    with capture(root, tail="terminal"):  # one state for the rules, both views and every record's facts
+        result = store.select_account(proposal["target_id"], replaces=proposal["replaces"], author=focus_signature(ctx),
+                                      reason="read before choosing", shown=proposal["shown"], propose=True)
+        if not result.ok:
+            return result
+        account, now = result.record["target_id"], mv.capture_memory_view(root, {}, spec)
+        with capture(root, proposed=result.record):
+            then = mv.capture_memory_view(root, {}, spec)
+        acting = (store.interpret([store.get(account)], sources=False)[0].get("selection") or {})
+        told_now, told_then = (told_map([e for e in view.story if e["kind"] == "account"]) for view in (now, then))
+        tells = told_records(store, account, told_then)
+        affected = [*tells, *(ident for ident in told_records(store, account, told_now) if ident not in tells)]
+        records = store.interpret([found for ident in affected if (found := store.get(ident)) is not None], sources=False)
+        periods = _periods(store, root, records)
+    visible = [{e["id"] for e in view.story if not e.get("told_by")} for view in (now, then)]
+    itself = {(True, True): "stays in", (True, False): "leaves", (False, True): "enters", (False, False): "stays out of"}[
+        (account in visible[0], account in visible[1])]
+    stories, rooms = (mv.render_story(now), mv.render_story(then)), (mv.render_room(now), mv.render_room(then))
+    would = [record for record in records if record["id"] in tells]
+    stopped = [record for record in records if record["id"] not in tells]
+
+    def rooms_of(group: List[Dict[str, Any]]) -> str:
+        return ", ".join(f"{r} ({n})" for r, n in sorted(Counter(str(record["room_id"]) for record in group).items()))
+
+    def whole(record: Dict[str, Any]) -> List[str]:
+        covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
+        readers = [f"memory_read(node_id='{record['id']}')"] + (
+            [f"rows: memory_read(room_id='{record['room_id']}', rows=true, from='{_address_text(covers.get('first'))}', "
+             f"to='{_address_text(covers.get('last'))}')"] if record["kind"] == "page" and covers.get("first") else [])
+        moves = (["(its words leave my story with this selection)"] if record["id"] in visible[0] - visible[1] else
+                 ["(its words return to my story with this selection)"] if record["id"] in visible[1] - visible[0] else [])
+        return ["", "\n".join([_listed(record, periods, told_now), *map(quote_line, record.get("quotes") or ()), *moves]),
+                "; ".join(readers)]
+
+    lines = [f"the proposal: replaces {len(proposal['replaces'])}: {', '.join(proposal['replaces']) or 'nothing'}; "
+             f"shown={proposal['shown']}. Nothing is written; chronicle_write(kind='selection') with these fields and a "
+             "reason makes the choice",
+             (f"acting selection now: {acting['id']} (shown={acting['shown']}, replaces {len(acting['replaces'])})"
+              if acting else "acting selection now: none, so the account is not in my story"),
+             f"my story, full view before any physical floor: {len(stories[0]):,} -> {len(stories[1]):,} chars, "
+             f"~{view_tokens(stories[0]):,} -> ~{view_tokens(stories[1]):,} tokens; this room's page ({room}): "
+             f"{len(rooms[0]):,} -> {len(rooms[1]):,} chars",
+             f"the account itself {itself} my story; other entries leaving it: {len(visible[0] - visible[1] - {account})}; "
+             f"returning to it: {len(visible[1] - visible[0] - {account})}; "
+             f"the account would tell {len(would)} records in all (an account's own and a part's folded members "
+             "included)" + (f"; their rooms: {rooms_of(would)}" if would else "")
+             + (f"; it would stop telling {len(stopped)} it tells now (rooms: {rooms_of(stopped)})" if stopped else "")
+             + ("; memory_read(proposed_selection=<same>, room_id=<room>) compares another room's page" if records else ""),
+             "", "## My story: now -> with this selection ('-' leaves, '+' arrives)", *(_diff(*stories) or ["(unchanged)"]),
+             "", f"## This room's page ({room}): now -> with this selection", *(_diff(*rooms) or ["(unchanged)"]),
+             "", "## What the account would tell, each record whole as it acts now"]
+    if not would:
+        lines.append("nothing: shown with no replaces, or withdrawn")
+    for record in would:
+        lines += whole(record)
+    if stopped:
+        lines += ["", "## What it tells now and would stop telling, each record whole as it acts now"]
+        for record in stopped:
+            lines += whole(record)
+    document = "\n".join(lines)
+    digest = sha256_text(document)[:16]
+    if (start or fingerprint) and fingerprint != digest:
+        return PublishResult(False, "position_mismatch", detail=(
+            "that page belongs to another document than this read: my chronicle changed since, or the proposal, room "
+            "or fingerprint differs. Read it again from start=0"))
+    head = (f"[proposed selection of account {account}: replaces {len(proposal['replaces'])}, shown={proposal['shown']}; "
+            f"a read, nothing written; fingerprint='{digest}']")  # on a complete page too, for a later start
+    return _window(head, document, start, limit, lambda end: (
+        f"memory_read(proposed_selection=<same>, room_id='{room}', start={end}, fingerprint='{digest}')"))
+
+
 @completed_local_read
 def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: int = 0, rows: bool = False,
                  task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, revision: str = "",
-                 story: bool = False, **bounds: Any) -> str:
+                 story: bool = False, proposed_selection: Any = None, fingerprint: str = "", **bounds: Any) -> str:
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
-    if sum(bool(mode) for mode in (node_id, source_ref, rows, story)) > 1 or story and room_id is not None:
-        return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, or a room's records")
+    if (sum(bool(mode) for mode in (node_id, source_ref, rows, story, proposed_selection is not None)) > 1
+            or story and room_id is not None):
+        return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, proposed_selection, "
+                               "or a room's records")
     if revision and not node_id:
         return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
+    if fingerprint and (proposed_selection is None or not isinstance(fingerprint, str)):
+        return _arg_error(ctx, "fingerprint continues a proposed_selection read, as its continuation names it")
     if type(after_seq) is not int or after_seq < 0 or type(start) is not int or start < 0:
         return _arg_error(ctx, "after_seq and start are non-negative integers")
     limit = tool_result_limit("memory_read")
@@ -956,6 +1109,11 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
             text = _read_source(root, source_ref, start, limit)
         elif story:
             text = _read_story(root, store, start, limit)
+        elif proposed_selection is not None:
+            text = _read_proposal(ctx, root, store, _proposal(proposed_selection), _room(ctx, root, room_id), start, limit,
+                                  fingerprint)
+            if isinstance(text, PublishResult):  # the write's refusal, as chronicle_write returns it, or a stale page
+                return _published(ctx, text)
         elif str(room_id) == "*":
             text = _read_rooms(root, store, start, limit)
         elif str(room_id) in {"late_reviews", "notes"}:
@@ -1118,7 +1276,7 @@ def chronicle_tools() -> List[ToolEntry]:
     room = {"type": "string", "description": "Room address: its chat id as text (1 is Main). Default: this task's own room."}
     address = {"type": "string", "description": "Chat row address row:<chat_id>@<ts>#<sha12>, as memory_read prints it."}
     source = {"type": "object", "description": "A retained source reference exactly as a record or reader returned it."}
-    quotes = {"type": "array", "description": "Optional decisive words you cite. Each must be an exact substring of the row at its address, spoken by that class; the host checks and never inserts words itself.",
+    quotes = {"type": "array", "description": "Optional decisive words you cite (page, part or account). Each must be an exact substring of the row at its address, spoken by that class; the host checks and never inserts words itself.",
               "items": {"type": "object", "additionalProperties": False, "required": ["address", "text", "speaker"],
                         "properties": {"address": address, "text": string,
                                        "speaker": {"type": "string", "enum": sorted(SPEAKERS)}}}}
@@ -1138,7 +1296,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "sources": {"type": "array", "description": "account: the records it is based on, each {id, revision?} (revision: the one I read, as memory_read shows it; default the current one) or a bare id. Any page, part, note, legacy record, gap or account, of any room; citing one neither seals nor folds it. To incorporate later source corrections, write a new account citing the corrected direct source revisions, then select it; correcting or reselecting an old account leaves its source versions unchanged, and citing it retains its older nested edges. Reporting later source changes does not check whether the account omitted content from the cited version.",
                     "items": {"anyOf": [string, {"type": "object", "additionalProperties": False, "required": ["id"],
                                                  "properties": {"id": string, "revision": string}}]}},
-        "replaces": {"type": "array", "items": string, "description": "selection: the records of my story the account tells in its place. In views carrying my story their words leave it and their room's page (a replaced part's folded members too); their count and period stay visible, their exact IDs remain in the account's memory_read composition and selections, and each stays readable through memory_read. Citing a record in sources does not replace it. To supersede an earlier account, include its ID here or withdraw it. Empty shows the account beside everything."},
+        "replaces": {"type": "array", "items": string, "description": "selection: the records of my story the account tells in its place. In views carrying my story their words leave it and their room's page (a replaced part's folded members too); their count and period stay visible, their room's page names the account, their exact IDs remain in the account's memory_read composition and selections, and each stays readable through memory_read. Only my account's words and kept quotes carry what they said; my later corrections of cited sources, and my corrections/rejections of replaced records no cited version holds, stay beside it. Citing a record in sources does not replace it. To supersede an earlier account, include its ID here or withdraw it. Empty shows the account beside everything. memory_read(proposed_selection=…) shows the change first."},
         "shown": {"type": "boolean", "description": "selection: true (default) shows the account in the common view, false withdraws it; the latest selection of an account acts."},
         "expected_revision": {"type": "string", "description": "correction: the target's current revision when it already has a correction (memory_read node_id shows it)."},
         "expected_sequence": {"type": "integer", "minimum": 0, "description": "The room head your text is based on (memory_read room's first line). Required for a part; optional for a page or correction. A newer head is refused with the current head and the newer record ids."},
@@ -1147,6 +1305,11 @@ def chronicle_tools() -> List[ToolEntry]:
     }
     read = {
         "story": {"type": "boolean", "description": "true: list every current page, part and selected account with its id and reader; continue with start."},
+        "proposed_selection": {"type": "object", "additionalProperties": False, "required": ["target_id"],
+                               "description": "What chronicle_write kind=selection with these fields would change, read before choosing; nothing is written, a refusal is the write's. My story and room_id's page (default this task's room) now and with it, line by line, then every record the account would tell or stop telling, whole as it acts now, all from one state; continue with start and fingerprint.",
+                               "properties": {"target_id": string, "replaces": {"type": "array", "items": string},
+                                              "shown": {"type": "boolean"}}},
+        "fingerprint": {"type": "string", "description": "proposed_selection: the document a later page continues, as the read's header names it; a changed one is refused position_mismatch, never joined."},
         "node_id": {"type": "string", "description": "One record: as it acts now, its host stamp, coverage, original text, corrections and decisions."},
         "room_id": {**room, "description": room["description"] + " '*' lists all open rooms (label, period, counts, reader); 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
         "after_seq": {"type": "integer", "minimum": 0, "description": "Room records and active marks after this sequence (the previous page's next_after_seq)."},
@@ -1190,7 +1353,7 @@ def chronicle_tools() -> List[ToolEntry]:
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
-            "Read memory by address, as text: a room's records and active marks (first line: room and head), one record with its stamp and corrections (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), or a retained source (source_ref). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
+            "Read memory by address, as text: a room's records and active marks (first line: room and head), one record with its stamp and corrections (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), or a selection before I make it (proposed_selection). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",

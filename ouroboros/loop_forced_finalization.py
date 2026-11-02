@@ -12,7 +12,8 @@ call answers only owner directives that arrived during the first. A configured
 API child's standing timeout repeat (#1886) buys no forced call at all.
 
 Every rail records through ``_record_forced_finalization``; a rail runs no result
-review (its outcome says what ended the task).
+review (its outcome says what ended the task). A task's direct children and their
+disposition state are read through ``tools/join_ledger``, the owner of child dispositions.
 Extracted from loop.py (v7 L-B split); loop.py re-exports every name."""
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import pathlib
 import queue
 import time
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros._usage_wait import receiver_abandonable
 from ouroboros.loop_llm_call import (
@@ -33,16 +34,12 @@ from ouroboros.loop_llm_call import (
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice
+from ouroboros.tools.join_ledger import _child_disposition_state, _load_direct_child_results  # noqa: F401 -- loop re-exports both
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
 
-
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_delivery import DeliveryCandidate
-
-if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.loop_round_limits import _RoundLimitContext
 
 
@@ -60,27 +57,6 @@ def _loop():
     from ouroboros import loop
 
     return loop
-
-
-def _load_direct_child_results(
-    status_root: pathlib.Path,
-    task_id: str,
-    root_task_id: str,
-) -> list[Dict[str, Any]]:
-    """Read this task's direct children (plan review spawns none)."""
-
-    from ouroboros.task_status import find_child_tasks
-
-    return [
-        row for row in find_child_tasks(
-            pathlib.Path(status_root),
-            parent_task_id=task_id,
-            root_task_id=root_task_id,
-            exclude_task_id=task_id,
-            scope="direct",
-        )
-        if isinstance(row, dict)
-    ]
 
 
 def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
@@ -103,35 +79,6 @@ def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
 HANDLED_CHILD_DISPOSITIONS = frozenset({
     "integrated", "irrelevant", "deferred", "discarded", "cancelled", "host_attention",
 })
-
-
-def _child_disposition_state(child: Dict[str, Any]) -> str:
-    """Return cancellation, the current task-tree exact-hash disposition, or host attention."""
-
-    # Explicit cancellation wins every completion race; late scratch results are
-    # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):
-    # ``cancel_requested`` is intent, so such a child stays cancel-pending.
-    if (
-        str(child.get("parent_decision") or "").strip().lower() == "cancelled"
-        and str(child.get("status") or "").strip().lower() == "cancelled"
-    ):
-        return "cancelled"
-    try:
-        from ouroboros.tools.join_ledger import _current_child_result_disposition
-
-        current = _current_child_result_disposition(child)
-        if current:
-            return current
-    except Exception:
-        pass
-    # A host-minted silence diagnostic is attention to this task, not work it
-    # delegated: it stays listed, accounted and readable, but owes no author
-    # disposition, pending or settled (#1376). An explicit one above still wins.
-    from ouroboros.work_diagnostics import diagnostic_ref
-
-    ref = diagnostic_ref(child)
-    minted = bool(ref) and str(child.get("task_id") or child.get("id") or "") == "silence-" + ref["episode_id"]
-    return "host_attention" if minted and str(child.get("parent_task_id") or "") == ref["task_id"] else ""
 
 
 def _project_child_result_dispositions(
@@ -626,16 +573,18 @@ def _prepare_forced_prompt(
 
 
 def _deliver_forced_late_results(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> bool:
-    """Locators of timed-out calls that settled since (``late_tool_results``) join the forced candidate
-    on the live transcript before it is priced and sealed: an authorized forced send is the task's next
-    turn too. Rails that end without a send never call this; a budget candidate priced and then not
-    sent leaves them in the transcript its pause or next ordinary round carries."""
+    """Locators of timed-out calls that settled since (``late_tool_results``) and an owed native task
+    wait's result (``native_task_wait.deliver_owed``) join the forced candidate on the live transcript
+    before it is priced and sealed: an authorized forced send is the task's next turn too. Rails that
+    end without a send never call this; a budget candidate priced and then not sent leaves them in the
+    transcript its pause or next ordinary round carries."""
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     if tools_ctx is not None:
         from ouroboros.late_tool_results import deliver_late_results
+        from ouroboros.native_task_wait import deliver_owed
 
-        return deliver_late_results(ctx.messages, tools_ctx, llm_trace, ctx.drive_logs,
-                                    _loop()._append_or_merge_user_message)
+        return deliver_owed(ctx) | deliver_late_results(ctx.messages, tools_ctx, llm_trace, ctx.drive_logs,
+                                                        _loop()._append_or_merge_user_message)
     return False
 
 

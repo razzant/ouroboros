@@ -101,6 +101,9 @@ TERMINAL_WRITERS = {
     # Existing task custody/projection enrichment only: its locked field
     # projector preserves CURRENT lifecycle status rather than ending a task.
     ('ouroboros/history_retention.py::call_inventory_custodied', 'current["status"]'): 'dynamic',
+    # Settlement's raw-QA carry arms only missing-evidence facts on the same
+    # attempt; its locked projector returns the row's own status unchanged.
+    ('ouroboros/history_retention.py::raw_evidence_custodied', 'current["status"]'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'status'): 'dynamic',
     ('ouroboros/headless.py::_finalize_task_artifacts_locked', 'str(existing.get("status") or status or "completed")'): 'terminal',
     ('ouroboros/mutation_attribution.py::advance_mutation_baseline', 'status'): 'dynamic',

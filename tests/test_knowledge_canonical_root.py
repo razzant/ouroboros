@@ -50,18 +50,6 @@ def _read_previous(registry: ToolRegistry, ref: dict) -> str:
     return json.loads(source)[ref["field"]]
 
 
-def _read_previous_in_light(ctx: ToolContext, ref: dict) -> str:
-    """The same handle through a Light memory operation's read tools (``consolidator.KnowledgeReadContext``)."""
-    from ouroboros.consolidator import KnowledgeReadContext
-    from ouroboros.tools.core_file_tools import delivered_source_prefix
-
-    row = KnowledgeReadContext(ctx).read_call({"id": "previous", "function": {
-        "name": ref["read"]["tool"], "arguments": json.dumps(ref["read"]["arguments"])}})
-    assert row["status"] == "ok", row["result"]
-    view = row["result_meta"]["read_file_source"]
-    return json.loads(delivered_source_prefix(view, row["result"], len(row["result"])))[ref["field"]]
-
-
 def _atlas_reads(root: Path, scope: str, topic: str) -> dict:
     """The extension memory reader over the host's data root (``PluginAPI._drive_root``)."""
     from ouroboros.extension_plugin_api import PluginAPIImpl, _PluginAPIConfig
@@ -184,7 +172,6 @@ def test_an_admitted_child_keeps_knowledge_where_every_reader_reads(tmp_path, mo
     assert remove_subagent_task_drive(drive, task["id"], live=lambda _tid: False)
     assert not child_drive.exists()
     assert _read_previous(registry, previous) == _note("SUMMARY lessons/root-unity")
-    assert _read_previous_in_light(ctx, previous) == _note("SUMMARY lessons/root-unity")
 
     # Next delegated context: the index this child's first delegation would carry.
     index = _with_index({"result": "Subagent request queued."}, ctx)["result"]

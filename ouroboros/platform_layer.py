@@ -581,9 +581,9 @@ def file_lock_exclusive(fd: int) -> None:
     _file_lock(fd, exclusive=True, blocking=True)
 
 
-def file_lock_shared(fd: int) -> None:
-    """Acquire a shared (read) lock on a file descriptor. Blocks."""
-    _file_lock(fd, exclusive=False, blocking=True)
+def file_lock_shared(fd: int, *, blocking: bool = True) -> None:
+    """Acquire a shared (read) lock; a non-blocking attempt raises OSError if unavailable."""
+    _file_lock(fd, exclusive=False, blocking=blocking)
 
 
 def file_lock_exclusive_nb(fd: int) -> None:

@@ -2,7 +2,7 @@
 
 The real SPA (served static) talks to the REAL history and Pause endpoints and the
 real activity census; the upkeep is the real post-task coordinator and its fallback-draft
-stage (a two-send Light operation since the scratchpad pass is retired, #918) with the
+stage (two Light sends since the scratchpad pass is retired, #918) with the
 deterministic Light transport of ``test_late_phase_pause_cut``.
 Screenshots: ``OUROBOROS_UI_EVIDENCE_DIR``, else ``<tmp>/screenshots`` (retained by
 ``scripts/safe_test.py``).

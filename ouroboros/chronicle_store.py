@@ -107,7 +107,7 @@ _RESET = ("DELETE FROM records; DELETE FROM state; DELETE FROM active_marks; DEL
 
 
 class PublishResult(NamedTuple):
-    """Outcome of one publication; ``reason`` is ``saved``, ``unchanged`` or a typed refusal.
+    """Outcome of one publication; ``reason`` is ``saved``, ``unchanged``, ``proposed`` (nothing written) or a typed refusal.
 
     Refusals: ``revision_required``, ``revision_conflict``, ``already_sealed``,
     ``already_folded``, ``quote_mismatch``, ``target_missing``, ``not_integrator``, ``invalid``. A
@@ -310,16 +310,17 @@ _SNAPSHOT_SQL = ("SELECT json_group_array(json_array(sequence,id,kind,room,targe
                  "SELECT json_group_array(json_array(sequence,room,scope,body)) FROM active_marks",
                  "SELECT json_group_array(json_array(key,value)) FROM state", _ACTING_PAGES, _ACTING_PARTS)
 _TAIL_SCOPES = {"all": (_TAIL_SQL,), "terminal": (_TAIL_SQL + _TERMINAL,), "none": ()}
+_SELECTION_FREE = ("membership", "tail", "terminal_tail", "legacy_pointers")  # memo facts a selection never changes
 
 
 class _Snapshot:
     """``_IndexLookups`` answered from one state of the index (``_SNAPSHOT_SQL``, parsed after its read
     transaction closed): the same filters and order and no statement. Each record handed out is parsed
     anew from its stored text, as the index returns it; ``memo`` holds facts one capture derives once.
-    Of the stored tail facts it holds what its view reads (``tail_scope``)."""
+    Of the stored tail facts it holds what its view reads (``tail_scope``); a proposal's capture extends its ``tables``."""
 
-    def __init__(self, texts, tail_scope):
-        records, folded, sealed, marks, state, acting, self.parts, *tail = (json.loads(text or "[]") for text in texts)
+    def __init__(self, tables, tail_scope, memo=()):
+        records, folded, sealed, marks, state, acting, self.parts, *tail = self.tables = tables
         self.acting, self.tail_scope, self.acting_by_room = sorted(acting), tail_scope, {}
         for row in self.acting:
             self.acting_by_room.setdefault(row[1], []).append(row)
@@ -337,7 +338,7 @@ class _Snapshot:
         self.active = sorted(marks)
         self.values = dict(state)
         self.tail_rows = sorted(tail[0]) if tail else []  # [pos, seq, row_sha256, legacy, meta, terminal] by position
-        self.memo: Dict[str, Any] = {"tail_scope": tail_scope}
+        self.memo: Dict[str, Any] = {"tail_scope": tail_scope, **dict(memo)}
 
     def get(self, record_id):
         row = self.by_id.get(str(record_id))
@@ -394,7 +395,7 @@ _CAPTURE: ContextVar[Optional[Tuple[str, _Snapshot]]] = ContextVar("chronicle_ca
 
 
 @contextmanager
-def capture(data_root: Any, *, tail: str = "all"):
+def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str, Any]] = None):
     """One state of this installation's chronicle for every reader inside the block (one capture).
 
     The index is read once (``_SNAPSHOT_SQL`` in one read transaction, closed before any reader runs, so a
@@ -402,15 +403,24 @@ def capture(data_root: Any, *, tail: str = "all"):
     this is that capture. Of the stored tail facts it reads what its view reads (``tail``: every row,
     ``"terminal"`` rows or ``"none"``); a reader asking for more reads the index. It yields the facts its
     readers derive once (``capture_memo``); without a journal nothing is pinned and it yields None. A
-    publication inside the block is not seen by its readers.
+    publication inside the block is not seen by its readers. With ``proposed`` (a checked, unsaved
+    selection) it is a capture of its own where every reader reads that selection as acting: inside a capture, of
+    that state and the memo facts no selection changes (``_SELECTION_FREE``), never read anew.
     """
     store = ChronicleStore(data_root)
-    if (pinned := store._pinned()) is not None or not store.log_path.exists():
-        yield None if pinned is None else pinned.memo
+    snapshot = store._pinned()
+    if snapshot is not None and proposed is None or snapshot is None and not store.log_path.exists():
+        yield None if snapshot is None else snapshot.memo
         return
-    with store._index() as db:
-        texts = [db.execute(sql).fetchone()[0] for sql in (*_SNAPSHOT_SQL, *_TAIL_SCOPES[tail])]
-    snapshot = _Snapshot(texts, tail)
+    if snapshot is None:
+        with store._index() as db:
+            texts = [db.execute(sql).fetchone()[0] for sql in (*_SNAPSHOT_SQL, *_TAIL_SCOPES[tail])]
+        snapshot = _Snapshot([json.loads(text or "[]") for text in texts], tail)
+    if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
+        rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
+        snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],
+                                       proposed["room_id"], proposed.get("target_id", ""), _json(proposed)]],
+                              *snapshot.tables[1:]], snapshot.tail_scope, kept)
     token = _CAPTURE.set((str(store.index_path), snapshot))
     try:
         yield snapshot.memo
@@ -652,17 +662,12 @@ class ChronicleStore:
                      expected_sequence: Optional[int] = None) -> PublishResult:
         """Seal a host-expanded row set; a helper author makes it a draft that acts at once."""
         room = str(room_id)
-        record = {"kind": "page", "room_id": room, "text": text, "author": author, "metadata": metadata or {},
-                  "covers": {"room_id": room, **covers} if isinstance(covers, dict) else covers}
         quotes = list(quotes or ())
-        if quotes:
-            record["quotes"] = quotes
-        if host_stamp is not None:
-            record["host_stamp"] = host_stamp
-        if record_id:
-            record["id"] = str(record_id)
-        refusal = verify_quotes(quotes, quote_resolver)
-        if refusal is not None:
+        record = {"kind": "page", "room_id": room, "text": text, "author": author, "metadata": metadata or {},
+                  "covers": {"room_id": room, **covers} if isinstance(covers, dict) else covers,
+                  **({"quotes": quotes} if quotes else {}), **({"host_stamp": host_stamp} if host_stamp is not None else {}),
+                  **({"id": str(record_id)} if record_id else {})}
+        if (refusal := verify_quotes(quotes, quote_resolver)) is not None:
             return refusal
         with self._publishing() as db:
             return self._commit(db, [record], quotes_verified=True,
@@ -680,8 +685,7 @@ class ChronicleStore:
         """
         room = str(room_id)
         quotes = list(quotes or ())
-        refusal = verify_quotes(quotes, quote_resolver)
-        if refusal is not None:
+        if (refusal := verify_quotes(quotes, quote_resolver)) is not None:
             return refusal
         with self._publishing() as db:
             if expected_sequence is None:
@@ -702,13 +706,18 @@ class ChronicleStore:
                               "author": author}])
 
     def publish_account(self, *, room_id: Any, text: str, sources: Iterable[Any], author: Dict[str, Any],
-                        metadata: Optional[Dict[str, Any]] = None, record_id: Optional[str] = None) -> PublishResult:
+                        metadata: Optional[Dict[str, Any]] = None, record_id: Optional[str] = None,
+                        quotes: Iterable[Dict[str, Any]] = (), quote_resolver: Optional[QuoteResolver] = None) -> PublishResult:
         """The mind's account over exact source versions; each source is ``{id, revision?}`` or an id.
 
         The revision named is the one the mind read (the record itself or one of its corrections);
         unnamed, the current one is frozen. A source that is not in this chronicle is
-        ``target_missing``; a revision that is not that record's is ``revision_conflict``.
+        ``target_missing``; a revision that is not that record's is ``revision_conflict``. ``quotes``
+        are the words it keeps verbatim, verified as a page's are, of any room's rows.
         """
+        quotes = list(quotes or ())
+        if (refusal := verify_quotes(quotes, quote_resolver)) is not None:
+            return refusal
         with self._publishing() as db:
             refs = []
             for given in sources if isinstance(sources, (list, tuple)) else ():
@@ -717,21 +726,28 @@ class ChronicleStore:
                     return refusal
                 refs.append(frozen)
             record = {"kind": "account", "room_id": str(room_id), "text": text, "author": author, "sources": refs,
-                      "metadata": metadata or {}}
+                      "metadata": metadata or {}, **({"quotes": quotes} if quotes else {})}
             if record_id:
                 record["id"] = str(record_id)
-            return self._commit(db, [record])
+            return self._commit(db, [record], quotes_verified=True)
 
     def select_account(self, account_id: str, *, replaces: Iterable[Any], author: Dict[str, Any], reason: str,
-                       shown: bool = True) -> PublishResult:
-        """The mind's choice of the common view: show the account (or withdraw it) in place of the named records."""
-        with self._publishing() as db:
+                       shown: bool = True, propose: bool = False) -> PublishResult:
+        """The mind's choice of the common view: show the account (or withdraw it) in place of the named records.
+
+        ``propose`` writes nothing and takes no lock: the selection is checked by the same rules on a read
+        and returned unsaved (reason ``proposed``), for ``capture(proposed=…)`` to show what it would change.
+        """
+        with (self._reading() if propose else self._publishing()) as db:
             target = self._get(db, account_id)
             if target is None:
                 return _refuse("target_missing", conflict_ids=(str(account_id),))
-            return self._commit(db, [{"kind": "selection", "room_id": target["room_id"], "target_id": target["id"],
-                                      "replaces": [str(r) for r in (replaces or ())], "shown": shown, "reason": reason,
-                                      "author": author}])
+            record = {"kind": "selection", "room_id": target["room_id"], "target_id": target["id"],
+                      "replaces": [str(r) for r in (replaces or ())], "shown": shown, "reason": reason, "author": author}
+            if not propose:
+                return self._commit(db, [record])
+            refusal = self._rules(db, {**record, "id": "proposed"}, False)
+            return refusal or PublishResult(True, "proposed", {**record, "id": "proposed", "ts": utc_now_iso()})
 
     def correct(self, target_id: str, text: str, author: Dict[str, Any], *,
                 expected_revision: Optional[str] = None, expected_sequence: Optional[int] = None) -> PublishResult:
@@ -869,11 +885,10 @@ class ChronicleStore:
             return _refuse("invalid", problem)
         if kind in _TEXT_KINDS and not _nonblank(record.get("text")):
             return _refuse("invalid", f"a {kind} needs text")
-        if kind in ("page", "part"):
-            if record["author"]["kind"] not in ("mind", "helper"):
-                return _refuse("invalid", f"a {kind} is written by the mind, or drafted by a helper")
-            if record.get("quotes") and not quotes_verified:
-                return _refuse("quote_mismatch", "quotes are verified by publish_page/publish_part")
+        if kind in ("page", "part") and record["author"]["kind"] not in ("mind", "helper"):
+            return _refuse("invalid", f"a {kind} is written by the mind, or drafted by a helper")
+        if kind in ("page", "part", "account") and record.get("quotes") and not quotes_verified:
+            return _refuse("quote_mismatch", "quotes are verified by publish_page/publish_part/publish_account")
         rule = getattr(self, "_rule_" + kind, None)
         return rule(db, record) if rule else None
 

@@ -48,15 +48,17 @@ def _reserve_parallel_review_roster(ctx, prepared) -> None:
 
     The immutable operation-id map is process-local execution state. The full
     roster is attached to the caller. When the owner deadline has no dispatch
-    window left, the roster remains an unpaid typed $0 wave; otherwise the
-    existing paid write-ahead stamp records the wave atomically in the existing
-    CommitAttemptRecord. A stamp failure propagates before any worker or
-    provider POST can start.
+    window left, the roster remains a typed $0 wave; otherwise the installed
+    stamp's reservation records it atomically in the existing
+    CommitAttemptRecord, unpaid: the paid fact joins that row at the first
+    physical send (``review_dispatch``), so a wave that only replays or is
+    refused spends no cycle. A reservation failure propagates before any
+    worker or provider POST can start.
     """
     from types import SimpleNamespace
 
     from ouroboros.observability import new_call_id
-    from ouroboros.review_dispatch import slot_id_for_row, stamp_review_paid_on_dispatch
+    from ouroboros.review_dispatch import reserve_review_roster, slot_id_for_row
 
     rows = [
         copy.deepcopy(row)
@@ -98,11 +100,11 @@ def _reserve_parallel_review_roster(ctx, prepared) -> None:
     if owner_deadline_exhausted_for_context(ctx, reserve_sec=get_finalization_grace_sec()):
         return
     try:
-        stamp_review_paid_on_dispatch(ctx)
+        reserve_review_roster(ctx)
     except Exception:
-        # No worker can have started before the write-ahead stamp.  Do not let
-        # the outer reconciliation turn this unsent process-local reservation
-        # into durable custody_lost when the stamp itself failed.
+        # No worker can have started before the write-ahead reservation. Do not
+        # let the outer reconciliation turn this unsent process-local roster
+        # into durable custody_lost when the reservation itself failed.
         ctx._review_reserved_roster = None
         ctx._review_reserved_operations = {}
         raise
@@ -158,15 +160,14 @@ def _commit_review_retry_key(
     ``since_review`` included, only when given; host observations never)."""
     material = str(binding_fingerprint or "").strip()
     if not material:
+        from ouroboros.tools.review_subject import staged_patch
+
         try:
-            diff_bytes = run_cmd(
-                ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
-                cwd=ctx.repo_dir,
-            ).encode()
+            _patch, diff_sha = staged_patch(ctx.repo_dir)
             tree_sha = run_cmd(["git", "write-tree"], cwd=ctx.repo_dir).strip()
         except Exception:
-            diff_bytes, tree_sha = b"", ""
-        material = hashlib.sha256(tree_sha.encode() + b"\0" + diff_bytes).hexdigest()
+            diff_sha, tree_sha = "", ""
+        material = hashlib.sha256(tree_sha.encode() + b"\0" + diff_sha.encode()).hexdigest()
     return "commit_review:" + hashlib.sha256(json.dumps({
         "binding": material, "commit_message": commit_message,
         "goal": goal, "scope": scope,
@@ -287,13 +288,13 @@ def run_parallel_review(
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "") or review_retry_key(subject)
         ctx._current_review_retry_key = retry_key
     else:
+        from ouroboros.tools.review_subject import staged_patch
+
         try:
-            diff_bytes = run_cmd(
-                ["git", "diff", "--cached", "--binary", "--no-ext-diff"], cwd=ctx.repo_dir,
-            ).encode()
+            # The same identity a frozen gate subject reads: one patch keeps one history across both paths.
+            _patch, snapshot_digest = staged_patch(ctx.repo_dir)
         except Exception:
-            diff_bytes = b""
-        snapshot_digest = hashlib.sha256(diff_bytes).hexdigest()
+            snapshot_digest = hashlib.sha256(b"").hexdigest()
         retry_key = str(getattr(ctx, "_current_review_retry_key", "") or "") or (
             _commit_review_retry_key(
                 ctx, commit_message, goal=goal, scope=scope,

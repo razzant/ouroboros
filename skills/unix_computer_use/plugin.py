@@ -134,7 +134,8 @@ def _pipe(cmd: list[str], text: str, *, timeout: int = _TIMEOUT_SEC) -> tuple[in
 
 
 def _json(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    """Every tool result (local, place and remote paths) as compact JSON: exactly the payload, without layout."""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _which(name: str) -> str:

@@ -58,6 +58,8 @@ async def api_mcp_refresh(request: Request) -> JSONResponse:
     """POST /api/mcp/refresh — refresh one or all servers."""
     try:
         body: Dict[str, Any] = await request_json_or(request, {})
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         server_id = canonical_server_id(body.get("server_id") or "")
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
@@ -77,6 +79,8 @@ async def api_mcp_test(request: Request) -> JSONResponse:
 
     try:
         body: Dict[str, Any] = await request_json_or(request, {})
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object", 400)
         await asyncio.to_thread(_ensure_configured)
         manager = get_manager()
         server_id = canonical_server_id(body.get("server_id") or "")

@@ -1,10 +1,12 @@
 """Delegated custody on the store (DELTA §3): the reducer's rows and the outbox around every
-death point, the pending invocation's atomic transition, the open set, the export seam's
-outbox verification and the importer's one fold of a legacy chain."""
+death point, the pending invocation's atomic transition and the start fence that reads both
+of its sides at once, the open set, the export seam's outbox verification and the importer's
+one fold of a legacy chain."""
 from __future__ import annotations
 
 import errno
 import json
+import threading
 from contextlib import contextmanager
 
 import pytest
@@ -187,6 +189,68 @@ def test_a_pending_invocation_becomes_its_run_or_its_refusal_in_one_transaction(
     assert "inv-2" in o.members(tmp_path, "custody_refused")
 
 
+def _bind_after_the_first_read(monkeypatch, root, task_id, invocation_id):
+    """While the start fence runs, the real STARTED of INVOCATION_ID commits on its own connection
+    right after the fence's first read transaction closes: a later read sees the run, not the request."""
+    from ouroboros import delegate_recovery
+
+    fence, opened, armed = delegate_recovery.unsettled_start_ids, store.open_store, []
+
+    def armed_fence(*args, **kwargs):
+        armed.append(True)
+        try:
+            return fence(*args, **kwargs)
+        finally:
+            armed.clear()
+
+    @contextmanager
+    def open_store(path, **kwargs):
+        with opened(path, **kwargs) as txn:
+            yield txn
+        if armed and not kwargs.get("write"):
+            armed.clear()
+            writer = threading.Thread(target=c.record_started, args=(root, c.RunCustody(
+                run_id="run-bound", task_id=task_id, route_id="codex", invocation_id=invocation_id)))
+            writer.start()
+            writer.join(30)
+
+    monkeypatch.setattr(delegate_recovery, "unsettled_start_ids", armed_fence)
+    monkeypatch.setattr(store, "open_store", open_store)
+
+
+@pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
+@pytest.mark.parametrize("decision", ["zero_run", "replacement"])
+def test_the_start_fence_reads_runs_and_requests_in_one_snapshot(tmp_path, monkeypatch, journal, decision):
+    """STARTED moves a start from its open request to its run row in one commit (above), so a fence
+    that read the two in separate transactions could see it in neither: a zero-run receipt over a
+    started leaf, or an empty-prompt replacement free to start the work order again."""
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.subagent_runtime import delegate_start_entry
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools.verify import _verify_and_record
+    from tests._store_journal_shared import use_journal
+
+    use_journal(monkeypatch, journal)
+    ctx = ToolContext(repo_dir=str(tmp_path), drive_root=str(tmp_path))
+    ctx.task_id = "actor"
+    ctx._configured_actor_bootstrap = {"route_id": "session-a", "work_order_fingerprint": "a" * 64,
+                                       "physical_started": False}
+    drive = c.custody_root(ctx)
+    assert c.record_start_requested(drive, run_id="", task_id="actor", invocation_id="inv",
+                                    idempotency_key="inv", request={"prompt": "work"}, route="codex")
+    _bind_after_the_first_read(monkeypatch, drive, "actor", "inv")
+    if decision == "zero_run":
+        out = _verify_and_record(ctx, contract_kind="delegation_zero_run", zero_run_decision="incomplete",
+                                 zero_run_basis="no run observed")
+        assert "zero_run_requires_settlement" in out and '"pending_invocation_ids": ["inv"]' in out, out
+        assert read_verification_receipts(drive, "actor") == []
+    else:
+        out = json.loads(delegate_start_entry(ctx, "").text)
+        assert (out["reason"], out.get("pending_invocation_ids")) == ("replacement_requires_settlement", ["inv"]), out
+    assert current.run(drive, "run-bound").invocation_id == "inv", "the STARTED landed during the fence"
+    c._CUSTODY.clear()
+
+
 def test_the_open_set_is_the_held_runs_and_the_pending_invocations(tmp_path):
     assert c.emit(tmp_path, c.STARTED, {"run_id": "live", "task_id": "a"})
     assert c.emit(tmp_path, c.STARTED, {"run_id": "owner", "task_id": "b", "project_id": "p", "project_owned": True})
@@ -329,6 +393,7 @@ def test_the_import_folds_a_legacy_chain_into_the_custody_tables_once(tmp_path, 
 @pytest.mark.parametrize("journal", ["PERSIST", "WAL"])
 def test_task_snapshot_materializes_only_own_runs_and_pending_requests(tmp_path, monkeypatch, journal):
     from ouroboros import delegate_pending, delegate_terminal
+    from ouroboros.delegate_evidence import task_execution_evidence
     from ouroboros.task_finalization import prepare_terminal_send_event
     from tests._store_journal_shared import use_journal
 
@@ -374,7 +439,7 @@ def test_task_snapshot_materializes_only_own_runs_and_pending_requests(tmp_path,
     monkeypatch.setattr(current, "_decode", owned_decode)
     monkeypatch.setattr(delegate_pending, "request_body", owned_request)
     monkeypatch.setattr(store, "open_store", observed_open)
-    monkeypatch.setattr(store.Txn, "set_rows", lambda *a: pytest.fail("delivery read an entire obligation set"))
+    monkeypatch.setattr(store.Txn, "set_rows", lambda *a: pytest.fail("a task's reader read an entire obligation set"))
     usage = {}
     event = prepare_terminal_send_event(tmp_path, {"id": "own"}, "Answer", usage,
                                         {"text": "Answer"}, presence=False)
@@ -388,6 +453,10 @@ def test_task_snapshot_materializes_only_own_runs_and_pending_requests(tmp_path,
     assert "own-open" in event["terminal_custody_notice"] and "own-pending" in event["terminal_custody_notice"]
     assert "review" not in event["terminal_custody_notice"] and "other-" not in event["terminal_custody_notice"]
     assert delegate_terminal.terminal_custody_disclosure(tmp_path, "absent")["unreconciled"] == []
+    # The evidence projection (completion seam, finalization nudge, terminal sweep) reads the start fence
+    # through the same addressed snapshot, whatever the installation's open starts and runs.
+    assert task_execution_evidence(tmp_path, "own")["delegated_obligations"] == {
+        "open_run_ids": ["own-open"], "pending_invocation_ids": ["own-pending"], "undisposed_patch_run_ids": []}
 
 
 def test_task_snapshot_keeps_a_legacy_numeric_request_task_identity(tmp_path):

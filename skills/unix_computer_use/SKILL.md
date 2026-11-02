@@ -23,7 +23,7 @@ tools:
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, act in a named application (click/type/press keys there), drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.
 model_experience:
   what_model_sees: Desktop tools include bounded AX reads, local macOS element_act press/set_value without activation or pointer input, explicit foreground input, screenshot observation IDs, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback and front observations.
-  token_effect: The tool schemas add a moderate fixed cost to every round while the skill is enabled; each screenshot adds one image attachment (the dominant per-use cost), each input receipt about a hundred tokens of place facts, and an ax_tree read grows with the nodes it returns (bounded by max_nodes).
+  token_effect: When loaded, all 25 tool schemas total about 15K characters; Nano can load tools on demand. Results are compact JSON without dropped fields. Input receipts grow with commands and output, screenshots add an image and capture metadata, and window_list and ax_tree grow with returned entries (limit, app=, max_nodes).
 ---
 
 # Unix Computer Use

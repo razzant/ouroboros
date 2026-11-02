@@ -2,7 +2,7 @@
 
 Three operations over the host's own data root, each answered by the owner of its memory family
 and never by a second interpreter: the chronicle by ``ChronicleStore`` (its index, ``_interpret``,
-``_source_state``, and its ``told`` projection decided by ``memory_view_account.told_map``), a page's,
+``_source_state``, and its ``told`` projection decided by ``memory_view_account.told_by``), a page's,
 part's, account's or retold record's period by ``memory_inventory.record_period`` (``_dated``), knowledge
 by ``knowledge`` (address, inventory, note, links), room labels by ``memory_view.room_labeler``, and
 the plain sources (identity, WORLD, scratchpad, a Project's workpad) and their append-only journals
@@ -427,14 +427,6 @@ def _records(root: pathlib.Path, params: Dict[str, Any]) -> Dict[str, Any]:
     return _page(entries, rows, limit, lambda row: f"s{row['sequence']}")
 
 
-def _told_by(store: ChronicleStore, ids: List[str]) -> Dict[str, Optional[str]]:
-    """``record id -> account`` that tells it in the common view: ``told_map``, the story's own precedence, over
-    only the acting selections that bear on each record (``ChronicleStore.telling_selections``, indexed)."""
-    from ouroboros.memory_view_account import told_map
-
-    return {ident: told_map(entries).get(ident) for ident, entries in store.telling_selections(ids).items()}
-
-
 def _story_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
     """One story entry as the memory view composed it, its words and lists bounded: the record reads them whole."""
     out: Dict[str, Any] = {key: entry.get(key) for key in (
@@ -451,7 +443,7 @@ def _story_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
         out["span"] = [str(item) for item in entry["span"]][:2]
     if entry.get("gap"):
         out["gap"] = _derived_text(str(entry["gap"]), {**record, "field": ["metadata", "source_gap"]})
-    for key in ("fixes", "terminal_links", "quotes", "sources"):  # derived lists of the view: their size here
+    for key in ("fixes", "terminal_links", "quotes", "told_fixes", "sources"):  # derived lists of the view: their size here
         if key in entry:
             out[f"{key}_count"] = len(entry.get(key) or ())
     if entry.get("kind") == "account" and entry.get("selection"):
@@ -787,12 +779,13 @@ def _record_document(root: pathlib.Path, address: Mapping[str, Any], revision: O
     entry = _record_entry(read, budget)
     entry.pop("preview")
     from ouroboros.memory_view import room_labeler
+    from ouroboros.memory_view_account import told_by
 
     meta = {"record": entry, "stored": _project(stored, _record_address(record["id"]), [], budget),
             "corrections_shown": entry["corrections"], "current_revision": later[-1] if later else read["revision"],
             "later_corrections": _later_corrections(store, record["id"], read["revision"], later),
             "room_label": room_labeler(root)(record["room_id"]) if record.get("room_id") else None,
-            "told_by": _told_by(store, [record["id"]])[record["id"]], **_dated(store, record)}
+            "told_by": told_by(store, [record["id"]])[record["id"]], **_dated(store, record)}
     return _words(read), {**meta, "revision": read["revision"]}
 
 

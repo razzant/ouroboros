@@ -232,12 +232,15 @@ def test_a_cached_tier_tariff_is_quoted_without_http_and_a_later_price_never_rew
     assert quiet_primary == []  # the facts read the cache only; nothing fetched a price
 
 
-def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorded_call(main_call, monkeypatch):
+@pytest.mark.parametrize("second", ["refused", "unknown"])
+def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorded_call(main_call, monkeypatch, second):
     """The second producer: an earlier fallback's quota refusal waits for the owner after the later route
-    fails, then its retained send answers; the facts read that send's own call and the round's first failure."""
+    fails, or ends with an outcome nobody knows that still allows a new generation, then its retained send
+    answers; the facts read that send's own call and the round's first failure. That re-send is told as the
+    one route re-sent after the owner's answer, and the end row keeps an unknown outcome with its own attempt."""
     from types import SimpleNamespace
 
-    from ouroboros import fallback_cooldown, loop
+    from ouroboros import fallback_cooldown, loop, loop_transport
     from ouroboros.primary_route_observation import PRIMARY_CALL_KEY
     from tests.test_model_wait_controls import _loop_tools
     from tests.test_quota_rotation_fallback import RESET
@@ -248,7 +251,9 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::one,openai::two")
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
-    asked, seen = [], []
+    if second == "unknown":  # an eligible unknown outcome does not fence the walk
+        monkeypatch.setattr(loop_transport, "new_generation_after_unknown", lambda *_a, **_kw: True)
+    asked, seen, resent = [], [], []
 
     def candidate(call):
         seen.append((call.active_model, call.defer_resource_wait))
@@ -257,11 +262,20 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
             call.tools._ctx._deferred_resource_refusal = SimpleNamespace(
                 fact={"reason": "quota", "reset_at": RESET}, ask_owner=lambda _waiter: asked.append("quota"),
                 terminal=lambda **fields: {"reason": "quota", "reset_at": RESET, **fields})
-            call.accumulated_usage.update(_last_llm_error_kind="quota_exhausted", _last_llm_error="fallback quota refusal")
+            call.accumulated_usage.update(_last_llm_error_kind="quota_exhausted", _last_llm_error="fallback quota refusal",
+                                          _last_llm_failure={"model": call.active_model, "failure_code": "quota_exhausted"})
+            return None, 0.0, "max"
+        if call.active_model == "openai::two" and second == "unknown":
+            call.accumulated_usage.update(
+                _last_llm_error_kind="provider_outcome_unknown", _last_llm_error="second route outcome unknown",
+                _last_llm_failure={"model": call.active_model, "failure_code": "provider_outcome_unknown"},
+                _pending_transport_outcome={"physical_attempt_id": "attempt-two", "operation_id": "operation-two"})
             return None, 0.0, "max"
         if call.active_model == "openai::two":
-            call.accumulated_usage.update(_last_llm_error_kind="bad_request", _last_llm_error="second route refused")
+            call.accumulated_usage.update(_last_llm_error_kind="bad_request", _last_llm_error="second route refused",
+                                          _last_llm_failure={"model": call.active_model, "failure_code": "bad_request"})
             return None, 0.0, "max"
+        resent.extend(str(row["content"]) for row in call.messages if "[Transport recovery]" in str(row.get("content")))
         call.accumulated_usage["_last_round_cache_usage"] = {
             "round": 4, "model": "one", "provider": "openai", "billing": None, "prompt_tokens": 9_000,
             "cached_tokens": 8_000, "cache_write_tokens": 0, "cost": 0.0123, "cost_final": True,
@@ -278,13 +292,28 @@ def test_the_answer_after_an_owner_wait_gets_the_same_facts_from_its_own_recorde
              PRIMARY_CALL_KEY: {"round": 3, "model": ctx.active_model, "provider": "claudexor", "billing": "unknown",
                                 "cost": None, "cost_final": False, "binding": [ctx.active_model, False, ""]}}
     usage["_last_llm_failure"] = usage["llm_call_refs"][-1]  # the producer retains the row by identity
+    notes = []
     message, model, *_ = loop._run_cross_model_fallback_chain(
         llm=ctx.llm, ctx=tools._ctx, tools=tools, messages=ctx.messages, active_model=ctx.active_model,
         active_use_local=False, tool_schemas=[], active_effort="medium", max_retries=1, drive_logs=ctx.drive_logs,
         task_id=ctx.task_id, round_idx=4, event_queue=None, accumulated_usage=usage, task_type="task",
-        emit_progress=lambda *_a, **_kw: None, context_fit_plan=ctx.context_fit_plan, active_context_mode="max")
+        emit_progress=lambda text, *, incident=None: notes.append((text, incident)),
+        context_fit_plan=ctx.context_fit_plan, active_context_mode="max")
+    end = ("⚡ Fallback: the last attempt, on openai::two, ended without a usable reply after a rejected request."
+           if second == "refused" else
+           "⚡ Fallback: the last attempt, on openai::two, has no known outcome; its outcome and cost stay unknown.")
+    if second == "unknown":  # what the re-send was told after the owner's answer, and the walk's end row before it
+        assert {"re-send": [re.search(r"\[Transport recovery\] (.*?) Continue", row).group(1) for row in resent],
+                "end": notes[2][0]} == {"end": end, "re-send": [
+            "The previous attempt ended without a usable answer; the host is preparing another request after the owner's answer."]}
     assert message["content"] == "after the owner wait" and model == "openai::one" and asked == ["quota"]
     assert seen == [("openai::one", True), ("openai::two", True), ("openai::one", False)]
+    # The walk's end reports its last attempt before the wait and rules out nothing; the resend's answer adopts a route.
+    assert [(text, incident is not None) for text, incident in notes] == [
+        (f"⚡ Fallback: trying openai::one after a rejected request on {ctx.active_model}.", True),
+        ("⚡ Fallback: trying openai::two after a quota or billing refusal on openai::one.", True),
+        (end, False),
+        ("⚡ Fallback: openai::one is now the active route; it answered.", False)]
     facts = tools._ctx._route_facts_pending
     assert f"openai::one (role fallback:0) via openai answered this round after {ctx.active_model} failed with " \
            "bad_request (HTTP 400) at 2026-10-21T01:00:00Z." in facts
@@ -404,6 +433,54 @@ def test_a_wait_card_choice_never_lends_an_earlier_binding_its_primary_call(main
                             "openai answered this round after ")
     assert "cost $0.0042 reported, billing basis not reported" in facts  # the fallback's own call
     assert ctx.accumulated_usage[PRIMARY_CALL_KEY]["binding"] == [MODEL, False, "account-a"]  # round 1's, as recorded
+
+
+@pytest.mark.parametrize("sent,served", [("account-a", "account-a"), ("", "account-c")], ids=["pinned", "auto"])
+def test_an_adopted_route_names_the_account_its_own_call_requested(main_call, monkeypatch, sent, served):
+    """The real walk, dispatcher, Claudexor request and engine result. While fallback:0's call generates on the
+    account its request carried, the owner pins account-b in Settings. The adoption row and the acting model's
+    facts name what that request carried (Auto stays Auto, never the account the engine reports serving it); the
+    newer setting speaks only for later sends."""
+    from ouroboros import fallback_cooldown, loop
+    from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
+    from tests.test_llm_claudexor import MODEL, ROUTE, result
+    from tests.test_model_wait_controls import _loop_tools
+
+    ctx, gateway, owner, events, _decide, _observations = main_call
+    monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"fallback": [sent]}))
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", MODEL)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+    monkeypatch.setattr(llm_probe, "upstream_transport_reachable", lambda *_a, **_kw: {})
+    tools = ctx.tools = _loop_tools(ctx, owner)
+    tools._ctx.task_id, tools._ctx.primary_route = ctx.task_id, {"model": API_FALLBACK, "use_local": False, "role": "main"}
+    gateway.results, gateway.dispatch = [result(route={**ROUTE, "credentialProfileId": served})], ["response_received"]
+    read = gateway.get_model_result
+
+    def generated_while_the_owner_moved_the_pin(*args, **kwargs):
+        monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"fallback": ["account-b"]}))
+        return read(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, "get_model_result", generated_while_the_owner_moved_the_pin)
+    usage, notes = ctx.accumulated_usage, []
+    usage.update(_last_llm_error_kind="bad_request", _last_llm_failure={"model": API_FALLBACK, "failure_code": "bad_request"})
+    message, model, *_ = loop._run_cross_model_fallback_chain(
+        llm=ctx.llm, ctx=tools._ctx, tools=tools, messages=ctx.messages, active_model=API_FALLBACK,
+        active_use_local=False, tool_schemas=[], active_effort="medium", max_retries=1, drive_logs=ctx.drive_logs,
+        task_id=ctx.task_id, round_idx=2, event_queue=events, accumulated_usage=usage, task_type="task",
+        emit_progress=lambda text, *, incident=None: notes.append(text),
+        context_fit_plan=ctx.context_fit_plan, active_context_mode="max")
+    assert message is not None and model == MODEL
+    assert gateway.uploads[-1][0]["account"].get("profileId", "") == sent, "the request carried the send-time account"
+    assert usage["_last_llm_call_meta"]["requested_profile"] == sent
+    assert usage["_last_llm_call_meta"]["observed_route"]["credentialProfileId"] == served
+    assert model_role_option(MODEL_ACCOUNTS_KEY, "fallback:0") == "account-b", "the owner's newer setting stands"
+    words = f"account: {sent or 'Auto'}"
+    assert notes[0].startswith(f"⚡ Fallback: trying {MODEL} ({words}"), "the attempt names the binding about to be sent"
+    assert notes[1:] == [f"⚡ Fallback: {MODEL} ({words}) is now the active route; it answered."]
+    facts = tools._ctx._route_facts_pending
+    assert f"{MODEL} (role fallback:0; account {sent or 'Auto'}) via claudexor answered this round after " in facts
+    assert "account-b" not in notes[1] + facts and (sent or "account-c" not in notes[1] + facts)
 
 
 def test_a_primary_call_recorded_without_its_binding_stays_unattributed():

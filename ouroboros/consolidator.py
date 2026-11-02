@@ -1,21 +1,20 @@
-"""Light memory operations: the shared Light transport.
+"""Light memory operations: the Light transport.
 
-The old dialogue writer (summary blocks of a hundred chat rows, eras, its cursor
-and nominations) is gone: the chronicle imports what it wrote once
-(``chronicle_import``) and the mind writes its own pages. So is the post-task
-scratchpad compression (#918): only a fold the integrating mind accepts replaces
-scratchpad blocks (``Memory.fold_scratchpad_blocks``). What remains is the common
-Light transport (``_call_consolidation_llm`` with its route, fit and typed
-failures) and the read context that records what an operation actually read; that
-knowledge-reading branch (``KnowledgeReadContext``) has no production caller since
-the compression left. No Light operation writes knowledge: lessons, the Pattern
-Register and the backlog are the acting mind's (``knowledge_write``).
+``_call_consolidation_llm`` sends one complete prompt, without tools, on the
+configured Light route and account: a request the route's known window cannot hold
+is refused before any send, and the answer returns with its physical usage or as a
+typed failure (empty, cut at the output ceiling, refused, outcome unknown), while
+controls, waits and unknown custody propagate. Its caller is the fallback memory
+writer (``memory_fallback``). Light writes no knowledge: lessons,
+the Pattern Register and the backlog are the acting mind's (``knowledge_write``),
+the mind writes its own pages (the retired dialogue writer's output was imported
+once by ``chronicle_import``) and only a fold it accepts replaces scratchpad blocks
+(``Memory.fold_scratchpad_blocks``).
 """
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros import chat_chain
 from ouroboros._usage_response import OUTPUT_LIMIT_FINISH_REASONS, response_finish_reason
 
 log = logging.getLogger(__name__)
@@ -60,7 +59,7 @@ def _light_dispatch_binding() -> Dict[str, Any]:
     return binding
 
 
-def _merge_consolidation_usage(*usages: Dict[str, Any], reasoning_usage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _merge_consolidation_usage(*usages: Dict[str, Any]) -> Dict[str, Any]:
     """Combine helper usage without turning absent spend/counters into zero."""
     from ouroboros.knowledge import observed_route_stamp
 
@@ -70,10 +69,9 @@ def _merge_consolidation_usage(*usages: Dict[str, Any], reasoning_usage: Optiona
         merged[key] = None if None in values else sum(values)
     for key in ("ledger_attempt_ids", "_consolidation_errors", "_coverage"):
         merged[key] = [value for usage in usages for value in usage.get(key, [])]
-    retirement_rows = [*usages, reasoning_usage or {}]
     for key in ("reasoning_retired", "reasoning_retired_turns", "reasoning_retired_blocks", "prompt_prefix_breaks"):
-        if any(key in usage for usage in retirement_rows):
-            merged[key] = sum(usage.get(key, 0) for usage in retirement_rows)
+        if any(key in usage for usage in usages):
+            merged[key] = sum(usage.get(key, 0) for usage in usages)
     # The route that answered the LAST send of this unit, and only that one: a
     # physical usage carries provider/resolved_model, a merged one its forwarded
     # stamp, and a final call without a physical fact reads unknown — an earlier
@@ -85,197 +83,10 @@ def _merge_consolidation_usage(*usages: Dict[str, Any], reasoning_usage: Optiona
     return merged
 
 
-class KnowledgeReadContext:
-    """The read tools of one Light operation and the exact source ranges it was shown."""
-
-    def __init__(self, context: Any, call_type: str = "memory_consolidation"):
-        from ouroboros.tools.knowledge import get_tools
-        from ouroboros.tools.compact_context import get_tools as context_tools
-        from ouroboros.tools.core import get_tools as core_tools
-
-        self.context = context
-        self.call_type = call_type
-        self.reads: Dict[Tuple[str, str], str] = {}
-        self.read_ranges: Dict[Tuple[str, str, str], Tuple[int, List[Tuple[int, int]]]] = {}
-        self.pending_delivery: List[Dict[str, Any]] = []
-        self.required_source: Optional[Dict[str, Any]] = None
-        self.tools = [{"type": "function", "function": tool.schema} for tool in get_tools()
-                      if tool.name in {"knowledge_read", "knowledge_list"}]
-        self.tools.extend({"type": "function", "function": tool.schema} for tool in context_tools())
-        self.tools.extend({"type": "function", "function": tool.schema} for tool in core_tools() if tool.name == "read_file")
-
-    def read_call(self, call: Dict[str, Any]) -> Dict[str, Any]:
-        from ouroboros.tools.knowledge import _knowledge_list, _knowledge_read
-        from ouroboros.tools.tool_result import (
-            _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar,
-        )
-
-        function = call.get("function") or {}
-        name = function.get("name")
-        meta, status, typed_result = {}, "error", None
-        try:
-            arguments = function.get("arguments") or "{}"
-            args = json.loads(arguments) if isinstance(arguments, str) else arguments
-            if name in {"knowledge_read", "read_file"}:
-                sentinel = object()
-                token = _install_tool_result_sidecar(self.context, sentinel)
-                try:
-                    if name == "read_file":
-                        from ouroboros.tools.core_file_tools import _read_file
-                        from ouroboros.delegate_output import staged_read_delivery_scope
-                        with staged_read_delivery_scope():
-                            text = _read_file(self.context, **args)
-                    else:
-                        text = _knowledge_read(self.context, **args)
-                    result = _published_tool_result(self.context, sentinel)
-                    typed_result = result if name == "read_file" else None
-                    meta = dict(getattr(result, "meta", {}))
-                    status = getattr(result, "status", "")
-                    if name == "read_file" and self.context.last_read_view:
-                        meta["read_file_source"] = dict(self.context.last_read_view)
-                        status = "ok"
-                finally:
-                    _restore_tool_result_sidecar(token)
-            elif name == "knowledge_list":
-                text = _knowledge_list(self.context, **args)
-            elif name == "compact_context":
-                from ouroboros.tools.compact_context import _compact_context
-                text = _compact_context(self.context, **args)
-            else:
-                text = "This memory operation supports knowledge_read, knowledge_list, read_file and compact_context."
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            text = f"Knowledge read unavailable: {type(exc).__name__}: {exc}"
-        return {"tool_call_id": str(call.get("id") or ""), "fn_name": name,
-                "result": text, "result_meta": meta, "status": status, "tool_result": typed_result}
-
-    def accept_delivery(self) -> None:
-        """Credit only source characters in the request the model answered."""
-        for row in self.pending_delivery:
-            if row.get("status") != "ok":
-                continue
-            from ouroboros.delegate_output import acknowledge_staged_output_delivery
-
-            original = row.get("_original_result", row["result"])
-            shown = ((row.get("result_source_view") or {}).get("delivered_range")
-                     if row.get("result_partial") else [0, len(original)])
-            if isinstance(shown, list):
-                acknowledge_staged_output_delivery(self.context, {**row, "result": original}, row, shown_ranges=[shown])
-            meta = row.get("result_meta") or {}
-            source = meta.get("knowledge_source") or {}
-            try:
-                file = meta.get("read_file_source")
-                if file:
-                    if file.get("source_masked"):
-                        continue
-                    scope, topic, revision = file["opened_root"], file["opened_path"], file["source_revision"]
-                    total, start, end = file["complete_chars"], file["source_start_char"], file["source_end_char"]
-                    header, body = file["body_start"], file["body_chars"]
-                else:
-                    args = source["read"]["arguments"]
-                    scope, topic, revision = args["scope"], args["topic"], source["revision"]
-                    total, start, end = source["complete_chars"], source["start_char"], source["end_char"]
-                    header, body = meta["knowledge_body_start"], meta["knowledge_body_chars"]
-                if (not all(type(n) is int for n in (total, start, end, header, body))
-                        or not 0 <= start <= end <= total or body != end - start or header < 0):
-                    continue
-                shown = (row["result_source_view"]["delivered_range"][1]
-                         if row.get("result_partial") else len(row["result"]))
-                if shown < header:
-                    continue
-                if file:
-                    from ouroboros.tools.core_file_tools import delivered_source_prefix
-
-                    delivered_end = start + len(delivered_source_prefix(file, row["result"], shown))
-                else:
-                    delivered_end = start + min(body, shown - header)
-                key = (scope, topic, revision)
-                old_total, ranges = self.read_ranges.get(key, (total, []))
-                self.reads.pop((scope, topic), None)
-                if old_total != total:
-                    continue
-                merged: List[Tuple[int, int]] = []
-                for lo, hi in sorted([*ranges, (start, delivered_end)]):
-                    if merged and lo <= merged[-1][1]:
-                        merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
-                    else:
-                        merged.append((lo, hi))
-                self.read_ranges[key] = (total, merged)
-                if merged == [(0, total)]:
-                    self.reads[(scope, topic)] = revision
-            except (KeyError, TypeError, ValueError):
-                continue
-        self.pending_delivery = []
-
-    def source_complete(self) -> bool:
-        ref = self.required_source
-        args = ref["read"]["arguments"] if ref else {}
-        return ref is None or self.reads.get((args["root"], args["path"])) == ref["sha256"]
-
-    def next_messages(self, values: dict, message: dict, *, fit_candidate: Callable,
-                      facts: dict, round_id: str) -> list:
-        """Complete one tool batch, apply the actor's view, then project its results."""
-        from dataclasses import asdict
-        from ouroboros.context_budget import ContextReclaimRequest, SummarizerContextOverflow
-        from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
-        from ouroboros.context_fit import project_tool_result_batch
-
-        rows = [self.read_call(call) for call in message["tool_calls"]]
-        before = [*values["messages"], {**message, "role": "assistant"}]
-
-        def tool_messages(results):
-            return [{"role": "tool", "tool_call_id": row["tool_call_id"], "content": row["result"]}
-                    for row in results]
-
-        pending = getattr(self.context, "_pending_compaction", None)
-        if pending is not None:
-            self.context._pending_compaction = None
-            receipt = {"status": "authored_note_required",
-                       "reason": "This Light operation uses your authored view. Call inspect=true, then supply working_note and keep_unit_ids; no helper was called."}
-            if isinstance(pending, dict):
-                observed = pending["observed"]
-                complete = [*before, *tool_messages(rows)]
-                request = ContextReclaimRequest(
-                    route_fp=str(facts.get("route_fp") or "unknown"), round_id=round_id,
-                    transcript_sha256=context_reclaim_transcript_sha256(complete),
-                    measurement_basis="cold_estimate", measurement_density=facts.get("measurement_density", 1.0),
-                    reclaim_goal_tokens=0,
-                    **{key: pending[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names")})
-                candidate, applied = compact_tool_history_llm(
-                    complete, request=request, observed_messages=observed["messages"],
-                    observed_tool_schemas=observed["tool_schemas"], tool_schemas=values["tools"],
-                    fit_candidate=fit_candidate, drive_root=self.context.drive_root,
-                    task_id=str(self.context.task_id or "consolidation"))
-                facts_receipt = asdict(applied)
-                # Full provenance already lives in the checkpoint/capsule.
-                # Replaying that growing lineage in every tool reply can fill
-                # the very window the actor just reclaimed.
-                receipt = {key: facts_receipt[key] for key in (
-                    "status", "checkpoint_ref", "view_revision", "reclaimed_tokens", "fit") if key in facts_receipt}
-                receipt["receipt_ref"] = chat_chain.retain_memory_source(self.context, "memory_context_view",
-                    json.dumps(facts_receipt, ensure_ascii=False).encode("utf-8"), "json")
-                if applied.status in {"applied", "no_op"}:
-                    before = candidate[:-len(rows)]  # the new completed batch is preserved verbatim
-                if applied.status == "applied":
-                    from ouroboros.transcript_prefix import sanction_rewrite
-                    sanction_rewrite(self.context, "compaction")  # the actor's own fold names its change
-            for row in rows:
-                if row["fn_name"] == "compact_context":
-                    row["result"] = json.dumps({"context_view": receipt}, ensure_ascii=False)
-        projected, projection = project_tool_result_batch(
-            rows, before, values["tools"], drive_root=self.context.drive_root,
-            task_id=str(self.context.task_id or "consolidation"), fit_candidate=fit_candidate)
-        self.pending_delivery = [{**view, "_original_result": row["result"]}
-                                 for row, view in zip(rows, projected)]
-        if projection["status"] == "minimum_view_unfit":
-            raise SummarizerContextOverflow("Memory tool-result source locators exceed the current working window")
-        return [*before, *tool_messages(projected)]
-
 def _call_consolidation_llm(
     llm_client: Any, prompt: str, label: str, *, fixed_prompt: str = "",
     input_limit: Optional[Dict[str, Any]] = None,
     model_route: Optional[Dict[str, Any]] = None,
-    knowledge: Optional[KnowledgeReadContext] = None,
-    source_ref: Optional[Dict[str, Any]] = None,
     reasoning_effort: str = "low",
 ) -> Tuple[str, Dict[str, Any]]:
     from contextlib import nullcontext
@@ -284,34 +95,20 @@ def _call_consolidation_llm(
     from ouroboros.context_budget import SummarizerContextOverflow
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, resolve_context_fit_route)
-    from ouroboros.tools.compact_context import record_context_view
     from ouroboros.model_wait import current_model_wait
     from ouroboros.provider_models import parse_claudexor_model, provider_for_model
-    from ouroboros.tool_access import canonical_data_root
 
     facts: Dict[str, Any] = {}
     prepared_values: Dict[str, Any] = {}
-    retired_usage: Dict[str, Any] = {}
     model_route = model_route if model_route is not None else {}
     invoked = False
     usages: List[Dict[str, Any]] = []
     waiter = current_model_wait()
-    if knowledge:
-        from ouroboros.llm_claudexor import ModelTurnState
-        turn_state = ModelTurnState()
 
     def prepare(values: Dict[str, Any], *, check_fit: bool = True) -> Dict[str, Any]:
         # Use the same role, captured pin (including Auto), local flag and
         # observed account as dispatch. Revalidate after an owner route switch.
         observed = values.pop("_model_observed_route", None)
-        if knowledge:
-            from ouroboros.llm_claudexor import turn_state_for_route
-            from ouroboros.transcript_prefix import append_reasoning_retirement_fact, prepare_reasoning_for_send
-            if prepare_reasoning_for_send(knowledge.context, values["messages"], values["tools"],
-                                          round_idx=len(usages) + 1, usage=retired_usage):
-                append_reasoning_retirement_fact(retired_usage, len(usages) + 1, values["messages"])
-            values["model_turn_state"] = turn_state_for_route(
-                turn_state, "local" if values["use_local"] else provider_for_model(values["model"]))
         prepared_values.clear()
         prepared_values.update(values)
         task = {
@@ -376,100 +173,42 @@ def _call_consolidation_llm(
             raise SummarizerContextOverflow("Complete consolidation request exceeds the route input capacity")
         return values
 
-    def fit_candidate(messages: list, tools: list) -> Dict[str, Any]:
-        # Reuse captured preparation facts: a view search reads no catalog/network and keeps the model route.
-        tokens = ceil(estimate_context_prompt_tokens(
-            messages, tools, provider=facts.get("provider", ""),
-            reasoning_effort=prepared_values.get("reasoning_effort")) * facts.get("measurement_density", 1.0))
-        text = messages[0]["content"] if len(messages) == 1 else json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
-        size = len(text.encode("utf-8"))
-        accepted = ((facts.get("input_limit") is None or tokens <= facts["input_limit"])
-                    and (facts.get("byte_limit") is None or size <= facts["byte_limit"]))
-        return {"accepted": accepted, "input_tokens": tokens, "input_bytes": size,
-                "input_limit": facts.get("input_limit"), "output_reserve_tokens": facts.get("output_reserve_tokens"),
-                "measurement_basis": "canonical_visible_estimate", "strict_bound_proven": False}
+    def reprepare_with_route(next_values: Dict[str, Any]) -> Dict[str, Any]:
+        observed = next_values.get("_model_observed_route")
+        if isinstance(observed, dict):
+            model_route.clear()
+            model_route.update(observed)
+        return prepare(next_values)
 
     try:
         # The effective Light binding this call dispatches on (``_light_dispatch_binding``).
         values = dict(messages=[{"role": "user", "content": prompt}],
-                      model_role="light", tools=knowledge.tools if knowledge else None,
-                      cache_affinity=f"memory_preparation:{canonical_data_root(knowledge.context)}" if knowledge else "",
+                      model_role="light", tools=None, cache_affinity="",
                       reasoning_effort=reasoning_effort, max_tokens=LIGHT_ANSWER_CEILING_TOKENS,
                       **_light_dispatch_binding())
         # Carry part-to-part evidence only on initial preparation. A wait's
         # reprepare without an observed receipt rediscovers Auto after rotation.
-        try:
-            values = prepare({**values, "_model_observed_route": dict(model_route)})
-        except SummarizerContextOverflow:
-            if knowledge is None:
-                raise
-            source_ref = source_ref or chat_chain.retain_memory_source(knowledge.context, label, prompt.encode("utf-8"))
-            knowledge.required_source = source_ref
-            pointer = (f"Complete source and instructions for {label} are retained here. "
-                       "Read the whole source through read_file in ranges before your final response. "
-                       "Use compact_context with your authored working_note while progressing through ranges; "
-                       "preserve the whole temporal horizon, uncertainty and source references. "
-                       "This locator is not a summary. Knowledge reads and all current tools remain available.\n"
-                       + json.dumps(source_ref, ensure_ascii=False))
-            values = prepare({**prepared_values, "messages": [{"role": "user", "content": pointer}],
-                              "_model_observed_route": dict(model_route)})
-        while True:
-            def reprepare_with_route(next_values: Dict[str, Any]) -> Dict[str, Any]:
-                observed = next_values.get("_model_observed_route")
-                if isinstance(observed, dict):
-                    model_route.clear()
-                    model_route.update(observed)
-                return prepare(next_values)
-
-            with waiter.register_reprepare("light", reprepare_with_route) if waiter else nullcontext():
-                invoked = True
-                if knowledge:
-                    from ouroboros.llm_observability import chat_observed
-                    msg, usage = chat_observed(
-                        llm_client, drive_root=knowledge.context.drive_root,
-                        task_id=str(knowledge.context.task_id or "consolidation"),
-                        call_type=knowledge.call_type, **values)
-                else:
-                    msg, usage = llm_client.chat(**values)
-            usages.append(usage)
-            if knowledge:
-                # A wait may have re-prepared this same call with another route;
-                # pin its final canonical view before executing the returned tools.
-                from ouroboros.transcript_prefix import count_accepted_send
-                count_accepted_send(knowledge.context, prepared_values["messages"], prepared_values["tools"],
-                                    round_idx=len(usages), usage=retired_usage)
-                record_context_view(knowledge.context, prepared_values["messages"], prepared_values["tools"])
-                knowledge.accept_delivery()
-            if isinstance(usage.get("claudexor"), dict):
-                model_route.clear()
-                model_route.update(usage["claudexor"].get("route") or {})
-            calls = msg.get("tool_calls") or []
-            if knowledge is not None and calls:
-                invoked = False
-                messages = knowledge.next_messages(prepared_values, msg, fit_candidate=fit_candidate,
-                                                    facts=facts, round_id=str(len(usages)))
-                values = prepare({**prepared_values, "messages": messages, "_model_observed_route": dict(model_route)})
-                continue
-            content = msg.get("content") or ""
-            if content.strip():
-                if knowledge and not knowledge.source_complete():
-                    response_ref = chat_chain.retain_memory_source(knowledge.context, "incomplete_memory_response", content.encode("utf-8"))
-                    return "", {**_merge_consolidation_usage(*usages, reasoning_usage=retired_usage), "_consolidation_errors": [{
-                        "kind": "source_incomplete", "label": label,
-                        "message": "The complete retained source was not delivered; originals are preserved.",
-                        "source_ref": knowledge.required_source, "response_ref": response_ref}]}
-                # The shared finish reader: usage.response_finish_reason (OpenAI-family lanes),
-                # then the message's own finish_reason / stop_reason (native Anthropic).
-                if str(response_finish_reason(usage, msg)[1] or "").strip().lower() in OUTPUT_LIMIT_FINISH_REASONS:
-                    # A summary cut at the output ceiling is silent truncation
-                    # (BIBLE P1): keep the originals rather than a clipped memory.
-                    usages.pop()
-                    kind, message, preflight = "output_truncated", "Consolidation output was cut at the output ceiling", False
-                    break
-                return content, _merge_consolidation_usage(*usages, reasoning_usage=retired_usage)
-            usages.pop()  # the empty response is added once as the failed result below
-            kind, message, preflight = "empty_summary", "Consolidation returned no summary", False
-            break
+        values = prepare({**values, "_model_observed_route": dict(model_route)})
+        with waiter.register_reprepare("light", reprepare_with_route) if waiter else nullcontext():
+            invoked = True
+            msg, usage = llm_client.chat(**values)
+        usages.append(usage)
+        if isinstance(usage.get("claudexor"), dict):
+            model_route.clear()
+            model_route.update(usage["claudexor"].get("route") or {})
+        content = msg.get("content") or ""
+        if content.strip():
+            # The shared finish reader: usage.response_finish_reason (OpenAI-family lanes),
+            # then the message's own finish_reason / stop_reason (native Anthropic).
+            if str(response_finish_reason(usage, msg)[1] or "").strip().lower() not in OUTPUT_LIMIT_FINISH_REASONS:
+                return content, _merge_consolidation_usage(*usages)
+            # A summary cut at the output ceiling is silent truncation
+            # (BIBLE P1): keep the originals rather than a clipped memory.
+            kind, message = "output_truncated", "Consolidation output was cut at the output ceiling"
+        else:
+            kind, message = "empty_summary", "Consolidation returned no summary"
+        usages.pop()  # the unusable response is added once as the failed result below
+        preflight = False
     except Exception as error:
         from ouroboros.llm_claudexor import propagate_model_error
         from ouroboros.loop_llm_call import classify_llm_exception
@@ -495,8 +234,6 @@ def _call_consolidation_llm(
         usage["ledger_attempt_ids"] = list(getattr(error, "ledger_attempt_ids", []))
     from ouroboros.utils import sanitize_tool_result_for_log
 
-    if knowledge is not None and usages and kind == "context_overflow":
-        kind = "knowledge_source_unfit"  # splitting the original episode cannot shrink a requested note
     fact = dict(facts, kind=kind, label=label, message=sanitize_tool_result_for_log(message), preflight_only=preflight)
     log.warning("%s failed (%s): %s", label, kind, fact["message"])
-    return "", {**_merge_consolidation_usage(*usages, usage, reasoning_usage=retired_usage), "_consolidation_errors": [fact]}
+    return "", {**_merge_consolidation_usage(*usages, usage), "_consolidation_errors": [fact]}
