@@ -329,20 +329,21 @@ def _assignment_with_an_evolution_row(data_root, monkeypatch, *, settle_at):
 
 
 def test_an_evolution_row_the_exact_budget_affords_is_assigned_under_a_held_writer(data_root, monkeypatch):
-    """``assign_tasks`` refuses at TWO floors: zero, and the evolution reserve. Under
-    a held write lock its read is exact, so an affordable evolution row is assigned."""
-    workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
+    """``assign_tasks`` refuses at zero. Under a held write lock its read is exact, so an
+    affordable evolution row is assigned."""
+    workers, pending, _reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(workers.assign_tasks)
     assert elapsed < _MAX_READ_SEC
-    assert pending == [] and "evolution_dropped_budget" not in reasons  # exact budget: $4.90
+    assert pending == [] and list(workers.RUNNING) == ["evo-1"]  # exact budget: $4.90
 
 
-def test_an_evolution_row_the_exact_budget_cannot_afford_is_still_dropped(data_root, monkeypatch):
-    """The quiet direction: the refusal itself is untouched when the money is really gone."""
-    workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=3.50)
+def test_an_evolution_row_below_two_dollars_is_assigned_not_dropped(data_root, monkeypatch):
+    """Positive money under the former $2 Evolution reserve is ordinary money (owner decision
+    2026-11-02): the queued row reaches its worker instead of leaving the queue unrecorded."""
+    workers, pending, _reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=3.50)
     workers.assign_tasks()
-    assert pending == [] and "evolution_dropped_budget" in reasons  # exact budget: $1.50
+    assert pending == [] and list(workers.RUNNING) == ["evo-1"]  # exact budget: $1.50
 
 
 @pytest.mark.parametrize("free_worker", [True, False])
@@ -386,11 +387,11 @@ def test_assignment_answers_under_a_held_writer_when_money_is_there(data_root, m
     """With money plainly there the tick answers at once under a held write lock."""
     from supervisor import state
 
-    workers, pending, reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
+    workers, pending, _reasons = _assignment_with_an_evolution_row(data_root, monkeypatch, settle_at=0.10)
     assert state.budget_remaining({}, strict=True, allow_stale=True) == pytest.approx(4.90)
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(workers.assign_tasks)
-    assert elapsed < _MAX_READ_SEC and pending == [] and "evolution_dropped_budget" not in reasons
+    assert elapsed < _MAX_READ_SEC and pending == [] and list(workers.RUNNING) == ["evo-1"]
 
 
 def _display_readers(data_root, state):
