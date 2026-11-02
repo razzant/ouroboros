@@ -15,7 +15,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D05 | Tool surfaces: files, code, shell, media, external | 46 | 0 |
 | D06 | Review stack | 95 | 0 |
 | D07 | Delegation, subagents & Claudexor | 104 | 0 |
-| D08 | Supervisor: queue, workers, events & runtime control | 75 | 0 |
+| D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 114 | 0 |
@@ -27,8 +27,8 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D17 | Projects, workspaces & task results | 54 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 37 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
-| D20 | Presence | 22 | 0 |
-| **total** | | **969** | **0** |
+| D20 | Presence | 24 | 0 |
+| **total** | | **972** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -43,7 +43,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 | **D05** | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · |
 | **D06** | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | · | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D07** | ✓ | ✓ | · | ✓ | ✓ | ✓ | · | ✓ | · | · | · | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | · |
-| **D08** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | · |
+| **D08** | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · | ✓ | · | · | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **D09** | ✓ | · | · | · | · | ✓ | · | ✓ | · | · | · | · | · | · | · | ✓ | ✓ | ✓ | · | · |
 | **D10** | · | · | · | ✓ | ✓ | ✓ | · | ✓ | · | · | · | ✓ | ✓ | · | · | ✓ | ✓ | ✓ | ✓ | · |
 | **D11** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | · | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **124**
+- lazy-only cross-domain pairs: **123**
   - D01->D10
   - D01->D11
   - D02->D05
@@ -114,7 +114,6 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D08->D10
   - D08->D11
   - D08->D13
-  - D08->D20
   - D09->D02
   - D09->D04
   - D09->D05
@@ -654,7 +653,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/cognitive_operations.py`
 - `supervisor/consciousness_carriers.py`
 - `supervisor/continuation_admission.py`
-- `supervisor/direct_pause.py`
+- `supervisor/conversation_lane.py`
 - `supervisor/direct_roots.py`
 - `supervisor/event_observation.py`
 - `supervisor/event_taxonomy.py`
@@ -671,6 +670,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `supervisor/events_task_done.py`
 - `supervisor/events_worker_reports.py`
 - `supervisor/followup_policy.py`
+- `supervisor/inline_carrier.py`
 - `supervisor/log_addressing.py`
 - `supervisor/loop_load.py`
 - `supervisor/message_bus.py`
@@ -1218,10 +1218,12 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/presence_bindings.py`
 - `ouroboros/presence_call.py`
 - `ouroboros/presence_capabilities.py`
+- `ouroboros/presence_carrier.py`
 - `ouroboros/presence_context.py`
 - `ouroboros/presence_continuation.py`
 - `ouroboros/presence_delivery.py`
 - `ouroboros/presence_events.py`
+- `ouroboros/presence_executions.py`
 - `ouroboros/presence_history.py`
 - `ouroboros/presence_observations.py`
 - `ouroboros/presence_owner_contact.py`
