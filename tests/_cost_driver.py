@@ -222,14 +222,20 @@ class _NoProcess:
 
 def _stub_duty_effects(result: Dict[str, Any]) -> Dict[str, Any]:
     """What the duty passes must not reach: the daemon (every gateway read refuses typed, as an
-    install without one answers), the maintenance child's process (its spawn is recorded) and the
-    body's own driver clock (parked; the pass drives the tick and advances the clock itself)."""
+    install without one answers), the maintenance child's process (its spawn is recorded), the body's
+    own driver clock (parked; the pass drives the tick and advances the clock itself) and a process
+    behind the event bus."""
     from ouroboros import claudexor_daemon, delegate_collection, maintenance
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from supervisor import workers
+    from supervisor.event_observation import ObservedEventQueue
 
     def no_daemon(*_args, **_kwargs):
         raise ClaudexorUnavailable("daemon_unreachable", "cost contract: no daemon on these boundaries")
 
+    # The bus the spawned pool would have created: without it the duties that hand work to it fail before their first
+    # read, and a duty that cannot run rests by default. Nothing drains it here: the supervisor is held.
+    workers._EVENT_Q = ObservedEventQueue()
     claudexor_daemon.read_owned_gateway = no_daemon
     claudexor_daemon.ensure_owned_gateway = no_daemon
     maintenance.spawn_maintenance_job = lambda data_root, repo_dir, purpose, **_k: (
@@ -630,8 +636,8 @@ def _body_pass(runtime: Any, tick: Callable[..., Any]) -> None:
 
 
 def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str, Callable[[], str]]:
-    """One addressed input change per duty, after whose arrival the duty has work again. Each returns
-    what it changed. A duty without one is listed with the reason in tests/test_cost_contract.py."""
+    """One addressed input change per duty, after whose arrival the duty has work again (the live set's own six in
+    tests/_live_set.py). Each returns what it changed."""
     from ouroboros import delegate_custody as custody
     from ouroboros import maintenance_jobs, owner_quiz
     from ouroboros.cancel_intents import request_cancel
@@ -696,9 +702,11 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
         request_cancel(root, "cur-cancel-me", reason="cost contract", source="owner", requested_by="owner")
         return "an open cancel intent for a task nobody runs"
 
+    from tests._live_set import companions as live_set_companions
+
     return {"delegated-body": body, "abandoned_usage_reconciliation": late_body, "custody-maintenance": owed_projection,
             "reconcile-maintenance": owed_mark, "maintenance-child": child_job, "question_delivery_replay": question,
-            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel}
+            "terminal_delivery_replay": delivery, "cancel_intent_sweep": cancel, **live_set_companions(root)}
 
 
 def _completion(root: pathlib.Path, who: str, _k: int) -> None:
@@ -814,6 +822,24 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
                child.request if duty.name == "maintenance-child" else (lambda: None))
 
 
+def _measure_contract(meter: CostMeter, srv: Any, client: Any, result: Dict[str, Any], root: pathlib.Path,
+                      facts: Dict[str, Any], stubs: Dict[str, Any]) -> None:
+    _chat_frame(meter, client, result, "B4", "cost-contract-1")
+    _request(meter, client, result, "B3", "GET", "/api/state")
+    _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
+    _request(meter, client, result, "R_late", "GET", f"/api/chat/history?chat_id={facts['late_chat_id']}")
+    _chat_frame(meter, client, result, "B4w", "cost-contract-2")
+    _request(meter, client, result, "B3w", "GET", "/api/state")
+    _request(meter, client, result, "R_activew", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
+    _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel", json={"cascade": True})
+    _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
+    if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
+        _heartbeats(root)
+        _measure_boundaries(meter, srv, result, root, facts)
+        _measure_duties(meter, srv, result, root, facts, stubs)
+    _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
+
+
 def run(spec: Dict[str, Any]) -> Dict[str, Any]:
     root = pathlib.Path(spec["root"])
     result: Dict[str, Any] = {"facts": spec.get("facts", {}), "errors": [], "_started": time.monotonic()}
@@ -868,21 +894,12 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
                 BOUNDARY.reset(token)
             try:
                 facts = spec.get("facts", {})
-                _chat_frame(meter, client, result, "B4", "cost-contract-1")
-                _request(meter, client, result, "B3", "GET", "/api/state")
-                _request(meter, client, result, "R_active", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
-                _request(meter, client, result, "R_late", "GET", f"/api/chat/history?chat_id={facts['late_chat_id']}")
-                _chat_frame(meter, client, result, "B4w", "cost-contract-2")
-                _request(meter, client, result, "B3w", "GET", "/api/state")
-                _request(meter, client, result, "R_activew", "GET", f"/api/chat/history?chat_id={facts['active_chat_id']}")
-                _request(meter, client, result, "B5", "POST", f"/api/tasks/{CURRENT['stop_root']}/cancel",
-                         json={"cascade": True})
-                _boundary(meter, result, "B9", lambda: _addressed_stream(root, result))
-                if facts.get("held_runs"):  # a root with the duties' shapes: B8 first, then B7
-                    _heartbeats(root)
-                    _measure_boundaries(meter, srv, result, root, facts)
-                    _measure_duties(meter, srv, result, root, facts, stubs)
-                _measure_turns(meter, srv, result, root, facts)  # B10 last: no earlier law's inputs change
+                if spec.get("plan") == "live_set":  # the live-set axis grows the set on this booted root instead
+                    from tests import _live_set
+
+                    _live_set.measure(meter, srv, client, result, root, spec, stubs)
+                else:
+                    _measure_contract(meter, srv, client, result, root, facts, stubs)
             finally:
                 result["process_at_end"] = _all_counts(meter)
                 if stubs:

@@ -24,7 +24,14 @@ What is counted, per tag:
   exists only on POSIX); ``lock_acquired``: a lock file created by an exclusive ``os.open`` (every
   lock tier takes its name so), one per acquisition however contended, since a refused create raises;
 - ``json_loads`` and ``json_chars``: every ``json.loads``/``json.load`` and its input length;
-  ``rows_decoded``: the stored dialogue row bodies among them (``ROW_DECODER``);
+  ``rows_decoded``: the stored dialogue row bodies among them (``ROW_DECODER``); ``json_dumps`` and
+  ``json_dumps_chars``: every ``json.dumps`` and the text it made;
+- ``fsync`` and ``replace``: ``os.fsync`` and the ``os.replace`` that publishes a file, named by file in ``names``;
+- ``under_q:<kind>``: the same work done while the calling thread holds the supervisor's queue lock (``fsync``,
+  ``replace``, ``json_dumps_chars``): what an owner's control waits behind;
+- per store (``current``, ``dialog``, ``usage``, ``other``, from the connection's file name):
+  ``begins:<store>`` and ``statements:<store>``; ``task_body_reads``: a statement that selects from ``task_bodies``;
+  ``usage_row_reads``: one that selects a usage store's attempts or summaries (its marker and dirty set are no rows);
 - ``rows_crossed``: every row a statement hands to Python as a ``sqlite3.Row`` (the store's row factory),
   one SQLite-to-Python crossing each: a read that captures (``store_capture``) crosses once per statement;
 - ``popen`` (argv[0] names kept in ``popen_names``) and ``thread_start`` (thread names).
@@ -140,6 +147,7 @@ class CostMeter:
         self.spawned: Dict[str, List[threading.Thread]] = collections.defaultdict(list)
         self._lock = threading.Lock()
         self._fd_category: Dict[int, str] = {}
+        self._fd_names: Dict[int, str] = {}
         self._rebound: List[Tuple[Any, str, Any]] = []
         self._patched: List[Tuple[Any, str, Any]] = []
 
@@ -176,6 +184,12 @@ class CostMeter:
                 return "root"
         return "outside"
 
+    def path_of(self, database: Any) -> str:
+        """A connection's file, a SQLite URI (``store.connect``) included."""
+        text = os.fspath(database)
+        text = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+        return urllib.parse.unquote(urllib.parse.urlsplit(text).path) if text.startswith("file:") else text
+
     def add(self, kind: str, amount: int = 1, *, path: Any = None, category: Optional[str] = None) -> str:
         tag = tag_of()
         if category is None and path is not None:
@@ -207,21 +221,34 @@ class CostMeter:
                 return text[len(root):]
         return text
 
-    def note_statement(self, statement: str) -> None:
+    def note_statement(self, statement: str, store: str = "other") -> None:
         head = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
         tag = tag_of()
         source = caller(4)
         with self._lock:
             counter = self.counts[tag]
             counter["statements"] += 1
+            counter[f"statements:{store}"] += 1
             self.callers[tag][f"statements <- {source}"] += 1
             if head in ("COMMIT", "END"):
                 counter["commits"] += 1
             elif head == "BEGIN":
                 counter["begins"] += 1
+                counter[f"begins:{store}"] += 1
             elif head in ("INSERT", "UPDATE", "DELETE", "REPLACE"):
                 counter["writes"] += 1
+            elif head == "SELECT" and "task_bodies" in statement:
+                counter["task_body_reads"] += 1
+                self.callers[tag][f"task_body_reads <- {source}"] += 1
+            elif head == "SELECT" and store == "usage" and (" FROM attempts" in statement or " FROM summaries" in statement):
+                counter["usage_row_reads"] += 1
+                self.callers[tag][f"usage_row_reads <- {source}"] += 1
             self.statements[tag][" ".join(statement.split())[:160]] += 1
+
+    def note_queue_held(self, kind: str, amount: int = 1) -> None:
+        """The same work again under ``under_q:<kind>`` when the calling thread holds the queue lock."""
+        if _queue_lock_held():
+            self.add(f"under_q:{kind}", amount)
 
     def note_name(self, kind: str, name: str) -> None:
         tag = tag_of()
@@ -274,6 +301,15 @@ class CostMeter:
 
 
 # ---- wrappers (module level so that aliases can be rebound to one object) ------------
+
+def _queue_lock_held() -> bool:
+    queue = sys.modules.get("supervisor.queue")
+    lock = getattr(queue, "_queue_lock", None)
+    try:
+        return bool(lock is not None and lock._is_owned())
+    except Exception:
+        return False
+
 
 def _w_stat(path, *args, **kwargs):
     meter = _ACTIVE
@@ -346,6 +382,8 @@ def _w_os_open(path, flags, *args, **kwargs):
         category = meter.category(path)
         meter.add("os_open", path=path, category=category)
         meter._fd_category[fd] = category
+        if not isinstance(path, int):
+            meter._fd_names[fd] = os.path.basename(os.fspath(path))
         if category == "lock" and flags & os.O_EXCL:
             meter.add("lock_acquired")
     return fd
@@ -375,7 +413,24 @@ def _w_os_close(fd, *args, **kwargs):
     meter = _ACTIVE
     if meter is not None:
         meter._fd_category.pop(fd, None)
+        meter._fd_names.pop(fd, None)
     return _ORIG["os.close"](fd, *args, **kwargs)
+
+
+def _w_fsync(fd):
+    meter = _ACTIVE
+    if meter is not None:
+        meter.note_name("fsync", meter._fd_names.get(fd, "fd") if isinstance(fd, int) else "file")
+        meter.note_queue_held("fsync")
+    return _ORIG["os.fsync"](fd)
+
+
+def _w_replace(src, dst, *args, **kwargs):
+    meter = _ACTIVE
+    if meter is not None:
+        meter.note_name("replace", os.path.basename(os.fspath(dst)))
+        meter.note_queue_held("replace")
+    return _ORIG["os.replace"](src, dst, *args, **kwargs)
 
 
 class _CountingFileIO(io.FileIO):
@@ -447,6 +502,16 @@ def _w_json_loads(s, *args, **kwargs):
     return _ORIG["json.loads"](s, *args, **kwargs)
 
 
+def _w_json_dumps(obj, *args, **kwargs):
+    text = _ORIG["json.dumps"](obj, *args, **kwargs)
+    meter = _ACTIVE
+    if meter is not None:
+        meter.add("json_dumps")
+        meter.add("json_dumps_chars", len(text))
+        meter.note_queue_held("json_dumps_chars", len(text))
+    return text
+
+
 class _CountedRow(sqlite3.Row):
     """``sqlite3.Row`` while a meter is installed (the store sets ``row_factory = sqlite3.Row`` at each
     connect): each row a statement hands to Python counts ``rows_crossed``."""
@@ -458,10 +523,10 @@ class _CountedRow(sqlite3.Row):
         return super().__new__(cls, cursor, data)
 
 
-def _trace(statement: str) -> None:
+def _trace(store: str, statement: str) -> None:
     meter = _ACTIVE
     if meter is not None:
-        meter.note_statement(statement)
+        meter.note_statement(statement, store)
 
 
 def _progress() -> int:
@@ -477,7 +542,9 @@ def _w_connect(database, *args, **kwargs):
     if meter is not None:
         meter.add("connect", path=database)
         try:
-            conn.set_trace_callback(_trace)
+            name = os.path.basename(meter.path_of(database))
+            store = name.split(".", 1)[0] if name in ("current.sqlite", "dialog.sqlite", "usage.sqlite") else "other"
+            conn.set_trace_callback(functools.partial(_trace, store))
             conn.set_progress_handler(_progress, VM_STEP)
         except Exception:
             pass
@@ -526,8 +593,10 @@ _MODULE_PATCHES = (
     (os, "scandir", "os.scandir", _w_scandir), (os, "listdir", "os.listdir", _w_listdir),
     (os, "open", "os.open", _w_os_open), (os, "read", "os.read", _w_os_read),
     (os, "pread", "os.pread", _w_os_pread), (os, "close", "os.close", _w_os_close),
+    (os, "fsync", "os.fsync", _w_fsync), (os, "replace", "os.replace", _w_replace),
     (io, "open", "io.open", _w_open), (builtins, "open", "builtins.open", _w_open),
-    (json, "loads", "json.loads", _w_json_loads), (sqlite3, "connect", "sqlite3.connect", _w_connect),
+    (json, "loads", "json.loads", _w_json_loads), (json, "dumps", "json.dumps", _w_json_dumps),
+    (sqlite3, "connect", "sqlite3.connect", _w_connect),
     (sqlite3, "Row", "sqlite3.Row", _CountedRow),
 )
 _ACCESSOR = getattr(pathlib, "_NormalAccessor", None)
