@@ -102,3 +102,33 @@ def test_the_telegram_health_line_counts_every_started_process(published, monkey
     assert telegram_health._started_processes(snap) == 1
 
 
+# ---- N9: a failed publication is retried; the stale document is never re-certified ---------------
+
+def test_a_failed_census_publication_is_retried_and_never_recertified_meanwhile(published, monkeypatch):
+    root, now = published
+    queue.RUNNING["r"] = {"task": _task("r"), "attempt": 1, "worker_id": 3, "started_at": now[0] - 100,
+                          "last_heartbeat_at": now[0] - 1, "budget_paused_sec": 0.0, "soft_sent": False}
+    assert queue.persist_queue_snapshot("start") is True
+    generation = _read(root, "queue.alive")["generation"]
+    queue_publication.tick_publisher_started()
+    with queue._queue_lock:  # an unmarked change of a published fact (the census's business)
+        queue.RUNNING["r"]["silence_attention"] = {"episode_id": "e1", "state": "pending_attention", "last_progress_at": now[0] - 50}
+    with monkeypatch.context() as broken:
+        broken.setattr(queue, "atomic_write_text", lambda *_a: False)  # the disk is full
+        assert queue_publication.publish_queue_changes() is False
+    assert not (root / "state/queue.alive").exists(), "the old certificate was revoked before the failed write"
+    # Quiet ticks inside the refresh cadence and past it: the stale document is never certified again.
+    now[0] += queue_publication.QUEUE_ALIVE_REFRESH_SEC * 2
+    with monkeypatch.context() as broken:
+        broken.setattr(queue, "atomic_write_text", lambda *_a: False)
+        assert queue_publication.publish_queue_changes() is False, "the change is retried, not forgotten"
+    assert not (root / "state/queue.alive").exists()
+    assert "silence_attention" not in _read(root, "queue_snapshot.json")["running"][0]
+    # The disk is back: the next tick publishes the change and certifies the new document.
+    assert queue_publication.publish_queue_changes() is True
+    assert _read(root, "queue_snapshot.json")["running"][0]["silence_attention"]["episode_id"] == "e1"
+    alive = _read(root, "queue.alive")
+    assert alive["generation"] != generation and alive["generation"] == _read(root, "queue_snapshot.json")["generation"]
+    assert queue_publication.publish_queue_changes() is True, "and the quiet tick that follows refreshes as before"
+
+
