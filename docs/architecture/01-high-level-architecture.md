@@ -51,6 +51,7 @@ supervisor/ — background thread inside server.py (§5)
   state.py, state_initialization.py — `state/state.json` updates with typed read quality; init witness
   queue.py — task queue (PENDING/RUNNING) with activity-based timeouts; the one task-state authority (§5); loop_load.py measures it
   queue_schedules.py, schedule_lifecycle.py, queue_snapshot.py, queue_timeouts.py, followup_policy.py — leaves re-exported through `supervisor.queue`; related/independent relationship admission (`followup_relation`) (§5)
+  queue_publication.py — marks under Q; the tick publishes outside Q by revision (§5)
   cognitive_operations.py — operation leases and typed wait marks (`wait_for_tasks` picks a responsible parent) for silence attention and reply preparation; no durable ledger (§6)
   silence_attention.py — silence episodes, their mail and one related diagnostic (§5)
   task_model_wait.py — live model-wait projection with quota-clock reads for liveness (§6 Quota and auth waits)
@@ -60,14 +61,14 @@ supervisor/ — background thread inside server.py (§5)
   budget_resume.py, budget_resume_unstarted.py — Resume grants (a queued root through its Pause fence), revocation and hold release (§6)
   consciousness_carriers.py — finds a wake after its direct actor handed the same id to the pool (§6 Background consciousness)
   owner_pause_control.py — owner Pause fence, member wake, tree settlement (§6)
-  continuation_admission.py — owner Continue admission: replay first, predecessor claim (§6 Owner Continue)
+  continuation_admission.py, tree_census.py — owner Continue admission: replay first, predecessor claim; the writer census memo (§6 Owner Continue)
   sleep_wake.py — cold model-sleep wake with a typed `sleep_wake` grant, vetoed by holds (§6)
   restart_retention.py — stop retention and restart/update-abort return authority (§5, §9)
   queue_transitions.py, task_ownership.py — the root admission seal (stored as `acceptance_fences`), Resume, evolution stop, fenced Project deletion; ownership reads precede the queue lock (§5, §6)
   terminal_delivery.py, terminal_cascade.py, terminal_supersession.py — delivery-id dedupe, byte receipts, bounded outbox (ouroboros/terminal_outbox.py); one owner message per settled cascade (§5, §10)
   task_reaper.py — the off-loop owner of timeout, crash, idle and unready jobs; a timeout never retries; unconfirmed death keeps reaping; mints no cancel intents (§5)
   owner_stop.py — graceful stop: finalize first (`finalize_now`), then cancel on the same durable cancel intent; grace bounded by `OWNER_STOP_OUTER_CAP_SEC`
-  schedule_time.py, schedule_occurrence.py — cron/timezone parsing; a due occurrence admits at most one root
+  schedule_time.py, schedule_occurrence.py — cron/timezone parsing, the pass's wake; a due occurrence admits at most one root
   schedule_notes.py — a due `kind:"notify"` row becomes a signed `reminder` System row; no model, no retry
   schedule_view.py — pure schedule facts and digest
   evolution_lifecycle.py — evolution campaign state and cycle lifecycle (§6 Background consciousness)
@@ -336,7 +337,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_dependencies.py — Dependency-spec resolution, the one package-readying seam and its owner sentences
   skill_repair_admission.py — selected-skill development admission against an immutable `base_content_hash`; no long shell lock or rollback (§6 Skills and extensions)
   skill_owner_attestation.py — Skip review / Turn on anyway: the owner accepts exact bytes without LLM review (§13)
-  skill_identity.py, skill_install_record.py, skill_acceptance.py, skill_builtin.py — Release digest and record conversion; install record; install-basis/owner-edit acceptance; the built-in source (§13)
+  skill_identity.py, skill_install_record.py, skill_acceptance.py, skill_builtin.py, skill_discovery_reuse.py — Release digest and record conversion; install record; install-basis/owner-edit acceptance; the built-in source; exact discovery reuse (§13)
   skill_publish_snapshot.py, skill_publish_scanner.py, skill_publish_result.py, skill_publish_github.py, skill_publish_client.py, skill_publish_eligibility.py, skill_publish_destination.py — Publication leaves: captured bytes, Betterleaks evidence, attempt/receipt, token HTTPS transport, author authority, destination and hub entry (§6 Skill publication)
   skill_review_status.py — The review gate → `executable_review` (§13): verdicts, Advisory author acceptance, install-basis and owner facts
   skill_review.py — Skill review, the lifecycle verb: preflight and admission, then one `review_change(subject="skill")` wave projected into `review.json` (§13)
@@ -427,7 +428,7 @@ ouroboros/ — agent core and shared runtime (§6)
     router.py — Starlette route collector for /api/* and /ws (§4)
     ws.py — WS manager, extension WS dispatch off the ASGI loop, broadcast (§4 WebSocket protocol)
     call_ws.py, host_call.py, call_contracts.py — Owner/companion call admission, shared peer parser and media contract (§12)
-    state.py — /api/health, /api/contract and /api/state
+    state.py, state_publication.py — /api/health, /api/contract and /api/state; its one versioned publication (§4)
     reply_preparation.py — awaited replies active now, projected from existing live owners to destination chats; no store, scheduler or public census fields (§6)
     tasks.py — Headless task create/list/get/cancel/events; cancel's `stop_policy`: §5 (CLI / Headless Boundary below)
     task_archive.py, task_reviews.py — Confined task-file/ZIP reads, review pages and owner-bound sources (§6 Review ledger record)

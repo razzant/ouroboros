@@ -217,7 +217,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 
 Update-status, log-tail and schedule-list reads run off the event loop.
 
-`/api/state` adds `current_questions`/`main_attention` and the work projection (`works`, `rooms`), each with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes; actions reuse `/api/decisions` and task endpoints.
+`/api/state` adds `current_questions`/`main_attention` and the work projection (`works`, `rooms`), each with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes; requests share one display publication per app (`gateway/state_publication.py`: rebuilt only when its probed revision moved, one refresh in flight, a cancelled request starts nothing), never an authority; actions reuse `/api/decisions` and task endpoints.
 
 ### WebSocket protocol
 
@@ -245,7 +245,7 @@ Project chat, typing, media and log frames carry `chat_id`; each Project panel c
 
 Extension WebSocket traffic is namespaced by `extension_loader.extension_surface_name()`, so an extension cannot shadow a built-in type. Each incoming extension frame resolves its owning skill and rechecks that the extension is still desired, reviewed, granted, enabled and live; out-of-process handlers run in their extension child off the event loop. A non-`None` result returns as `<request-type>.reply`; a missing or failed handler becomes a typed error log frame, never ending the socket loop.
 
-Server broadcasts snapshot the client list and send to all clients concurrently, so one slow or half-open browser cannot head-of-line-block every other tab. Failed sends remove only the dead clients and append a durable `broadcast_partial_failure` event; the domain event stays owned by its durable producer. Restart shutdown closes remaining clients with code 1012 so they enter the ordinary reconnect path.
+Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open browser delays only itself; a broadcast is encoded once, only while a socket is open, a burst reaching the loop in one flush. A failed send retires its socket and writes `broadcast_partial_failure` off the loop; the domain event stays owned by its durable producer. Restart shutdown closes remaining clients with code 1012 so they enter the ordinary reconnect path.
 
 #### Reconnect and recovery
 

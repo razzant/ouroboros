@@ -7,7 +7,7 @@ unverified speech grants no owner authority. Identity never enters `places.json`
 
 ### Host Service boundary
 
-The Host Service (`gateway/host_service.py`, `OUROBOROS_HOST_SERVICE_PORT`) authenticates `x-skill-token` against payload hash, executable review, enablement and grants. `skill_token.py` tokens hold no secrets, stale on edits and refuse stringification; routes/permissions: §4. `host_notify.py` writes signed, bounded `skill_notice` rows without waking a model; grant, capability and receipt contract: CREATING_SKILLS “Telling the owner something”. Reviewed owner-bound transports may control Ouroboros; external slash commands use a positive-owner slot (`supervisor/state.py`): unidentified transports cannot bind and web identity cannot exclude the remote owner. `wait_for_response` is A2A-only.
+The Host Service (`gateway/host_service.py`, `OUROBOROS_HOST_SERVICE_PORT`) authenticates `x-skill-token` against payload hash, executable review, enablement and grants, read through reused discovery (§13). `skill_token.py` tokens hold no secrets, stale on edits and refuse stringification; routes/permissions: §4. `host_notify.py` writes signed, bounded `skill_notice` rows without waking a model; grant, capability and receipt contract: CREATING_SKILLS “Telling the owner something”. Reviewed owner-bound transports may control Ouroboros; external slash commands use a positive-owner slot (`supervisor/state.py`): unidentified transports cannot bind and web identity cannot exclude the remote owner. `wait_for_response` is A2A-only.
 
 Decision/language writers: §4. Review waits reach their live controller after author completion via `pending_action`; a stale revision/identity or absent consumer is 409 (§6 Quota and auth waits). A verdict grants no continuation or skill authority.
 
@@ -65,7 +65,7 @@ Receipt negotiation: `CREATING_SKILLS.md` “Reporting actual Presence delivery�
 
 ### Companion processes
 
-Reviewed manifest descriptors enter host-supervised durable custody, reconcile on lifecycle changes/restart, and stop on disable/unload/panic. `state/extension_generation.json` publishes the server's live set; workers adopt at task start/dispatch miss, so enablement is visible without pool respawn. Workers write durable `state/extension_reconcile/` requests instead of spawning server-owned children; reconcile names the answering process.
+Reviewed manifest descriptors enter host-supervised durable custody, reconcile on lifecycle changes/restart, and stop on disable/unload/panic. `state/extension_generation.json` publishes the server's live set; workers adopt at task start/dispatch miss, so enablement is visible without pool respawn. Workers write durable `state/extension_reconcile/` requests instead of spawning server-owned children; a pickup pass reconciles each named skill once (PERSISTENCE.md); reconcile names the answering process.
 
 Aggregate/Skills health uses the server observation; worker health is only a qualifier, so failed handoff cannot advance `last_known_good`. Restart-budget exhaustion persists until successful start. Companion cwd is the reviewed payload: edits stale review before reload instead of silently changing a live process. Projection: `state/extension_companions.json`.
 
