@@ -67,6 +67,16 @@ def carry(workers_module: Any, slot: Any, actor: Any, *, out_q: Any = None,
     return ran
 
 
+def host_lane(monkeypatch, root) -> None:
+    """A Host serving in a process with no started pool generation (the Host-only tests): the lane's tables
+    and roots isolated under ``root``, no lane carrier, so every turn body takes the disclosed degraded executor
+    on a thread of this process (``inline_carrier``), and its own frames settle the Host's waiter."""
+    from supervisor import workers
+
+    isolate_lane_pool(monkeypatch, root, spares=0)
+    monkeypatch.setattr(workers, "REPO_DIR", root / "repo")
+
+
 class _LaneFrames:
     """The test's stand-in for the supervisor's frame consumer: every frame reaches ``inner``; the
     carrier's bound facts (``direct_turn_bound``) reach the RUNNING row as ``conversation_lane`` lays them."""

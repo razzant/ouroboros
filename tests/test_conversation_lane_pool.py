@@ -15,7 +15,7 @@ from ouroboros.task_carrier import (
     EXECUTOR_INLINE_DEGRADED, EXECUTOR_WORKER, LANE_CONVERSATION, LANE_PROJECT,
     carrier_executor, conversation_origin, execution_kind, inline_execution,
 )
-from supervisor import conversation_lane, queue, worker_health, worker_pool_lifecycle as lifecycle, workers
+from supervisor import conversation_lane, queue, worker_chat_lane, worker_health, worker_pool_lifecycle as lifecycle, workers
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
@@ -215,3 +215,55 @@ def test_carrier_facts_are_additive_and_old_rows_decode(tmp_path):
     assert rebound["kind"] == "direct" and rebound["lane"] == LANE_CONVERSATION and rebound["executor"] == EXECUTOR_WORKER
     plain = execution_owner_record(tmp_path, {"id": "f", "_is_direct_chat": True}, "direct")
     assert "lane" not in plain and "executor" not in plain  # a legacy admission records nothing it does not know
+
+
+def _stop_doubles(monkeypatch):
+    monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0.0)
+    monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
+    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 1})
+    monkeypatch.setattr(workers, "append_jsonl", lambda *a, **k: True)
+    monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda _pid: None)
+    monkeypatch.setattr(workers, "_audit_delegate_terminal_custody", lambda *a, **k: None)
+    monkeypatch.setattr(workers, "reconstruct_task_cost", lambda *a, **k: {
+        "cost_accounting_status": "unavailable", "cost_final": False})
+
+
+def test_a_lane_turn_admitted_during_a_project_stops_teardown_survives_the_stop(pool, monkeypatch):
+    """S43 defect 2: the rows a project stop spares are chosen under the same Q hold as its terminalization.
+    A hello admitted while the doomed slots were torn down outside Q is the lane's too: never failed by
+    that stop with "Worker process crashed (crash storm)"."""
+    from ouroboros.task_results import load_task_result
+
+    _stop_doubles(monkeypatch)
+    workers.RUNNING.clear()
+    dead = workers.WORKERS.get(0) or add_slot(0, lane=LANE_PROJECT)
+    dead.busy_task_id, dead.proc.alive, dead.proc.exitcode = "p0", False, -9
+    workers.RUNNING["p0"] = {"task": task("p0"), "worker_id": 0, "attempt": 1, "started_at": time.time(),
+                             "last_heartbeat_at": time.time()}
+    real_teardown = workers._tear_down_slots
+
+    def teardown_then_hello(doomed):
+        real_teardown(doomed)  # Q is dropped here; the owner's hello is admitted in that gap
+        workers.RUNNING["hello"] = {"task": task("hello", _is_direct_chat=True), "worker_id": None, "attempt": 1,
+                                    "started_at": time.time(), "lane": LANE_CONVERSATION}
+
+    monkeypatch.setattr(workers, "_tear_down_slots", teardown_then_hello)
+    assert workers.kill_workers(disable_reason="worker_crash_storm", lanes=frozenset({LANE_PROJECT}))
+    assert "p0" not in workers.RUNNING
+    assert "hello" in workers.RUNNING and workers.RUNNING["hello"]["worker_id"] is None  # still awaiting its carrier
+    assert (load_task_result(pool.root, "hello") or {}).get("status") != "failed"
+
+
+def test_a_turn_admitted_while_the_spare_boots_is_dispatched_through_a_marker_window(pool, monkeypatch):
+    """S43 defect 3: a marker window forbids a spawn, never a waiting turn's carrier. The spare that was
+    booting at admission takes the turn on the next reconcile, inside the window; nothing spawns."""
+    spare = add_slot(7, lane=LANE_CONVERSATION)
+    spare.booting = spare.reaping = True  # spawned, not yet opened by the readiness owner
+    meta = conversation_lane.admit_turn(task("t", _is_direct_chat=True), chat_id=1, client_message_id="cm")
+    worker_chat_lane._degrade_if_no_carrier_can_start(meta)
+    assert meta["worker_id"] is None and all(w.executor == EXECUTOR_WORKER for w in workers.WORKERS.values())
+    monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "managed_update")  # the window closes
+    spare.booting = spare.reaping = False  # the readiness owner opened the spare
+    conversation_lane.reconcile_conversation_lane()
+    assert meta["worker_id"] == 7 and spare.busy_task_id == meta["task"]["id"]
+    assert len(pool.created) == 0  # the window forbade a spawn, as it should

@@ -472,6 +472,8 @@ def _supervisor_tail(root: pathlib.Path) -> Dict[str, Any]:
             found["load"] = row
         elif kind == "direct_turn":
             found["turns"] = [*found["turns"], row][-_OWNER_TURNS_SHOWN:]
+        elif kind == "conversation_inline_executor":  # a turn that ran on a thread of the server (2A)
+            found["inline"] = [*found.get("inline", []), row][-_OWNER_TURNS_SHOWN:]
         elif kind in _STALL_ENDS:
             found["open"][(kind, _stall_key(row))] = row
         elif kind in _STALL_ENDS.values():
@@ -681,6 +683,12 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
             fact[_STALLS_KEY] = stalls
         if isinstance(tail.get("load"), dict):
             fact["busy_minute"] = _busy_minute(tail["load"], observed_at)
+        if tail.get("inline"):
+            # Owner decision 2A: the turns the body ran on a thread of the server instead of a carrier, newest
+            # last — the degraded executor's reason (a refused spawn, a marker window) or a live call.
+            fact["inline_executors"] = [
+                f"{_clock(row.get('ts'), observed_at)} {row.get('executor')} turn {row.get('task_id')}"
+                + (f" ({row.get('reason')})" if row.get("reason") else "") for row in tail["inline"]]
         routes = _route_health_line(root, observed_at)
         if routes:
             fact["route_health"] = routes
@@ -714,8 +722,8 @@ def vitals_line(fact: Optional[Dict[str, Any]]) -> str:
     if not isinstance(fact, dict):
         return ""
     parts = [f"body as of {fact['observed_at']}" if fact.get("observed_at") else "body"]
-    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "route_health", "runtime", "wal_gate",
-                "last_update", "boot"):
+    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "inline_executors", "route_health",
+                "runtime", "wal_gate", "last_update", "boot"):
         value = fact.get(key)
         if isinstance(value, list) and value:
             parts.append(f"{key.replace('_', ' ')} " + " | ".join(str(item) for item in value))

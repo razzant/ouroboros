@@ -190,11 +190,12 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),
     # --- a Host-admitted Presence turn's body in a carrier: its envelope and its settlement --
     "presence_turn_initial": _handled(
-        "ouroboros.presence_carrier", "ouroboros/presence_carrier.py",
-        note="a continuing author's initial envelope resolves the Host's initial future"),
+        "supervisor.events", "ouroboros/presence_carrier.py",
+        note="a continuing author's initial envelope resolves the Host's initial future (a lazy wrapper: the "
+             "dispatcher never imports Presence at module level)"),
     "presence_turn_settled": _handled(
-        "ouroboros.presence_carrier", "ouroboros/presence_carrier.py",
-        note="the body's result or error by value resolves the Host's future and frees the row"),
+        "supervisor.events", "ouroboros/presence_carrier.py",
+        note="the body's result or error by value resolves the Host's future and frees the row (lazy wrapper)"),
     "task_done": _handled(
         "supervisor.events_task_done", "ouroboros/agent_task_pipeline.py",
         "supervisor/queue.py", "supervisor/task_reaper.py", "supervisor/worker_health.py", idle_input=True),

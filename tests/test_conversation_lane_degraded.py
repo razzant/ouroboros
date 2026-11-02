@@ -8,6 +8,7 @@ carrier. A live call is the other inline executor (``executor=inline_call``), na
 
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from tests.worker_pool_support import affirm_ready
 
 pytestmark = pytest.mark.serial
 _REAL_THREAD = threading.Thread  # captured at collection: the pool fixture stubs the lifecycle's threads
+_REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane  # the shared pool fixture stubs it
 
 
 class Actor:
@@ -102,3 +104,86 @@ def test_a_booting_spare_is_a_carrier_that_will_come(degraded, monkeypatch):
     workers.WORKERS[6] = booting
     worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-c"})
     assert _inline_slot() is None and not degraded.actor.ran
+
+
+def test_under_the_project_fence_the_tick_still_starts_a_waiting_turns_executor(degraded, monkeypatch):
+    """S43 defect 1: the lane is independent of the project pool's crash fuse. Under the fence the tick
+    reconciles the lane all the same: the lane's refused spawn is noticed and the waiting turn's degraded
+    executor starts, instead of the owner's hello waiting forever beside a fenced pool."""
+    from supervisor import worker_pool_lifecycle
+
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
+    monkeypatch.setattr(workers, "load_state", lambda: {"owner_chat_id": 1})
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", _REAL_LANE_RECONCILE)
+    busy = workers.Worker(5, Process(5005), InputQueue(), lane=LANE_CONVERSATION, busy_task_id="other")
+    affirm_ready(busy)
+    workers.WORKERS[5] = busy
+
+    def refused(*_a, **_k):
+        raise OSError("fork refused")
+
+    monkeypatch.setattr(worker_pool_lifecycle, "_spawn_worker_slot", refused)
+    worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-fence"})
+    meta = next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION and m["task"]["text"] == "hello")
+    assert meta["worker_id"] is None and not degraded.actor.ran  # awaiting: a busy lane is no physical fact
+    workers.assign_tasks()  # the tick under the fence: the lane is reconciled, the refusal is now the fact
+    deadline = time.time() + 10
+    while not degraded.actor.ran and time.time() < deadline:
+        time.sleep(0.02)
+    assert degraded.actor.ran and degraded.actor.ran[0]["text"] == "hello"
+    assert meta["executor"] == EXECUTOR_INLINE_DEGRADED
+    assert inline_carrier.inline_vitals()["inline_executions"][-1]["reason"] == "carrier_spawn_refused:OSError"
+    for slot in list(workers.WORKERS.values()):  # the executor's thread ends with its pseudo-slot
+        if slot.executor == EXECUTOR_INLINE_DEGRADED:
+            slot.proc.join(10)
+
+
+def test_the_degraded_executor_is_a_health_and_runtime_vitals_fact(degraded, monkeypatch):
+    """Owner decision 2A: the degraded executor is a fact of /api/health (in memory) and of the Runtime
+    vitals the mind reads (from the journal row the disclosure wrote), not only a chat notice."""
+    import asyncio
+    import json as _json
+
+    from ouroboros.context_runtime_facts import vitals_fact
+    from ouroboros.gateway import state as gateway_state
+
+    monkeypatch.setattr(conversation_lane, "_SPAWN_REFUSED", ["carrier_spawn_refused:OSError"])
+    worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-v"})
+    slot = _inline_slot()
+    _await_inline(slot)
+    tid = degraded.actor.ran[0]["id"]
+    fact = inline_carrier.inline_executors_fact()
+    assert fact["degraded_total"] == 1 and fact["recent"][-1]["task_id"] == tid
+    assert fact["recent"][-1]["executor"] == EXECUTOR_INLINE_DEGRADED
+    monkeypatch.setattr(gateway_state, "_live_boot", lambda request: {"phase": "serving"})
+    health = _json.loads(asyncio.run(gateway_state.api_health(SimpleNamespace())).body)
+    assert health["inline_executors"]["degraded_total"] == 1 and health["inline_executors"]["recent"][-1]["task_id"] == tid
+    vitals = vitals_fact(degraded.root, observed_at="2026-11-02T12:00:00+00:00")
+    assert vitals is not None and any(EXECUTOR_INLINE_DEGRADED in line and tid in line for line in vitals["inline_executors"])
+
+
+def test_a_degraded_executor_whose_thread_cannot_start_leaves_the_row_admitted_and_no_pseudo_slot(degraded, monkeypatch):
+    """A process that can start no thread ran nothing: the pseudo-slot and the activity entry leave, the row
+    is admitted and awaiting again (its owner record names the worker executor), and the caller learns it by
+    type (``InlineExecutorUnavailable``) instead of a bound row whose executor never ran."""
+    from ouroboros.task_carrier import EXECUTOR_WORKER
+    from supervisor.active_activity import get_direct_activity_registry
+    from supervisor.conversation_lane import admit_turn
+
+    class Refusing:
+        def __init__(self, *args, **kwargs):
+            self.name = kwargs.get("name", "")
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(inline_carrier, "threading", SimpleNamespace(Thread=Refusing))
+    task = {"id": "t-unstarted", "chat_id": 1, "text": "hello", "metadata": {}}
+    with workers._queue_lock:
+        meta = admit_turn(task, chat_id=1, client_message_id="cm-u")
+        with pytest.raises(inline_carrier.InlineExecutorUnavailable):
+            inline_carrier.start_inline_turn(meta, executor=EXECUTOR_INLINE_DEGRADED, reason="pool_not_started")
+    assert workers.RUNNING["t-unstarted"] is meta and meta["worker_id"] is None and "executor" not in meta
+    assert meta["task"]["_execution_owner"]["executor"] == EXECUTOR_WORKER
+    assert _inline_slot() is None and get_direct_activity_registry().get("t-unstarted") is None
+

@@ -203,7 +203,14 @@ class HostServiceContext:
         self.bridge_getter = bridge_getter or self._default_bridge
         self.tool_schemas_getter = tool_schemas_getter or self._default_tool_schemas
         self.ws_broadcaster_getter = ws_broadcaster_getter or self._default_ws_broadcaster
-        self.presence_runner = presence_runner or self._default_presence_runner
+        # The runner a test injects for the carrier's body (``presence_carrier.carry_presence_turn`` reads
+        # it); the Host itself runs no turn body: every body is a conversation-lane carrier's (1A). An
+        # injected runner supplies its own repo/drive/factory, as the retired unarmed seam's runner did.
+        self.presence_runner = presence_runner
+        if presence_runner is not None:
+            from ouroboros.presence_carrier import set_presence_runner
+
+            set_presence_runner(data_dir, presence_runner)
         self.rate_limiter = _RateLimiter(on_burst_end=self._ws_relay_burst_ended)
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
@@ -261,16 +268,13 @@ class HostServiceContext:
 
         return broadcast_ws_sync
 
-    def _default_presence_runner(self, **kwargs: Any) -> Any:
-        from ouroboros.presence_runner import run_presence_turn
-        from supervisor.workers import REPO_DIR, get_event_q
-
-        return run_presence_turn(
-            repo_dir=pathlib.Path(REPO_DIR),
-            drive_root=self.data_dir,
-            event_queue=get_event_q(),
-            **kwargs,
-        )
+    def _default_presence_runner(self, **kwargs: Any) -> None:
+        """The Host runs no turn body of its own: a Presence turn's body is a conversation-lane carrier's
+        (owner decision 1A, ``presence_carrier.dispatch_presence_turn``), the degraded executor's when no
+        carrier can start (2A). Kept as the named site the executor inventory scans; it starts nothing."""
+        log.warning("Host presence runner called directly; a turn body is the lane's (%s)",
+                    sorted(kwargs) if kwargs else "no arguments")
+        return None
 
     async def admit_presence_gate(self, conversation_key: str, *, wait: bool = True) -> Any:
         """Coroutine admission into the configured presence gate; the lease the turn runs under."""

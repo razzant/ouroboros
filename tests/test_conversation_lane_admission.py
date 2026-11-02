@@ -95,12 +95,15 @@ def test_wake_is_admitted_quietly_with_its_input_bound_before_dispatch(lane, mon
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
     monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: False)
     bound = []
+    second = workers.Worker(6, Process(5006), InputQueue(), lane=LANE_CONVERSATION)  # a wake leaves the owner's spare
+    affirm_ready(second)
+    workers.WORKERS[6] = second
     receipt = worker_chat_lane.handle_wake_direct(
         1, "[Wake-up]", {"initiator": "consciousness", "wake_cause": "own_clock", "work_kind": "consciousness"},
         bind_input=lambda task: bound.append(task["id"]))
     assert receipt["admitted"] and bound == [receipt["task_id"]]
     meta = workers.RUNNING[receipt["task_id"]]
-    assert meta["lane"] == LANE_CONVERSATION and meta["worker_id"] == 5
+    assert meta["lane"] == LANE_CONVERSATION and meta["worker_id"] == 5 and second.busy_task_id is None
     assert lane.spare.in_q.get_nowait()["_conversation_prepare"]["quiet"] is True
 
 
@@ -172,3 +175,49 @@ def test_carrier_turn_receipt_measures_the_owner_wait_from_the_admission(tmp_pat
     assert receipt["phases"]["started"] >= 0.0 and turn.execution.phase == "started"
     turn.observe("log_event", {"type": "context_building_started", "task_id": "t9"})
     assert out_q.get_nowait() == {"type": "direct_turn_phase", "task_id": "t9", "task_attempt": 1, "phase": "context_building"}
+
+
+def _wake_doubles(monkeypatch):
+    from supervisor import state
+    monkeypatch.setattr(worker_chat_lane, "wake_gate_refusal", lambda: "")
+    monkeypatch.setattr(state, "load_state", lambda: {"bg_consciousness_enabled": True, "owner_chat_id": 1})
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
+    monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: False)
+
+
+WAKE = {"initiator": "consciousness", "wake_cause": "own_clock", "work_kind": "consciousness"}
+
+
+def test_the_reserved_spare_is_the_owners_and_a_wake_waits_for_its_own_carrier(lane, monkeypatch):
+    """Owner decision 4A: a wake never takes the last idle carrier. Its own carrier is started at its
+    admission; the owner's next turn reaches the spare without a boot wait, and the claim replenishes
+    the spare at once, not at the next tick."""
+    _wake_doubles(monkeypatch)
+    receipt = worker_chat_lane.handle_wake_direct(1, "[Wake-up]", dict(WAKE), bind_input=lambda task: None)
+    wake = workers.RUNNING[receipt["task_id"]]
+    assert wake["worker_id"] is None, "the last idle carrier is the owner's spare"
+    assert len(lane.created) == 1 and workers.WORKERS[6].lane == LANE_CONVERSATION  # the wake's carrier, now
+    worker_chat_lane.handle_chat_direct(1, "hello", None, task_metadata={"client_message_id": "cm-own"})
+    owner = next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION and m["task"]["text"] == "hello")
+    assert owner["worker_id"] == 5, "the owner's turn took the spare with no boot behind the wake"
+    assert len(lane.created) == 2, "the claim replenished the spare without a tick"
+    for wid in (6, 7):  # the readiness owner opens the two booting carriers
+        slot = workers.WORKERS[wid]
+        slot.booting = slot.reaping = False
+        affirm_ready(slot)
+    conversation_lane.reconcile_conversation_lane()
+    assert wake["worker_id"] == 6 and workers.WORKERS[7].busy_task_id is None  # the wake runs; one spare stays
+
+
+def test_consecutive_owner_turns_reuse_the_returned_carrier_without_a_boot(lane):
+    def row(text):
+        return next(m for m in workers.RUNNING.values() if m.get("lane") == LANE_CONVERSATION and m["task"]["text"] == text)
+
+    worker_chat_lane.handle_chat_direct(1, "one", None, task_metadata={"client_message_id": "cm-1"})
+    first = row("one")
+    assert first["worker_id"] == 5 and len(lane.created) == 1  # the claim replenished at once
+    lane.spare.busy_task_id = None  # the task_done handler released the carrier
+    workers.RUNNING.pop(first["task"]["id"])
+    worker_chat_lane.handle_chat_direct(1, "two", None, task_metadata={"client_message_id": "cm-2"})
+    assert row("two")["worker_id"] == 5, "the returned carrier takes the next turn; no spawn wait"
+    assert len(lane.created) == 1  # the booting replacement already stands as the spare

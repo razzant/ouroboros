@@ -31,6 +31,21 @@ from ouroboros.presence_runner import (
 log = logging.getLogger(__name__)
 
 PRESENCE_RUN_KEY = "_presence_run"  # the Host's admission facts the carrier re-admits from (durable bindings)
+_RUNNERS: dict = {}  # data root -> a runner injected in this process (``host_service.create_host_service_app``), tests only
+
+
+def set_presence_runner(drive_root: Any, runner: Any) -> None:
+    """Replace the body's runner for turns of ``drive_root`` in THIS process (a Host test's seam); None restores
+    the module's own. Keyed by root: Hosts of different roots in one process never share it."""
+    key = str(Path(drive_root).resolve())
+    if runner is None:
+        _RUNNERS.pop(key, None)
+    else:
+        _RUNNERS[key] = runner
+
+
+def _runner(drive_root: Any) -> Any:
+    return _RUNNERS.get(str(Path(drive_root).resolve())) or run_presence_turn
 
 
 class FrameExecution:
@@ -43,19 +58,27 @@ class FrameExecution:
         self.initial.set_running_or_notify_cancel()
 
     def publish_initial(self, value: Any, *, return_capacity: bool = True) -> bool:
-        if self.initial.done():
-            return False
-        self.initial.set_result(value)
-        self._sink.put({"type": "presence_turn_initial", "turn_id": self.turn_id, "task_id": self.turn_id,
-                        "result": _result_payload(value), "return_capacity": bool(return_capacity)})
-        return True
+        # Two-phase like the Host's own execution: an author that answered early (``return_capacity=False``)
+        # sets the envelope here and returns its capacity only at its first real park, whose own
+        # ``publish_initial`` must still reach the Host to release it, though the envelope is already out.
+        first = not self.initial.done()
+        if first:
+            self.initial.set_result(value)
+        if first or return_capacity:
+            self._sink.put({"type": "presence_turn_initial", "turn_id": self.turn_id, "task_id": self.turn_id,
+                            "result": _result_payload(value), "return_capacity": bool(return_capacity)})
+        return first
 
     def return_capacity(self, fallback: Any = None) -> None:
         pass
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
-    payload = {key: getattr(result, key) for key in PresenceTurnResult.__dataclass_fields__}
+    """The result by value: every field of ``PresenceTurnResult``; a runner that states fewer (a double)
+    leaves the dataclass's defaults for the rest."""
+    defaults = PresenceTurnResult(**{key: getattr(result, key) for key in ("outcome", "text", "task_id")
+                                     if hasattr(result, key)})
+    payload = {key: getattr(result, key, getattr(defaults, key)) for key in PresenceTurnResult.__dataclass_fields__}
     if payload.get("reply_anchor") is not None:
         payload["reply_anchor"] = dict(payload["reply_anchor"])
     return payload
@@ -125,15 +148,28 @@ def dispatch_presence_turn(execution: PresenceTurnExecution, *, drive_root: Path
     (conversation lock, ``OUROBOROS_PRESENCE_MAX_ACTIVE`` slot) is acquired by the carrier.
     """
     from supervisor import queue, workers
-    from supervisor.conversation_lane import admit_turn
+    from supervisor.conversation_lane import admit_turn, replenish_after_claim
+    from supervisor.inline_carrier import InlineExecutorUnavailable
     from supervisor.worker_chat_lane import _degrade_if_no_carrier_can_start
 
     task = presence_seed_task(admission=admission, event=event, skill_name=skill_name, event_payload=event_payload,
                               staged_files=staged_files, gate_wait=gate_wait)
+    # The Host's data root is this turn's authority, whichever carrier runs it: a pooled worker carries the
+    # server's own root (the same one), and the in-process degraded executor must re-admit and write against
+    # the Host's root, never the pool's global DRIVE_ROOT (unset, or another root, in a standalone Host).
+    task["drive_root"] = str(drive_root)
     with queue._queue_lock, workers._repo_writer_gate_lock:
         meta = admit_turn(task, chat_id=int(task["chat_id"]), client_message_id=event.source_event_id,
                           quiet=True, reply_expected=False)
-        _degrade_if_no_carrier_can_start(meta)
+        try:
+            _degrade_if_no_carrier_can_start(meta)
+        except InlineExecutorUnavailable as exc:
+            # Nothing ran and no carrier will come to this process: the row leaves now and the Host answers
+            # a typed retry; its reservation returns with the settlement, the gate was never taken.
+            workers.RUNNING.pop(str(task["id"]), None)
+            queue.persist_queue_snapshot(reason="presence_turn_not_started")
+            raise PresenceTurnNotStarted("presence turn thread could not start") from exc
+    replenish_after_claim()  # the spare the turn took is replaced now, or its own carrier started now (4A)
 
 
 def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_root: Any, *,
@@ -194,11 +230,19 @@ def carry_presence_turn(task: dict[str, Any], out_q: Any, repo_dir: Any, drive_r
                     agent.owner_wait_callback = owner_wait_callback
                 return agent
 
-            result = run_presence_turn(admission=admission, event=event, repo_dir=Path(repo_dir), drive_root=root,
-                                       staged_files=[Path(p) for p in facts.get("staged_files") or []],
-                                       event_queue=out_q, agent_factory=factory, admitted=lease,
-                                       carrier_owner=carrier_owner, event_sink=lambda rows: [out_q.put(dict(r)) for r in rows],
-                                       request_waits=bool(facts.get("request_waits", True)))
+            runner = _runner(root)
+            # The turn facts, never the physical carrier's. An injected runner (a test's seam, as the
+            # retired unarmed path's runner) supplies its own repo/drive/factory; only the module runner
+            # takes this carrier's, so an injected wrapper is never handed a second repo_dir/drive_root.
+            turn_kwargs = dict(admission=admission, event=event,
+                               staged_files=[Path(p) for p in facts.get("staged_files") or []],
+                               event_queue=out_q, admitted=lease, carrier_owner=carrier_owner,
+                               event_sink=lambda rows: [out_q.put(dict(r)) for r in rows],
+                               request_waits=bool(facts.get("request_waits", True)))
+            if runner is run_presence_turn:
+                result = runner(repo_dir=Path(repo_dir), drive_root=root, agent_factory=factory, **turn_kwargs)
+            else:
+                result = runner(**turn_kwargs)
             physical_id = str(result.task_id or turn_id)
         finally:
             lease.release()
@@ -246,6 +290,12 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
         slot = ctx.WORKERS.get(wid) if wid is not None else None
         if slot is not None and slot.busy_task_id == turn_id and not getattr(slot, "reaping", False):
             slot.busy_task_id = None
+    try:  # the row ended here: a remote Host offers nothing more to this author, whatever its carrier did
+        from ouroboros.conversation_lease import close_author_intake
+
+        close_author_intake(Path(getattr(ctx, "DRIVE_ROOT", None) or queue.DRIVE_ROOT), turn_id)
+    except Exception:
+        log.debug("author intake of %s not closed at settlement", turn_id, exc_info=True)
     if meta is not None:
         try:
             queue.persist_queue_snapshot(reason="presence_turn_settled")
@@ -253,5 +303,5 @@ def handle_presence_turn_settled(evt: dict[str, Any], ctx: Any) -> None:
             log.debug("presence settlement snapshot failed for %s", turn_id, exc_info=True)
 
 
-__all__ = ["PRESENCE_RUN_KEY", "FrameExecution", "carry_presence_turn", "dispatch_presence_turn",
+__all__ = ["PRESENCE_RUN_KEY", "FrameExecution", "carry_presence_turn", "dispatch_presence_turn", "set_presence_runner",
            "handle_presence_turn_initial", "handle_presence_turn_settled", "presence_seed_task"]

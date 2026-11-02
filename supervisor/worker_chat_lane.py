@@ -335,7 +335,7 @@ def admit_owner_turn(
     from ouroboros.server_restart import agent_restart_pending
     from supervisor import queue
     from supervisor.active_activity import reply_expected
-    from supervisor.conversation_lane import admit_turn
+    from supervisor.conversation_lane import admit_turn, replenish_after_claim
 
     client_msg_id = _client_message_id(task_metadata)
     task = _seed_task(chat_id, text, image_data, task_constraint, task_metadata)
@@ -357,6 +357,8 @@ def admit_owner_turn(
         if deferred:
             _defer_chat_for_restart(task, chat_id, task_metadata)
             return None
+        if meta is not None:
+            replenish_after_claim()  # the spare the turn took is replaced now, or its own carrier started now (4A)
         _announce_turn_start({"task": task, "chat_id": chat_id, "client_msg_id": client_msg_id, "kind": "direct_chat"})
         return meta
     except Exception as e:
@@ -386,7 +388,7 @@ def handle_wake_direct(
     failure leaves the complete text as the wake's only input.
     """
     from supervisor import queue
-    from supervisor.conversation_lane import admit_turn
+    from supervisor.conversation_lane import admit_turn, replenish_after_claim
 
     closed = wake_gate_refusal()
     if closed:
@@ -415,10 +417,12 @@ def handle_wake_direct(
             closed = wake_gate_refusal()  # the gate may have closed since the check above: silent and typed
             if closed:
                 return {"admitted": False, "task_id": "", "reason": closed}
-            _degrade_if_no_carrier_can_start(admit_turn(task, chat_id=int(chat_id), quiet=True, reply_expected=False))
+            meta = admit_turn(task, chat_id=int(chat_id), quiet=True, reply_expected=False)
+            _degrade_if_no_carrier_can_start(meta)
     except Exception:
         log.warning("wake %s could not be admitted to the conversation lane", task_id, exc_info=True)
         return {"admitted": False, "task_id": "", "reason": "admission_failed"}
+    replenish_after_claim()  # the wake's own carrier starts now; a wake never takes the owner's spare (4A)
     _announce_turn_start({"task": task, "chat_id": int(chat_id), "client_msg_id": "", "kind": "direct_chat"})
     return {"admitted": True, "task_id": task_id, "reason": ""}
 

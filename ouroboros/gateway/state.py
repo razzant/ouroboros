@@ -128,6 +128,8 @@ async def api_health(request: Request) -> JSONResponse:
     runtime_version = get_version()
     app_version = os.environ.get("OUROBOROS_APP_VERSION", "").strip() or runtime_version
     boot = _live_boot(request)
+    from supervisor.inline_carrier import inline_executors_fact
+
     return JSONResponse({
         "status": "ok",
         # legacy field for backward compatibility
@@ -137,6 +139,9 @@ async def api_health(request: Request) -> JSONResponse:
         # The wire-contract carrier a client checks before relying on GET /api/contract.
         "abi_version": GATEWAY_ABI_VERSION,
         "boot": boot,
+        # Owner decision 2A: the turns this process ran on its own threads (a degraded carrier, a live
+        # call), in memory, additive.
+        "inline_executors": inline_executors_fact(),
     })
 
 
