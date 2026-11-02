@@ -12,8 +12,8 @@ construction, a context build, a wake's preparation, a Presence turn's body, the
 executor it runs on, so a reference that exists without a row fails by name here, and a row that names a reference
 the tree no longer has fails too: both directions, as the duty inventory holds the tick and its table. Line numbers
 are no part of a row. A name is what is scanned, not a resolved call: a door reached through a string or a ``getattr``
-is not seen, which is why the dynamic drives below and the stand (tests/test_stand_laws.py, E1, a real server with
-real workers) hold the law at the doors themselves.
+is not seen, which is why the dynamic drives below and the stand (tests/system_e2e/test_stand_server.py, E1, a real
+server with real workers and a spy at each door) hold the law at the doors themselves.
 
 Today's starts that break the class are rows too, with the executor ``SERVER_THREAD``, grouped by the focus they
 start (``FOCI_ON_SERVER_THREADS``). The law over them and the drives are strict xfails naming their remover, so this
@@ -201,7 +201,8 @@ def _on_server_threads(focus: str = "") -> List[Site]:
 
 
 def _gap(reason: str, *raises: type) -> pytest.MarkDecorator:
-    return pytest.mark.xfail(strict=True, reason=reason, **({"raises": raises} if raises else {}))
+    """Only the law's own failure may count as the known breach: anything else errors by name."""
+    return pytest.mark.xfail(strict=True, reason=reason, raises=raises or AssertionError)
 
 
 # ---- the inventory, both directions ------------------------------------------------------------------------------
@@ -277,11 +278,17 @@ class CognitionInThisProcess(AssertionError):
 class _ImmediateThread:
     """``threading.Thread``, its target run at ``start``: a turn's thread is in the count when the intake returns."""
 
+    depth = 0  # above zero while a thread this intake started is running
+
     def __init__(self, group=None, target=None, name=None, args=(), kwargs=None, daemon=None) -> None:
         self.target, self.args, self.kwargs = target, args, kwargs or {}
 
     def start(self) -> None:
-        self.target(*self.args, **self.kwargs)
+        _ImmediateThread.depth += 1
+        try:
+            self.target(*self.args, **self.kwargs)
+        finally:
+            _ImmediateThread.depth -= 1
 
 
 def _no_door(started: List[str]) -> None:
@@ -296,6 +303,15 @@ def _spy(started: List[str], door: str, answer=None):
     return called
 
 
+def _spy_on_a_started_thread(started: List[str], door: str):
+    """The lane's door on a thread the intake itself started: the turn is this process's. The same door called from the
+    intake's own stack only admits: the turn is a carrier's."""
+    def called(*_args, **_kwargs):
+        if _ImmediateThread.depth:
+            started.append(f"{door} on a thread of this process")
+    return called
+
+
 @_gap(FOCI_ON_SERVER_THREADS[OWNER_TURN], CognitionInThisProcess)
 def test_an_owner_message_starts_no_turn_in_this_process(tmp_path, monkeypatch):
     """The owner's message, routed: nothing in this process runs the turn."""
@@ -306,7 +322,7 @@ def test_an_owner_message_starts_no_turn_in_this_process(tmp_path, monkeypatch):
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
     monkeypatch.setattr(routing, "_reserved_project_for_chat", lambda *_a: {})
     monkeypatch.setattr(routing, "addressable_roots", lambda *_a, **_k: RootSnapshot(()))
-    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, handle_chat_direct=_spy(started, "handle_chat_direct"))
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, handle_chat_direct=_spy_on_a_started_thread(started, "handle_chat_direct"))
     routing._route_owner_message(SimpleNamespace(), ctx, {"chat_id": 1, "text": "hello", "client_message_id": "m-1"})
     _no_door(started)
 
@@ -321,7 +337,7 @@ def test_auto_resume_starts_no_turn_in_this_process(tmp_path, monkeypatch):
     (tmp_path / "state" / "pending_restart_verify.json").write_text("{}", encoding="utf-8")
     (tmp_path / "logs").mkdir()
     monkeypatch.setattr(threading, "Thread", _ImmediateThread)
-    monkeypatch.setattr(lane, "handle_chat_direct", _spy(started, "handle_chat_direct"))
+    monkeypatch.setattr(lane, "handle_chat_direct", _spy_on_a_started_thread(started, "handle_chat_direct"))
     monkeypatch.setattr(lane, "_pool", lambda: SimpleNamespace(
         DRIVE_ROOT=tmp_path, load_state=lambda: {"owner_chat_id": 7}, chat_turn_liveness=lambda: False))
     monkeypatch.setattr("ouroboros.delegate_recovery.import_legacy_restart", lambda _root: None)
@@ -335,6 +351,7 @@ def test_auto_resume_starts_no_turn_in_this_process(tmp_path, monkeypatch):
 def alarm(monkeypatch, tmp_path):
     """A due alarm clock over an in-memory runtime state (tests/test_consciousness.py), its doors spied."""
     from ouroboros import consciousness as clock_module
+    from ouroboros import consciousness_wake
     from ouroboros.consciousness import BackgroundConsciousness
     from supervisor import state, workers
 
@@ -354,7 +371,9 @@ def alarm(monkeypatch, tmp_path):
     clock = BackgroundConsciousness(tmp_path, tmp_path / "repo", lambda: 7, now=1_800_000_000.0)
     monkeypatch.setattr(clock, "_context_facts", _spy(started, "_context_facts", {"counted_roots": ()}))
     for door in ("observe_wake", "previous_wake_text", "render_wake_message"):
-        monkeypatch.setattr(clock_module, door, _spy(started, door, SimpleNamespace(full_text=str)))
+        spy = _spy(started, door, SimpleNamespace(full_text=str))
+        monkeypatch.setattr(consciousness_wake, door, spy)
+        monkeypatch.setattr(clock_module, door, spy, raising=False)  # the name it took at import, while it still takes it
     return SimpleNamespace(clock=clock, started=started)
 
 
