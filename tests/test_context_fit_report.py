@@ -184,7 +184,6 @@ def test_only_a_granted_lock_proves_the_root_offline(tmp_path, monkeypatch, answ
     assert server_alive(tmp_path)
 
 
-@pytest.mark.serial
 def test_snapshot_measures_a_held_root_and_its_wal_without_probing_liveness(tmp_path, monkeypatch):
     """An owned live server pid refuses a direct read and outlives it. With that server's admission held and
     frames committed only to the WAL, --snapshot asks no liveness, opens nothing in the source, recovers the WAL
@@ -194,7 +193,9 @@ def test_snapshot_measures_a_held_root_and_its_wal_without_probing_liveness(tmp_
 
     from devtools import _context_fit_readonly as readonly
     from ouroboros import dialogue_store, platform_layer, test_environment
+    from tests._store_journal_shared import use_journal
 
+    use_journal(monkeypatch, 'WAL')  # this scenario needs committed WAL frames even when the host defaults to PERSIST
     root = scale.write_root(tmp_path / 'data')
     offline_fixture(root)
     platform_temp = tmp_path / 'platform-temp'  # what Windows has instead of /tmp
