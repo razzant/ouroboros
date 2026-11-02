@@ -287,7 +287,6 @@ def test_queued_retry_resume_waits_for_its_earlier_attempts_handed_work(tmp_path
     from supervisor.owner_pause_control import request_owner_pause, settle_requested_owner_pauses
 
     q, workers, row = _queued_retry_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
     source = SimpleNamespace(task_id="root", root_task_id="root", drive_root=tmp_path)
     with pytest.raises(TimeoutError):  # attempt 1 handed an operation whose outcome is unknown
         with tool_handoff(source, "external_write"):
@@ -302,9 +301,9 @@ def test_queued_retry_resume_waits_for_its_earlier_attempts_handed_work(tmp_path
     assert read_fence(tmp_path, "root")["state"] == "requested"
     assert q.BUDGET_ROOT_FENCES["root"]["cause"] == "owner_pause"
     assert workers.PENDING == [row] and "_budget_pause_hold" not in row
-    assert settle_requested_owner_pauses(q, now=100.0) == []
+    assert settle_requested_owner_pauses(q) == []
     write_task_result(tmp_path, "root", "interrupted", launch_handoffs={})  # positively settled
-    assert settle_requested_owner_pauses(q, now=110.0) == ["root"]
+    assert settle_requested_owner_pauses(q) == ["root"]
     assert read_fence(tmp_path, "root")["state"] == "paused"
     assert q.resume_budget_paused_task("root")["ok"]
     assert (row["_attempt"], row["admitted_dispatch"]) == (2, "possible")

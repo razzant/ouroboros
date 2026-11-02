@@ -9,6 +9,7 @@ satisfied by a pass that stopped looking. Counting is not timing: no clock decid
 from __future__ import annotations
 
 import pathlib
+import time
 
 import pytest
 
@@ -396,3 +397,407 @@ def test_l14_an_empty_queue_keeps_the_tick_free(tmp_path, monkeypatch):
     queue, _state, _workers = _install_queue(root, monkeypatch)
     tick = _Tick(monkeypatch, queue)
     assert tick() == 0 and tick.reads == 0
+
+
+# ---- L1: the owner-pause census ------------------------------------------------------------------
+
+def _paused_trees(tmp_path, monkeypatch, name: str, roots: int, *, children: int = 1):
+    """``roots`` trees the owner's real Pause settled: never-started rows under their accepted latch."""
+    from ouroboros.owner_pause import FENCE_PAUSED, read_fence
+    from ouroboros.task_results import write_task_result
+    from supervisor.owner_pause_control import request_owner_pause
+
+    root = tmp_path / name
+    root.mkdir()
+    queue, _state, workers = _install_queue(root, monkeypatch)
+    ids = []
+    for index in range(roots):
+        root_id = f"{name}-{index}"
+        ids.append(root_id)
+        write_task_result(root, root_id, "scheduled", chat_id=0, root_task_id=root_id, text="paused work " * 2000)
+        workers.PENDING.append({"id": root_id, "type": "task", "chat_id": 0, "root_task_id": root_id, "_attempt": 1})
+        for child in range(children):
+            child_id = f"{root_id}-c{child}"
+            write_task_result(root, child_id, "scheduled", chat_id=0, root_task_id=root_id, text="child " * 2000)
+            workers.PENDING.append({"id": child_id, "type": "task", "chat_id": 0, "root_task_id": root_id,
+                                    "parent_task_id": root_id, "_attempt": 1})
+        assert request_owner_pause(root_id, request_id=f"pause-{root_id}")["ok"]
+        assert read_fence(root, root_id)["state"] == FENCE_PAUSED
+    return root, queue, workers, ids
+
+
+def test_l1_settled_trees_cost_nothing_per_pass_at_one_root_or_twenty(tmp_path, monkeypatch, meter):
+    """The owner's Pause must not ENLARGE the census (live 01.11: 4.4-5.5k fence reads/min at 24 fences)."""
+    from supervisor import owner_pause_control
+
+    def one_pass(name, roots):
+        _root, queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, name, roots)
+        assert all(owner_pause_control._AT_REST.get(root_id) for root_id in ids)
+        outcome = counted(meter, f"L1:{name}", lambda: owner_pause_control.settle_requested_owner_pauses(queue))
+        monkeypatch.undo()
+        assert outcome["result"] == [], "a settled tree is not examined again"
+        return outcome
+
+    small, large = one_pass("one", 1), one_pass("twenty", 20)
+    assert small["counts"] == large["counts"], (small["counts"], large["counts"])
+    assert set(small["counts"].values()) == {0}, ("no store read, no decode, no write at all", small)
+
+
+def test_l1_a_new_process_reads_each_fenced_tree_once_then_rests(tmp_path, monkeypatch, meter):
+    """The dirty-set's safety: nothing in memory survives a restart, so the first look is the full census."""
+    from supervisor import owner_pause_control
+
+    _root, queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, "boot", 3)
+    owner_pause_control._AT_REST.clear()
+    census = []
+    real = owner_pause_control.refresh_owner_pause_tree
+    monkeypatch.setattr(owner_pause_control, "refresh_owner_pause_tree",
+                        lambda root_id, **kw: census.append(root_id) or real(root_id, **kw))
+    assert sorted(owner_pause_control.settle_requested_owner_pauses(queue)) == sorted(ids)
+    assert sorted(census) == sorted(ids)
+    census.clear()
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == [] and census == []
+
+
+@pytest.mark.parametrize("change", ["member_left", "member_arrived", "attempt_changed", "marked", "new_generation"])
+def test_l1_a_member_transition_brings_exactly_its_own_tree_back(tmp_path, monkeypatch, meter, change):
+    """The companion: a transition wakes the tree it touched. Its neighbours keep costing nothing."""
+    from supervisor import owner_pause_control
+
+    _root, queue, workers, ids = _paused_trees(tmp_path, monkeypatch, "moves", 5)
+    target = ids[2]
+    census = []
+    real = owner_pause_control.refresh_owner_pause_tree
+    monkeypatch.setattr(owner_pause_control, "refresh_owner_pause_tree",
+                        lambda root_id, **kw: census.append(root_id) or real(root_id, **kw))
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == [] and not census
+    if change == "member_left":
+        workers.PENDING[:] = [row for row in workers.PENDING if row["id"] != f"{target}-c0"]
+    elif change == "member_arrived":
+        workers.PENDING.append({"id": f"{target}-late", "root_task_id": target, "parent_task_id": target, "_attempt": 1})
+    elif change == "attempt_changed":
+        workers.RUNNING[f"{target}-c0"] = {"task": {"id": f"{target}-c0", "root_task_id": target}, "attempt": 2,
+                                           "worker_id": 0, "started_at": 1000.0}
+    elif change == "marked":
+        owner_pause_control.mark_tree_changed(target)
+    else:
+        queue.BUDGET_ROOT_FENCES[target] = {**queue.BUDGET_ROOT_FENCES[target], "fence_id": "a-newer-fence"}
+    owner_pause_control.settle_requested_owner_pauses(queue)
+    assert census == [target]
+
+
+def test_l1_the_look_is_owed_by_the_cadence_and_a_mark_and_never_without_a_pause(tmp_path, monkeypatch):
+    from supervisor import owner_pause_control as control
+
+    queue = type("Q", (), {"BUDGET_ROOT_FENCES": {}})()
+    control.request_settlement_look()
+    assert not control.settlement_look_owed(queue), "no owner Pause stands: nothing is owed"
+    queue.BUDGET_ROOT_FENCES = {"budget-root": {"cause": "budget"}}
+    control.request_settlement_look()
+    assert not control.settlement_look_owed(queue), "a budget latch is not this census's"
+    queue.BUDGET_ROOT_FENCES = {"root": {"cause": "owner_pause"}}
+    assert not control.settlement_look_owed(queue), "nothing asked for a look"
+    control.mark_tree_changed("root")
+    assert control.settlement_look_owed(queue)
+
+
+def test_l1_the_pass_consumes_the_look_and_a_stopped_pass_keeps_what_it_never_reached(tmp_path, monkeypatch, meter):
+    from supervisor import owner_pause_control as control
+
+    _root, queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, "stop", 2)
+    control.request_settlement_look()
+    control.mark_tree_changed(ids[0])
+    control.mark_tree_changed(ids[1])
+    assert control.settle_requested_owner_pauses(queue, stop_requested=lambda: True) == []
+    assert control.settlement_look_owed(queue), "the marked trees were not looked at: still owed"
+    assert sorted(control.settle_requested_owner_pauses(queue)) == sorted(ids)
+    assert not control.settlement_look_owed(queue)
+
+
+def test_l1_a_pass_longer_than_the_cadence_is_never_followed_at_once_by_another(monkeypatch):
+    """The closed loop this replaced: a pass longer than its spacing ran back to back. The cadence that
+    finds a pass running owes nothing and journals the stall; only a transition may start the next at once."""
+    from ouroboros import maintenance, server_maintenance as sm
+    from supervisor import owner_pause_control as control, queue
+
+    started = []
+
+    def start(latch, name, _target, _args):
+        started.append(name)
+        latch.release()
+        return True
+
+    stalled = []
+    monkeypatch.setattr(sm, "_start_maintenance_thread", start)
+    monkeypatch.setattr(sm, "_duty_busy", lambda latch, _sec: stalled.append(latch))
+    monkeypatch.setattr(sm, "_tick_maintenance_child", lambda: None)
+    monkeypatch.setattr(maintenance, "child", maintenance.MaintenanceChild())
+    monkeypatch.setattr(queue, "RUNNING", {})
+    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {"root": {"cause": "owner_pause", "fence_id": "f"}})
+    with control._BOOK_LOCK:
+        control._LOOK_OWED[0] = False
+        control._CHANGED.clear()
+
+    def tick():
+        monkeypatch.setattr(sm, "_LAST_CANCEL_INTENT_SWEEP", [0.0])  # the 20 s block is due
+        started.clear()
+        sm._periodic_supervisor_maintenance([time.time()], [time.time()])
+        return "owner_pause_settlement" in started
+
+    assert sm._OWNER_PAUSE_SWEEP_LOCK.acquire(blocking=False)
+    try:
+        assert not tick(), "its latch is held: the pass already running is this look"
+    finally:
+        sm._OWNER_PAUSE_SWEEP_LOCK.release()
+    assert sm._OWNER_PAUSE_SWEEP_LOCK in stalled
+    assert not control.settlement_look_owed(queue), "the pass ended: nothing is owed until the next cadence"
+    assert tick(), "the next cadence looks again"
+
+
+def test_l1_an_unconfirmed_stop_keeps_its_tree_due_without_rereading_a_body(tmp_path, monkeypatch, meter):
+    """The real re-check stays: an unsettled stop is read back each look, and that is all it costs."""
+    from ouroboros import budget_pause, owner_pause, task_results
+    from supervisor import owner_pause_control
+    from tests.test_pause_observation_cas import _owner_paused_solo
+
+    queue, _workers = _owner_paused_solo(tmp_path, monkeypatch)
+    observed = []
+
+    def custody(root, task_id, **kw):
+        observed.append(kw.get("reason"))
+        return {"custody_read": "ok", "runs": [{"run_id": "run-1", "state": "stop_requested", "stop_outcome": "requested"}]}
+
+    monkeypatch.setattr(budget_pause, "observe_task_runs", custody)
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == []
+    assert owner_pause_control._AT_REST.get("solo") is None
+    monkeypatch.setattr(task_results, "load_task_result", lambda *a, **k: pytest.fail("a look at an unsettled stop read a body"))
+    observed.clear()
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == []
+    assert observed == ["owner_pause_settlement_check"], "read back once per look, never a second control"
+    monkeypatch.undo()
+
+
+def test_l1_a_tree_held_by_an_open_writer_reaches_its_census_each_look_and_reads_no_member(tmp_path, monkeypatch, meter):
+    """The look that DOES reach the census: nothing moved, so the memo answers it, and the writer's end is seen."""
+    from ouroboros import budget_pause, delegate_custody as custody, owner_pause, task_results
+    from ouroboros.task_results import write_task_result
+    from supervisor import owner_pause_control
+
+    root = tmp_path / "held"
+    root.mkdir()
+    queue, _state, workers = _install_queue(root, monkeypatch)
+    write_task_result(root, "held-root", "scheduled", chat_id=0, root_task_id="held-root", text="work " * 2000)
+    write_task_result(root, "held-child", "scheduled", chat_id=0, root_task_id="held-root", text="work " * 2000)
+    workers.PENDING.extend([{"id": "held-root", "type": "task", "chat_id": 0, "root_task_id": "held-root", "_attempt": 1},
+                            {"id": "held-child", "type": "task", "chat_id": 0, "root_task_id": "held-root", "_attempt": 1}])
+    assert custody.emit(root, custody.STARTED, {"run_id": "run-open", "invocation_id": "invoke-open", "task_id": "held-child",
+                                                "root_task_id": "held-root", "route": "route", "source": "delegate_start"})
+    assert owner_pause_control.request_owner_pause("held-root", request_id="p")["state"] == owner_pause.FENCE_REQUESTED
+    census = []
+    real_census = owner_pause_control.refresh_owner_pause_tree
+    monkeypatch.setattr(owner_pause_control, "refresh_owner_pause_tree",
+                        lambda root_id, **kw: census.append(root_id) or real_census(root_id, **kw))
+    with monkeypatch.context() as patch:
+        patch.setattr(task_results, "load_task_result", lambda *a, **k: pytest.fail("a settled member's body was re-read"))
+        patch.setattr(budget_pause, "observe_task_runs", lambda *a, **k: pytest.fail("unchanged custody was re-read"))
+        assert owner_pause_control.settle_requested_owner_pauses(queue) == []
+    assert census == ["held-root"], "the tree stays due: its census ran"
+    assert owner_pause.read_fence(root, "held-root")["state"] == owner_pause.FENCE_REQUESTED
+    assert custody.emit(root, custody.SETTLED, {"run_id": "run-open", "invocation_id": "invoke-open", "task_id": "held-child",
+                                                "root_task_id": "held-root", "terminal_state": "succeeded"})
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == ["held-root"], "the custody write is the census's input"
+    assert owner_pause.read_fence(root, "held-root")["state"] == owner_pause.FENCE_PAUSED
+
+
+def test_l1_the_stop_confirmed_later_settles_the_tree_on_the_next_look(tmp_path, monkeypatch, meter):
+    from ouroboros import budget_pause, owner_pause
+    from supervisor import owner_pause_control
+    from tests.test_pause_observation_cas import _owner_paused_solo, _quiet_custody
+
+    queue, _workers = _owner_paused_solo(tmp_path, monkeypatch)
+    monkeypatch.setattr(budget_pause, "observe_task_runs", _quiet_custody)
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == ["solo"]
+    assert owner_pause.read_fence(tmp_path, "solo")["state"] == owner_pause.FENCE_PAUSED
+    assert owner_pause_control._AT_REST.get("solo"), "and from here it costs nothing"
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == []
+
+
+def test_l1_a_paused_tree_whose_late_work_settles_with_no_queue_row_is_still_released(tmp_path, monkeypatch):
+    """Why a state string is no proof of rest (k3): no member is left to announce this, so it stays looked at."""
+    from ouroboros import owner_pause
+    from ouroboros.task_results import write_task_result
+    from supervisor import owner_pause_control
+
+    root = tmp_path / "late"
+    root.mkdir()
+    queue, _state, _workers = _install_queue(root, monkeypatch)
+    write_task_result(root, "answered", "running", chat_id=0, root_task_id="answered")
+    fence, _created = owner_pause.install_fence(root, "answered", request_id="p", late_work=True)
+    owner_pause.set_fence_state(root, "answered", fence_id=fence["fence_id"], state=owner_pause.FENCE_PAUSED)
+    queue.BUDGET_ROOT_FENCES["answered"] = {"cause": "owner_pause", "fence_id": fence["fence_id"],
+                                            "root_task_id": "answered", "status": "paused"}
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == ["answered"], "not settled: its row still runs"
+    assert owner_pause_control._AT_REST.get("answered") is None, "a tree with no queue row is never at rest"
+    write_task_result(root, "answered", "completed", result="answered")  # an orphan repair: no hook names it
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == []
+    assert owner_pause.read_fence(root, "answered")["state"] == owner_pause.FENCE_RELEASED
+    assert "answered" not in queue.BUDGET_ROOT_FENCES
+
+
+def test_l1_a_finishing_review_keeps_its_tree_due_until_it_ends(tmp_path, monkeypatch, meter):
+    from ouroboros import owner_pause
+    from ouroboros import review_operation
+    from supervisor import owner_pause_control
+
+    root, queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, "review", 1)
+    target = ids[0]
+    live = {"on": True}
+    monkeypatch.setattr(review_operation, "task_has_live_review_operation",
+                        lambda _r, task_id, **_k: live["on"] and task_id == target)
+    owner_pause_control.mark_tree_changed(target)
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == [target]
+    fence = owner_pause.read_fence(root, target)
+    assert fence["finishing_reviews"] == [target] and owner_pause_control._AT_REST.get(target) is None
+    live["on"] = False
+    assert owner_pause_control.settle_requested_owner_pauses(queue) == [target], "still due, with no transition"
+    assert owner_pause.read_fence(root, target)["finishing_reviews"] == []
+    assert owner_pause_control._AT_REST.get(target), "and now at rest"
+
+
+# ---- L1: one census memo for the settle pass, Pause, Resume and the display -----------------------
+
+def _census_tree(tmp_path, monkeypatch, name="census"):
+    root, queue, workers, ids = _paused_trees(tmp_path, monkeypatch, name, 1, children=2)
+    return root, queue, workers, ids[0]
+
+
+def _write_seq_reads(monkeypatch):
+    """Fail the moment a member's body or a member's custody is read: what a memo hit must not do."""
+    from ouroboros import budget_pause, task_results
+
+    monkeypatch.setattr(task_results, "load_task_result", lambda *a, **k: pytest.fail("a census hit read a body"))
+    monkeypatch.setattr(budget_pause, "observe_task_runs", lambda *a, **k: pytest.fail("a census hit read custody"))
+
+
+def test_l1_memo_an_unchanged_tree_answers_every_census_consumer_without_a_member_read(tmp_path, monkeypatch, meter):
+    from supervisor.continuation_admission import action_writers, conflicting_writers, model_handoffs
+
+    root, queue, _workers, target = _census_tree(tmp_path, monkeypatch)
+    first = conflicting_writers(queue, target, drive_root=root)
+    with monkeypatch.context() as patch:
+        _write_seq_reads(patch)
+        assert conflicting_writers(queue, target, drive_root=root) == first
+        assert model_handoffs(root, target) == []
+    # An addressed action first repairs its own tree (its one body read, per press); its census is the same memo.
+    assert action_writers(queue, target, drive_root=root) == first
+
+
+@pytest.mark.parametrize("change", ["task_row", "custody_run", "open_request"])
+def test_l1_memo_any_write_of_the_tree_is_a_new_census(tmp_path, monkeypatch, meter, change):
+    from ouroboros import delegate_custody as custody
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import conflicting_writers
+
+    root, queue, _workers, target = _census_tree(tmp_path, monkeypatch)
+    child = f"{target}-c0"
+    conflicting_writers(queue, target, drive_root=root)
+    if change == "task_row":
+        write_task_result(root, child, "scheduled", launch_handoffs={"op": {"tool": "opaque", "state": "claimed"}})
+        kind = "tool_handoff"
+    elif change == "custody_run":
+        assert custody.emit(root, custody.STARTED, {"run_id": "run-new", "invocation_id": "invoke-new",
+                                                    "task_id": child, "root_task_id": target,
+                                                    "route": "route", "source": "delegate_start"})
+        kind = "delegated_run"
+    else:
+        assert custody.record_start_requested(root, run_id="", task_id=child, invocation_id="invoke-open",
+                                               idempotency_key="invoke-open", request={"prompt": "work"},
+                                               route="codex", source="delegate_start")
+        kind = "delegated_run"
+    blockers = conflicting_writers(queue, target, drive_root=root)
+    assert any(row["kind"] == kind and row.get("task_id") == child for row in blockers), blockers
+
+
+def test_l1_memo_a_fact_no_revision_names_is_derived_fresh_on_a_hit(tmp_path, monkeypatch, meter):
+    """Inputs are kept, never verdicts: a claim's owner that died, a queue member, a process."""
+    from ouroboros import tool_custody
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import conflicting_writers
+
+    root, queue, workers, target = _census_tree(tmp_path, monkeypatch)
+    child = f"{target}-c0"
+    write_task_result(root, child, "scheduled", launch_handoffs={"op": {"tool": "opaque", "state": "claimed"}})
+    assert any(row["kind"] == "tool_handoff" for row in conflicting_writers(queue, target, drive_root=root))
+    holds = [False]
+    monkeypatch.setattr(tool_custody, "retained_tool_custody",
+                        lambda *_a, **_k: [{"kind": "tool_handoff", "task_id": child}] if holds[0] else [])
+    with monkeypatch.context() as patch:
+        _write_seq_reads(patch)
+        assert not any(row["kind"] == "tool_handoff" for row in conflicting_writers(queue, target, drive_root=root))
+        holds[0] = True
+        assert any(row["kind"] == "tool_handoff" for row in conflicting_writers(queue, target, drive_root=root))
+    workers.RUNNING["new-member"] = {"task": {"id": "new-member", "root_task_id": target}, "attempt": 1,
+                                     "worker_id": 0, "started_at": 1000.0}
+    assert any(row == {"kind": "running_member", "task_id": "new-member"}
+               for row in conflicting_writers(queue, target, drive_root=root))
+
+
+def test_l1_memo_unknown_is_never_kept(tmp_path, monkeypatch, meter):
+    from ouroboros import owner_pause
+    from supervisor import tree_census
+    from supervisor.continuation_admission import conflicting_writers
+
+    root, queue, _workers, target = _census_tree(tmp_path, monkeypatch)
+    tree_census.forget(root)
+    with monkeypatch.context() as patch:
+        def unreadable(*_a, **_k):
+            raise ValueError("tree_membership_unreadable")
+
+        patch.setattr(owner_pause, "tree_member_results", unreadable)
+        assert any(row["kind"] == "tree_census_unreadable"
+                   for row in conflicting_writers(queue, target, drive_root=root))
+    assert not any(row["kind"] == "tree_census_unreadable"
+                   for row in conflicting_writers(queue, target, drive_root=root)), "the next reader reads again"
+
+
+def test_l1_memo_holds_no_task_body(tmp_path, monkeypatch, meter):
+    from supervisor import tree_census
+
+    root, _queue, _workers, target = _census_tree(tmp_path, monkeypatch)
+    facts = tree_census.writer_facts(root, target)
+    assert set(facts.rows) == {target, f"{target}-c0", f"{target}-c1"}
+    for row in facts.rows.values():
+        assert set(row) <= set(tree_census.MEMBER_FIELDS), row
+
+
+def test_l1_seam_many_trees_one_attempt_read_and_no_member_read_without_an_attempt(tmp_path, monkeypatch, meter):
+    """What ``/api/state`` calls over its paused roots (noted for LE): flat in the number of trees."""
+    from supervisor.continuation_admission import trees_model_handoffs
+
+    def many(name, roots):
+        root, _queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, name, roots, children=0)
+        with monkeypatch.context() as patch:
+            _write_seq_reads(patch)
+            outcome = counted(meter, f"seam:{name}", lambda: trees_model_handoffs(root, ids))
+        monkeypatch.undo()
+        assert outcome["result"] == {root_id: [] for root_id in ids}
+        return outcome
+
+    small, large = many("one", 1), many("twenty", 20)
+    assert small["counts"] == large["counts"], (small["counts"], large["counts"])
+    assert small["counts"]["writes"] == 0 and trees_model_handoffs(tmp_path, []) == {}
+
+
+def test_l1_seam_a_tree_with_an_open_attempt_still_answers_it(tmp_path, monkeypatch, meter):
+    from ouroboros import owner_pause
+    from supervisor.continuation_admission import model_handoffs, trees_model_handoffs
+
+    root, _queue, _workers, ids = _paused_trees(tmp_path, monkeypatch, "open", 2, children=0)
+    open_attempt = {"attempt_id": "a1", "task_id": ids[0], "root_task_id": ids[0], "state": "dispatched",
+                    "review_slot_id": "slot"}
+    monkeypatch.setattr(owner_pause, "trees_model_requests",
+                        lambda _r, roots: {root_id: [open_attempt] if root_id == ids[0] else [] for root_id in roots})
+    answered = trees_model_handoffs(root, ids)
+    assert [row["kind"] for row in answered[ids[0]]] == ["model_handoff"] and answered[ids[0]][0]["review_owned"]
+    assert answered[ids[1]] == []
+    assert answered[ids[0]] == model_handoffs(root, ids[0], attempts=[open_attempt])

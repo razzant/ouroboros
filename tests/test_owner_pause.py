@@ -223,7 +223,6 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
     from supervisor import owner_pause_control
     from supervisor.owner_pause_control import settle_requested_owner_pauses
 
-    monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
     observed: list = []
 
     def custody(_root, task_id, *, runs, **kwargs):
@@ -232,12 +231,11 @@ def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tm
 
     monkeypatch.setattr(budget_pause, "observe_task_runs",
                         lambda root, task_id, **kw: custody(root, task_id, runs=[{"run_id": "run-1"}], **kw))
-    assert settle_requested_owner_pauses(queue, now=100.0) == []
+    assert settle_requested_owner_pauses(queue) == []
     assert observed == [("child-run", budget_pause.STOP_POLICY_TASK_OWNED, True)]
     monkeypatch.setattr(budget_pause, "observe_task_runs",
                         lambda root, task_id, **kw: custody(root, task_id, runs=[], **kw))
-    assert settle_requested_owner_pauses(queue, now=101.0) == [], "throttled per root"
-    assert settle_requested_owner_pauses(queue, now=110.0) == ["root-1"]
+    assert settle_requested_owner_pauses(queue) == ["root-1"]
     assert budget_pause.budget_pause_row(tmp_path, "child-run")["settlement"] == owner_pause.SETTLEMENT_SETTLED
     assert owner_pause.read_fence(tmp_path, "root-1")["state"] == owner_pause.FENCE_PAUSED
     assert phase() == "budget_paused"
@@ -522,8 +520,7 @@ def test_a_direct_roots_warm_park_settles_when_its_requested_stop_ends_and_resum
         assert resume_warm_owner_pause_root("author")["error"] == "owner_pause_effects_unsettled"
 
         remote["state"] = "cancelled"  # the run obeys the requested stop later
-        monkeypatch.setattr(owner_pause_control, "_LAST_SETTLE_CHECK", {})
-        assert settle_requested_owner_pauses(queue, now=100.0) == ["author"]
+        assert settle_requested_owner_pauses(queue) == ["author"]
         assert remote["cancels"] == ["run-own"], "the issued stop is re-read, never repeated"
         wait = load_task_result(tmp_path, "author")["owner_wait"]
         assert [run["state"] for run in wait["owner_pause"]["external_runs"]["runs"]] == [EXTERNAL_STOP_CONFIRMED]

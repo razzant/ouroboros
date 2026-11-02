@@ -326,7 +326,8 @@ def _periodic_supervisor_maintenance(
     """Throttled upkeep on the supervisor tick, nothing history-sized inline (INV-24).
     Each tick starts the schedule duty when its previous pass ended;
     the 20 s cadence independently starts cancel, delivery, question, notice, usage and synthesis duties,
-    plus the held-Continue re-check while a pending Continue waits under its writer hold; every 600 s
+    plus the held-Continue re-check while a pending Continue waits under its writer hold, and owes the
+    owner-Pause look (started by the tick that finds it owed, or that a member transition marked); every 600 s
     the custody block (reaping, delegated runs, the engine's route-health facts, then the working copies'
     retirers); every 300 s the reconcile
     block (zombie heal, the age-only retirers, drive settlement, then the maintenance dispatcher). The first
@@ -357,6 +358,14 @@ def _periodic_supervisor_maintenance(
         # A writer hold installs no root fence: the held row itself is the cheap
         # scheduling hint, and the off-loop pass re-reads the queue under its lock.
         held = (host_duty("held_continuation_recheck"),) if held_continuation_predecessors(queue.PENDING) else ()
+        # A remote run's end has no transition: its tree is due on this cadence, not on every tick. A pass
+        # still running is this cadence's look (never back to back): its stall is journaled like any duty's.
+        from supervisor.owner_pause_control import request_settlement_look
+
+        if _OWNER_PAUSE_SWEEP_LOCK.locked():
+            _duty_busy(_OWNER_PAUSE_SWEEP_LOCK, BODY_MAINTENANCE_INTERVAL_SEC)
+        else:
+            request_settlement_look()
         for duty in (*TWENTY_SECOND_DUTIES, *held):  # the one 20 s group of HOST_DUTIES, dispatched together
             if duty.latch.acquire(blocking=False):
                 _start_maintenance_thread(duty.latch, duty.name, duty.run,
@@ -373,9 +382,11 @@ def _periodic_supervisor_maintenance(
         _LAST_COLD_CUSTODY_SWEEP[0] = now
         _start_maintenance_thread(_COLD_CUSTODY_SWEEP_LOCK, "cold-custody", _run_cold_custody,
                                   (stop_event, _COLD_CUSTODY_SWEEP_LOCK))
-    # Presence is only a cheap scheduling hint. The off-loop owner re-reads
-    # the exact fences; a network stop must never run on the assignment tick.
-    if queue.BUDGET_ROOT_FENCES and _OWNER_PAUSE_SWEEP_LOCK.acquire(blocking=False):
+    # A cheap scheduling hint. The off-loop owner re-reads the exact fences and reads
+    # nothing for a tree at rest; a network stop must never run on the assignment tick.
+    from supervisor.owner_pause_control import settlement_look_owed
+
+    if settlement_look_owed(queue) and _OWNER_PAUSE_SWEEP_LOCK.acquire(blocking=False):
         latch = _OWNER_PAUSE_SWEEP_LOCK
         _start_maintenance_thread(latch, "owner_pause_settlement", _run_terminal_duty,
                                   (pathlib.Path(DATA_DIR), "owner_pause_settlement", latch, stop_event))
