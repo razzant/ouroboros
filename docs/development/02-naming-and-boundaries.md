@@ -254,7 +254,7 @@ change the world, so a new read tool reaches Observe by default (ARCHITECTURE §
 
 Who is speaking through a routing act is one fact the host mints by value
 (`control_routing._routing_issuer`); never derive it again from a proxy (a routing
-contract only chat turns carry, an empty client id, the event's chat id, the direct
+contract only chat turns carry, an empty client id, the event's chat id, the conversation
 lane a consciousness wake-up also runs on) and never give the model an argument for it.
 A task's own words travel as `KIND_TASK_MESSAGE` with provenance `independent_task`,
 never as `KIND_OWNER_TEXT`; the value lands at three seams in one change
