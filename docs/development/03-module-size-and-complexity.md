@@ -78,8 +78,8 @@ addressed store, outside queue locks, released before display consumers; unavail
 unknown for that request (`tests/test_hot_facts*.py` fix Stop/custody results while settled
 history grows 20→2,000 rows). Main batches question display views and warms lineage by
 generation, keeping strict per-member gaps if a batch fails (`tests/test_main_decisions_reads.py`);
-`tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows;
-`tests/test_recurring_pass_cost.py` the Pause-settle, cold-custody, pending and timeout passes as the live set grows.
+`tests/test_cost_contract.py` fixes every boundary and recurring pass as history grows,
+`tests/test_cost_live_set.py` as the live set grows, one axis at a time (flat, at rest).
 
 - **Measure growth:** history, object count, nesting, cold caches and contention, using
   existing spans and real-reader spies when responsiveness suffers. Telemetry adds no
@@ -95,7 +95,9 @@ generation, keeping strict per-member gaps if a batch fails (`tests/test_main_de
   bounded filtered tail (`jsonl_tail.py`); transactional summaries (`usage_store.py`, `store.py`);
   one-step indexed selects (`store_capture.py`); task-event SSE v2 cursor (ARCHITECTURE §3); one
   census per tree for every consumer (`tree_census.writer_facts`); exact reuse by source identity,
-  never time, pinned against a fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`).
+  never time, pinned against a fresh read (`memory_view.capture_story`, `skill_discovery_reuse.py`);
+  rows kept by stamp, each reader deriving its own verdict (`delegate_custody_current.held_runs`,
+  `task_store.owing_documents`); stored results admitted in one batch (`obligations.result_rows`).
 
 CHECKLISTS item 9 `perf_lifecycle` covers changed readers, startup/shutdown, batches, endpoints, pollers, subscriptions and timers. Runtime `storage` supplies the last count; `query_data(kind="storage")` its detail. The mind judges growth (P5). New growing stores name their `storage.PLACES` entry and PERSISTENCE retirer.
 
