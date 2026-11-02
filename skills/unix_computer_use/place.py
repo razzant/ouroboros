@@ -399,8 +399,8 @@ class PlaceMixin:
 
     def _finish(self, payload: dict[str, Any], ctx: dict[str, Any], stderr: str = "", *, after: Any = _UNREAD) -> dict[str, Any]:
         """Compose the place facts of an input receipt (any transport) and demote a dispatch the helper itself
-        reported as dropped (cliclick warns on stderr and exits 0). ``after`` is the post-input front; the local
-        backends read it here, the remote ones pass what their probe printed (None = unread)."""
+        reported as dropped (cliclick, or the paste chord program, warns on stderr and exits 0). ``after`` is the
+        post-input front; the local backends read it here, the remote ones pass what their probe printed (None = unread)."""
         if after is _UNREAD:
             after = self._front_local()
         ctx["front_last"] = after
@@ -465,20 +465,23 @@ class PlaceMixin:
             if untyped:
                 # cliclick types through key codes of the ACTIVE keyboard layout and exits 0 when it cannot find
                 # one (measured 27.10.2026: Latin text under a Cyrillic layout typed nothing). Partial typing is unknown.
+                # The paste chord program says the same when no key of the layout gives V under Command: it sent nothing.
                 if payload.get("method") == "paste":
-                    hint = "the paste chord's key has no code in the active keyboard layout: switch the layout, or use the app's own commands"
-                elif "keys" in payload:
-                    hint = "switch the keyboard layout (a Latin one for Latin keys) or use the app's own commands"
+                    error = ("no key of the active keyboard layout gives V under Command, so the paste chord was not sent: "
+                             "switch the layout, or use the app's own commands")
                 else:
-                    hint = "use type_text with via=paste"
-                payload.update({"reason": "untypable_characters", "untyped": untyped[:20],
-                                "error": f"{len(untyped)} character(s) have no key code in the active keyboard layout and were "
-                                         f"not typed (the rest may have been); {hint}"})
-            else:
+                    hint = ("switch the keyboard layout (a Latin one for Latin keys) or use the app's own commands"
+                            if "keys" in payload else "use type_text with via=paste")
+                    error = (f"{len(untyped)} character(s) have no key code in the active keyboard layout and were "
+                             f"not typed (the rest may have been); {hint}")
+                payload.update({"reason": "untypable_characters", "untyped": untyped[:20], "error": error})
+            else:  # the paste chord program refuses to post rather than have macOS drop it
                 payload.update({"reason": "permission_denied",
                                 "permission": {"accessibility": "untrusted", "source": "helper stderr"},
-                                "error": "macOS drops synthetic input from a process without the Accessibility grant: "
-                                         "the helper exited 0 but nothing reached the screen"})
+                                "error": ("this process may not post input events (the Accessibility grant), so the paste "
+                                          "chord was not sent" if payload.get("method") == "paste" else
+                                          "macOS drops synthetic input from a process without the Accessibility grant: "
+                                          "the helper exited 0 but nothing reached the screen")})
             effects = []
             if target.get("activated"):
                 payload["observed_effect"] = True  # the switch before it was observed
@@ -488,8 +491,8 @@ class PlaceMixin:
                 payload["observed_effect"] = True  # the clipboard write before it completed
                 payload["clipboard_done"] = True
                 effects.append("the clipboard write")
-            if untyped and payload.get("method") == "paste":
-                dropped_text = "the paste chord was not typed (see error)"
+            if payload.get("method") == "paste":
+                dropped_text = "the paste chord was not sent (see error)"
             elif untyped:
                 dropped_text = "the characters without a key code were dropped (see error); those with one may have been typed"
             else:

@@ -884,15 +884,16 @@ def test_storage_envelopes_have_a_field_identical_browser_twin():
     from tests.test_gateway_parity import _js_typedef_fields
 
     text = (WEB / "storage_types.js").read_text(encoding="utf-8")
-    from ouroboros import storage_free
+    from ouroboros import storage_deleted, storage_free
 
     names = [name for name in contracts.__all__ if name.startswith("Storage")]
+    deleted = ["StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart"]
     assert names == ["StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
-                     "StorageRest", "StorageVolume", "StorageRemover", "StorageFree", "StorageFreeEntry", "StorageFreeGroup",
-                     "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept", "StorageFreePool", "StorageFreeRequest",
-                     "StorageFreeRun"]
+                     "StorageRest", "StorageVolume", "StorageRemover", *deleted, "StorageFree", "StorageFreeEntry",
+                     "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept", "StorageFreePool",
+                     "StorageFreeRequest", "StorageFreeRun"]
     for name in names:
-        home = storage_free if name.startswith("StorageFree") else storage
+        home = storage_deleted if name in deleted else storage_free if name.startswith("StorageFree") else storage
         assert getattr(contracts, name) is getattr(home, name)
         assert _js_typedef_fields(text, name) == set(getattr(contracts, name).__annotations__), name
     assert "storage_types.js" in (WEB / "api_types.js").read_text(encoding="utf-8").splitlines()[0]
@@ -907,7 +908,7 @@ def test_a_real_count_has_exactly_the_contract_fields(tmp_path):
     _write(data / "observability" / "a.bin", 1)
     record = _count(data)
     required = {key for key, kind in storage.StorageCount.__annotations__.items() if "NotRequired" not in str(kind)}
-    assert set(record) == required
+    assert set(record) == required | {"deleted_projects"}, "optional only on a count saved before it existed"
     place_required = {key for key, kind in storage.StoragePlace.__annotations__.items() if "NotRequired" not in str(kind)}
     assert all(set(row) == place_required for row in record["places"])
     assert all(set(part) == set(storage.StoragePart.__annotations__) for row in record["places"] for part in row["parts"])

@@ -35,9 +35,11 @@ TIER0_ALWAYS_FULL = frozenset({
 })
 
 
-# Resident where present; only the physical window may choose its outline.
+# Resident where present; only the physical window may choose its outline: the knowledge
+# indexes and, last, the hand-written registry (owner 2.11.2026: whole in every mode).
 INDEX_STEPS = ("project_knowledge_index", "knowledge_index")
-TIER0_WHOLE_OR_OUTLINE = frozenset(INDEX_STEPS)
+WHOLE_OR_OUTLINE_STEPS = (*INDEX_STEPS, "registry")
+TIER0_WHOLE_OR_OUTLINE = frozenset(WHOLE_OR_OUTLINE_STEPS)
 
 def _read_doc(env: Any, rel_path: str) -> str:
     try:

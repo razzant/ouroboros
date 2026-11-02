@@ -431,3 +431,43 @@ def test_s3_integration_pin_working_recovery_restores_its_saved_cost_ceiling(tmp
     route = ("same-model", "high", False, "max", 0, registry._ctx.context_fit_plan)
     resumed = loop._resume_continuation(registry, ({}, {}, saved), [], {}, {}, set(), route, fresh, 1.0)
     assert resumed[6].ceiling_usd == 7.0 and registry._ctx._cost_ceiling is resumed[6]
+
+
+def cold_continuation(ctx, trace, monkeypatch, *, writer="working", new_id=False, legacy=False):
+    """``ctx`` saved through a real writer — the rolling working checkpoint (its encoder turns non-JSON values into
+    opaque markers) or a parked owner wait (strict JSON) — attached to a retry by the supervisor's own carrier
+    (``restart_retention._recovery_source``) and continued as a new worker process does: a fresh context, the
+    loop's turn reset, then ``resume_from_working`` for the same task or a new execution id. Only the route
+    rebind, which needs a live model plan, is stubbed. ``legacy`` drops the result review's shown facts from
+    the saved bytes, as a source written before they were carried. Returns ``(fresh context, restored trace)``."""
+    from ouroboros import loop, owner_wait
+    from ouroboros.tools.registry import ToolContext
+    from supervisor.restart_retention import _recovery_source
+
+    root, messages = ctx.drive_root, [{"role": "user", "content": "task"}]
+    ctx.task_attempt = 1  # a worker's context always names its attempt
+    write_task_result(root, ctx.task_id, "running")
+    if writer == "owner_wait":
+        wait = owner_wait.checkpoint_owner_wait(ctx, messages, trace, {}, 3, [], set())
+        owner_wait.set_owner_wait(root, ctx.task_id, {**wait, "state": "waiting"})
+    else:
+        wc.save_round(SimpleNamespace(tools=SimpleNamespace(_ctx=ctx), messages=messages, llm_trace=trace,
+                                      accumulated_usage={}, round_idx=3, tool_schemas=[], owner_msg_seen=set(),
+                                      budget_tail="no_tool"), "candidate")
+    if legacy:
+        path = wc.checkpoint_path(root, ctx.task_id, 1)
+        state = json.loads(path.read_bytes())
+        state["acceptance"] = {key: value for key, value in state["acceptance"].items()
+                               if not key.startswith("_result_review_")}
+        path.write_text(json.dumps(state), encoding="utf-8")
+    task = {"id": ctx.task_id, "_attempt": 1}
+    assert _recovery_source(root, task, 1, "restart")
+    fresh = ToolContext(repo_dir=ctx.repo_dir, system_repo_dir=ctx.system_repo_dir, drive_root=root,
+                        workspace_root=ctx.workspace_root, workspace_mode=ctx.workspace_mode,
+                        task_id="task-retry" if new_id else ctx.task_id)
+    fresh.task_attempt, fresh.working_recovery = 2, task["_working_recovery"]
+    loop._reset_turn_state(fresh)
+    monkeypatch.setattr(owner_wait, "rebind_restored_route", lambda *_a, **_k: (None, "max"))
+    restored: dict = {}
+    wc.resume_from_working(SimpleNamespace(_ctx=fresh), wc.load_recovery(fresh), [], restored, {}, set())
+    return fresh, restored

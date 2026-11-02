@@ -680,6 +680,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None,
                + f"round {anchor_round} accepted {int(anchor):,}, {int(estimate) - int(anchor):+,} since")
         if anchor is None and usage.get("_context_measurement_basis") in {"fresh_route_usage", "fresh_model_usage"}:
             how = "fresh same-model measurement at comparable input size"
+        if usage.get("_context_measurement_basis") == "refused_input":  # a changed candidate is counted, not stated
+            how = "host estimate at the density of the size-refused request: its provider-stated input over its estimate"
         floor = int(usage.get("_context_response_reserve_tokens") or reserve or 0)
         parts.append(f"input ~{int(estimate):,} before this line ({how}) + reply reservation {int(reserve or 0):,}")
         # Known-window admission acts on this prediction; a reservation is no provider observation.

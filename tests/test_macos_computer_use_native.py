@@ -13,7 +13,9 @@ contents); the skill's answers, kept in ``receipts.jsonl``, are checked against 
 themselves. Three cases use foreground input: one hands the front to one fixture and lets the other take
 it (targeted ``key``/``type_text`` with ``raise_policy="never"`` must refuse rather than take it back), one
 sends Command-A spelled ``cmd+a`` and ``cmd+A`` and reads the modifiers the front app received, and one
-clicks Commit at a point read off a downscaled screenshot. The calls run as an owner task's would
+clicks Commit at a point read off a downscaled screenshot. A fourth, only with ``OUROBOROS_MACOS_DESKTOP_QA=clipboard``
+because it replaces the clipboard, pastes into the paste fixture under whatever keyboard layout is active (#2589).
+The calls run as an owner task's would
 (``work_kind`` owner). A grant the run lacks becomes the skip reason, never a pass.
 ``test_the_fixture_builds`` alone runs without the opt-in: it compiles and starts nothing.
 """
@@ -35,8 +37,11 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = REPO / "tests" / "fixtures" / "macos_computer_use_qa.swift"
 SKILL = "unix_computer_use"
-DESKTOP = sys.platform == "darwin" and os.environ.get("OUROBOROS_MACOS_DESKTOP_QA") == "1"
+DESKTOP = sys.platform == "darwin" and os.environ.get("OUROBOROS_MACOS_DESKTOP_QA") in ("1", "clipboard")
 desktop_only = pytest.mark.skipif(not DESKTOP, reason="needs a logged-in macOS desktop and OUROBOROS_MACOS_DESKTOP_QA=1")
+# The paste case replaces the clipboard, so it asks for that in so many words (the other cases leave it alone).
+clipboard_only = pytest.mark.skipif(os.environ.get("OUROBOROS_MACOS_DESKTOP_QA") != "clipboard",
+                                    reason="replaces the clipboard: needs OUROBOROS_MACOS_DESKTOP_QA=clipboard")
 log = logging.getLogger(__name__)
 
 # The registered public schema: process and window scope sit outside the element selector.
@@ -448,3 +453,41 @@ def test_a_point_read_off_a_screenshot_clicks_the_button_drawn_there(host, launc
     assert [(r["event"], r.get("instance")) for r in rows] == [("commit", 1)] and after["count"] == 1, \
         {"point": point, "commit_frame": placed["commit_frame"], "transform": transform, "pressed": pressed,
          "rows": rows}
+
+
+@desktop_only
+@clipboard_only
+def test_paste_arrives_as_the_active_layouts_command_v_and_pastes_through_the_edit_menu(host, launch):
+    """#2589: type_text(via="paste") posts Command and the key that gives v under Command in the active layout. The
+    paste fixture's own log, not the receipt, says what arrived (characters "v", exactly the Command modifier), which
+    action its standard Edit menu performed and what text landed. With the window itself first responder the same
+    chord arrives and nothing is pasted while the receipt still says dispatched: what the receipt cannot see."""
+    call, _schema = host
+    _input_ready(call)
+    paste = launch("paste")
+    _hand_front(call, paste)
+    token = f"qa{uuid.uuid4().hex[:8]}Привет"
+    paste.send(f"expect {token}")
+    problems: list[str] = []
+
+    def check(label, condition, payload):
+        if not condition:
+            problems.append(f"{label}: {json.dumps(payload, ensure_ascii=False)[:1500]}")
+
+    for focus, lands in (("paste", True), ("window", False)):
+        paste.send("clear")
+        paste.send(f"focus {focus}")
+        before = paste.mark(f"before-{focus}")
+        sent = call("type_text", text=token, via="paste", app=f"pid:{paste.pid}", raise_policy="never")
+        check(f"{focus}: dispatched to the fixture", sent.get("ok") is True and sent.get("dispatched") is True
+              and sent.get("clipboard_replaced") is True and (sent.get("delivered_to") or {}).get("pid") == paste.pid, sent)
+        time.sleep(1.0)  # a late key, action or text lands before the mark below
+        after = paste.mark(f"after-{focus}")
+        rows = _between(paste.rows(), before["t"], after["t"], "key_down", "paste_action", "menu_sent_action")
+        keys = [(r["modifiers"], r.get("characters")) for r in rows if r["event"] == "key_down"]
+        check(f"{focus}: one Command chord that reads as v", keys == [(["cmd"], "v")],
+              {"keys": keys, "input_source": after.get("input_source"), "sent": sent.get("helper_stderr")})
+        pasted = [r.get("action") for r in rows if r["event"] == "paste_action"]
+        check(f"{focus}: Edit > Paste {'performed' if lands else 'not performed'}", pasted == (["paste:"] if lands else []), rows)
+        check(f"{focus}: text", (after["text"], after.get("pasteboard_is_token")) == ((token if lands else ""), True), after)
+    assert not problems, "\n".join(problems)

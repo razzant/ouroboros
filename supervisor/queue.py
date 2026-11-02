@@ -830,6 +830,14 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     return tid
 
 
+def project_running() -> List[str]:
+    """The RUNNING ids the evolution idle gate waits for: every row but the conversation lane's (an owner turn, a
+    wake, a Presence turn), which base ran in the server and never let hold it."""
+    from supervisor.conversation_lane import conversation_row
+
+    return [task_id for task_id, meta in RUNNING.items() if not conversation_row(meta)]
+
+
 def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return a non-mutating evolution scheduling snapshot.
 
@@ -866,6 +874,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         ),
         None,
     )
+    project = project_running()  # what the idle gate waits for: never a conversation turn
     status = "disabled"
     detail = "Evolution mode is off."
 
@@ -898,7 +907,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     elif enabled and actual_remaining is not None and actual_remaining <= 0:
         status = "budget_blocked"
         detail = "Global budget exhausted: no new cycle starts until the limit allows one. The campaign stays on."
-    elif enabled and (PENDING or RUNNING):
+    elif enabled and (PENDING or project):
         status = "waiting_for_idle"
         detail = "Waiting for active tasks to finish before the next evolution cycle."
     elif enabled:
@@ -921,7 +930,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         "budget_remaining_usd": remaining if remaining is not None and math.isfinite(remaining) else None,
         "budget_reserve_usd": 0.0,  # frozen field: Evolution keeps no reserve of its own (owner, 2026-11-02)
         "pending_count": len(PENDING),
-        "running_count": len(RUNNING),
+        "running_count": len(project),
         "queued_task_id": str((queued_task or {}).get("id") or ""),
         "running_task_id": str((running_task or {}).get("id") or ""),
     }

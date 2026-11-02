@@ -179,7 +179,7 @@ ouroboros/ — agent core and shared runtime (§6)
   usage_store.py, usage_journal.py, openrouter_cost.py — `state/usage.sqlite`, its journal import and explicit OpenRouter price receipts (USAGE_STORE.md)
   store.py, store_capture.py, store_empty.py, store_journal.py, store_task_cards.py, store_timing.py, store_import.py, store_switch.py, install_identity.py, dialogue_store.py, dialogue_retry.py, dialogue_import.py, dialogue_positions.py — shared SQLite core (USAGE_STORE.md): `state/current.sqlite` (atomic `meta.commit_seq`; boot import/reconcile §2, export before storeless switches §9), `state/dialog.sqlite` (chat/progress rows by chain coordinate, ordinals, import intervals; one `append` seam; cutover, archive import, rollback export; PERSISTENCE.md)
   cost_projection.py — the one task-cost projection for every producer: `accounted_upper_bound_usd`, null as None and never $0.00 (§6 Budget tracking)
-  storage.py, storage_free.py, storage_free_view.py, storage_removers.py — Dashboard counts, temporary-space actions and their paged views (§3)
+  storage.py, storage_deleted.py, storage_free.py, storage_free_view.py, storage_removers.py — Dashboard counts, temporary space, paged views (§3)
   delegate_custody.py, delegate_custody_reconcile.py, delegate_collection.py, delegate_state_sweep.py, delegate_custody_usage.py, delegate_capture_attempt.py, delegate_capture_job.py, delegate_named_evidence.py — run custody, observation, collection, child capture and usage; OWNED/FOREIGN/UNKNOWN (§6 Nanny, transport and custody)
   delegate_hold.py — unknown-provider nanny hold (§6 Context fitting)
   delegate_source_coverage.py — oversized work-order source custody; incomplete source cannot authorize a passing terminal verdict or an apply

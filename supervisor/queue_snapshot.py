@@ -201,12 +201,16 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     fenced: list[str] = []
     unreadable: list[str] = []
     unrecorded: list[str] = []
+    from supervisor.restart_retention import presence_turn
+
     for row in rows if isinstance(rows, list) else []:
         task_id = str(row.get("id") or "") if isinstance(row, dict) else ""
         if not task_id or task_id in restored_ids:
             continue
         try:
             stored = load_task_result(_queue().DRIVE_ROOT, task_id, strict=True) or {}
+            if presence_turn(row.get("task")) or presence_turn(stored):
+                continue  # a correspondent's turn: its place's recovery settles it (the Presence sweep), not a fence
             if not stored:
                 # Admission writes the durable scheduled row (task_admission.py
                 # :536-543), so even a failed RUNNING mirror leaves a readable

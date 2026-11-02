@@ -33,7 +33,10 @@ from ouroboros.loop_llm_call import (
 )
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION
-from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice
+from ouroboros.task_finalization import (
+    TERMINAL_ORIGIN_HOST_NOTICE, TERMINAL_ORIGIN_HOST_SALVAGE, TERMINAL_ORIGIN_MODEL_FINAL, set_terminal_host_notice,
+    set_terminal_plan_review_open,
+)
 from ouroboros.tools.join_ledger import _child_disposition_state, _load_direct_child_results  # noqa: F401 -- loop re-exports both
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.usage_accounting import BillingAuthorityUnavailable, BudgetExceeded, ControlAuthorityUnavailable, PhysicalAttemptPreconditionFailed
@@ -438,6 +441,9 @@ def _enforce_plan_gate(
     decision = _loop()._plan_gate_decision(tools._ctx, llm_trace)
     if decision.get("required"):
         llm_trace["plan_gate"] = decision
+    else:  # the projection the outcome reads is THIS answer's gate: an earlier hold's never outlives it
+        for stale in ("plan_gate", "force_plan_decision"):
+            llm_trace.pop(stale, None)
     identity = _plan_gate_identity(decision) if decision.get("required") else ""
     told = str(getattr(tools._ctx, "_plan_gate_told_identity", "") or "")
     if decision.get("allow"):
@@ -526,11 +532,11 @@ def _forced_state_facts(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> s
     Never raises: a forced answer outranks its own annotation."""
     try:
         tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+        # The plan now (a projection an earlier held answer left may name an objection withdrawn since);
+        # without a tool context to read it from, only that projection remains.
         projected = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
-        decision = (
-            projected if isinstance(projected, dict)
-            else (_loop()._plan_gate_decision(tools_ctx, llm_trace) if tools_ctx is not None else {})
-        )
+        decision = (_loop()._plan_gate_decision(tools_ctx, llm_trace) if tools_ctx is not None
+                    else projected if isinstance(projected, dict) else {})
         lines = [line for line in (_plan_gate_facts(decision),) if line]
         undecided = _undispositioned_children(ctx)
         if undecided:
@@ -1079,10 +1085,8 @@ def _forced_fallback_result(
     )
     suffix = plan_suffix + _loop()._forced_orphan_note(ctx)
     # Every rail that DISCLOSES types the fact: a host-notice fallback used to state
-    # the open review in prose while nothing typed carried it. Absent = not open: a
-    # clean result carries no key (pinned usage shapes).
-    if plan_suffix:
-        ctx.accumulated_usage["terminal_plan_review_open"] = True
+    # the open review in prose while nothing typed carried it.
+    set_terminal_plan_review_open(ctx.accumulated_usage, plan_suffix)
     set_terminal_host_notice(ctx.accumulated_usage, suffix)
     live_candidate = _loop()._live_delivery_candidate(ctx)
     fallback_is_retained_model_text = (
@@ -1502,8 +1506,7 @@ def _forced_final_answer(
             _loop()._plan_gate_disclosure(tools_ctx, llm_trace, forced_reason=reason_code)
             if tools_ctx is not None else ""
         )
-        if plan_suffix:  # absent = not open: a clean result carries no key (pinned usage shapes)
-            ctx.accumulated_usage["terminal_plan_review_open"] = True
+        set_terminal_plan_review_open(ctx.accumulated_usage, plan_suffix)
         cut = forced_response_cut(response_meta) if isinstance(request, dict) else ""
         set_terminal_host_notice(ctx.accumulated_usage, plan_suffix, _loop()._forced_orphan_note(ctx), (
             f"The provider cut this reply at its output limit ({cut}) after its completion request; anything "

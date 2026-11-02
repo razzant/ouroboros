@@ -8,10 +8,12 @@ otherwise it stays cold (a 97k helper must not calibrate a 900k task). The large
 input a route accepted here is a lower bound for planning, never evidence of reply room. A size refusal clears predicted free room; only room below an accepted input
 remains a lower bound. All live in the task's usage, so a working checkpoint keeps
 them; a new execution has no task anchor. Data and arithmetic only; the loop records them.
+A refused request's own density sizes only its recovery; dated measurements retain it, but it is not learned.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -142,3 +144,31 @@ def refused_input(usage: Optional[Mapping[str, Any]], plan: Any) -> Optional[int
         return None
     value = (usage.get(REFUSED_INPUTS_KEY) or {}).get(_anchor_model_key(plan))
     return int(value) if value else None
+
+
+def refused_request_density(usage: Optional[Mapping[str, Any]], refused: Any, measurement: Any) -> Optional[float]:
+    """Provider tokens per estimator token of the request a provider just refused by size, or None.
+
+    The provider's own stated input of that request (``_last_llm_provider_message``, stamped for this very
+    failure) over the fit estimator's count of the bytes the same attempt sent (its capture's
+    ``prompt_tokens_bounded_estimate``: the pair the dispatch-usage witness reads for an accepted request).
+    A bare total, a refusal stating no count, a pre-dispatch or exact-local candidate, a capture without that
+    count, or a route the round's ``measurement`` no longer measures (a rebind) measures nothing. Recovery
+    receipts label it as refused input; it becomes neither an accepted anchor nor learned route density.
+    """
+    from ouroboros.capability_evidence import _parse_ctx_requested
+
+    stated = _parse_ctx_requested(str((usage or {}).get("_last_llm_provider_message") or ""))[0]
+    estimate = int(getattr(refused, "prompt_tokens_bounded_estimate", 0) or 0)
+    if stated <= 0 or estimate <= 0:
+        return None
+    sent = getattr(getattr(refused, "physical_context", None), "route_fp", None)
+    return stated / estimate if sent and sent == getattr(measurement, "route_fp", None) else None
+
+
+def measured_units(refused_density: Optional[float], measurement: Any,
+                   *tokens: Optional[int]) -> Tuple[Optional[int], ...]:
+    """``tokens`` the refused request's own density counts, in the units ``measurement`` counts; None stays unknown."""
+    scale = measurement.measurement_density / refused_density if refused_density else 1.0
+    return tuple(None if value is None else math.ceil(value * scale) if refused_density else int(value)
+                 for value in tokens)

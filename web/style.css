@@ -5987,6 +5987,23 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .storage-parts-list > li { display: flex; justify-content: space-between; gap: var(--space-3); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .storage-parts-rest { justify-content: flex-start; }
 
+/* The fold of deleted projects' folders under the five groups. Everything else it uses is Storage's own.
+   No key dot and a lighter name: it is not one of the bar's five shares. */
+.storage-deleted-label { font-weight: 500; }
+.storage-deleted-open { margin-left: calc(8px + var(--space-2)); }
+.storage-deleted-open .storage-group-places { margin: 0; }
+.storage-deleted-open > .storage-meta:first-child { margin-top: 0; }
+.storage-deleted-never { margin-top: var(--space-3); }
+.storage-deleted .storage-free-sub { margin-top: var(--space-4); }
+.storage-deleted .storage-free-sub + .storage-meta { margin-top: 2px; }
+.storage-deleted .storage-parts { margin-top: var(--space-1); border-top: 0; padding-top: 0; }
+/* The same right edge as a fold's head, whose caret slot it has no use for. */
+.storage-deleted-static { display: block; padding-inline-end: 20px; }
+/* A row's opened parts keep their sizes in the row's size column. */
+.storage-deleted .storage-parts-list { padding-inline-end: calc(56px + var(--space-2)); }
+.storage-deleted .storage-place:focus { outline: none; }
+.storage-deleted .storage-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-sm); }
+
 /* Free temporary space: the flow under the free-space reading in the first card. */
 .storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
 .storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--surface-border); }
@@ -6053,6 +6070,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 @container storage (max-width: 520px) {
     .storage-free-size.is-qualified { grid-column: 2; grid-row: 2; justify-self: start; white-space: normal; }
     .storage-free-groups.is-single .storage-free-size.is-qualified { grid-column: 1; }
+    /* As in the free-space lists: on a narrow card a qualified size goes under the name. */
+    .storage-place.is-member > .storage-place-size.is-qualified { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
 }
 
 /* A phone stacks everything: full-width capsules, Measure first, Stop under it; size on the name's
@@ -6069,6 +6088,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     .storage-place.is-member { grid-template-columns: minmax(0, 1fr) auto; }
     .storage-place.is-member > .storage-place-delta { grid-column: 1 / -1; text-align: start; }
     .storage-free-groups.is-single > .storage-free-group { grid-template-columns: minmax(0, 1fr) auto; }
+    .storage-deleted .storage-parts-list { padding-inline-end: 0; }
 }
 /* === design-system:migrated-end === */
 

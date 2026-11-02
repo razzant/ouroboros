@@ -13,6 +13,9 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageVolume, StorageRemover,
 )
 from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
+    StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
+)
 from ouroboros.storage_free import (  # noqa: F401 -- public re-exports
     StorageFree, StorageFreeEntry, StorageFreeGroup, StorageFreeItem, StorageFreeItemsResponse, StorageFreeKept, StorageFreePool,
     StorageFreeRequest, StorageFreeRun,
@@ -1586,6 +1589,7 @@ __all__ = [
     "EffortRange", "OwnerEffortRangeResponse", "OwnerSubagentsModeResponse", "LogTailResponse",
     "StorageCount", "StorageCounting", "StorageError", "StoragePart", "StoragePlace", "StorageResponse",
     "StorageRest", "StorageVolume", "StorageRemover",
+    "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
     "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
     "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
     "HTTP_ENDPOINTS",

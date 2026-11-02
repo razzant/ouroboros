@@ -61,6 +61,11 @@ UNPROVEN_BOUNDARY_INSTRUCTION = (
 # releases a copy (`delegate_named_evidence.retain_named_evidence` reads it from here); a session
 # is told it, never asked to guess.
 EVIDENCE_DIRNAME = ".review-evidence"
+# Disposable by purpose, never by name, kind or size (#2642): generated build/dependency output is not
+# automatically excluded from a Git copy's capture, and named evidence applies no cache, binary or size filter,
+# so a tool's default location can turn this output into a durable payload.
+CHECK_BYPRODUCTS = ("build or dependency output that only serves your checks (environments, dependency "
+                    "installs, compiled output, tool caches)")
 # What the host declares about the scratch it made for one run, before the run uses it.
 # Purpose and ownership, never a promise that the contents come back byte for byte.
 DISPOSABLE_SCRATCH = (
@@ -105,27 +110,36 @@ def disposable_state_instruction(evidence_root: str, *, investigation: bool = Fa
     Work product stays in the private copy; disposable process state is the
     session's task-owned scratch, released or retained by its producer outside
     every Git tree, so verification never discovers a checkout by walking up; new
-    named evidence goes where the host retains it. ``evidence_root`` "" is a copy
+    named evidence goes where the host retains it. Build and dependency output that only
+    serves checks is disposable by purpose, never by name or size (#2642): in a Git copy it
+    may stay only as new files Git ignores (tracking overrides ignore rules),
+    never in the evidence folder, whose retention applies no such filter. ``evidence_root`` "" is a copy
     captured whole: a payload or folder product retains no evidence folder, while an
     evidence-only investigation's copy is itself retained (its PURPOSE line names the
-    folder), so it learns only where outside scratch goes. Project-neutral: the body's
+    folder), so it learns to keep that output out and where outside scratch goes. Project-neutral: the body's
     own launcher is named in its environment facts. ``granted`` is the engine-granted
     scratch, named instead of the host's default temp parent (``scratch_fact``).
     """
     scratch = scratch_fact(granted=granted)
     if not evidence_root and investigation:
-        return f"Disposable process state you keep outside this copy goes outside every Git working tree ({scratch})."
+        return (f"This copy is itself your retained evidence, so keep {CHECK_BYPRODUCTS} out of it; disposable "
+                f"process state you keep outside this copy goes outside every Git working tree ({scratch}).")
     if not evidence_root:
         return ("This copy is itself the result: every file you leave in it becomes part of what is "
-                "captured, so keep test scratch, environments and evidence outside it and outside every "
+                f"captured, so keep test scratch, {CHECK_BYPRODUCTS} and evidence outside it and outside every "
                 f"Git working tree ({scratch}); no evidence folder is retained for this run, so report "
                 "verification results in your answer.")
-    return ("Disposable process state you create — test scratch, package-manager temporaries — is not "
-            f"part of that work: keep it outside every Git working tree ({scratch}); durable package "
-            "downloads go only to the shared download cache your host names. Keep verification "
-            f"evidence worth returning under {evidence_root}: the host retains new files there before it "
-            "releases the copy and never applies them; files the project already tracks there stay "
-            "ordinary work product.")
+    return ("Disposable process state you create — test scratch, package-manager temporaries and "
+            f"{CHECK_BYPRODUCTS} — is not part of that work: keep it outside every Git working tree ({scratch}) "
+            "or, where a tool must keep it in the project tree, in new files Git ignores here (tracking overrides "
+            "ignore rules), setting each tool's output and cache location rather than "
+            "trusting a default, which may land where it is captured or in the author's checkout; durable package "
+            "downloads go only to the shared download cache your host names. Keep verification evidence worth "
+            f"returning under {evidence_root}: the host retains new files there before it releases the copy and "
+            "never applies them; files the project already tracks there stay ordinary work product. That folder "
+            "is for reports, logs, sources, repro scripts and intended binaries of any size; its retention applies "
+            "no cache, binary, size or ignore filter, so by-products left there are kept too, and a link or special "
+            "entry is only recorded as a gap.")
 
 
 # Persisted with every run's instructions, which a resumed vendor session may keep from its
@@ -166,8 +180,9 @@ ACCESS_INSTRUCTIONS = {
 INVESTIGATION_INSTRUCTION = (
     " PURPOSE: this is an evidence-only investigation. Your private copy exists so you can run the "
     "checks you judge useful (tests, scripts, fixtures, temporary files); nothing in it is applied to "
-    "the reviewed or researched tree or creates an obligation to apply it. Put any file worth keeping "
-    "under .review-evidence/: the host retains that folder and the copy's other changes as evidence."
+    "the reviewed or researched tree or creates an obligation to apply it. Put any file worth returning "
+    "under .review-evidence/: the host retains that folder and the copy's other changes as evidence, with "
+    "no cache or binary filter."
 )
 
 

@@ -115,6 +115,10 @@ def test_roster_advice_stays_whole_and_skill_legend_factors_exact_repeats(tmp_pa
     for text in (skills.full_text, skills.operative_view):
         assert text.count('Current payload accepted by author under Advisory; reviewer evidence remains at its original hash.') == 1
         assert text.count('  author_accepted=true') == 8
+        # The compact form keeps each skill's purpose and trigger (owner 2.11.2026), tools stay the full form's.
+        assert text.count('(behavior, v1, advisory): Skill capability description.') == 8
+        assert text.count('  Trigger: When requested.') == 8
+    assert 'ext_skill_0_tool_0' in skills.full_text and 'ext_skill_0_tool_0' not in skills.operative_view
 
 
 def test_runtime_unrecognized_shapes_remain_whole():

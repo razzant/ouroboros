@@ -573,6 +573,36 @@ def test_final_caption_writer_failure_does_not_leave_teardown_waiting():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('speaker', ['owner', 'ouroboros'])
+def test_malformed_final_cannot_poison_valid_teardown_words(speaker):
+    from ouroboros.call_peers import LiveCallHub
+    from skills.live_conversation.driver import _Call
+
+    async def scenario():
+        host = Host()
+        host.hub = LiveCallHub(cp.CallSpec('malformed-caption', 1, 'synthetic', 'synthetic'))
+        async def store_caption(**row):
+            # Like the dialogue store, persistence cannot carry an unpaired surrogate.
+            row['text'].encode('utf-8')
+            host.captions.append(row)
+        host.caption = store_caption
+        call, session = _Call(host), Session()
+        session.final_captions = lambda: [LiveEvent('caption', {
+            'speaker': 'ouroboros', 'item_id': 'valid', 'text': 'Valid teardown words.', 'final': True})]
+        call.last_session = session
+        call.writer = asyncio.create_task(call.save_rows())
+        try:
+            with pytest.raises(UnicodeEncodeError):
+                await call.caption({'speaker': speaker, 'item_id': 'malformed', 'text': '\ud800', 'final': True})
+            await asyncio.wait_for(call.finalize(), 2)
+            assert [(row['speaker'], row['text'], row['item_id']) for row in host.captions] == [
+                ('ouroboros', 'Valid teardown words.', 'valid')]
+        finally:
+            call.writer.cancel()
+            await asyncio.gather(call.writer, return_exceptions=True)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('source', ['host', 'provider'])
 @pytest.mark.parametrize('barrier', ['response', 'input', 'tools', 'playback', 'caption', 'native'])
 def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):

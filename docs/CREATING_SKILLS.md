@@ -181,11 +181,11 @@ automatically disabling, deleting, or moving either payload.
 model's point of view: `what_model_sees` (what the skill adds to the model's
 context — tools, sections, attachments) and `token_effect` (roughly what that
 costs and when it is loaded). A bare string is shorthand for
-`what_model_sees`. The prose travels to the model-visible surfaces — bounded in
-the `list_skills` index and the "Installed Skills" context section, whole in
-`list_skills(name=...)`, which also returns the `read_file` call for this
-manifest — so write it for the model, not for the human reviewer. Unknown keys or
-non-string values are refused at parse time.
+`what_model_sees`. Its prose is bounded in the `list_skills` index and full context catalogue;
+the compact catalogue keeps status, description and trigger.
+`list_skills(name=...)` returns it whole with the manifest's `read_file` call.
+Write for the model, not the reviewer. Unknown keys or non-string values are
+refused at parse time.
 
 ### Always-in-context instructions
 
