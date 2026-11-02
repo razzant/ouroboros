@@ -19,7 +19,7 @@ def _index(repo):
 @pytest.mark.parametrize("changed", [False, True], ids=["stat-dirty-same-content", "real-content"])
 @pytest.mark.parametrize("reader", ["capture", "bounded", "shell", "attribution", "review", "tool",
                                     "preflight", "checkpoint", "patch", "streamed_patch", "subject", "pr",
-                                    "vcs_names", "selection"])
+                                    "vcs_names", "vcs_diff", "selection"])
 def test_host_observations_never_write_the_index(tmp_path, monkeypatch, changed, reader):
     from ouroboros import mutation_attribution, utils
     from ouroboros.tools import review_file_pack, shell_effects, vcs_read
@@ -74,10 +74,10 @@ def test_host_observations_never_write_the_index(tmp_path, monkeypatch, changed,
     elif reader == "pr":
         from ouroboros.tools.git_pr import _g
         output = _g(["status", "--porcelain"], repo).stdout
-    elif reader == "vcs_names":
+    elif reader in {"vcs_names", "vcs_diff"}:
         from ouroboros.tools.registry import ToolContext
         output = vcs_read._vcs_read(ToolContext(repo_dir=repo, drive_root=tmp_path / "data"),
-                                    action="diff", root="system_repo", name_only=True)
+                                    action="diff", root="system_repo", name_only=reader == "vcs_names")
         assert "VCS target:" in output and "ERROR" not in output, output
     else:
         assert reader == "selection"

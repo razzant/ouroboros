@@ -220,14 +220,17 @@ class ReviewSourceChanged(ValueError):
 
 def read_selected_source(drive_root: Any, task_id: str, record_id: str, seat_id: str, *,
                          role: str, part: str, sha256: str) -> bytes:
-    """Resolve an exact owned seat source, including an earlier selection after settlement."""
+    """Resolve an exact owned seat source, including an earlier selection after settlement, or a wave
+    failure note, which the record keeps as the panel's source (``verdict.wave_failures``), no seat's."""
     record = load_record(drive_root, record_id)
     if not record or record.get("task_id") != task_id:
         raise LookupError("Review does not belong to this task.")
     seats = [row for row in record.get("rows") or [] if isinstance(row, dict) and row.get("seat_id") == seat_id]
-    if len(seats) != 1:
+    notes = [note["source_ref"] for note in (record.get("verdict") or {}).get("wave_failures") or []
+             if isinstance(note, dict) and isinstance(note.get("source_ref"), dict) and note["source_ref"].get("seat_id") == seat_id]
+    if len(seats) > 1 or not (seats or notes):
         raise LookupError("Saved reviewer seat is unavailable.")
-    sources = [*seats[0].get("source_refs", []), *seats[0].get("historical_source_refs", [])]
+    sources = [*notes, *(ref for seat in seats for ref in (*seat.get("source_refs", []), *seat.get("historical_source_refs", [])))]
     selected = next((s for s in sources if isinstance(s, dict) and s.get("role") == role
                      and str(s.get("part") or "") == part and s.get("status") == "retained"
                      and isinstance(s.get("ref"), dict) and s["ref"].get("sha256") == sha256), None)
@@ -266,6 +269,8 @@ def record_sources_resolvable(drive_root: Any, payload: Dict[str, Any]) -> bool:
             for ref in (row or {}).get(key) or []]
     refs.extend([((payload.get("brief") or {}).get("dispute_input") or {}).get("rebuttal"),
                  (payload.get("author_decision") or {}).get("source_ref")])
+    refs.extend(note.get("source_ref") for note in (payload.get("verdict") or {}).get("wave_failures") or []
+                if isinstance(note, dict))
     return all(source_ref_resolvable(drive_root, task_id, ref) for ref in refs if isinstance(ref, dict) and "role" in ref)
 
 
@@ -432,7 +437,7 @@ def index_row(drive_root: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
         "heavy_stripped": resolvable,
     }
     if not resolvable:
-        row["verdict"].update({k: verdict.get(k) for k in HEAVY_VERDICT_FIELDS})
+        row["verdict"].update({k: verdict.get(k) for k in (*HEAVY_VERDICT_FIELDS, "wave_failures")})
         row["rows"] = payload.get("rows")
     return row
 
@@ -1394,7 +1399,7 @@ def settle_pending_payload(prior: Dict[str, Any], fresh: Dict[str, Any]) -> Dict
                              gate_reason=gate_reason.removeprefix("gate_block:"), dispatch_refusal=settled.get("dispatch_refusal"),
                              pending=any(seat_open(row) for row in counted))
     verdict["per_row"].update({str(row.get("seat_id") or ""): row_verdict(row) for row in rows})
-    for name in (*HEAVY_VERDICT_FIELDS, "degraded_reasons"):
+    for name in (*HEAVY_VERDICT_FIELDS, "degraded_reasons", "wave_failures"):
         values = [*((prior.get("verdict") or {}).get(name) or []), *((fresh.get("verdict") or {}).get(name) or [])]
         verdict[name] = _merge_evidence(values)
     settled.update(verdict=verdict, state=STATE_PENDING if still_open else STATE_SETTLED,
@@ -1487,7 +1492,7 @@ def settle_from_collected(drive_root: Any, record_id: str, raws: Iterable[Dict[s
         found = dict(zip(HEAVY_VERDICT_FIELDS, seat_findings(
             applied, {str(seat.get("seat_id") or "") for seat in rows if seat.get("additional")})))
         verdict.update({key: _merge_evidence(before.get(key) or [], found[key]) for key in HEAVY_VERDICT_FIELDS},
-                       degraded_reasons=list(before.get("degraded_reasons") or []))
+                       **{key: list(before.get(key) or []) for key in ("degraded_reasons", "wave_failures")})
         known = [float(seat["usd"]) for seat in rows if isinstance(seat.get("usd"), (int, float))]
         settled = {"rows": rows, "verdict": verdict, "state": STATE_PENDING if still_open else STATE_SETTLED,
                    "cost": {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}}

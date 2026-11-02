@@ -594,9 +594,10 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
     Visible text is retained in ``reasoning_notes``. Provider reasoning stays
     display-only; the native message and transcript remain unchanged.
 
-    Both emissions are the turn's OWN speech, so both carry ``narration=True``:
-    this function is the single producer of model narration, and the card takes
-    its title and collapsed activity line from that voice alone.
+    Both emissions are the model's own words, so both carry ``narration=True``:
+    this function is the single producer of model narration. Display reasoning
+    also carries ``reasoning=True``: it is the model's thinking, shown whole in the
+    card's details, while only visible text may name the card or its collapsed line.
     """
     visible_text = _visible_round_text(content)
     if visible_text:
@@ -606,7 +607,7 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
     elif str(runtime_setting("OUROBOROS_REASONING_SUMMARY", "auto")).strip().lower() != "off":
         display_reasoning = LLMClient.extract_display_reasoning(msg)
         if display_reasoning:
-            emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True)
+            emit_progress(sanitize_tool_result_for_log(display_reasoning), narration=True, reasoning=True)
 
 
 # ---------------------------------------------------------------------------

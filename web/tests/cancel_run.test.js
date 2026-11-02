@@ -185,61 +185,16 @@ test('a timeout-retry root gains Cancel run: the host marker is the truth', () =
     }), false);
 });
 
-test('a 404 cancel reconciles the card from the durable record', () => {
-    // 404 says "not live"; if the terminal frame was lost the card would sit
-    // "Working" forever. The branch must fetch the durable record and resolve the
-    // card through the SAME terminal seam replay uses — not merely hide a button.
+// The 200, 404 and refused paths run as behaviour in cancel_pending_stop.test.js: the
+// real card under every answer and durable record. This keeps what it cannot see.
+test('every Stop answer reconciles through the one helper; a refused one keeps its delta', () => {
+    // The card acts the same under a faithful inline copy of the reconcile (until it
+    // drifts) and under the strict detail read, which fails the same way here. The
+    // refused path's viewport write runs without remoteContent and cancelRunFromCard
+    // drops its result, so a constant in place of the delta changes nothing on screen.
     const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const branch = chat.slice(chat.indexOf('exc?.status === 404'));
-    assert.match(branch.slice(0, 600), /revokeManagedTaskCancelAuthority\(taskId\);/);
-    assert.match(branch.slice(0, 1200), /reconcileCancelCardFromDetail\(record, taskId, await fetchTaskDetail\(taskId\)\)/);
-});
-
-test('a successful cancel also reconciles when task_done publication is lost', () => {
-    // Durable cancellation precedes fail-soft publication. A 200 with no WS frame
-    // must therefore read the stored result before leaving the button disabled.
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const success = chat.slice(chat.indexOf('await requestStop(taskId, action)'));
-    const beforeCatch = success.slice(0, success.indexOf('} catch (exc)'));
-    assert.match(beforeCatch, /reconcileCancelCardFromDetail\(record, taskId, await fetchTaskDetail\(taskId\)\)/);
-});
-
-// --- GR2-8: cancel-state honesty (failure restore + pending-before-terminal) ---
-
-test('task-detail reconciliation consults taskCancelPending BEFORE the legacy terminal fallback', () => {
-    // GR2-8b: a live task wedged in the legacy `cancel_requested` STATUS latch is
-    // INTENT, not outcome — it must show as cancel-pending, never resolve as a
-    // terminal "Stopped" while the supervisor is still tearing it down. Pinned
-    // at source: the shared reconcile helper checks the typed projection first
-    // and only falls through to the terminal list afterwards.
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
-    const helper = chat.slice(chat.indexOf('function reconcileCancelCardFromDetail'));
-    const pendingAt = helper.indexOf('taskCancelPending(stored)');
-    const terminalAt = helper.indexOf("'cancel_requested'");
-    assert.ok(pendingAt > 0 && terminalAt > 0, 'both branches exist in the helper');
-    assert.ok(pendingAt < terminalAt, 'the typed pending check runs before the terminal fallback');
-});
-
-test('a failed cancel reconciles through the shared helper before touching the button', () => {
-    // GR3-10 (supersedes the GR2-8a inline check): the non-404 failure path
-    // must reconcile the fetched durable detail through the SHARED
-    // reconcileCancelCardFromDetail helper — keep the button disabled while
-    // cancel_state=pending, finish the card for a terminal record — and only
-    // a genuinely-live, non-pending task gets its prior phase restored and
-    // the button re-enabled.
-    const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8')
-        .replace(/\r\n/g, '\n');
-    const failure = chat.slice(chat.indexOf('showToast(`Cancel failed:'));
-    const branch = failure.slice(0, 2200);
-    // The shared seam runs BEFORE any button re-enable.
-    const reconcileAt = branch.indexOf('reconcileCancelCardFromDetail(record, taskId, stored)');
-    const reenableAt = branch.indexOf('btn.disabled = false');
-    assert.ok(reconcileAt > 0 && reenableAt > 0, 'both the reconcile and the re-enable exist');
-    assert.ok(reconcileAt < reenableAt, 'reconciliation happens before the button is re-enabled');
-    // Pending or terminal returns the real reconcile delta without touching the button.
-    assert.match(branch, /let changed = reconcileCancelCardFromDetail\(record, taskId, stored\);/);
-    assert.match(branch, /if \(record\.finished \|\| taskCancelPending\(stored\)\) return changed;/);
-    assert.match(branch, /return changed;/);
-    assert.match(branch, /taskCancelPending\(stored\)/);
-    assert.match(branch, /restoreLiveCardPhaseState\(record, priorPhase\)/);
+    const stop = chat.slice(chat.indexOf('async function cancelRunFromCard'), chat.indexOf('function restoreCardActivity'));
+    assert.equal(stop.match(/reconcileCancelCardFromDetail\(record, taskId, await fetchTaskDetail\(taskId\)\)/g)?.length, 2);
+    assert.match(stop, /let changed = reconcileCancelCardFromDetail\(record, taskId, stored\);/);
+    assert.match(stop, /if \(record\.finished \|\| taskCancelPending\(stored\)\) return changed;/);
 });

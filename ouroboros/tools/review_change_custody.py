@@ -244,6 +244,8 @@ def settle_attempt(ctx: Any, wave: Any, outcome: Dict[str, Any], payload: Dict[s
             wave, ctx, status="reviewed", phase="review", paid=True, attempt=number,
             late_result_pending=payload.get("state") == "pending",
             block_reason=str(outcome.get("block_reason") or ""),
+            # The record's wave failure note in its safe words; the complete note stays on the record.
+            block_details="\n".join(str(note.get("reported_cause") or "") for note in verdict.get("wave_failures") or []),
             triad_raw_results=copy.deepcopy([row for row in forensic.get("triad_raw") or [] if isinstance(row, dict)]),
             degraded_reasons=[str(item) for item in verdict.get("degraded_reasons") or []])))
         return True

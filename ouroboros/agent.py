@@ -1376,7 +1376,7 @@ class OuroborosAgent:
     def _emit_progress(self, text: str, *, incident: Optional[Dict[str, str]] = None,
                        executor_observation: Optional[Dict[str, Any]] = None,
                        delegated_activity: Optional[Dict[str, Any]] = None,
-                       narration: bool = False, card_row: str = "", card_row_id: str = "",
+                       narration: bool = False, reasoning: bool = False, card_row: str = "", card_row_id: str = "",
                        _task_id_override: Any = _PROGRESS_ID_UNSET,
                        _chat_id_override: Any = _PROGRESS_ID_UNSET,
                        _progress_meta_override: Any = _PROGRESS_ID_UNSET,
@@ -1394,8 +1394,8 @@ class OuroborosAgent:
         speech. Every other caller — checkpoints, fallback and plan notes, the
         review, nudge and transport lines, and the whole ToolContext ABI
         (``emit_progress_fn``) — is the HOST talking about the turn, so it keeps
-        the default. Both voices stay visible rows; the flag decides only whether
-        a note may claim the card title and the collapsed activity line."""
+        the default. Both voices stay visible rows; only narration that is not the model's
+        display ``reasoning`` (stamped only when true) may claim the card title and collapsed line."""
         self._last_progress_ts = time.time()
         chat_id = (
             self._current_chat_id if _chat_id_override is _PROGRESS_ID_UNSET else _chat_id_override
@@ -1447,7 +1447,7 @@ class OuroborosAgent:
             # Stamped on EVERY frame, never inferred from the absence of other
             # metadata: a reader that sees no key is reading an older worker or a
             # row written before the fact existed, and keeps the legacy reading.
-            progress_meta["narration"] = bool(narration)
+            progress_meta.update(narration=bool(narration), **({"reasoning": True} if reasoning and narration else {}))
             event["progress_meta"] = progress_meta
             self._event_queue.put(event)
         except Exception:

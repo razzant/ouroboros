@@ -376,6 +376,10 @@
  *   card title and the collapsed activity line. Absent = a frame that predates
  *   the fact (an older worker, a supervisor note, a stored row), which keeps
  *   the legacy reading that promoted every progress frame.
+ * @property {boolean=} reasoning
+ *   True only on narration that is the model's display reasoning: a Thinking
+ *   row in the timeline, never the title, collapsed line or census last_line.
+ *   Absent = visible speech (and every row written before the fact).
  * @property {{call_id:string,item_id:string,played_ms:number,status:'played'|'generated'|'interrupted'}=} spoken
  *   Generated speech and actual playback evidence; retained on history replay.
  * @property {string=} initiator
@@ -431,6 +435,9 @@
  *   keeps failure_details as an object, and names current sources[] by
  *   {role, part, status, sha256, size, chars}. Pending/displaced sources remain
  *   historical in the record; existing exact selections remain readable.
+ *   panels[].wave_failures (absent when none) is a wave Ouroboros itself stopped:
+ *   [{block_reason, reported_cause (masked, bounded), source}], source naming the
+ *   panel's failure note by {seat_id: "panel", role, part, status, sha256, size, chars}.
  *   v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored
  *   dialogue-status reduction), panels[].single_reviewer_no_diversity (boolean label),
  *   and actors[].dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement"|"").

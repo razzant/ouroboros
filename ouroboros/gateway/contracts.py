@@ -240,6 +240,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     cancelable: NotRequired[bool]
     _is_direct_chat: NotRequired[bool]  # lane fact stamped on a direct turn's own frames
     narration: NotRequired[bool]  # progress VOICE: the model's own round narration (true) vs a host note (false); absent = legacy
+    reasoning: NotRequired[bool]  # true only on narration that is the model's display reasoning: details, never title/line
     spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
@@ -695,7 +696,7 @@ class ActiveDirectTurn(TypedDict):
 
 
 class ActiveChatActivity(ActiveDirectTurn):  # global root census; phase and control facts keep their own authority
-    last_line: NotRequired[str]  # visible model narration, never host notes
+    last_line: NotRequired[str]  # visible model narration, never host notes or display reasoning
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
     detached: NotRequired[bool]  # durable detached_at, independent of carrier/phase
