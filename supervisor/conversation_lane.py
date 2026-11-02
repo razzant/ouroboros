@@ -157,21 +157,34 @@ def awaiting_turns() -> List[Dict[str, Any]]:
     return sorted(rows, key=lambda meta: float(meta.get("started_at") or 0.0))
 
 
-def _held_by_a_stop(rows: List[Dict[str, Any]]) -> set:
-    """The awaiting rows a Stop owns: one read of the durable cancel-intent projection (custody settles them).
+_STOPS_READ: Dict[str, Any] = {"identity": None, "read": ({}, [])}
 
-    Read only while turns await a carrier; an unreadable projection holds every row for this pass (an unknown
-    is never a start), a quarantined intent row holds its own."""
+
+def _held_by_a_stop(rows: List[Dict[str, Any]]) -> set:
+    """The awaiting rows a Stop owns (custody settles them), read only while turns await a carrier.
+
+    The cancel-intent projection is read as every behaviour read is (the watchdog's enforcement read): fail-soft
+    with disclosure. An intent and a quarantined intent row hold their own task; an unreadable projection, which
+    no Stop can be minted into, holds none and is disclosed (``disclose_corruption``, and a warning here) rather
+    than holding every turn silently until someone repairs it. Parsed once per file identity: a quiet pass stats.
+    """
     ids = {str(meta["task"].get("id") or "") for meta in rows}
     if not ids:
         return set()
-    from ouroboros.cancel_intents import read_active_intents
+    from ouroboros.cancel_intents import _intents_path_read, read_active_intents
+    from ouroboros.utils import file_identity
 
+    path = _intents_path_read(_pool().DRIVE_ROOT)
     try:
-        intents, unseen = read_active_intents(_pool().DRIVE_ROOT, strict=True)
-    except Exception:
-        log.warning("cancel intents unreadable: the awaiting conversation turns wait a pass", exc_info=True)
-        return ids
+        identity = (str(path), file_identity(path.stat()))
+    except OSError:
+        identity = (str(path), None)  # absent: no intent, nothing read
+    if _STOPS_READ["identity"] != identity:
+        read = read_active_intents(_pool().DRIVE_ROOT, disclose_corruption=True)
+        if read[1] is None:
+            log.warning("cancel intents unreadable: awaiting conversation turns start without the Stops it held")
+        _STOPS_READ.update(identity=identity, read=read)
+    intents, unseen = _STOPS_READ["read"]
     return ids & (set(intents) | set(unseen or ()))
 
 

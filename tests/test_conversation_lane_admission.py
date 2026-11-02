@@ -320,3 +320,25 @@ def test_a_dead_carriers_retry_whose_barrier_failed_waits_unstarted_for_its_row(
     monkeypatch.setattr(queue, "publish_queue_snapshot", real)
     conversation_lane.dispatch_awaiting_turns()
     assert meta["worker_id"] == lane.spare.wid and lane.spare.in_q.get_nowait()["id"] == "turn-r"
+
+
+def test_a_damaged_cancel_intent_projection_holds_only_what_it_cannot_read(lane):
+    """Review N5: the lane's Stop hold reads the projection as every behaviour read does (fail-soft with
+    disclosure). A quarantined intent row holds its own turn and the turn beside it starts; a projection that
+    cannot be read at all, which no Stop can be minted into, holds no turn: it is disclosed, never a silent hold
+    of every awaiting turn while READY carriers sit idle."""
+    import json
+
+    from supervisor import queue
+
+    path = queue.DRIVE_ROOT / "state" / "cancel_intents.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    quarantined = _awaiting_turn(lane, "damaged hello", "cm-n5-row")
+    free = _awaiting_turn(lane, "free hello", "cm-n5-free")
+    path.write_text(json.dumps({"intents": {quarantined: "not a row"}}), encoding="utf-8")
+    handed = _dispatched_once_carriers_are_ready()
+    assert free in handed and quarantined not in handed
+    path.write_text("{not json", encoding="utf-8")
+    assert quarantined in _dispatched_once_carriers_are_ready()  # an unreadable projection holds nothing
+    trail = (queue.DRIVE_ROOT / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
+    assert '"op": "active_intents"' in trail and '"op": "active_intents_row"' in trail  # both disclosed
