@@ -29,7 +29,7 @@ from ouroboros.task_results import (
     STATUS_SCHEDULED,  # noqa: F401 -- facade name tests read
     load_task_result,
 )
-from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
+from ouroboros.cost_projection import LIVE_ROOT_COSTS, carry_cost_meta, live_root_cost_projection, with_cost_aliases  # noqa: F401
 from ouroboros.subagent_messages import subagent_message_meta  # noqa: F401
 from supervisor.cognitive_operations import EVENT_HANDLERS as _CEH, _handle_cognitive_operation  # noqa: F401
 from supervisor.task_model_wait import EVENT_HANDLERS as _MWH
@@ -181,6 +181,11 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
         "round_id": round_id,
         "call_attempt": call_attempt,
     }
+    if phase != "observed":
+        # A call opened (its reservation is an open ledger row) or closed: the root's live cost figure is
+        # read again at the next flush, so the card says "up to" while the call is in flight (RV_MAIN M7).
+        root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta, dict) else None
+        LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or evt.get("root_task_id") or task_id)
     if phase == "started":
         updated = {**identity, "started_at": time.time()}
     elif not isinstance(active, dict) or any(active.get(key) != value for key, value in identity.items()):

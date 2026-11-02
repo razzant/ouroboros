@@ -219,3 +219,72 @@ def test_the_rollback_export_is_stamped_format_one(published):
     assert exported[FORMAT_KEY] == 1 and queue_observation.SHARED_KEY not in exported
     assert exported["pending"][0]["task"]["origin_message_text"] == "x" * 2000
     assert queue_observation.load_queue_document(root, fresh=True)["pending"][0]["task"]["origin_message_text"] == "x" * 2000
+
+
+# ---- M7: the live root cost figure sees a call in flight and an open run -------------------------
+
+def _memo_reads(monkeypatch):
+    from ouroboros import usage_accounting
+    reads = []
+    monkeypatch.setattr(usage_accounting, "usage_breakdown", lambda *a, **k: reads.append(k) or {
+        "accounted_usd": 1.0, "attempt_counts": {"settled": 1}, "priced_rows": 1, "tracked_nonfinal_rows": 0,
+        "accounting_open_rows": 1, "reserved_usd": 0.5})
+    return reads
+
+
+def test_a_call_state_frame_marks_the_root_so_the_flush_reads_the_in_flight_call(tmp_path, monkeypatch):
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+    from ouroboros.server_liveness import flush_budget_projection
+    from supervisor.events import _handle_main_llm_call_state
+
+    reads = _memo_reads(monkeypatch)
+    task = {"id": "root", "type": "task", "root_task_id": "root", "_attempt": 1}
+    running = {"root": {"task": task, "attempt": 1, "started_at": 1.0}}
+    ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=running, PENDING=[], update_budget_from_usage=lambda u: True)
+    assert LIVE_ROOT_COSTS.fields(tmp_path, "root", task) == {}
+    flush_budget_projection(ctx)
+    assert len(reads) == 1, "first sight: one read"
+    flush_budget_projection(ctx)
+    assert len(reads) == 1, "unchanged money: no read"
+    frame = {"task_id": "root", "phase": "started", "llm_call_id": "c1", "execution_id": "e1", "round_id": "r1",
+             "task_attempt": 1, "call_attempt": 1}
+    _handle_main_llm_call_state(frame, ctx)
+    assert "active_llm_call" in running["root"]
+    flush_budget_projection(ctx)
+    assert len(reads) == 2, "a call opened: the figure is read again (the reservation is an open row)"
+    assert LIVE_ROOT_COSTS.fields(tmp_path, "root", task)["cost_presentation"]["accounting_open"] is True
+    _handle_main_llm_call_state({**frame, "phase": "observed", "model_activity": {"kind": "reasoning"}}, ctx)
+    flush_budget_projection(ctx)
+    assert len(reads) == 2, "an observation inside the call changes no money"
+    _handle_main_llm_call_state({**frame, "phase": "finished"}, ctx)
+    flush_budget_projection(ctx)
+    assert len(reads) == 3, "a call closed: read again"
+
+
+def test_a_wait_lease_and_a_custody_transition_mark_the_root(tmp_path, monkeypatch):
+    from ouroboros.cost_projection import LIVE_ROOT_COSTS
+    from ouroboros.delegate_custody_reconcile import _mark_root_cost
+    from ouroboros.server_liveness import flush_budget_projection
+    from supervisor.events_worker_reports import _handle_external_wait_lease
+
+    reads = _memo_reads(monkeypatch)
+    task = {"id": "root", "type": "task", "root_task_id": "root"}
+    child = {"id": "child", "type": "task", "root_task_id": "root", "parent_task_id": "root", "delegation_role": "subagent"}
+    running = {"root": {"task": task, "attempt": 1}, "child": {"task": child, "attempt": 1}}
+    ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=running, update_budget_from_usage=lambda u: True)
+    LIVE_ROOT_COSTS.fields(tmp_path, "root", task)
+    flush_budget_projection(ctx)
+    flush_budget_projection(ctx)
+    assert len(reads) == 1
+    _handle_external_wait_lease({"task_id": "child", "run_id": "run-1", "until_ts": 9e12, "lease_id": "l1"}, ctx)
+    assert running["child"]["external_wait_lease_run_id"] == "run-1"
+    flush_budget_projection(ctx)
+    assert len(reads) == 2, "a hold over an open run marks the ROOT, not the child"
+    _handle_external_wait_lease({"task_id": "child", "run_id": "run-1", "until_ts": 0, "lease_id": "l1"}, ctx)
+    flush_budget_projection(ctx)
+    assert len(reads) == 3, "the hold's release marks it again"
+    _mark_root_cost(tmp_path, types.SimpleNamespace(root_task_id="root", task_id="child", run_id="run-1"))
+    flush_budget_projection(ctx)
+    assert len(reads) == 4, "a settlement this process made is a custody transition"
+    flush_budget_projection(ctx)
+    assert len(reads) == 4

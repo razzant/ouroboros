@@ -354,6 +354,10 @@ def _handle_external_wait_lease(evt: Dict[str, Any], ctx: Any) -> None:
     except (TypeError, ValueError):
         until = 0.0
     lease_id = str(evt.get("lease_id") or "")
+    # A hold over a delegated run opened or closed: the root's live cost figure is read again at the next
+    # flush, so an open run reaches the card before the subtree's next usage row (RV_MAIN M7).
+    root_id = (meta.get("task") or {}).get("root_task_id") if isinstance(meta.get("task"), dict) else None
+    LIVE_ROOT_COSTS.mark(getattr(ctx, "DRIVE_ROOT", None), root_id or task_id)
     if until > 0:
         from ouroboros.delegate_progress import EXTERNAL_WAIT_LEASE_CEILING_SEC
 
