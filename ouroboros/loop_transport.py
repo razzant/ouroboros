@@ -1035,15 +1035,37 @@ def provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
     return f" No readable provider message is available; the host classified the failure as {words}. {_DIAGNOSTIC_POINTER}"
 
 
-def fallback_reason_text(accumulated_usage: Dict[str, Any]) -> str:
-    """Explain the previous failure and surviving facts, then quote its provider sentence.
+def _failure_is_own(accumulated_usage: Dict[str, Any], model: str, fresh: bool) -> bool:
+    """Whether the last failure row is ``model``'s own call's (``fresh``: that call replaced the row it found)."""
+    return fresh and (accumulated_usage.get("_last_llm_failure") or {}).get("model") == model
 
-    No duplicate class/typed fields; only a shortened quote points at Logs."""
+
+def fallback_reason_text(accumulated_usage: Dict[str, Any], model: str, use_local: bool = False, *,
+                         named: bool = True, entry: bool = False, fresh: bool = True) -> str:
+    """Explain ``model``'s last failure and surviving facts, then quote its provider sentence.
+
+    No duplicate class/typed fields; only a shortened quote points at Logs. A host fence can keep an older kind or leave
+    an earlier route's sentence: only this call's own failure row makes them this route's (``entry``: the kind the walk
+    entered on is the acting route's own even without a row, its sentence still not). ``fresh=False``: the call left
+    the row it found (a gate that sent nothing), which stays the earlier attempt's under the same model name too."""
     kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    own = _failure_is_own(accumulated_usage, model, fresh)
+    route = f" on {model}{' (local)' if use_local else ''}" if named else ""
     after = {"auth_error": "; sign-in is still needed there",
              "provider_outcome_unknown": "; the earlier attempt’s outcome and cost stay unknown"}.get(kind, "")
-    return (f" Trying the next model{f' after {_failure_words(kind)}' if kind else ''}{after}."
-            f"{_provider_quote(accumulated_usage)}")
+    cause = (f" after {_failure_words(kind)}{route}{after}" if kind and (own or entry)
+             else f" after no usable answer{route}" if named else "; no cause of its own is known here")
+    return f"{cause}.{_provider_quote(accumulated_usage) if own else ''}"
+
+
+def fallback_last_attempt_words(accumulated_usage: Dict[str, Any], model: str, *, fresh: bool = True) -> str:
+    """The walk's end row after its last attempt's route: that attempt's own result alone. An outcome the host does not
+    know stays that attempt's own, true whether its operation is still readable (fenced) or not: no ending and no
+    earlier attempt (``fallback_reason_text`` keeps ``the earlier attempt`` for the next attempt's row)."""
+    if _failure_is_own(accumulated_usage, model, fresh) and str(
+            accumulated_usage.get("_last_llm_error_kind") or "").strip() == "provider_outcome_unknown":
+        return f", has no known outcome; its outcome and cost stay unknown.{_provider_quote(accumulated_usage)}"
+    return f", ended without a usable reply{fallback_reason_text(accumulated_usage, model, named=False, fresh=fresh)}"
 
 
 # What the host KNOWS it did. It asks again and names no account; which account

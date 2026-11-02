@@ -5,6 +5,10 @@ model's choice, never a duration threshold. It selects senders, readable task
 terminals, own run terminals, own service exits (warm only) and/or a wake time.
 Without selectors, any addressed mail wakes it. Owner words/controls and typed
 descendant escalations bypass sender filters; ordinary unselected mail waits.
+A sleeping ``wait_task``/``wait_tasks`` adds its descriptor (``task_wait``,
+``native_task_wait``): its all/any mode decides the task terminal over the effective
+result its answer reads, a selected child's unseen attention beacon wakes it too and
+a selected source lost after arming wakes it as unknown.
 A place arrival's typed ``place_arrival.wake`` decides for itself (``owner_mailbox.place_arrival_wake``):
 ``True`` wakes its author past any selector, ``False`` never wakes, not even any mail; without it, mail.
 New questions from any ordinary run THIS author owns also wake it, never a
@@ -470,6 +474,8 @@ def terminal_readiness(ctx: Any, chosen: Dict[str, Any], seen: Any = (), *, ordi
             identity = f"task:{task_id}"
             if status in SETTLED_STATUSES and identity not in delivered:
                 ready.append({"id": identity, "reason": f"{identity}:{status}"})
+        if (chosen.get("task_wait") or {}).get("mode") == "all_terminal" and len(ready) < len(chosen.get("tasks") or ()):
+            ready = []  # a native all_terminal wait wakes once every selected task settled
     except Exception as exc:
         errors.append(exc)
     try:
@@ -549,11 +555,22 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
         shown = set(interactions.get(run_id) or ()) | set((chosen.get("interaction_seen") or {}).get(run_id) or ())
         if _pending_question(run) and set(run.pending_interaction_ids) - shown:
             return f"run_question:{run_id}"
-    ready = read_source(terminal_readiness, ctx, chosen, seen, review_entries=review_entries)
+    native, effective, lost = isinstance(chosen.get("task_wait"), dict), {}, {}
+    if native:  # a sleeping task wait's terminal is the effective one its own answer reads
+        from ouroboros.native_task_wait import observe, unseen_beacon
+
+        tasks = chosen.get("tasks") or ()
+        rows, lost, contended = read_source(observe, ctx, tasks) or ({}, dict.fromkeys(tasks, "source_unreadable"), None)
+        first_error = first_error or contended
+        effective = {"task_results": rows}
+    ready = read_source(terminal_readiness, ctx, chosen, seen, review_entries=review_entries, **effective)
     if ready:
         if wake_fact is not None:
             wake_fact.update(actor_id=ready[0].get("actor_id", ready[0]["id"]))
         return ready[0]["reason"]
+    if native:  # a waited child's beacon ends the sleep as it ends an in-slot wait
+        if beacon := read_source(unseen_beacon, ctx, chosen["task_wait"]):
+            return beacon
     for pin in chosen.get("services") or ():
         observed = _service_wake(pin)  # already returns an unknown wake on a read failure
         if observed:
@@ -561,6 +578,8 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     wake_at = parse_deadline_ts(chosen.get("wake_at") or "")
     if wake_at is not None and utc_now() >= wake_at and f"time:{chosen.get('wake_at')}" not in seen:
         return "timeout"
+    if lost:  # nothing else is ready: a lost selected source wakes as unknown, never a silent sleep
+        return f"task_wait:unknown:{next(iter(lost))}"
     if first_error is not None:
         raise first_error
     return ""
@@ -623,6 +642,17 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     root = _canonical_root(ctx)
     tree_id = _member_coordinates(ctx)[1]
     dependencies = set(chosen.get("tasks", []) + chosen.get("senders", []))
+    if isinstance(chosen.get("task_wait"), dict):  # a native wait depends on who answers for the ids it selected
+        from ouroboros.native_task_wait import observe
+
+        rows, _lost, contended = observe(ctx, chosen.get("tasks") or ())
+        if contended is not None:
+            blockers.append({"kind": "tree_custody_unreadable", "detail": str(contended)[:200]})
+        for task_id, row in rows.items():
+            dependencies.add(str(row.get("task_id") or task_id))  # a retry successor the root fence would hold
+            if row.get("pre_first_result") and str(row.get("root_task_id") or task_id) == tree_id:  # no census row
+                blockers.append({"kind": "running_member" if row.get("status") == "running" else "queued_member",
+                                 "detail": task_id})
     members, links_known = {str(ctx.task_id)}, True  # a row is unlinked only once every link source answered
     try:
         members.update(tree_task_ids(root, tree_id))  # the store answers or raises: unreadable is a blocker
@@ -653,8 +683,8 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
                 # including a child whose terminal/mail was selected as our wake.
                 blockers.append({"kind": "queued_member", "detail": task_id})
             own_sleep = ""
-            if own:
-                sleep_tools = ("continue_in_background",) if detach else ("await_messages",)
+            if own:  # the in-flight call arming this very sleep (a native task wait too) is no custody
+                sleep_tools = ("continue_in_background",) if detach else ("await_messages", "wait_task", "wait_tasks")
                 own_sleep = next((operation for tool in sleep_tools
                                   if (operation := current_tool_operation(ctx, tool))), "")
             from ouroboros.tool_custody import retained_tool_custody
@@ -733,8 +763,14 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         project_id = str(getattr(ctx, "project_id", "") or (getattr(ctx, "task_metadata", None) or {}).get("project_id") or "")
         from ouroboros.owner_pause import _member_coordinates
         tree_id = _member_coordinates(ctx)[1]
-        for selected in set(chosen.get("tasks", []) + chosen.get("senders", [])):
-            row = load_task_result(_canonical_root(ctx), selected, strict=True) or {}
+        if isinstance(chosen.get("task_wait"), dict):  # who answers needs the lane: a queued retry too
+            from ouroboros.native_task_wait import lane_rows
+
+            selected_rows = lane_rows(ctx, chosen.get("tasks") or ()) if project_id else {}
+        else:
+            selected_rows = {selected: load_task_result(_canonical_root(ctx), selected, strict=True) or {}
+                             for selected in set(chosen.get("tasks", []) + chosen.get("senders", []))}
+        for selected, row in selected_rows.items():
             if (project_id and row.get("project_id") == project_id
                     and str(row.get("root_task_id") or selected) != tree_id
                     and row.get("status") in {"requested", "scheduled"}):
@@ -868,13 +904,20 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None) -> Di
     """Host facts for the woken model: what woke it — a fact, never a verdict.
 
     ``slept`` is ``None`` when no sleep start was recorded: no duration is claimed."""
+    native = isinstance(chosen.get("task_wait"), dict)  # its result follows in a host notice (``native_task_wait``)
     what = {
         "timeout": "the wake time you chose",
     }.get(outcome, "")
     if not what:
         if outcome.startswith("task:"):
             _prefix, task_id, status = (outcome.split(":", 2) + ["", ""])[:3]
-            what = f"task {task_id} reaching {status} — read its result; settled is not success"
+            what = (f"task {task_id} reaching {status}" + (" for the task wait you chose" if native else
+                    " — read its result") + "; settled is not success")
+        elif outcome.startswith("beacon:"):
+            what = f"an attention beacon from task {outcome[7:]}"
+        elif outcome.startswith("task_wait:unknown:"):
+            what = (f"task {outcome[18:]} of the task wait you chose having no readable record or queue row; "
+                    "its state is unknown, not success")
         elif outcome.startswith("run:"):
             what = f"delegated run {outcome[4:]} reaching an engine terminal state — inspect its outcome; collection may remain owed"
         elif outcome.startswith("run_question:"):
@@ -896,7 +939,8 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None) -> Di
         "[SYSTEM NOTICE]\nYou slept" + ("" if slept is None else f" {slept:.0f}s")
         + f" ({chosen.get('mode') or 'warm'}) and were woken by {what}. "
         "Mail you did not select stayed unread and reaches you now with everything else pending. "
-        "The sleep did not count as execution time; an explicit deadline did not move."
+        + ("The task wait's current result follows in a separate notice. " if native else "")
+        + "The sleep did not count as execution time; an explicit deadline did not move."
         + (" A cold sleep ended your previous process: its browser and task-local services are gone; "
            "re-read files before building on them." if chosen.get("mode") == "cold" else ""))}
 

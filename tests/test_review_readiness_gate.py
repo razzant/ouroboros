@@ -3,6 +3,7 @@
 import subprocess
 from unittest.mock import patch, MagicMock
 
+import pytest
 
 from ouroboros.tools.review_helpers import (
     check_worktree_readiness,
@@ -22,12 +23,17 @@ class TestCheckWorktreeReadiness:
             warnings = check_worktree_readiness(tmp_path)
             assert any("no uncommitted changes" in w.lower() for w in warnings)
 
-    def test_dirty_worktree_no_warnings(self, tmp_path):
-        """A worktree with changes and no obvious issues should return empty."""
+    @pytest.mark.parametrize("porcelain", [
+        " M README.md\n",
+        " M ouroboros/loop.py\n",
+        " M ouroboros/loop.py\n M tests/test_loop.py\n",
+    ])
+    def test_dirty_worktree_no_warnings(self, tmp_path, porcelain):
+        """Changed paths say nothing about coverage, with or without a tests/ edit."""
         def side_effect(cmd, **kwargs):
             result = MagicMock(returncode=0, stderr="")
             if "status" in cmd and "--porcelain" in cmd:
-                result.stdout = " M README.md\n"
+                result.stdout = porcelain
             elif "diff" in cmd:
                 result.stdout = "some small diff"
             else:
@@ -37,38 +43,6 @@ class TestCheckWorktreeReadiness:
         with patch("ouroboros.tools.review_helpers.subprocess.run", side_effect=side_effect):
             warnings = check_worktree_readiness(tmp_path)
             assert warnings == []
-
-    def test_py_without_tests_warning(self, tmp_path):
-        """Modified .py in ouroboros/ without test changes should warn."""
-        def side_effect(cmd, **kwargs):
-            result = MagicMock(returncode=0, stderr="")
-            if "status" in cmd and "--porcelain" in cmd:
-                result.stdout = " M ouroboros/loop.py\n"
-            elif "diff" in cmd:
-                result.stdout = "small diff"
-            else:
-                result.stdout = ""
-            return result
-
-        with patch("ouroboros.tools.review_helpers.subprocess.run", side_effect=side_effect):
-            warnings = check_worktree_readiness(tmp_path)
-            assert any("test" in w.lower() for w in warnings)
-
-    def test_py_with_tests_no_warning(self, tmp_path):
-        """Modified .py in ouroboros/ WITH test changes should not warn."""
-        def side_effect(cmd, **kwargs):
-            result = MagicMock(returncode=0, stderr="")
-            if "status" in cmd and "--porcelain" in cmd:
-                result.stdout = " M ouroboros/loop.py\n M tests/test_loop.py\n"
-            elif "diff" in cmd:
-                result.stdout = "small diff"
-            else:
-                result.stdout = ""
-            return result
-
-        with patch("ouroboros.tools.review_helpers.subprocess.run", side_effect=side_effect):
-            warnings = check_worktree_readiness(tmp_path)
-            assert not any("test" in w.lower() for w in warnings)
 
     def test_diff_size_is_no_readiness_trigger(self, tmp_path):
         """No diff size warns: the commit gate states a change's size as the diff pulse
@@ -137,22 +111,15 @@ class TestCheckWorktreeReadiness:
         selected = ["ouroboros/loop.py", "ouroboros/config.py"]
         def side_effect(cmd, **kwargs):
             result = MagicMock(returncode=0, stderr="")
-            if "status" in cmd and "--porcelain" in cmd:
-                if "--" in cmd:
-                    result.stdout = " M ouroboros/loop.py\n"
-                else:
-                    result.stdout = " M ouroboros/loop.py\n M tests/test_loop.py\n"
-            elif "diff" in cmd:
-                assert cmd[cmd.index("--") + 1:] == selected
-                result.stdout = "small diff"
-            else:
-                result.stdout = ""
+            # The selected paths are clean; README.md is dirty outside them.
+            result.stdout = "" if "--" in cmd else " M README.md\n"
             return result
 
-        with patch("ouroboros.tools.review_helpers.subprocess.run", side_effect=side_effect):
+        with patch("ouroboros.tools.review_helpers.subprocess.run", side_effect=side_effect) as mock_run:
             warnings = check_worktree_readiness(tmp_path, paths=selected)
-            # With path scoping, only ouroboros/loop.py is visible → tests/ not in scope → warning
-            assert any("test" in w.lower() for w in warnings)
+        status_cmd = mock_run.call_args_list[0].args[0]
+        assert status_cmd[status_cmd.index("--") + 1:] == selected
+        assert any("no uncommitted changes" in w.lower() for w in warnings)
 
     def test_returns_list_type(self, tmp_path):
         """check_worktree_readiness must always return a list, never a generator."""
