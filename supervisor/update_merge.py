@@ -600,17 +600,38 @@ def _finish_rollback(
     return True, message
 
 
+# The whole-pool start an assisted resolver needs (``workers.spawn_workers``): slot 0, the conversation lane's
+# spare, and slot 1, the resolver's own project slot. Inside the marker window no project slot grows
+# (``worker_pool_lifecycle._spawn_worker_slot``), so this start, on an empty pool, is the resolver's only one.
+RESOLVER_POOL = 2
+
+
+def resolver_slot_owed() -> bool:
+    """Whether the whole-pool start owes a resolver its project slot: a resolver-held update is in flight (its
+    durable transaction in an assisted phase), as at a boot whose recovery resumes it; base's one boot worker
+    was that slot. Unknown owes nothing: an unreadable transaction recovers nothing either."""
+    try:
+        return str((active_update_tx() or {}).get("phase") or "") in _ASSISTED_PHASES
+    except Exception:
+        return False
+
+
 def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0) -> bool:
-    """Prove a fresh resolver imported the exact clean tree before conflicts go live."""
+    """Prove the resolver's own PROJECT worker imported the exact clean tree before conflicts go live.
+
+    The whole-pool start (``RESOLVER_POOL``) is the one start the marker window allows, on an empty pool while
+    this tree is still clean. Only the project slot's own ``worker_ready`` at the expected sha proves the
+    resolver: assignment gives queued work to project slots alone, and the lane's spare proves nothing here."""
     from supervisor import workers
     from supervisor.queue import _queue_lock
+    from supervisor.worker_pool_lifecycle import _worker_events_since, is_project_slot
 
     with _queue_lock:
         if workers.WORKERS:
             return False  # update quiescence must leave no ambiguous prior generation
     events_cursor = workers.events_log_cursor()
     try:
-        if not workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True):
+        if not workers.ensure_worker_pool_started(n=RESOLVER_POOL, allow_disabled_restart=True):
             return False
     except Exception:
         _g.log.warning("assisted resolver worker start failed", exc_info=True)
@@ -618,20 +639,17 @@ def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0)
     deadline = time.monotonic() + max(float(timeout_sec), 0.1)
     while time.monotonic() < deadline:
         with _queue_lock:
-            live_pids = {
-                int(worker.proc.pid)
-                for worker in workers.WORKERS.values()
-                if worker.proc.pid and worker.proc.is_alive()
-            }
-        if not live_pids:
+            resolvers = {int(worker.proc.pid) for worker in workers.WORKERS.values()
+                         if is_project_slot(worker) and worker.proc.pid and worker.proc.is_alive()}
+        if not resolvers:
             return False
-        boot = workers._first_worker_event_since(events_cursor, "worker_ready")
-        try:
-            boot_pid = int((boot or {}).get("pid") or 0)
-        except (TypeError, ValueError):
-            boot_pid = 0
-        if boot_pid in live_pids and str((boot or {}).get("git_sha") or "") == expected_sha:
-            return True
+        for row in _worker_events_since(events_cursor, "worker_ready"):
+            try:
+                pid = int(row.get("pid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            if pid in resolvers and str(row.get("git_sha") or "") == expected_sha:
+                return True
         time.sleep(0.05)
     return False
 

@@ -440,19 +440,55 @@ def test_abort_rechecks_the_captured_process_after_successful_quiescence(tmp_pat
 
 
 def test_active_assisted_pool_dispatches_only_its_authorized_resolver(tmp_path, monkeypatch):
+    """The update's own readiness proof starts the pool inside its marker window, where no project slot may grow
+    later: the resolver's project slot is started and proven there, and the authorized resolver runs on it."""
     system = _system(tmp_path, monkeypatch)
     system.saved()
     assert system.control._quiesce_repo_writers("assisted") == []
-    _update_merge, _tx, metadata = _assisted(system, monkeypatch)
+    update_merge, _tx, metadata = _assisted(system, monkeypatch)
     for task_id in ("ordinary", "resolver"):
         write_task_result(tmp_path, task_id, "scheduled", chat_id=0)
         system.workers.PENDING.append(_queued(task_id, metadata=metadata if task_id == "resolver" else {}))
-    assert system.workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True)
+    assert update_merge.ensure_assisted_resolver_ready("test-sha", timeout_sec=5)
     system.workers.assign_tasks()
     assert system.launches[0].get_nowait()["id"] == "resolver"
     assert set(system.workers.RUNNING) == {"saved", "resolver"}
     assert system.workers.RUNNING["saved"]["retained_for_boot"] is True
     assert [row["id"] for row in system.workers.PENDING] == ["ordinary"]
+
+
+def test_the_resolver_readiness_proof_never_counts_the_conversation_lanes_spare(tmp_path, monkeypatch):
+    """The lane's spare imports the same clean tree and reports ready, but it carries conversation, never the
+    resolver: with the resolver's project child gone, the proof fails and the update unwinds before any marker."""
+    from supervisor import worker_process
+
+    system = _system(tmp_path, monkeypatch)
+    update_merge, _tx, _metadata = _assisted(system, monkeypatch)
+    spawn = worker_process.spawn_worker_process
+
+    def project_child_dies(ctx, wid, commands, events, repo, root):
+        proc = spawn(ctx, wid, commands, events, repo, root)
+        if wid != 0:
+            proc.terminate()
+        return proc
+
+    monkeypatch.setattr(worker_process, "spawn_worker_process", project_child_dies)
+    assert update_merge.ensure_assisted_resolver_ready("test-sha", timeout_sec=0.5) is False
+
+
+def test_a_boot_that_resumes_an_assisted_update_starts_its_resolver_a_project_slot(tmp_path, monkeypatch):
+    """Boot recovery enqueues the authorized resolver after the boot's whole-pool start, inside the marker window
+    the durable transaction keeps, where no project slot may grow: that start owes the resolver its project slot
+    (base's one boot worker was it), and the resolver runs on it."""
+    system = _system(tmp_path, monkeypatch)
+    update_merge, tx, _metadata = _assisted(system, monkeypatch)
+    tx.update(resolver_submitted_id="", owner_chat_id=0)
+    update_merge.write_update_tx(tx)
+    system.workers.spawn_workers()  # the boot's start (server.py), before boot recovery
+    assert update_merge.enqueue_assisted_resolution_task(tx) == "resolver"
+    system.workers.assign_tasks()
+    assert system.launches[0].get_nowait()["id"] == "resolver"
+    assert set(system.workers.RUNNING) == {"resolver"}
 
 
 def test_abort_preserves_an_existing_queue_hold_and_releases_the_project_lease(tmp_path, monkeypatch):
