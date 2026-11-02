@@ -268,3 +268,40 @@ def test_a_kept_saved_queue_costs_no_capture_per_tick(published, monkeypatch):
     queue.PENDING.append(_task("admitted"))
     queue.persist_queue_snapshot("admit")
     assert queue_publication.publish_queue_changes() is True and captures == [1]
+
+
+def test_an_overtaken_barrier_never_acknowledges_a_later_torn_bundle(published, monkeypatch):
+    """A barrier that a newer publication overtook answers for the bundle on disk: when a write after that
+    newer one failed, the bundle is unknown and the barrier answers False, never a stale True."""
+    root, _now = _seed(published)
+    reached, proceed = threading.Event(), threading.Event()
+    real_documents = queue_publication._documents
+
+    def documents(capture):
+        if capture["reason"] == "slow_barrier":
+            reached.set()
+            assert proceed.wait(10)
+        return real_documents(capture)
+
+    monkeypatch.setattr(queue_publication, "_documents", documents)
+    answers = []
+    thread = threading.Thread(target=lambda: answers.append(queue.publish_queue_snapshot("slow_barrier")))
+    thread.start()
+    try:
+        assert reached.wait(10)
+        with queue._queue_lock:
+            queue.RUNNING["r"]["owner_wait"] = {"kind": "review", "state": "waiting", "revision": 1}
+        assert queue.publish_queue_snapshot("later_success") is True
+        with queue._queue_lock:
+            queue.RUNNING["r"]["owner_wait"]["revision"] = 2
+        real_write = queue.atomic_write_text
+        with monkeypatch.context() as fail:
+            fail.setattr(queue, "atomic_write_text",
+                         lambda path, text: False if path.name == "queue_dispatch.json" else real_write(path, text))
+            assert queue_publication.publish_queue_changes() is False
+    finally:
+        proceed.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    assert queue_publication._STATE["write_failed"] and not (root / "state/queue.alive").exists()
+    assert answers == [False], "an overtaken barrier never names a torn bundle persisted"

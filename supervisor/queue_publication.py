@@ -420,7 +420,9 @@ def _publish(capture: Dict[str, Any]) -> bool:
     with _PUBLISH_LOCK:
         previous = _queue().QUEUE_PUBLICATION
         if previous is not None and _STATE["published_seq"] > capture["seq"] and not capture["forced"]:
-            return True  # a later capture of this process already published newer documents
+            # A later capture already published newer documents; while a later write failed, the bundle on
+            # disk is unknown, so that publication is no durability for this caller either.
+            return not _STATE["write_failed"]
         # After a failed write the bundle on disk is unknown: byte equality with the last cache proves nothing,
         # so every document is rewritten under a new generation and certified (R2/R3-A).
         changed = (previous is None or previous[:2] != (_queue().QUEUE_SNAPSHOT_PATH, encoded) or capture["forced"]
