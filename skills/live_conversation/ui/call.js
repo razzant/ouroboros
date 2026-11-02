@@ -310,8 +310,7 @@ export class CallSession {
             this.node.port.postMessage({ type: 'audio', ...frame, item_id }, [frame.pcm.buffer]);
             return;
         }
-        if (typeof data !== 'string' || new TextEncoder().encode(data).length > 16 * 1024)
-            throw new Error('The server sent an invalid call message.');
+        if (typeof data !== 'string') throw new Error('The server sent an invalid call message.');
         const msg = JSON.parse(data);
         if (msg.type === 'state') this.receiveState(msg);
         else if (msg.type === 'activity') {

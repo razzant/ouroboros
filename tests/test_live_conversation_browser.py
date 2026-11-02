@@ -187,6 +187,7 @@ def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=Tru
     page.route("**/modules/**", lambda route: route.fulfill(status=404, body="Not served by the host")
                if urlparse(route.request.url).path.startswith("/modules/") else route.fallback())
     include_call = True
+    ui["errors"].watch(page)
     page.reload()
     page.wait_for_selector("#chat-input")
     return page, posts
@@ -321,6 +322,44 @@ def assert_ended(page):
         const f = __callFixture;
         return f.stopped > 0 && f.contexts[0].state === 'closed' && f.sockets[0].readyState === 3;
     }""")
+
+
+@pytest.mark.parametrize("width,scheme", [(360, "dark"), (1280, "light")])
+def test_long_captions_read_whole_while_the_call_goes_on(subscription_ui, monkeypatch, width, scheme):
+    from playwright.sync_api import expect
+    # Fewer characters than a peer's control may carry bytes, more UTF-8 bytes than that; one token never breaks.
+    said = "Синтетическая длинная реплика владельца 🐍. " * 400
+    answered = "Синтетический длинный ответ Ouroboros 🐍. " * 400 + "https://example.com/" + "синтетика" * 200
+    page, _ = open_call_ui(subscription_ui, monkeypatch, width=width, scheme=scheme, engine="gemini")
+    start_call(page)
+    page.evaluate("""([said, answered]) => {
+        const socket = __callFixture.sockets.at(-1);
+        socket.emit({type:'caption',speaker:'owner',text:said,final:true,item_id:'owner-long',replace:false});
+        socket.emit({type:'turn',turn:'answering'});
+        socket.emit({type:'caption',speaker:'ouroboros',text:answered,final:true,item_id:'answer-long',replace:false});
+        socket.emit({type:'turn',turn:'idle'});
+    }""", [said, answered])
+    assert_live(page)
+    expect(page.locator("#page-chat .call-state")).to_have_text("Listening")
+    page.locator("#page-chat .call-card-head").click()
+    text = page.locator("#page-chat .call-line.call-caption .call-line-text")
+    assert text.evaluate_all("nodes => nodes.map(node => node.textContent)") == [said, answered]
+    assert page.locator("#page-chat .call-card").evaluate("node => node.scrollWidth <= node.clientWidth"), "words wrap inside the card"
+    voice.no_page_scroll(page)
+    browser.capture(page, f"live-long-transcript-{width}-{scheme}")
+    last = page.locator("#page-chat .call-line.call-caption").last
+    last.evaluate("node => node.scrollIntoView({block: 'end'})")
+    browser.capture(page, f"live-long-transcript-end-{width}-{scheme}")
+    end = page.locator("#page-chat .call-end").bounding_box()
+    assert end and end["x"] >= 0 and end["x"] + end["width"] <= width and end["y"] + end["height"] <= 800, "End stays in reach"
+    page.locator("#page-chat .call-mute").click()
+    expect(page.locator("#page-chat .call-state")).to_have_text("Muted")
+    page.locator("#page-chat .call-mute").click()
+    expect(page.locator("#page-chat .call-state")).to_have_text("Listening")
+    assert_live(page)
+    page.locator("#page-chat .call-end").click()
+    assert_ended(page)
+    assert not subscription_ui["errors"].unexpected(), subscription_ui["errors"].report()
 
 
 @pytest.mark.parametrize("reason", ["pagehide", "panic", "device_loss", "server_stop"])

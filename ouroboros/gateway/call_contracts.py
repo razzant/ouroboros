@@ -162,6 +162,9 @@ class CallSocketContract(TypedDict):
     Sequence is per peer/direction modulo 2**32; epoch is modulo 2**16. A flush
     stops older playback immediately. Binary stream 0 is the primary track;
     item ids for playback acknowledgements come from captions.
+    ``max_control_bytes`` bounds what a peer sends, in UTF-8 bytes; caption text the
+    server sends has no byte cutoff. A partial caption appends to its item unless
+    ``replace`` is true; a final caption carries the item's whole text.
     """
 
     path: str
