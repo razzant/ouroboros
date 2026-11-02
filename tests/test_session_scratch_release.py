@@ -121,6 +121,65 @@ def test_an_interrupted_release_keeps_the_record_and_its_note(tmp_path, monkeypa
     assert not scratch.exists()
 
 
+def test_a_pass_stopped_after_the_record_left_the_drive_is_finished_by_the_next(tmp_path, monkeypatch):
+    data, scratch = _started(tmp_path)
+    trash, real_replace = data / "state" / "custody_trash", os.replace
+
+    def unpublished(src, dst):
+        if pathlib.Path(dst).parent == trash:
+            raise PermissionError("the trash could not take it")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", unpublished)
+    report = release_finished_scratch(data, OVER)
+    assert report["released"] == [] and len(report["errors"]) == 1 and _notes(data) == ["task-1/snap-1.json"]
+    _places, _unknown, pins = owner_keep.inventory(data, "task-1", {"status": "completed"})
+    assert str(scratch) not in pins  # the record is in staging now: the Keep counts the scratch released
+    monkeypatch.setattr(os, "replace", real_replace)
+    release_finished_scratch(data, OVER)  # publishes the staged record, then drops the empty record folder
+    assert _notes(data) == [] and not any((data / "state" / "custody_staging").iterdir())
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
+
+
+def test_a_record_folder_that_outlives_its_release_names_no_scratch(tmp_path, monkeypatch):
+    from ouroboros import force_remove
+
+    data, scratch = _started(tmp_path)
+    stale = owner_keep.inventory(data, "task-1", {"status": "completed", "task_id": "task-1"})
+    folder, original = _record(data).parent, force_remove.force_rmtree
+    monkeypatch.setattr(force_remove, "force_rmtree",  # a Windows sharing violation keeps the folder
+                        lambda path: None if pathlib.Path(path) == folder else original(path))
+    assert release_finished_scratch(data, OVER)["released"]
+    assert folder.is_dir() and not _record(data).exists()
+    monkeypatch.setattr(owner_keep, "inventory", lambda *_args: stale)
+    answer = owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})
+    assert str(scratch) in answer["retired"] and str(scratch) not in answer["retained"]
+    assert task_custody.remove_custody_trash(data)["removed"] == 1 and not scratch.exists()
+
+
+def test_an_unreadable_custody_store_keeps_the_scratch(tmp_path, monkeypatch):
+    from ouroboros import delegate_custody_current
+
+    data, scratch = _started(tmp_path)
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("the store could not be read")
+
+    monkeypatch.setattr(delegate_custody_current, "task_snapshot", unreadable)
+    assert release_finished_scratch(data, OVER) == {"released": [], "kept": 1, "errors": []}
+    assert _record(data).is_file() and scratch.is_dir()
+
+
+def test_an_unreadable_record_is_unknown_to_the_keep_never_kept_or_retired(tmp_path, monkeypatch):
+    data, scratch = _started(tmp_path)
+    stale = owner_keep.inventory(data, "task-1", {"status": "completed", "task_id": "task-1"})
+    _record(data).write_text("{torn", encoding="utf-8")
+    monkeypatch.setattr(owner_keep, "inventory", lambda *_args: stale)
+    answer = owner_keep.set_owner_keep(data, "task-1", keep=True, source={"basis": "test"})
+    assert answer["unknown"] == ["environments"]
+    assert str(scratch) not in answer["retained"] and str(scratch) not in answer["retired"]
+
+
 def test_a_keep_racing_the_release_never_reports_the_released_scratch_as_kept(tmp_path, monkeypatch):
     data, scratch = _started(tmp_path)
     row = {"status": "completed", "task_id": "task-1"}
@@ -149,6 +208,19 @@ def test_a_linked_note_folder_is_never_followed(tmp_path):
     release_finished_scratch(data, OVER)
     assert (outside / "document.json").read_text(encoding="utf-8") == '{"unrelated": true}\n'
     assert linked.is_symlink()
+
+
+def test_a_linked_note_is_never_read_or_removed(tmp_path):
+    data, scratch = _started(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"unrelated": true}\n', encoding="utf-8")
+    try:
+        (data / OPEN_SCRATCH_DIR / "task-1" / "linked.json").symlink_to(outside)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks unavailable here: {exc}")
+    report = release_finished_scratch(data, OVER)
+    assert report["errors"] == [] and len(report["released"]) == 1
+    assert outside.read_text(encoding="utf-8") == '{"unrelated": true}\n'
 
 
 @pytest.mark.parametrize("status, live", [("completed", True), ("completed", None), ("running", False)],

@@ -424,24 +424,42 @@ def _runs_still_open(root: pathlib.Path, task_id: str) -> bool:
     return bool(held["pending"]) or any(not run.settled for run in held["runs"].values())
 
 
-def _retire_record(root: pathlib.Path, task_id: str, owner: pathlib.Path) -> bool:
-    """Put a copy of OWNER's record into the custody trash, then remove OWNER; False when no folder
-    was there. The entry is assembled in private staging and renamed into the trash whole, so the
-    trash remover never meets it half-made; until that rename the original stays where it was."""
-    from ouroboros.force_remove import force_rmtree
-    from ouroboros.task_custody import _STAGING_DIR, _TRASH_DIR
+_RELEASE_MARK = "+scratch-"  # '+' is in no task id: a released record's entry is never a moved drive's
 
-    if not owner.is_dir() or owner.is_symlink():
+
+def _plain_directory(path: pathlib.Path) -> bool:
+    """A real directory, never a link or a Windows junction (a reparse point, as ``force_remove`` judges it)."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
+
+
+def _publish_released(root: pathlib.Path, staged: pathlib.Path) -> None:
+    """Rename a staged release entry into the custody trash whole: its remover never meets it half-made."""
+    from ouroboros.task_custody import _TRASH_DIR
+
+    (root / _TRASH_DIR).mkdir(parents=True, exist_ok=True)
+    os.replace(staged, root / _TRASH_DIR / staged.name)
+
+
+def _retire_record(root: pathlib.Path, task_id: str, owner: pathlib.Path) -> bool:
+    """Hand OWNER's record to the custody trash, then drop OWNER; False when no folder was there. The
+    record file itself moves, so it is in exactly one place at every step: the task's drive (the owner's
+    Keep still counts the scratch), private staging (a pass interrupted there is published by the next
+    one) or the trash."""
+    from ouroboros.force_remove import force_rmtree
+    from ouroboros.task_custody import _STAGING_DIR
+
+    if not _plain_directory(owner):
         return False
     if os.path.lexists(owner / "scratch.json"):  # else an uncompleted preparation: nothing to release
-        name = f"{task_id}+scratch-{uuid.uuid4().hex[:12]}"  # '+' is in no task id, never a moved drive's
-        staged = root / _STAGING_DIR / name
+        staged = root / _STAGING_DIR / f"{task_id}{_RELEASE_MARK}{uuid.uuid4().hex[:12]}"
         (staged / SESSION_SCRATCH_DIRNAME / owner.name).mkdir(parents=True)
-        shutil.copyfile(owner / "scratch.json", staged / SESSION_SCRATCH_DIRNAME / owner.name / "scratch.json",
-                        follow_symlinks=False)
-        (root / _TRASH_DIR).mkdir(parents=True, exist_ok=True)
-        os.replace(staged, root / _TRASH_DIR / name)
-    force_rmtree(owner)
+        os.replace(owner / "scratch.json", staged / SESSION_SCRATCH_DIRNAME / owner.name / "scratch.json")
+        _publish_released(root, staged)
+    force_rmtree(owner)  # only its preparation lock is left; a survivor names no scratch
     return True
 
 
@@ -456,14 +474,21 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     remover deletes the scratch in the maintenance child, off the serving process
     (``release_session_scratch``). A note whose record already retired with its drive, or that names no
     record of its task, is dropped; unknown liveness, a busy custody lock or a failed step keeps it for
-    the next pass. Links are never followed."""
+    the next pass. Links and junctions are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.owner_keep import gate
     from ouroboros.subagent_worktrees import _task_proven_over
+    from ouroboros.task_custody import _STAGING_DIR
     from ouroboros.task_results import validate_task_id
 
     root = pathlib.Path(data_root)
     report: Dict[str, Any] = {"released": [], "kept": 0, "errors": []}
+    with contextlib.suppress(OSError):  # one pass at a time (the custody latch): staged entries are a stopped pass's
+        for staged in sorted((root / _STAGING_DIR).glob(f"*{_RELEASE_MARK}*")):
+            try:
+                _publish_released(root, staged)
+            except OSError as exc:
+                report["errors"].append(f"{staged}: {type(exc).__name__}: {exc}")
     try:
         folders = [] if (root / OPEN_SCRATCH_DIR).is_symlink() else sorted((root / OPEN_SCRATCH_DIR).iterdir())
     except (FileNotFoundError, NotADirectoryError):
@@ -477,7 +502,7 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
             validate_task_id(task_id)
         except ValueError:
             continue  # no note of a task: nothing in it is read
-        if folder.is_symlink() or not folder.is_dir():
+        if not _plain_directory(folder):
             continue
         if not _task_proven_over(task_id, root, live) or _runs_still_open(root, task_id):
             report["kept"] += 1
