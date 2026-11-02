@@ -9,16 +9,20 @@ name; the dialogue and usage stores share ``store.transaction``) and per ``read`
 ``count``, ``failed``, ``total_sec``, ``cpu_sec`` (the holding thread's own CPU: wall minus it is
 time spent holding the lock while waiting for the GIL, a core or a lock), ``max_sec`` and
 ``max_site``, the code site (``module:function:line``) of the window's longest hold, the first frame
-outside the store modules, and ``sites``: every site that held a lock in the window, most summed hold
-first, each with the same counts. The row is bounded by the distinct sites the code has, not by a cut:
-when one reader is hidden by a cut, its share is what nobody can read (40 to 48 of 43 to 51 sites were
-invisible behind a top three during the 01.11 saturation). A site's ``chains`` attribute it to who
-called it: one ``{"chain", "count", "total_sec"}`` per distinct call chain, whose tag (``_call_chain``)
-is the thread's class and the site's nearest first-party callers, so a site reached by a duty, a request
-and a turn says how much each of them spent. ``drain()`` returns the window as
-``{kind: {"read": {...}, "write": {...}}}`` (only buckets with a count) and resets it: the per-minute
-diagnostics row publishes it. Nothing here writes to disk, takes a store lock or raises into the caller:
-a failure inside the hook is swallowed and the transaction's outcome stands.
+outside the store modules. ``drain()`` returns it as ``{kind: {"read": {...}, "write": {...}}}`` (only
+buckets with a count) and resets it: the per-minute row in the journal whose tail every context reads.
+
+The site table is a window of its own, because it weighs what the code's call paths weigh (36 to 42 KB
+for a busy minute on the stand), not what a row a minute in that journal can: every site that held a
+lock, most summed hold first, each with the same counts. It is bounded by the distinct sites the code
+has, not by a cut: when one reader is hidden by a cut, its share is what nobody can read (40 to 48 of 43
+to 51 sites were invisible behind a top three during the 01.11 saturation). A site's ``chains`` attribute
+it to who called it: one ``{"chain", "count", "total_sec"}`` per distinct call chain, whose tag
+(``_call_chain``) is the thread's class and the site's nearest first-party callers, so a site reached by
+a duty, a request and a turn says how much each of them spent. ``drain_sites()`` returns it as
+``{kind: {"read": [...], "write": [...]}}`` and resets it, on its publisher's own cadence
+(``server_liveness._publish_store_sites``). Nothing here writes to disk, takes a store lock or raises
+into the caller: a failure inside the hook is swallowed and the transaction's outcome stands.
 
 ``metered()`` scopes a second, private count to one unit of work on the calling context (an owner
 turn on its thread; a ``ContextVar``, the ``store._WAIT_BUDGET`` idiom): the same transactions as
@@ -48,6 +52,7 @@ _OWN_PACKAGES = frozenset({"ouroboros", "supervisor", "server", "__main__"})  # 
 _INSTANCE_TOKEN = re.compile(r"[-_ ]?[^-_ ]*\d[^-_ ]*")  # ``asyncio_12``, ``wake-turn-8f3a``: an instance, not a class
 _LOCK = threading.Lock()
 _WINDOW: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_SITES: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}  # kind -> side -> site -> counts and chains
 _METER: contextvars.ContextVar = contextvars.ContextVar("store_timing_meter", default=None)
 # The hold clock: high resolution on every OS (``time.monotonic`` ticks at ~15.6 ms on Windows, where a short hold
 # would measure 0.0); the holding thread's own CPU beside it.
@@ -80,10 +85,11 @@ def record(conn: Any, write: bool, since: tuple, *, failed: bool = False) -> Non
             site, chain = _site()
         except Exception:  # a site walk that fails still counts the hold
             site, chain = "", ""
+        hold = "write" if write else "read"
         with _LOCK:
-            bucket = _WINDOW.setdefault(kind, {}).setdefault("write" if write else "read", {**_bucket(), "max_site": "",
-                                                                                              "sites": {}})
-            at_site = bucket["sites"].setdefault(site, {**_bucket(), "chains": {}}) if site else None
+            bucket = _WINDOW.setdefault(kind, {}).setdefault(hold, {**_bucket(), "max_site": ""})
+            at_site = (_SITES.setdefault(kind, {}).setdefault(hold, {}).setdefault(site, {**_bucket(), "chains": {}})
+                       if site else None)
             for counts in (bucket, *((at_site,) if at_site is not None else ())):
                 counts["count"] += 1
                 counts["failed"] += int(failed)
@@ -171,12 +177,18 @@ def _published_site(site: str, counts: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def drain() -> Dict[str, Dict[str, Dict[str, Any]]]:
-    """The window since the last drain (seconds rounded to microseconds; per bucket every site, most summed hold
-    first, with its call chains), then an empty window."""
+    """The window since the last drain (seconds rounded to microseconds), then an empty window."""
     with _LOCK:
-        window = {kind: {side: {**_rounded({key: value for key, value in bucket.items() if key != "sites"}),
-                                "sites": [_published_site(site, counts) for site, counts in sorted(
-                                    bucket["sites"].items(), key=lambda item: -item[1]["total_sec"])]}
-                         for side, bucket in sides.items()} for kind, sides in _WINDOW.items()}
+        window = {kind: {side: _rounded(bucket) for side, bucket in sides.items()} for kind, sides in _WINDOW.items()}
         _WINDOW.clear()
     return window
+
+
+def drain_sites() -> Dict[str, Dict[str, list]]:
+    """Every site since the last drain of this table, most summed hold first, with its call chains; then an empty table."""
+    with _LOCK:
+        table = {kind: {side: [_published_site(site, counts) for site, counts in sorted(
+            sites.items(), key=lambda item: -item[1]["total_sec"])] for side, sites in sides.items()}
+            for kind, sides in _SITES.items()}
+        _SITES.clear()
+    return table

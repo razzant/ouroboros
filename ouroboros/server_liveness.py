@@ -208,6 +208,11 @@ SUPERVISOR_LOAD_WINDOW_SEC = 60.0
 _LOAD_FAILURES_SEEN: set = set()
 
 
+STORE_SITES_LOG = "store_sites.jsonl"
+STORE_SITES_WINDOW_SEC = 600.0  # a publication's cadence (about the bytes of the row it explains), never a cut of what it holds
+_STORE_SITES_STARTED = [time.monotonic()]
+
+
 def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
     """The row's further sections: a name and a zero-argument drain of its own window, one line each
     (``dialogue_retry`` answers its process-lifetime counters and current occupancy instead)."""
@@ -219,6 +224,33 @@ def _load_sections() -> Dict[str, Callable[[], Dict[str, Any]]]:
         "store_locks": store_timing.drain,
         "dialogue_retry": dialogue_retry.snapshot,
     }
+
+
+def _publish_store_sites(drive_root: Any) -> Optional[dict]:
+    """At most one row of the whole store-site table per window into its own journal, after a busy minute's row (an idle
+    stretch folds in, ``window_sec`` says how long). In ``logs/supervisor.jsonl`` a table of 36 to 42 KB would leave the
+    256 KB tail every context reads six minutes; a row a minute would write 58 MB a day of continuous work, nine times
+    the row it explains. Rotated here, the one place that grows it. Fail-soft and logged once per class, as that row is."""
+    from ouroboros import store_timing
+    from supervisor.state import rotate_jsonl_log_if_needed
+
+    now = time.monotonic()
+    window_sec = now - _STORE_SITES_STARTED[0]
+    if window_sec < STORE_SITES_WINDOW_SEC:
+        return None
+    _STORE_SITES_STARTED[0] = now
+    try:
+        table = store_timing.drain_sites()
+        row = {"ts": utc_now_iso(), "type": "store_sites", "window_sec": round(window_sec, 3), "store_locks": table}
+        if table:
+            append_jsonl(drive_root / "logs" / STORE_SITES_LOG, row, lock_timeout_sec=0)
+            rotate_jsonl_log_if_needed(drive_root, STORE_SITES_LOG, "store_sites")
+        return row if table else None
+    except Exception as exc:
+        if type(exc).__name__ not in _LOAD_FAILURES_SEEN:
+            _LOAD_FAILURES_SEEN.add(type(exc).__name__)
+            log.warning("store_sites row not recorded (%s)", type(exc).__name__, exc_info=True)
+        return None
 
 
 def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
@@ -233,7 +265,8 @@ def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
     this moment, None when the bus cannot say, and ``max_lag_sec``, the worst producer-stamp
     lag the drain saw); ``max_event_lag_sec`` over both lanes; then one key per
     ``_load_sections`` entry (Q: outermost waits, holds, longest hold's site), a failing
-    source answering ``{"error": <type>}``. The append never waits on the jsonl lock and a
+    source answering ``{"error": <type>}``. The whole store-site table has its own cadence and
+    journal (``_publish_store_sites``). The append never waits on the jsonl lock and a
     failure is logged once per class: diagnostics never cost the loop or a delivery. The boot
     document keeps the row's ``ts`` and ``max_event_lag_sec`` for the health answers.
     """
@@ -260,6 +293,7 @@ def publish_supervisor_load(event_q: Any, drive_root: Any) -> Optional[dict]:
                 row[name] = {"error": type(exc).__name__}
         BOOT.note_supervisor_load({"ts": row["ts"], "max_event_lag_sec": row["max_event_lag_sec"]})
         append_jsonl(drive_root / "logs" / "supervisor.jsonl", row, lock_timeout_sec=0)
+        _publish_store_sites(drive_root)
         return row
     except Exception as exc:
         if type(exc).__name__ not in _LOAD_FAILURES_SEEN:
