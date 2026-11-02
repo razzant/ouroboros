@@ -143,7 +143,10 @@ def _publish_now(reason: str) -> Optional[bool]:
 def publish_queue_changes() -> Optional[bool]:
     """The tick: publish when the revision or the direct roster moved, else refresh the certificate.
 
-    A failed write raises: the tick counts it as its own crash (``server.main_loop``).
+    True when published or refreshed, None when the documents on disk are kept (an
+    uncustodied saved queue, or nothing of this process certified yet), False when a write
+    failed: the loop treats False as its own crash (``server._run_supervisor``), None as a
+    quiet tick.
     """
     if not _queue().INITIALIZED:
         return None
@@ -158,8 +161,6 @@ def publish_queue_changes() -> Optional[bool]:
         with _queue()._queue_lock:
             capture = _capture(_STATE["reason"] or "main_loop", direct)
         outcome = None if capture is None else _publish(capture)
-    if outcome is False:
-        raise RuntimeError("queue publication failed")
     return outcome
 
 

@@ -219,14 +219,25 @@ def test_a_dead_loop_hands_publication_back_to_the_caller(published, monkeypatch
     assert [name for name, _ in writes] == ["queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"]
 
 
-def test_a_failed_tick_publication_is_the_loops_crash(published, monkeypatch):
+def test_a_failed_tick_publication_answers_false_for_the_loop_to_count(published, monkeypatch):
+    """The loop raises on False (``tests/test_server_shutdown.py``: three crashes clear readiness);
+    the publisher only reports it. A kept saved queue is None, never a failure."""
     _root, _now = published
     queue.PENDING.append(_task("t"))
     queue_publication.tick_publisher_started()
     queue.persist_queue_snapshot("admit")
     monkeypatch.setattr(queue, "atomic_write_text", lambda *_a: False)
-    with pytest.raises(RuntimeError, match="queue publication failed"):
-        queue_publication.publish_queue_changes()
+    assert queue_publication.publish_queue_changes() is False
+    assert queue_publication.publish_queue_changes() is False, "still unpublished: the next tick fails again"
+    monkeypatch.setattr(queue_snapshot, "_RESTORED", set())
+    queue_publication.reset()
+    queue_publication.tick_publisher_started()
+    monkeypatch.setattr(queue, "QUEUE_PUBLICATION", None)
+    monkeypatch.setattr(queue, "PENDING", [])
+    queue.QUEUE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)  # the stubbed writer above landed nothing
+    queue.QUEUE_SNAPSHOT_PATH.write_text('{"pending": [{"id": "saved", "task": {"id": "saved"}}], "running": []}', encoding="utf-8")
+    queue.persist_queue_snapshot("startup")
+    assert queue_publication.publish_queue_changes() is None, "a kept saved queue is a quiet tick, not a crash"
 
 
 @pytest.mark.parametrize("killed_after", ["revoke", "queue_snapshot.json", "queue_dispatch.json", "direct_roots.json"])

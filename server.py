@@ -867,7 +867,8 @@ def _run_supervisor(settings: dict) -> None:
             if _restart_requested.is_set():
                 break  # restart just triggered (drain done) — exit without assigning new work (bridge intake already ran early this iteration)
             assign_tasks()
-            publish_queue_changes()  # the one publisher: writes outside Q when the revision moved; raises on failure
+            if publish_queue_changes() is False:  # the one publisher, outside Q; None: a saved queue kept as it is
+                raise RuntimeError("queue publication failed")
             if _consciousness is not None and not draining and not _restart_lifecycle.agent_restart_pending():
                 try:
                     _consciousness.tick(time.time())

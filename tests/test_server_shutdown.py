@@ -893,12 +893,13 @@ def test_healthy_tick_between_crashes_resets_the_count(monkeypatch, tmp_path):
 def test_a_kept_saved_queue_is_not_a_failed_tick(monkeypatch, tmp_path, published):
     """A process that has not taken the saved queue into custody (its restore could not read it) keeps
     that snapshot at every tick's publication (None): durable as it is, so the loop runs on. Only a
-    failed publication (False) is a crash."""
+    failed publication (False) is a crash. The tick's publisher is ``publish_queue_changes``
+    (``queue_publication``); the mark every transition leaves is not the tick's outcome."""
     import server
     import supervisor.queue as queue_pkg
 
     rec = _supervisor_harness(monkeypatch, tmp_path, ["ok", "ok", "ok", "stop"])
-    monkeypatch.setattr(queue_pkg, "persist_queue_snapshot", lambda **_k: published)
+    monkeypatch.setattr(queue_pkg, "publish_queue_changes", lambda: published)
     _run(rec, server)
     if published is None:
         assert rec.alerts == [] and server._supervisor_error is None and rec.stop.waits == []
