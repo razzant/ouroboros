@@ -233,9 +233,12 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
             "max_active_subagents_per_root": int(get_max_active_subagents_per_root())}
     if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
         return {**fact, "note": "Queue observation unavailable; current capacity is unknown."}
-    for key in ("running", "pending"):
+    from ouroboros.task_carrier import execution_kind
+
+    for key in ("running", "pending"):  # a correspondent's Presence turn is its place's, never counted as the owner's
         rows = snapshot.get(key)
-        fact[key + "_count"] = sum(isinstance(row, dict) for row in rows) if isinstance(rows, list) else None
+        fact[key + "_count"] = sum(isinstance(row, dict) and execution_kind(row.get("task") or {}) != "presence"
+                                   for row in rows) if isinstance(rows, list) else None
     fact["reaping_count"] = snapshot.get("reaping_count")
     fact["worker_total"] = snapshot.get("worker_total")  # project slots: what max_workers bounds; idle is 0
     fact["lane_carrier_total"] = snapshot.get("lane_carrier_total")  # the conversation lane's carriers, apart

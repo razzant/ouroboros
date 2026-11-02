@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from ouroboros.context_fit import ContextFitPlan
 
 ContextProfile = Literal["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]
-MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 #: A view receipt's estimator tokens of the start note a directly required handbook brings (``context_fit``).
 BOOK_NOTE_KEY = "required_book_note_tokens"
 
@@ -115,11 +115,14 @@ def measure_main_fit(
     reasoning_effort: str = "",
     anchor: Optional[InputAnchor] = None,
     accepted_input_tokens: Optional[int] = None,
+    refused_density: Optional[float] = None,
 ) -> MainFitDisposition:
     """Measure one sealed Main candidate against owner target T and route W.
 
     The estimate is this conversation's own: ``anchor`` (``context_anchor.main_input_anchor``) scales the raw
-    estimate by the last accepted request on this route. Without one, a fresh exact-route witness
+    estimate by the last accepted request on this route; while a size refusal's passes, and a renewal after
+    them, size that refusal, its own ``refused_density`` (``context_anchor.refused_request_density``, never
+    recorded) does instead. Without either, a fresh exact-route witness
     of comparable input size calibrates it; absent that, it stays cold. Estimator windows
     always use the raw estimate. Acceptance raises a disproved stated limit,
     never a measured retention limit. The deficits,
@@ -139,6 +142,7 @@ def measure_main_fit(
 
     raw_input = int(estimate_context_prompt_tokens(messages, tools, provider=plan.provider, reasoning_effort=reasoning_effort))
     density, basis = ((1.0, "cold_estimate") if plan.window_basis == "estimator" else
+                      (float(refused_density), "refused_input") if refused_density else
                      (float(anchor.density), "fresh_route_usage") if anchor is not None else
                       resolve_main_token_density(canonical_evidence_root(), plan.route_fp, plan.model,
                                                  estimate_tokens=raw_input, view_kind=plan.view_kind))

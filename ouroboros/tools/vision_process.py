@@ -43,7 +43,7 @@ _NULL_INT = {"type": ["integer", "null"]}
 _CONTEXT = _object({
     "profile": {"enum": ["owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano"]},
     "rendered_mode": {"enum": ["max", "low", "nano"]},
-    "measurement_basis": {"enum": ["fresh_route_usage", "fresh_model_usage", "cold_estimate"]},
+    "measurement_basis": {"enum": ["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]},
     "route_fp": _STRING, "round_id": _STRING,
     "target_total_tokens": _NULL_INT, "capacity_total_tokens": _NULL_INT,
     "context_target_miss": {"type": "boolean"}, "automatic_pass_used": {"type": "boolean"},
@@ -68,6 +68,7 @@ _CAPTURE = _object({
     "submitted_processing_mode": _STRING,
     "processing_basis": {"type": ["object", "null"]},
     "effort": {"type": ["object", "null"]},
+    "prompt_tokens_bounded_estimate": {"type": "integer", "minimum": 0},
 })
 _CUSTODY = _object({
     "operation_id": _STRING, "invocation_id": {"type": "string", "minLength": 1},

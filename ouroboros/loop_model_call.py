@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import task_pacing
 from ouroboros import loop_output_exhaustion as output_recovery
+from ouroboros.context_anchor import main_input_anchor, measured_units, refused_request_density
 from ouroboros.context_budget import WHOLE_CATEGORY
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
@@ -557,7 +558,6 @@ def _rebind_context_fit_plan(
             "CONTEXT_FIT_REBUILD_FAILED: immutable context core is unavailable for route switch"
         )
     from ouroboros.context import _context_fit_route
-    from ouroboros.context_anchor import main_input_anchor
     from ouroboros.primary_route_observation import held_primary_view
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
@@ -721,6 +721,7 @@ class _RoundModelCallContext:
     defer_resource_wait: Optional[bool] = None
     output_recovery_fallback: bool = False
     physical_send_claim: Optional[Callable[[Any], None]] = None
+    refused_density: Optional[float] = None  # the size refusal in recovery: its own density, until the recovery sends
 
 
 def _route_follows(candidates: List[Tuple[str, str, bool, bool]]) -> bool:
@@ -800,7 +801,6 @@ def _measure_round_main_fit(
     plan = ctx.context_fit_plan
     if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
         return None
-    from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import measure_main_fit
     from ouroboros.transcript_prefix import rewrite_epoch
 
@@ -816,11 +816,10 @@ def _measure_round_main_fit(
         automatic_pass_used=automatic_pass_used,
         reasoning_effort=ctx.active_effort,
         anchor=anchor,
-        accepted_input_tokens=accepted,
+        accepted_input_tokens=accepted, refused_density=getattr(ctx, "refused_density", None),
     )
     _remember_main_fit(ctx, disposition)
     return disposition
-
 
 
 def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, usage=None) -> dict:
@@ -831,7 +830,6 @@ def _measure_main_context_view(plan, messages, schemas, mode, effort, round_id, 
     ``usage`` (the task's) supplies this conversation's own anchor; a candidate
     view is a rewrite, so its estimate is labelled as one.
     """
-    from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import estimate_context_prompt_tokens, measure_main_fit
     from ouroboros.loop_llm_call import MAIN_LOOP_MAX_TOKENS
 
@@ -1351,6 +1349,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
         ctx.tools._ctx._authored_memory_plan = None
     ctx.accumulated_usage.pop("_last_llm_failure", None)
     ctx.accumulated_usage.pop("_acting_route_failure", None)
+    ctx.refused_density = None  # every call measures ordinarily; only a size refusal inside it sets one
     from ouroboros.primary_route_observation import observe_primary_route
     observation = observe_primary_route(ctx)
     if observation:
@@ -1454,6 +1453,7 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None) 
     from ouroboros.context_anchor import record_refused_input
 
     measurement = fit.measurement
+    ctx.refused_density = refused_request_density(ctx.accumulated_usage, refused, measurement)  # passes measure at it
     predicted_free = getattr(refused, "predicted_free_tokens", None)
     if predicted_free is not None:  # a prediction never becomes a provider-refused size in the task's history
         slack = refused.predicted_slack_tokens
@@ -1486,6 +1486,7 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
     if fit is None:
         return None, cost, ctx.active_context_mode
     target, slack = _refusal_target(ctx, fit, failed_capture)
+    fit = (_loop()._measure_round_main_fit(ctx, automatic_pass_used=False) or fit) if ctx.refused_density else fit
     real = getattr(failed_capture, "predicted_free_tokens", None) is None  # the round's start: a provider's, not an estimate
     for steps in ((WAKE_DELIVERY_STEP,),) * bool(prepared) + REFUSAL_PASSES:
         if steps != (WAKE_DELIVERY_STEP,):
@@ -1495,6 +1496,7 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             done.add(key)
             if not _apply_refusal_pass(ctx, steps, fit, target, slack, real):
                 continue
+        density, ctx.refused_density = ctx.refused_density, None  # the retry is measured and sent ordinarily
         fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
         if fit is None:
             return None, cost, ctx.active_context_mode
@@ -1504,8 +1506,9 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
                 candidate_predicate=_strict_context_shrink_predicate(failed_capture),
                 max_tokens=int(getattr(failed_capture, "max_completion_tokens", 0) or 0) or None,
             )
-        except PhysicalAttemptPreconditionFailed:
+        except PhysicalAttemptPreconditionFailed:  # the changed, unsent view is not the refused request
             _emit_overflow_retry_skipped(ctx, "context_candidate_not_strictly_smaller", rung="+".join(steps))
+            target, slack = measured_units(density, fit.measurement, target, slack)  # its excess in fit's units
             continue  # ``fit`` already measures the changed view the next pass starts from
         cost = float(cost or 0.0) + float(retry_cost or 0.0)
         if retry_msg is not None or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") != "context_overflow":
@@ -1519,6 +1522,7 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             return _skipped("failed_candidate_not_comparable")
         fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit
         target, slack = _refusal_target(ctx, fit, failed_capture)
+        fit = (_loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit) if ctx.refused_density else fit
     return None, cost, ctx.active_context_mode
 
 

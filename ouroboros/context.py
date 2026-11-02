@@ -636,7 +636,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None, sc
 
 
 from ouroboros.context_sections import (  # noqa: E402,F401 — existing public builder surface
-    build_knowledge_sections, knowledge_navigation_sections, _build_registry_digest, _registry_row,
+    build_knowledge_sections, knowledge_navigation_sections, _build_registry_section,
     _build_installed_skills_section, _drive_state_section, runtime_host_section,
     _SHARED_UNDERSTANDING_GAP,
 )
@@ -934,9 +934,9 @@ def _capture_context_core(
     dynamic_parts.extend(build_memory_sections(context_memory, partition="volatile", include_scratchpad=not is_child,
                                                ctx=ctx))
 
-    registry_digest = _build_registry_digest(context_env)
-    if registry_digest:
-        dynamic_parts.append(registry_digest)
+    registry = _build_registry_section(context_env)
+    if registry:
+        dynamic_parts.append(registry)
     installed_skills = _build_installed_skills_section(context_env, skills=skills)
     if installed_skills:
         dynamic_parts.append(installed_skills)
