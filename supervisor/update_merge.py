@@ -617,11 +617,12 @@ def resolver_slot_owed() -> bool:
 
 
 def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0) -> bool:
-    """Prove the resolver's own PROJECT worker imported the exact clean tree before conflicts go live.
+    """Prove every child of the resolver's start imported the exact clean tree before conflicts go live.
 
     The whole-pool start (``RESOLVER_POOL``) is the one start the marker window allows, on an empty pool while
-    this tree is still clean. Only the project slot's own ``worker_ready`` at the expected sha proves the
-    resolver: assignment gives queued work to project slots alone, and the lane's spare proves nothing here."""
+    this tree is still clean. The project slot's own ``worker_ready`` at the expected sha proves the resolver
+    (assignment gives queued work to project slots alone; the lane's spare proves nothing here), and no marker
+    lands while another child of this start still imports: each live one reported its own row too."""
     from supervisor import workers
     from supervisor.queue import _queue_lock
     from supervisor.worker_pool_lifecycle import _worker_events_since, is_project_slot
@@ -639,19 +640,34 @@ def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0)
     deadline = time.monotonic() + max(float(timeout_sec), 0.1)
     while time.monotonic() < deadline:
         with _queue_lock:
-            resolvers = {int(worker.proc.pid) for worker in workers.WORKERS.values()
-                         if is_project_slot(worker) and worker.proc.pid and worker.proc.is_alive()}
-        if not resolvers:
-            return False
-        for row in _worker_events_since(events_cursor, "worker_ready"):
-            try:
-                pid = int(row.get("pid") or 0)
-            except (TypeError, ValueError):
-                pid = 0
-            if pid in resolvers and str(row.get("git_sha") or "") == expected_sha:
-                return True
+            live = {str(worker.proc.pid): is_project_slot(worker) for worker in workers.WORKERS.values()
+                    if worker.proc.pid and worker.proc.is_alive()}
+        if not any(live.values()):
+            return False  # the resolver's project child is gone
+        ready = {str(row.get("pid") or "") for row in _worker_events_since(events_cursor, "worker_ready")
+                 if str(row.get("git_sha") or "") == expected_sha}
+        if set(live) <= ready:  # a stopped child imports nothing more
+            return True
         time.sleep(0.05)
     return False
+
+
+def _boot_children_imported(timeout_sec: float = 90.0) -> bool:
+    """Boot recovery's barrier before it re-materializes the markers, as the apply proof is before it materializes
+    them: every live custodied child finished importing (the readiness seam opened it on its own ``worker_ready``)."""
+    from supervisor import workers
+    from supervisor.queue import _queue_lock
+    from supervisor.worker_pool_lifecycle import is_worker_slot, worker_ready
+
+    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
+    while True:
+        with _queue_lock:
+            if not any(is_worker_slot(slot) and slot.proc.is_alive() and not worker_ready(slot)
+                       for slot in workers.WORKERS.values()):
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
@@ -1092,6 +1108,11 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["conflict_paths"] = refreshed_conflicts
         rescue_info: Dict[str, Any] = {}
         if not has_progress:
+            if not _boot_children_imported():  # no child of the boot's start may import the markers below
+                tx["resolution_attempts"] = attempts
+                write_update_tx(tx)  # the tx waits for the next boot, bounded by the attempt cap
+                _log_supervisor({"type": "managed_update_assisted_resume_unadmitted", "reason": "workers_importing"})
+                return {"finalized": False, "resumed": False, "resolution_attempts": attempts}
             # The server's owner-control path must be resident before the
             # re-materialized conflict markers land in the live tree (#283); it imports
             # the first-party ``ouroboros`` and ``supervisor`` packages.
