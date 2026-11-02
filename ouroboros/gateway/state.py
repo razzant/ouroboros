@@ -733,7 +733,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 if work_facts is not None:
                     work_facts[task_id] = _raw_work_facts(row)
         from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
-        from ouroboros.review_operation import task_has_live_review_operation
+        from ouroboros.gateway.work_projection import tree_review_reads
         for task_id, row, started_at in running_rows:
             if task_id:
                 root = _is_root(task_id, row)
@@ -762,18 +762,18 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             if latch.get("cause") != "owner_pause" or root_id in visible:
                 continue
             facts = _task_hot_facts(drive_root, root_id)  # the body only for a root shown below (its row)
+            reviews = tree_review_reads(drive_root, root_id)  # the tree census's review questions, one read
             if root_id in active_roots and not (
-                    facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
-                    or task_has_live_review_operation(drive_root, root_id)):
+                    facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id) or reviews()):
                 continue  # the logical fence alone is no second actor; genuine late work stays
             # The fence's own census is the truth of "Paused": reviewers already
             # launched finish separately and never keep the tree Pausing.
             if owner_fence_state(drive_root, {"root_task_id": root_id}, root_id) == "paused":
                 phase = "budget_paused"
             elif (facts.get("finalizing") or post_task_synthesis_in_flight(drive_root, root_id)
-                  or task_has_live_review_operation(drive_root, root_id, sent_only=True)):
+                  or reviews(sent_only=True)):
                 phase = "budget_pausing"
-            elif task_has_live_review_operation(drive_root, root_id):
+            elif reviews():
                 phase = "budget_paused"  # an unsent review operation deferred until Resume
             elif any(str(item.get("root_task_id") or "") == root_id for item in pending_rows) or any(
                     str(item.get("root_task_id") or "") == root_id for _tid, item, _at in running_rows):

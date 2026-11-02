@@ -118,9 +118,7 @@ class _Observations:
         """Whether a review the task already sent still runs (``review_operation``), read from its stored result."""
         if task_id not in self.reviews:
             try:
-                from ouroboros.review_operation import task_has_live_review_operation
-
-                self.reviews[task_id] = bool(task_has_live_review_operation(
+                self.reviews[task_id] = bool(tree_review_operation(
                     self.drive_root, task_id, sent_only=True, result_loader=lambda tid: self.result(tid) or {}))
             except Exception:
                 log.debug("Work projection could not read the review of %s", task_id, exc_info=True)
@@ -140,11 +138,40 @@ class _Observations:
 
 
 def tree_model_handoffs(drive_root: Any, root_id: str) -> list:
-    """A paused tree's unresolved model recipients: the one call site of the tree census the projection reads,
-    so the owner-pause census memo (keyed by the tree's attempt/custody/fence revision) replaces it here."""
+    """A paused tree's unresolved model recipients: with ``tree_review_operation`` the tree census ``/api/state``
+    reads, so the owner-pause census memo (keyed by the tree's attempt/custody/fence revision) replaces it here."""
     from supervisor.continuation_admission import model_handoffs
 
     return model_handoffs(drive_root, root_id)
+
+
+def tree_review_operation(drive_root: Any, task_id: str, *, sent_only: bool = False, result_loader=None) -> bool:
+    """Whether a review ``task_id`` launched still runs (``sent_only``: one it already sent): the tree census's
+    review read for ``/api/state``, beside ``tree_model_handoffs``."""
+    from ouroboros import review_operation
+
+    return review_operation.task_has_live_review_operation(drive_root, task_id, sent_only=sent_only,
+                                                           result_loader=result_loader)
+
+
+def tree_review_reads(drive_root: Any, root_id: str):
+    """The review questions the census asks of one paused root (sent or not) over ONE strict stored read."""
+    from ouroboros.task_results import load_task_result
+
+    results: Dict[str, dict] = {}
+    answers: Dict[bool, bool] = {}
+
+    def load(task_id: str) -> dict:
+        if task_id not in results:
+            results[task_id] = load_task_result(drive_root, task_id, strict=True) or {}
+        return results[task_id]
+
+    def ask(sent_only: bool = False) -> bool:
+        if sent_only not in answers:
+            answers[sent_only] = tree_review_operation(drive_root, root_id, sent_only=sent_only, result_loader=load)
+        return answers[sent_only]
+
+    return ask
 
 
 def unconfirmed_stops(drive_root: Any, task_id: str, owner: Optional[Mapping[str, Any]] = None) -> frozenset:

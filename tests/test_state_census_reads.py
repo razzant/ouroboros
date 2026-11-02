@@ -102,3 +102,19 @@ def test_hot_facts_answer_the_phase_and_wait_without_a_body(tmp_path, monkeypatc
     full = gateway_state._task_activity_facts(tmp_path, "waiting")
     assert (full["finalizing"], full["late_phase"]) == (True, "running")
     assert full["owner_wait"]["quiz_id"] == "q", "the waited quiz's id lives in the body alone"
+
+
+def test_a_paused_root_review_questions_share_one_stored_read(tmp_path, monkeypatch):
+    from ouroboros import review_operation
+
+    with store.open_store(tmp_path, write=True) as txn:
+        _task(txn, "paused-root", status="completed")
+    asked = []
+    monkeypatch.setattr(review_operation, "task_has_live_review_operation",
+                        lambda root, task_id, sent_only=False, result_loader=None, **_: asked.append(
+                            (task_id, sent_only, bool(result_loader(task_id)))) or False)
+    loads = _loads(monkeypatch)
+    reviews = wp.tree_review_reads(tmp_path, "paused-root")
+    assert reviews() is False and reviews(sent_only=True) is False and reviews() is False
+    assert asked == [("paused-root", False, True), ("paused-root", True, True)], "each question once, at the seam"
+    assert loads == ["paused-root"], "both questions over one stored read"
