@@ -103,9 +103,11 @@ def test_only_a_run_that_owes_the_body_gets_a_job(tmp_path, monkeypatch, runtime
     _lay(tmp_path, 20)
     observed = []
     real = body.BodyRuntime._observe
-    monkeypatch.setattr(body.BodyRuntime, "_observe", lambda self, entry: observed.append(entry.run_id) or real(self, entry))
+    monkeypatch.setattr(body.BodyRuntime, "_observe", lambda self, entry: observed.append(entry) or real(self, entry))
     step()
-    assert observed == ["open"], "the settled majority owes no observation"
+    assert [entry.run_id for entry in observed] == ["open"], "the settled majority owes no observation"
+    held = started._held_entries["open"].entry
+    assert observed[0] is not held and observed[0].run_id == held.run_id, "a job never holds the body's own entry"
 
 
 def test_a_tick_in_the_same_period_reuses_its_listing_unless_this_process_wrote_custody(tmp_path, monkeypatch, runtime):
