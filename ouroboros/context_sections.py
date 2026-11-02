@@ -356,16 +356,17 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
 
 # The review-continuity host section (moved from review_state, which keeps its extraction bound).
 def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
-                            stale_status: tuple[bool, str] = (False, "")) -> List[str]:
-    """Current debts and uncertainty once, whole; historical executions have a reader."""
+                            stale_status: tuple[dict, str] = ({}, "")) -> List[str]:
+    """Current debts and uncertainty once, whole; historical executions have a reader.
+    ``stale_status`` is ``review_state.stale_marker_status`` for this checkout."""
     from ouroboros.review_state import make_repo_key
 
     repo_key = make_repo_key(repo_dir)
     lines = ["## Review Continuity", f"- repo_key={repo_key}"]
-    marker_current, look_unreadable = stale_status
-    if marker_current:
-        lines += [f"- stale_marker={state.last_stale_from_edit_ts}: {state.last_stale_reason}",
-                  f"  invalidated_by={state.stale_marker_attribution_note()}"]
+    marker, look_unreadable = stale_status
+    if marker:
+        lines += [f"- stale_marker={marker['ts']}: {marker['reason']}",
+                  f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}"]
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
     debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
