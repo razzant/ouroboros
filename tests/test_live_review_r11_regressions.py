@@ -1,7 +1,6 @@
 """R11 integration checks: synthetic roots and fake provider construction only."""
 from dataclasses import replace
 import json
-import queue
 from types import SimpleNamespace
 
 import pytest

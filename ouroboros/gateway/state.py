@@ -14,7 +14,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ouroboros import get_version
-from ouroboros.settings_scales import effort_range
 from ouroboros.gateway._helpers import json_exception, request_drive_root
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open, post_task_synthesis_is_terminal
 

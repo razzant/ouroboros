@@ -8,7 +8,6 @@ value. An arrival for a carried author is accepted through one transaction under
 author's mailbox lock against its durable intake fact.
 """
 
-import concurrent.futures
 import pathlib
 import queue as stdqueue
 from types import SimpleNamespace

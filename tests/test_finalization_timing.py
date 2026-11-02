@@ -467,7 +467,7 @@ def test_release_counts_actual_runs_and_daemon_requests(tmp_path, failed_read):
 def test_buffered_worker_handoff_stamps_a_value_snapshot(tmp_path, monkeypatch, pooled):
     import sys
     from ouroboros import observability as obs
-    from supervisor import worker_process, workers
+    from supervisor import worker_process
 
     with obs.task_timing_scope():
         usage = {}

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION, LANE_PROJECT
-from supervisor import conversation_lane, queue, worker_chat_lane, worker_pool_lifecycle as lifecycle, workers
+from supervisor import conversation_lane, worker_chat_lane, worker_pool_lifecycle as lifecycle, workers
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 

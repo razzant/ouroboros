@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _quiet_external, _supervisor_ctx
+from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _quiet_external
 from tests.test_acceptance_fence_transport import _pooled_agent, _Supervisor
 from tests.worker_pool_support import affirm_ready
 

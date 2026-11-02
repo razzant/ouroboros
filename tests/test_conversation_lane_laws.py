@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import store_timing
-from ouroboros.task_carrier import LANE_CONVERSATION, LANE_PROJECT
+from ouroboros.task_carrier import LANE_CONVERSATION
 from supervisor import conversation_lane, worker_chat_lane, workers
 from tests.test_owner_wait_pool import InputQueue, Process, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
