@@ -323,8 +323,9 @@ def _words_since(ctx: Any, earlier: str) -> List[str]:
     return [text for text in texts if text and text not in earlier] if earlier else []
 
 
-def _request_changed_text(ctx: Any, record: Dict[str, Any]) -> str:
-    """Asked once (owner, 18.10): the only review of this exact answer judged an earlier request."""
+def _request_changed_text(ctx: Any, record: Dict[str, Any], *, outcome: bool = False) -> str:
+    """Asked once (owner, 18.10): the only review of this exact answer judged an earlier request. ``outcome``:
+    its author has not received that review yet, so its findings ride the same question, whole."""
     earlier = _retained_subject_text(ctx, str((record.get("subject") or {}).get("diff_sha") or ""))
     words = _words_since(ctx, earlier)
     aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
@@ -334,6 +335,9 @@ def _request_changed_text(ctx: Any, record: Dict[str, Any]) -> str:
                                                           "the earlier request cannot be read back for)"]
     if len(words) > 5:
         lines.append(f"- ... and {len(words) - 5} more message(s)")
+    found = _outcome_lines(record) if outcome else []
+    if found:
+        lines += ["What that review found:", *found]
     lines.append("Do they change what was asked? If they do, revise the result, or ask for a review of the current "
                  "request with review_change(subject=\"result\"). If they do not, deliver again: the earlier review "
                  "stands for this result (its findings and enforcement apply as they are).")
@@ -600,25 +604,72 @@ def pending_review_choice_offered(ctx: Any) -> bool:
     return bool(getattr(ctx, "_result_review_pending", "")) and not _blocking_enforcement()
 
 
-def _findings_text(record: Dict[str, Any], *, blocking: bool) -> str:
+def _outcome_lines(record: Dict[str, Any]) -> List[str]:
+    """A review's outcome, whole: every finding in the record's order (critical, advisory, then an added
+    reviewer's, heard and never counted) and why no verdict formed when none did. Nothing is cut."""
     verdict = dict(record.get("verdict") or {})
     aggregate = str(verdict.get("aggregate") or "")
-    lines = [f"[Result review] Your result was reviewed before delivery (record {record.get('record_id')}): {aggregate}."]
-    for finding in [*(verdict.get("critical_findings") or []), *(verdict.get("advisory_findings") or [])][:12]:
-        lines.append(f"- {finding.get('severity') or 'advisory'} ({finding.get('seat_id') or 'reviewer'}): "
-                     f"{finding.get('item') or ''} {finding.get('reason') or ''}".rstrip())
+    lines = [f"- {finding.get('severity') or 'advisory'} ({finding.get('seat_id') or 'reviewer'}{note}): "
+             f"{finding.get('item') or ''} {finding.get('reason') or ''}".rstrip()
+             for name, note in (("critical_findings", ""), ("advisory_findings", ""),
+                                ("additional_findings", "; added reviewer, heard, not counted"))
+             for finding in verdict.get(name) or [] if isinstance(finding, dict)]
     if aggregate == "NOT_DISPATCHED":
         lines.append(str((record.get("dispatch_refusal") or {}).get("message") or "No review was dispatched."))
     elif aggregate not in {"PASS", "FAIL"}:
         lines.append(f"No verdict was formed ({verdict.get('reason') or 'unknown'}); the record names each seat's state.")
+    return lines
+
+
+def _findings_text(record: Dict[str, Any], *, blocking: bool) -> str:
+    aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
+    lines = [f"[Result review] Your result was reviewed before delivery (record {record.get('record_id')}): {aggregate}.",
+             *_outcome_lines(record)]
     lines.append(("Blocking enforcement: no review of this result can be bought until your human raises the review "
                   "ceiling, and it is not delivered unreviewed; stop the task explicitly, or wait for that."
                   if aggregate == "NOT_DISPATCHED" else
                   "Blocking enforcement: this result is not delivered until a review passes it; revise the result or "
                   "stop the task explicitly.") if blocking else
-                 "You decide: revise the result, or deliver it as it is with your reasons; nothing is delivered "
-                 "until you answer again.")
+                 "You decide: revise the result, or deliver it as it is" + ("" if aggregate == "PASS" else " with your reasons")
+                 + "; nothing is delivered until you answer again.")
     return "\n".join(lines)
+
+
+def _outcome_keys(record: Dict[str, Any]) -> set:
+    """What a review concluded, by identity: each seat's actual outcome with its status, counted seats and
+    added ones alike (``review_waiting.outcome_states``), else the record itself (a $0 refusal has no seat
+    outcome). A revision that records cost keeps it; a new outcome under the same record changes it."""
+    from ouroboros.review_waiting import outcome_states
+
+    return set(outcome_states(record)) or {str(record.get("record_id") or "")}
+
+
+def _outcome_received(ctx: Any, llm_trace: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    """Whether this exact outcome already reached its author whole: shown by this step's hold
+    (``ctx._result_review_shown``), or returned by a review tool, whose own result carried the receipt of
+    ``review_waiting.publish_delivery`` and entered the transcript complete (the loop records the call with
+    that receipt and without ``result_partial``, where ``acknowledge_delivery`` acknowledges it). A
+    [Selected results] notice or a readiness peek is not such a delivery. Exposure, never understanding or
+    agreement."""
+    record_id, seen = str(record.get("record_id") or ""), set(getattr(ctx, "_result_review_shown", None) or ())
+    for call in llm_trace.get("tool_calls") or []:
+        meta = call.get("tool_result_meta") if isinstance(call, dict) else None
+        receipt = meta.get("review_delivery") if isinstance(meta, dict) else None
+        if isinstance(receipt, dict) and not call.get("result_partial") and str(receipt.get("record_id") or "") == record_id:
+            seen.update(str(item) for item in receipt.get("outcome_states") or ())
+    return _outcome_keys(record) <= seen
+
+
+def _show(ctx: Any, hold: Any, text: str, record: Dict[str, Any], cause: str) -> bool:
+    """Hold the delivery once to hand this outcome to its author; ``_result_review_shown`` keeps its identity."""
+    shown = getattr(ctx, "_result_review_shown", None)
+    if not isinstance(shown, set):
+        shown = set(shown or ())
+        ctx._result_review_shown = shown
+    shown.update(_outcome_keys(record))
+    ctx._completion_hold_cause = cause  # each hold names its cause to the delivery owner
+    hold(text)
+    return True
 
 
 def _ceiling() -> Optional[int]:
@@ -686,12 +737,14 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     which the outcome axes read. Required adds the floor: a ROOT result with produced material that nobody
     reviewed yet is reviewed by the host, seating the whole pool with ``chosen_by="host"``, through the same
     wave as a mind's own call. The outcome reaches
-    the mind before delivery: a PASS delivers; otherwise its findings are shown once (``hold(text)``), then
-    Advisory and Cyber Pro deliver on the mind's next decision while Blocking holds until a review passes
-    the result or the task stops. A review of this result the mind started that is still running is
-    collected the same way: the delivery waits for it unless a nonblocking install's mind chose
-    ``pending_review=finish``. When the only review of this exact answer judged an earlier request (its owner's
-    words changed since), the host shows the new words once and asks whether they change what was asked; a
+    the mind before delivery: an outcome it has not received whole yet, a PASS included, is shown once with
+    every finding (``hold(text)``), and one a review tool already returned to it whole is not shown again
+    (``_outcome_received``); then a PASS delivers, Advisory and Cyber Pro deliver on the mind's next decision,
+    and Blocking holds until a review passes the result or the task stops. A review of this result the mind
+    started that is still running is collected the same way: the delivery waits for it unless a nonblocking
+    install's mind chose ``pending_review=finish``. When the only review of this exact answer judged an earlier
+    request (its owner's words changed since), the host shows the new words once, with that review's outcome
+    when it has not reached the mind, and asks whether they change what was asked; a
     delivery after that keeps that review for this result (owner, 18.10). A child is never forced; Presence
     speech is never held (its owed review runs with nobody waiting and arrives as a late mark,
     ``_presence_result_review``)."""
@@ -792,28 +845,22 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
             ctx._result_review_request_asked = asked
         if (str(record.get("record_id") or ""), subject.diff_sha) not in asked:
             asked.add((str(record.get("record_id") or ""), subject.diff_sha))
-            ctx._completion_hold_cause = "earlier_request"
-            hold(_request_changed_text(ctx, record))
-            return True
+            # The one question carries that review's outcome too when its author has not received it yet.
+            text = _request_changed_text(ctx, record, outcome=not _outcome_received(ctx, llm_trace, record))
+            return _show(ctx, hold, text, record, "earlier_request")
         # Delivered again: the mind judged the new words leave what was asked as it was.
     enforcement = "blocking" if _blocking_enforcement() else "advisory"
     run = _bind_review_run(llm_trace, record, subject.diff_sha, enforcement, earlier_request=stands_for_earlier)
-    if str((record.get("verdict") or {}).get("aggregate") or "") == "PASS":
-        return False
-    refused = str((record.get("verdict") or {}).get("aggregate") or "") == "NOT_DISPATCHED"
-    if refused:
+    aggregate = str((record.get("verdict") or {}).get("aggregate") or "")
+    received = _outcome_received(ctx, llm_trace, record)
+    if aggregate == "PASS":  # a PASS its author has not received is handed back once too (owner, 2 Nov)
+        return False if received else _show(ctx, hold, _findings_text(record, blocking=False), record, "pass")
+    if aggregate == "NOT_DISPATCHED":
         ctx._result_review_refused = {**(getattr(ctx, "_result_review_refused", None) or {}), subject.diff_sha: {
             "ceiling": _ceiling(), "record_id": str(record.get("record_id") or "")}}
     blocking = required and enforcement == "blocking"
-    shown = getattr(ctx, "_result_review_shown", None)
-    if not isinstance(shown, set):
-        shown = set()
-        ctx._result_review_shown = shown
-    if str(record.get("record_id") or "") not in shown or blocking:
-        shown.add(str(record.get("record_id") or ""))
-        ctx._completion_hold_cause = "findings"
-        hold(_findings_text(record, blocking=blocking))
-        return True
+    if not received or blocking:
+        return _show(ctx, hold, _findings_text(record, blocking=blocking), record, "findings")
     if enforcement == "advisory":
-        run["informed_finish"] = True  # the mind read the findings and delivered: its own decision
+        run["informed_finish"] = True  # the mind received the findings and delivered: its own decision
     return False
