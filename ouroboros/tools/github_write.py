@@ -5,7 +5,7 @@ Every write returns ONE receipt ``{effect, target, url, id, actor, at, outcome}`
 human line; ``actor`` is GitHub's acting identity or null, and local times are labelled. The response is read back against what was
 sent where that is cheap. A send whose answer never came (timeout, 5xx, reset) is looked up once by
 its exact body, target and acting identity; found → confirmed, otherwise the outcome stays ``unknown`` and the text
-says so — nothing is resent. A direct API 4xx is ``not_applied``; CLI PR writes need separate readback even after a 4xx.
+says so — nothing is resent. A direct API 4xx is ``not_applied``; PR writes settle by their own readback, even after a 4xx.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from ouroboros.tools.github import GhResult, _canonical_github_args, _gh_api, _gh_graphql, _graphql_operations, _no_launch_yet, _refuse, _split_repo
+from ouroboros.tools.github import (GhResult, _canonical_github_args, _gh_api, _gh_graphql, _graphql_operations, _http_refused,
+                                     _no_launch_yet, _refuse, _split_repo)
 from ouroboros.tools.github_read import _repo_of
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -122,7 +123,7 @@ class _Write:
             if readback and readback.get("verified") is False:
                 prefix = "⚠️ GH_WRITE_READBACK_MISMATCH: GitHub's record differs from what was sent in "
                 prefix += ", ".join(readback.get("mismatch") or []) + "; "
-        elif res.failure == "exit" and res.http_status is not None and 400 <= res.http_status < 500:
+        elif _http_refused(res):
             receipt.update(outcome="not_applied", http_status=res.http_status, error=res.text)
             status, code, outcome = "error", "TOOL_ERROR", "completed_no_effect"
             prefix = f"⚠️ GH_WRITE_NOT_APPLIED: GitHub refused (HTTP {res.http_status}); nothing changed. "
@@ -473,7 +474,7 @@ def _template(route: str, repo: str) -> str:
 
 def _definite(res: GhResult) -> bool:
     """Whether a failed send proves nothing was applied (a GitHub 4xx, a local refusal, no CLI)."""
-    return res.failure in ("target", "cli_missing") or (res.failure == "exit" and res.http_status is not None and 400 <= res.http_status < 500)
+    return res.failure in ("target", "cli_missing") or _http_refused(res)
 
 
 def _confirm_own(write: _Write, rows: list, *, actor=_actor) -> Optional[dict]:
@@ -539,7 +540,8 @@ SCHEMA: Dict[str, Any] = {
         "into base with title, body, draft and required expect={head_sha,base_sha}. update kind='pr' edits title/body/base "
         "with expect.head_sha (base also needs expect.base_sha), or toggles draft with expect.head_sha in a separate call. "
         "These PR writes precheck and read back each field: not a server-side compare-and-swap; no push/fork/merge, "
-        "and a failed CLI send or unverified readback stays unknown. Other updates change title, body, state open|closed, "
+        "and a failed send or unverified readback stays unknown unless a field edit's 4xx left every sent field as read. "
+        "Other updates change title, body, state open|closed, "
         "state_reason (completed, not_planned, reopened, duplicate) or labels (replaces) of an issue or PR; review = submit "
         "a pull request review (event APPROVE|REQUEST_CHANGES|COMMENT, body, inline comments [{path, line, body}]); "
         "resolve_thread = resolve or unresolve a review thread by its node id (from github_read get include=['threads']); "
