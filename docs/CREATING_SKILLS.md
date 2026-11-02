@@ -103,7 +103,8 @@ scripts:                            # type=script only
     description: Fetch and render
 permissions: [net, tool, route, widget, read_settings, companion_process, supervised_task] # see "Permissions"
 conflicts: [legacy-weather]            # optional incompatible installed skill names
-env_from_settings: [OPENROUTER_API_KEY]                  # core keys require an owner grant
+env_from_settings: [OPENROUTER_API_KEY, WEATHER_API_KEY] # core keys require an owner grant
+secret_fields: {apiKey: WEATHER_API_KEY}  # optional: form field id -> a custom key listed above ("Asking the owner for a secret")
 when_to_use: User asks for the weather forecast.
 model_experience:                   # optional prose (CPL-7); a bare string is also accepted
   what_model_sees: One weather tool joins the tool list; results come back as compact JSON.
@@ -853,6 +854,39 @@ A missing permission causes the matching `register_*` call to raise
 `ExtensionRegistrationError`, surfaced as a skill load error in the
 Skills UI.
 
+## Asking the owner for a secret (`secret_fields`)
+
+A skill that needs a credential the owner creates elsewhere (a bot token, a service API key) can let setup ask
+for it in a protected form instead of the chat. It declares which form field writes which key:
+
+```yaml
+env_from_settings: [TELEGRAM_BOT_TOKEN]
+secret_fields:
+  botToken: TELEGRAM_BOT_TOKEN   # field id (a letter, then letters/digits/_) -> a key listed in env_from_settings
+```
+
+The parser checks the shape and that each key is listed in `env_from_settings`; the host admits only an
+owner-defined custom Settings secret (uppercase, not a built-in setting, no `OUROBOROS_` prefix), so a skill can
+never front a provider, network or core credential. `env_from_settings` alone opts nothing in: it also lists keys
+that are not secrets (a host name, a site URL). The declaration is part of the reviewed manifest, so changing it
+changes the release digest.
+
+During setup a root task calls `showSecretHitl(pluginName, fields)`, for example
+`showSecretHitl('telegram', ['botToken'])`, and waits. The owner sees one card in the chat, opens its form, sees
+whether each key already has a value (never the value itself) and which installed skills read it, and chooses
+Save, or Replace for a key that is set. The value goes from that form to Settings (`POST /api/decisions/secret`);
+the task learns only `secret_filled` or `secret_replaced {pluginName, fields}`, or `secret_cancelled`. The value
+never enters a tool result, the chat, history, logs or an event. The form stays usable after the task ends; a
+later save is recorded in the chat and resumes no work. A request saves only while the skill still maps its fields
+to the same keys.
+
+Saving is not a connection and grants nothing. The outcome names what each skill that reads the key can read now:
+a newly saved key needs the owner's grant in Skills. Replacing a key while a skill that reads it is enabled is
+allowed; the skill may read the new value on its next call, while code that copied the value at start (a poller,
+a companion's environment) keeps the old one until it restarts, so say in your SKILL.md what your skill needs
+(Telegram: disable and re-enable it). Chat transports receive such a request as a note saying where to enter it;
+a transport must not offer a reply as an answer to it.
+
 ## Grants for protected keys and host permissions
 
 Some settings keys are protected: `OPENROUTER_API_KEY`,
@@ -861,7 +895,8 @@ Some settings keys are protected: `OPENROUTER_API_KEY`,
 `GITHUB_TOKEN`, `OUROBOROS_NETWORK_PASSWORD`. These keys are NEVER
 forwarded to a skill by default, even when listed in
 `env_from_settings`. Custom secret keys stored in Settings → Secrets
-are treated the same way. A granted key is read as currently saved: each
+are treated the same way; such a key joins a skill's request once it is saved, so a newly saved key is missing
+until the owner grants it, while the skill keeps its other approvals for the same release. A granted key is read as currently saved: each
 `api.get_settings` call, script run, out-of-process call and companion start sees a
 value the owner saved, rotated or deleted during a running task, while that task keeps
 its own model, account and review settings; a value your code already copied or cached,

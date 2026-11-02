@@ -17,7 +17,9 @@ import pytest
 
 from ouroboros import store, swarm_rollup, usage_store
 from ouroboros.task_results import load_task_result
-from tests.test_prestart_storage_wait import _host, lane, short_waits  # noqa: F401
+from tests.test_prestart_storage_wait import _host
+from tests.test_prestart_storage_wait import lane as lane  # pytest fixture; the alias re-exports it (no F811)
+from tests.test_prestart_storage_wait import short_waits as short_waits  # autouse pytest fixture
 
 INITIAL = swarm_rollup.initial_swarm_rollup(None)
 

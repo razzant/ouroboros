@@ -1577,9 +1577,9 @@ def test_auto_grant_if_enabled_uses_executable_review_gate(tmp_path, monkeypatch
 def test_save_skill_grants_merges_partial_approvals(tmp_path):
     """A subsequent partial-key grant must not silently revoke
     previously-approved keys. The merge is bound to the same
-    content_hash + requested_keys; any change to either resets the
-    persisted state because the owner has not consented to the new
-    shape yet."""
+    content_hash; new bytes reset the persisted state because the
+    owner has not consented to them yet (a request grown by saved
+    Settings: tests/test_skill_grant_request_growth.py)."""
     from ouroboros.skill_loader import (
         load_skill_grants,
         save_skill_grants,

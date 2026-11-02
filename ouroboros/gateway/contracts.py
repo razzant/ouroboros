@@ -32,7 +32,10 @@ from ouroboros.gateway.widgets import (
     ExtensionLiveSnapshot, WidgetFaultRequest, WidgetFaultResponse, WidgetTab, WidgetsResponse,
     WidgetAssetLeaseRequest, WidgetAssetTokenRequest, WidgetAssetLeaseResponse, WidgetAssetRevokeResponse,
 )
-from ouroboros.gateway.decision_contracts import DecisionRequest, DecisionResponse  # noqa: F401 -- public re-exports
+from ouroboros.gateway.decision_contracts import (  # noqa: F401 -- public re-exports
+    DecisionRequest, DecisionResponse, SecretDecisionRequest, SecretDecisionResponse, SecretEvent, SecretOutcome,
+    SecretConsumer, SecretKeyState, SecretRequestField, SecretRequestMeta,
+)
 from ouroboros.gateway.card_contracts import CardOutbound, CardStateOutbound  # noqa: F401 -- public re-exports
 from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-exports
     UpdateApplyErrorResponse, UpdateApplyRequest, UpdateApplySuccessResponse, UpdateDescriptionErrorResponse,
@@ -174,6 +177,10 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     closed_request_id: NotRequired[str]
     materials: NotRequired[List[Dict[str, Any]]]  # validated existing task artifact references
     question_delivery: NotRequired[Dict[str, Any]]  # canonical kind/state; pending stays current
+    # A mirrored secret request: its protected form, outcome and unconfirmed-save facts (no value).
+    secret_request: NotRequired[SecretRequestMeta]
+    secret_outcome: NotRequired[SecretOutcome]
+    secret_save: NotRequired[Dict[str, Any]]
     task_incident: NotRequired[str]
     # Historical rows only: the retired cancellation-fault notice named the PHYSICAL task it could not
     # settle when that differed from the logical id. Declared so stored rows keep their shape.
@@ -432,6 +439,7 @@ class QuizOutbound(ChatReferenceFields, SharedRowFrame):
     task_id: NotRequired[str]
     project_thread: NotRequired[bool]
     transport: NotRequired[TransportMetadata]
+    secret_request: NotRequired[SecretRequestMeta]  # an integration-secret request: answered only by its form
 
 
 class QuizStateOutbound(TypedDict):
@@ -459,6 +467,7 @@ class QuizStateOutbound(TypedDict):
     closed_by_task_id: NotRequired[str]
     closed_actor: NotRequired[str]
     closed_request_id: NotRequired[str]
+    secret_outcome: NotRequired[SecretOutcome]  # a secret request's typed completion, metadata only
 
 
 class TypingOutbound(TypedDict):
@@ -1505,6 +1514,8 @@ __all__ = [
     "QuizOption", "QuizOutbound", "QuizStateOutbound",
     "CardOutbound", "CardStateOutbound",
     "DecisionRequest", "DecisionResponse",
+    "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
+    "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
     "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
