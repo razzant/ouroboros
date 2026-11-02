@@ -1131,7 +1131,7 @@ def _retry_terminalization_pending() -> Tuple[List[str], List[str]]:
         try:
             from supervisor import queue
 
-            if queue.persist_queue_snapshot(reason="terminalization_retry_state") is not True:
+            if queue.publish_queue_snapshot(reason="terminalization_retry_state") is not True:  # barrier (LB)
                 log.warning("Failed to persist terminalization retry state")
         except Exception:
             log.warning("Failed to persist terminalization retry state", exc_info=True)
@@ -1616,7 +1616,7 @@ def _persist_pending_terminalization_retries(task_ids: List[str]) -> None:
     try:
         from supervisor import queue
 
-        if not queue.persist_queue_snapshot(reason="pending_terminal_event_retry"):
+        if not queue.publish_queue_snapshot(reason="pending_terminal_event_retry"):  # barrier (LB): restart-safe custody
             log.warning("Failed to persist pending terminal-event retry custody")
     except Exception:
         log.warning(

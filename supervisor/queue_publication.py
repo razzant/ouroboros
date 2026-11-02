@@ -94,11 +94,13 @@ def queue_revision() -> int:
 def persist_queue_snapshot(reason: str = "") -> Optional[bool]:
     """Mark the queue changed: one revision bump under Q, published by the tick.
 
-    Without a live tick publisher the caller publishes synchronously (startup, shutdown,
-    tests): True when published, False when the write failed, None when the documents on
-    disk are kept (no queue in this process, or the saved queue is not in its custody).
-    With one, True: the change is recorded and the next tick publishes it. A caller whose
-    effect needs the publication first uses ``publish_queue_snapshot``.
+    True means ON DISK, nothing less. Without a live tick publisher the caller publishes
+    synchronously (startup, shutdown, tests): True when published, False when the write
+    failed, None when the documents on disk are kept (no queue in this process, or the saved
+    queue is not in its custody). With a live tick publisher the mark answers None: the change
+    is recorded and the next tick publishes it, but nothing is on disk yet, so no caller can
+    read a mark as a persisted fact. A caller whose effect or reply needs the publication
+    first uses ``publish_queue_snapshot`` (or ``barrier_of`` through its context).
     """
     if not _queue().INITIALIZED:  # a boot without a provider: state initialization reads a snapshot as history (#2412)
         log.info("Queue snapshot not published (reason=%s): no supervisor queue in this process", reason)
@@ -107,8 +109,16 @@ def persist_queue_snapshot(reason: str = "") -> Optional[bool]:
         _STATE["revision"] += 1
         _STATE["reason"] = reason
     if tick_publisher_alive():
-        return True
+        return None
     return _publish_now(reason)
+
+
+def barrier_of(ctx: Any):
+    """The publication barrier a handler reaches through its context: the context's own
+    ``publish_queue_snapshot`` (the server's event context), else whatever stands in for its mark
+    there (a test context's stub stands in for the barrier too), else None: the caller decides
+    what an absent persister means for its effect."""
+    return getattr(ctx, "publish_queue_snapshot", None) or getattr(ctx, "persist_queue_snapshot", None)
 
 
 def publish_queue_snapshot(reason: str = "") -> Optional[bool]:

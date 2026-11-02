@@ -466,7 +466,10 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     # The event-loop ctx and the reaper's pool module expose the same queue
     # state; the snapshot/sort seams fall back to the queue module's own.
     sort_pending = getattr(ctx, "sort_pending", None) or queue_mod.sort_pending
-    persist_snapshot = getattr(ctx, "persist_queue_snapshot", None) or queue_mod.persist_queue_snapshot
+    from supervisor.queue_publication import barrier_of
+
+    # The park is confirmed ``paused`` only once its queue row is on disk: the barrier, never the mark.
+    persist_snapshot = barrier_of(ctx) or queue_mod.publish_queue_snapshot
     pause_id = str(checkpoint.get("pause_id") or "")
     if not task_id or not pause_id:
         raise ValueError("exact budget pause requires task_id and pause_id")

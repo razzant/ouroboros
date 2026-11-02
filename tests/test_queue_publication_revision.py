@@ -89,7 +89,7 @@ def test_marks_under_q_write_no_bytes_and_the_tick_publishes_the_last_state(publ
     with queue._queue_lock:
         for step in range(5):
             queue.PENDING.append(_task(f"t{step}"))
-            assert queue.persist_queue_snapshot(f"admit-{step}") is True
+            assert queue.persist_queue_snapshot(f"admit-{step}") is None, "a mark is not a disk fact"
     assert writes == [] and encodings == [] and queue_publication.queue_revision() == revision + 5
     assert not (root / "state/queue_snapshot.json").exists()
     assert queue_publication.publish_queue_changes() is True
@@ -196,7 +196,7 @@ def test_a_barrier_publishes_at_once_while_the_tick_owns_ordinary_marks(publishe
     writes, _fsyncs = _writes(monkeypatch)
     queue_publication.tick_publisher_started()
     queue.PENDING.append(_task("marked"))
-    assert queue.persist_queue_snapshot("mark") is True and writes == []
+    assert queue.persist_queue_snapshot("mark") is None and writes == []
     queue.PENDING.append(_task("granted"))
     with queue._queue_lock:  # a Resume grant publishes before it is sent, even from under Q
         assert queue.publish_queue_snapshot("owner_wait_resumed") is True
