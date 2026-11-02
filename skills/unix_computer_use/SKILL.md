@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.6.1
+version: 0.7.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -22,8 +22,8 @@ tools:
     effect: read
 when_to_use: The user asks Ouroboros to inspect a desktop, take a screenshot, act in a named application (click/type/press keys there), drag, or operate a local/explicitly configured remote GUI under human or benchmark supervision.
 model_experience:
-  what_model_sees: Desktop tools include bounded AX reads, local macOS element_act press/set_value without activation or pointer input, explicit foreground input, screenshot observation IDs, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback and front observations.
-  token_effect: The tool schemas add a moderate fixed cost to every round while the skill is enabled; each screenshot adds one image attachment (the dominant per-use cost), each input receipt about a hundred tokens of place facts, and an ax_tree read grows with the nodes it returns (bounded by max_nodes).
+  what_model_sees: Desktop tools include bounded AX reads (hierarchy, separate title/description/value/url with a chosen text_limit), local macOS element_act press/set_value without activation or pointer input (optionally followed by a read of the same window in the same call), explicit foreground input, screenshot observation IDs, capabilities and connections. Screenshots auto-attach as images; receipts separate action dispatch, readback, the read after the action and front observations.
+  token_effect: The tool schemas add a moderate fixed cost to every round while the skill is enabled; each screenshot adds one image attachment (the dominant per-use cost), each input receipt about a hundred tokens of place facts, and an ax_tree read (or an element_act observation) grows with the nodes it returns (bounded by max_nodes and text_limit).
 ---
 
 # Unix Computer Use
@@ -78,7 +78,8 @@ Tools:
   front, titles, bounds, pid, and on macOS whether the application has its own
   scripting commands (`scriptable`); `app=` filters, `limit` caps the rows.
 - `ax_tree` reads one window as text through the Accessibility API, bounded:
-  the frontmost application's window, or `app=`'s without bringing it forward.
+  the frontmost application's window, or `app=`'s without bringing it forward;
+  `window=` (a window ID or exact title) reads that window instead.
 - `element_act` performs local macOS `press` or text `set_value` through the
   control's own Accessibility interface. It never activates, focuses, injects
   global input, writes the clipboard or falls back to pointer/keyboard input.
@@ -96,9 +97,26 @@ select={identifier, role, label, nth}, window=..., text=...)`: name only the
 selector fields needed, from a fresh `ax_tree`/`window_list`. `window` is a
 window ID or exact title; `identifier` is AXIdentifier, `label` the full exact
 title/description, and `nth` is one-based among current matching controls.
-Tree IDs and coordinate marks are not reusable element handles. The helper
-resolves, revalidates, acts and reads back in one process; each call pays helper
-startup and a bounded walk. Ambiguous or incomplete selection refuses.
+Tree IDs and coordinate marks are not reusable element handles. One helper
+process resolves the application, finds and revalidates the element, acts and
+reads it back; each call pays one helper startup and a bounded walk. Ambiguous
+or incomplete selection refuses. `timeout_ms` is ONE budget from the start of
+the helper's `element` operation (after its interpreter has started; the
+application's resolution included): the search gets what is
+left, and an element found and checked after it is spent is not acted on
+(`budget_exhausted`, `dispatched: false`). The settle and readback after an
+action take only what remains; a readback with nothing left is skipped and says
+so, and the action's receipt stands.
+
+`observe=true` adds `observation`: the same window element read again after the
+one action (or after a refusal, read-only), shaped as `ax_tree` with
+`text_limit`. It spends the same `timeout_ms`: the read gets what is left,
+the window's facts included (`budget_exhausted` when nothing is). The
+receipt is printed before the read starts, so a read that fails, runs out or is
+cut off by the helper's timeout (`helper_stopped`) leaves the action's receipt
+as it was: the top-level outcome is always the action's. A call carries one
+action at most. Several independent calls in one response are admitted one by
+one; a step that depends on an earlier step's outcome belongs to the next round.
 
 The receipt separates `dispatched`, `action_outcome` and `element_after` from
 `front_before`/`front_after`. A completed AX call is not proof of the goal;
@@ -278,8 +296,16 @@ Observation without images (`ax_tree`, `window_list`):
   it) and the node records `children_unread`; a node or a children list
   the application failed to answer is a cut too (`read_errors`: that subtree
   is not requested, `errors` counts the failures by attribute); web content (`AXWebArea`)
-  is skipped unless `include_web=true`. Nodes carry role, label, value (capped,
-  with `value_len`), and bounds; an attribute the application failed to answer
+  is skipped unless `include_web=true`. `app=` is resolved in the same helper
+  process. Nodes carry `id`, `depth`, `parent_id` (absent on the root), role,
+  `label` (the title, else the description; at most 200 characters and no
+  length of its own: the whole texts are `title` and `description`), `title` and
+  `description` separately, `value`, `url` (a link's AXURL as an absolute
+  string), bounds, `enabled: false` and `focused: true` (only those values), all
+  from the same one read per node. `text_limit` (default 200, ceiling 100000)
+  is the characters kept per title, description, value and url; a cut one of
+  those four gives its whole length in `<field>_len`, so a larger `text_limit` (or
+  `window=`/`root=focused` to narrow the read) brings the rest. An attribute the application failed to answer
   (an error other than ordinary absence) is counted in `errors` by attribute,
   and an element none of whose attributes could be read is a failed read, not
   an empty node; `marks` number the elements of the marked roles with centre

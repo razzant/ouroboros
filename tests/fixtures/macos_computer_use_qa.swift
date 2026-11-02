@@ -44,12 +44,17 @@ func log(_ event: String, _ fields: [String: Any] = [:]) {
 }
 
 final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate {
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: role == "target" ? 460 : 240),
                           styleMask: [.titled], backing: .buffered, defer: false)
     let field = NSTextField(string: "")
     let status = NSTextField(labelWithString: "idle")
     let counter = NSTextField(labelWithString: "count:0")
     let typed = NSTextView(frame: NSRect(x: 20, y: 20, width: 420, height: 200))
+    let commandGroup = NSBox(frame: NSRect(x: 20, y: 250, width: 420, height: 180))
+    let commandField = NSTextField(string: "")
+    let urlLink = NSButton(title: "Open synthetic reference", target: nil, action: nil)
+    let syntheticCommand = String(repeating: "run λ漢字🧪 e\u{301} ", count: 24) + "[command-end]"
+    let syntheticURL = "https://example.invalid/qa/" + String(repeating: "segment/", count: 45) + "end"
     var commit: NSButton!
     var count = 0
     var pending: [Character] = []
@@ -86,6 +91,23 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             place(counter, "qa.count", NSRect(x: 20, y: 120, width: 200, height: 20))
             _ = button("Twin", "qa.twinA", #selector(twinPressed(_:)), NSRect(x: 20, y: 70, width: 100, height: 32))
             _ = button("Twin", "qa.twinB", #selector(twinPressed(_:)), NSRect(x: 140, y: 70, width: 100, height: 32))
+            commandGroup.title = "Command context"
+            commandGroup.setAccessibilityIdentifier("qa.command_group")
+            commandGroup.setAccessibilityElement(true)
+            commandGroup.setAccessibilityRole(.group)
+            window.contentView!.addSubview(commandGroup)
+            commandField.stringValue = syntheticCommand
+            commandField.isEditable = false
+            commandField.setAccessibilityLabel("Synthetic command")
+            commandField.setAccessibilityIdentifier("qa.command")
+            commandField.frame = NSRect(x: 12, y: 94, width: 392, height: 24)
+            commandGroup.contentView!.addSubview(commandField)
+            urlLink.setAccessibilityIdentifier("qa.url")
+            urlLink.setAccessibilityLabel("Synthetic URL")
+            urlLink.setAccessibilityRole(.link)
+            urlLink.setAccessibilityURL(URL(string: syntheticURL))
+            urlLink.frame = NSRect(x: 12, y: 42, width: 220, height: 32)
+            commandGroup.contentView!.addSubview(urlLink)
             window.orderFrontRegardless()  // shown without taking the front: it is acted on in the background
         } else {
             typed.delegate = self
@@ -142,6 +164,8 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             out["count"] = count
             out["status"] = status.stringValue
             out["commit_instance"] = commit?.tag ?? 0
+            out["command"] = commandField.stringValue
+            out["url"] = syntheticURL
             if let commit = commit, let primary = NSScreen.screens.first {
                 let frame = window.convertToScreen(commit.convert(commit.bounds, to: nil))
                 out["commit_frame"] = [frame.minX, primary.frame.maxY - frame.maxY, frame.width, frame.height]

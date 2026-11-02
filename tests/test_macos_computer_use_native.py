@@ -1,10 +1,10 @@
-"""Native macOS qualification of quiet ``element_act`` in the bundled ``unix_computer_use`` skill.
+"""Native macOS qualification of quiet ``element_act`` and its fresh tree in ``unix_computer_use``.
 
 Opt-in: runs only on macOS with ``OUROBOROS_MACOS_DESKTOP_QA=1`` in a logged-in desktop session
-whose owner keeps the keyboard and pointer still for the run (about half a minute). It compiles the
+whose owner keeps the keyboard and pointer still for the run (allow several minutes). It compiles the
 AppKit fixture ``tests/fixtures/macos_computer_use_qa.swift`` into this test's temporary directory and
-starts two windows in two processes it alone owns and stops: a target with a field, Commit, a counter
-and two buttons named "Twin", and a front app that receives synthetic keystrokes. Through the production
+starts two windows in two processes it alone owns and stops: a target with a field, Commit, a counter,
+two buttons named "Twin" and a nested long command/URL, and a front app that receives synthetic keystrokes. Through the production
 path - built-in install, out-of-process load and dispatch through ``ToolRegistry`` - the skill presses and
 sets a value in the background target while the front app is typed into. Each fixture logs its own
 state, every activation the workspace announces (a focus taken and given back between two samples
@@ -15,7 +15,7 @@ it (targeted ``key``/``type_text`` with ``raise_policy="never"`` must refuse rat
 sends Command-A spelled ``cmd+a`` and ``cmd+A`` and reads the modifiers the front app received, and one
 clicks Commit at a point read off a downscaled screenshot. The calls run as an owner task's would
 (``work_kind`` owner). A grant the run lacks becomes the skip reason, never a pass.
-``test_the_fixture_builds`` alone runs without the opt-in: it compiles and starts nothing.
+The Swift build and helper-count tests run without the opt-in; neither starts a desktop fixture.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import logging
 import os
 import pathlib
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -179,6 +180,14 @@ def host(tmp_path, monkeypatch):
         yield call, schema
     finally:
         clean_extension_runtime_state()
+        # The parent may name a durable evidence root for the native opt-in. Preserve the independent
+        # process logs beside the tool receipts and timing samples even when pytest's tmp_path is released.
+        evidence_root = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
+        if evidence_root:
+            case = pathlib.Path(evidence_root) / "macos-computer-use" / (uuid.uuid4().hex + "-" + receipts.parent.name)
+            case.mkdir(parents=True)
+            for source in tmp_path.glob("*.jsonl"):
+                shutil.copy2(source, case / source.name)
 
 
 def _grants(call) -> dict:
@@ -196,6 +205,22 @@ def _interface(schema) -> None:
     missing = sorted(ACT_ARGS - set(props)) + sorted(SELECT_KEYS - set(select))
     assert not missing, f"element_act schema lacks {missing}; registered: {json.dumps(registered)}"
     assert set(registered.get("required", [])) == {"app", "do", "select"}, registered
+
+
+def _new_interface(schema) -> None:
+    _interface(schema)
+    for name, required in (("ax_tree", {"window", "text_limit"}),
+                           ("element_act", {"observe", "text_limit"})):
+        registered = schema(name)
+        assert registered is not None, name
+        missing = required - set(registered.get("properties", {}))
+        assert not missing, f"{name} schema lacks {sorted(missing)}: {json.dumps(registered)}"
+
+
+def _identified(tree: dict, identifier: str) -> dict:
+    matches = [node for node in tree.get("nodes", []) if node.get("identifier") == identifier]
+    assert len(matches) == 1, {"identifier": identifier, "matches": matches, "tree": tree}
+    return matches[0]
 
 
 def _act(call, target: Owned, do: str, *, text: str | None = None, **select) -> dict:
@@ -448,3 +473,179 @@ def test_a_point_read_off_a_screenshot_clicks_the_button_drawn_there(host, launc
     assert [(r["event"], r.get("instance")) for r in rows] == [("commit", 1)] and after["count"] == 1, \
         {"point": point, "commit_frame": placed["commit_frame"], "transform": transform, "pressed": pressed,
          "rows": rows}
+
+
+@desktop_only
+def test_named_window_tree_keeps_nested_unicode_command_and_url(host, launch):
+    """One background-window tree must expose real hierarchy and the full synthetic fields on request."""
+    call, schema = host
+    if _grants(call).get("accessibility") != "trusted":
+        pytest.skip("unsupported here, not passed: Accessibility is not trusted")
+    _new_interface(schema)
+    target, front = launch("target"), launch("front")
+    if front.wait_for("pointer_monitor").get("installed") is not True:
+        pytest.skip("pointer observation unavailable; no non-interference verdict")
+    _hand_front(call, front)
+    t_before, f_before = target.mark("tree_before"), front.mark("tree_before")
+    args = {"app": f"pid:{target.pid}", "window": target.title, "max_nodes": 100, "timeout_ms": 5000}
+    compact = call("ax_tree", **args)
+    full = call("ax_tree", **args, text_limit=100000)
+    t_after, f_after = target.mark("tree_after"), front.mark("tree_after")
+
+    for tree in (compact, full):
+        assert tree.get("ok") is True and tree.get("pid") == target.pid and tree.get("window") == target.title, tree
+        assert not tree.get("truncated") and tree.get("truncated_by") == [], tree
+        assert (tree.get("target") or tree.get("app") or {}).get("pid") == target.pid, tree
+    command_short, command = _identified(compact, "qa.command"), _identified(full, "qa.command")
+    url_short, url = _identified(compact, "qa.url"), _identified(full, "qa.url")
+    assert len(t_before["command"]) > 200 and len(t_before["url"]) > 200
+    assert command_short["value"] == t_before["command"][:200] and command_short["value_len"] == len(t_before["command"])
+    assert url_short["url"] == t_before["url"][:200] and url_short["url_len"] == len(t_before["url"])
+    assert command["value"] == t_before["command"] and "value_len" not in command
+    assert url["url"] == t_before["url"] and "url_len" not in url
+    assert command.get("description") == "Synthetic command", command
+    assert url.get("title") == "Open synthetic reference" and url.get("description") == "Synthetic URL", url
+    nodes = {node["id"]: node for node in full["nodes"]}
+    group = _identified(full, "qa.command_group")
+    assert "parent_id" not in full["nodes"][0] and group["id"] in nodes
+    for child in (command, url):
+        ancestry = set()
+        current = child
+        while "parent_id" in current:
+            assert current["parent_id"] in nodes and current["parent_id"] not in ancestry, current
+            ancestry.add(current["parent_id"])
+            current = nodes[current["parent_id"]]
+        assert group["id"] in ancestry, {"child": child, "group": group, "ancestry": ancestry}
+    start, end = min(t_before["t"], f_before["t"]), max(t_after["t"], f_after["t"])
+    assert not _between(target.rows(), start, end, "commit", "app_became_active", "window_became_key", "key_down")
+    assert not _between(front.rows(), start, end, "app_resigned_active", "window_resigned_key", "workspace_activated", "pointer_event")
+    assert f_after["app_active"] and f_after["front_pid"] == front.pid and f_before["mouse"] == f_after["mouse"]
+    assert f_before["pasteboard_change_count"] == f_after["pasteboard_change_count"]
+
+
+@desktop_only
+def test_one_action_plus_fresh_same_window_tree_and_counterbalanced_timing(host, launch, tmp_path):
+    """Run equivalent presses in AB/BA order; record tool wall time, not a model-round measurement.
+
+    The fixture's commit events are the action oracle. The counter node must read the new count in
+    each separate tree or in the combined call's observation. No speed ratio is asserted because
+    scheduling and Accessibility latency vary on a live desktop.
+    """
+    call, schema = host
+    if _grants(call).get("accessibility") != "trusted":
+        pytest.skip("unsupported here, not passed: Accessibility is not trusted")
+    _new_interface(schema)
+    target, front = launch("target"), launch("front")
+    if front.wait_for("pointer_monitor").get("installed") is not True:
+        pytest.skip("pointer observation unavailable; no non-interference verdict")
+    _hand_front(call, front)
+    setup = _act(call, target, "set_value", text="1500", identifier="qa.field")
+    assert setup.get("ok") is True and setup.get("action_outcome") == "completed", setup
+    t_before, f_before = target.mark("timing_before"), front.mark("timing_before")
+    refused = call("element_act", app=f"pid:{target.pid}", do="press", select={"identifier": "qa.commit"},
+                   window=target.title, text_limit=100000)
+    assert refused.get("ok") is False and refused.get("reason") == "bad_option" and refused.get("dispatched") is False, refused
+    assert target.mark("refusal_check")["count"] == 0
+
+    args = {"app": f"pid:{target.pid}", "window": target.title, "max_nodes": 100, "timeout_ms": 5000}
+    order = (("separate", "combined"), ("combined", "separate"),
+             ("separate", "combined"), ("combined", "separate"))
+    samples: list[dict] = []
+    timing = tmp_path / "native_timing.jsonl"
+    expected_count = 0
+    for pair, methods in enumerate(order):
+        for position, method in enumerate(methods):
+            before = target.mark(f"{pair}_{position}_before")
+            start = time.perf_counter()
+            receipt = call("element_act", app=args["app"], do="press", select={"identifier": "qa.commit"},
+                           window=target.title, max_nodes=args["max_nodes"], timeout_ms=args["timeout_ms"],
+                           **({"observe": True, "text_limit": 100000} if method == "combined" else {}))
+            action_ms = round((time.perf_counter() - start) * 1000, 3)
+            assert receipt.get("ok") is True and receipt.get("dispatched") is True \
+                and receipt.get("action_outcome") == "completed" and receipt.get("observed_effect") is True, receipt
+            assert receipt.get("do") == "press" and (receipt.get("element") or {}).get("identifier") == "qa.commit" \
+                and (receipt.get("element_after") or {}).get("identifier") == "qa.commit", receipt
+            assert (receipt.get("front_before") or {}).get("pid") == front.pid \
+                and (receipt.get("front_after") or {}).get("pid") == front.pid, receipt
+            assert (receipt.get("window") or {}).get("title") == target.title, receipt
+            if method == "combined":
+                tree = receipt.get("observation") or {}
+            else:
+                assert "observation" not in receipt, receipt
+                tree = call("ax_tree", **args, text_limit=100000)
+            total_ms = round((time.perf_counter() - start) * 1000, 3)
+            expected_count += 1
+            commit = target.wait_for("commit", after=before["t"], timeout=5)
+            after = target.mark(f"{pair}_{position}_after")
+            assert [(row["instance"], row["field"], row["count"]) for row in
+                    _between(target.rows(), before["t"], after["t"], "commit")] == [(1, "1500", expected_count)]
+            assert commit["count"] == after["count"] == expected_count and after["status"] == "committed:1500"
+            assert tree.get("ok") is True and not tree.get("truncated") and tree.get("truncated_by") == [], tree
+            if method == "combined":
+                assert (tree.get("window") or {}).get("title") == target.title, tree
+                assert (tree.get("window") or {}).get("window_id") == (receipt.get("window") or {}).get("window_id"), receipt
+            else:
+                assert tree.get("window") == target.title and tree.get("pid") == target.pid, tree
+            assert _identified(tree, "qa.count").get("value") == f"count:{expected_count}", tree
+            assert _identified(tree, "qa.status").get("value") == "committed:1500", tree
+            sample = {"pair": pair, "position": position, "method": method, "action_ms": action_ms,
+                      "tool_wall_ms": total_ms, "count": expected_count,
+                      "helper_ops_structural": ["element"] if method == "combined" else ["element", "observe"]}
+            samples.append(sample)
+            with timing.open("a", encoding="utf-8") as out:
+                out.write(json.dumps({"kind": "sample", **sample}) + "\n")
+
+    time.sleep(0.5)  # catch a late duplicate press or activation before the final marks
+    t_after, f_after = target.mark("timing_after"), front.mark("timing_after")
+    start, end = min(t_before["t"], f_before["t"]), max(t_after["t"], f_after["t"])
+    assert len(_between(target.rows(), start, end, "commit")) == expected_count
+    assert not _between(target.rows(), start, end, "twin", "app_became_active", "window_became_key", "key_down")
+    assert not _between(front.rows(), start, end, "app_resigned_active", "window_resigned_key", "workspace_activated", "pointer_event")
+    assert f_after["app_active"] and f_after["front_pid"] == front.pid and f_before["mouse"] == f_after["mouse"]
+    assert f_before["pasteboard_change_count"] == f_after["pasteboard_change_count"]
+    assert t_after["count"] == expected_count and t_after["field"] == "1500"
+    summary = {method: {"first_measured_ms": next(s["tool_wall_ms"] for s in samples if s["method"] == method),
+                        "subsequent_median_ms": statistics.median(s["tool_wall_ms"] for s in samples[2:] if s["method"] == method)}
+               for method in ("separate", "combined")}
+    with timing.open("a", encoding="utf-8") as out:
+        out.write(json.dumps({"kind": "summary", "tool_wall_only": True, "model_round_measured": False,
+                              "cold_start_measured": False,
+                              "methods": summary}) + "\n")
+
+
+def test_combined_and_separate_helper_launch_counts_offline(tmp_path, monkeypatch):
+    """Fake only the process boundary to count helper invocations; no desktop or fixture starts."""
+    from tests.test_unix_computer_use_targeting import KEYNOTE, SAFARI, app_dict, inputs, mac, receipt
+
+    target, front = app_dict(KEYNOTE), app_dict(SAFARI)
+    tree = {"ok": True, "pid": 200, "window": "Deck.key", "nodes": [], "marks": [], "visited": 0,
+            "truncated": False, "truncated_by": [], "errors": {}, "elapsed_ms": 1,
+            "limits": {"max_nodes": 100, "timeout_ms": 5000, "text_limit": 200}}
+
+    def helper(args, _state):
+        data = json.loads(args[1])
+        assert data["app"] == "pid:200", data
+        if args[0] == "observe":
+            return {**tree, "target": target}
+        if args[0] == "element":
+            answer = {"ok": True, "target": target, "dispatched": True, "action_outcome": "completed",
+                      "element": {"identifier": "qa.commit"}, "element_after": {"identifier": "qa.commit"},
+                      "window": {"title": "Deck.key"}, "front_before": front, "front_after": front}
+            if data.get("observe"):
+                answer["observation"] = {**tree, "window": {"title": "Deck.key"}}
+            return answer
+        raise AssertionError(f"unexpected helper op: {args}")
+
+    _module, api, state = mac(tmp_path, monkeypatch, helper=helper)
+    action = {"app": "pid:200", "do": "press", "select": {"identifier": "qa.commit"}, "window": "Deck.key"}
+    assert receipt(api.tools["element_act"](**action))["ok"] is True
+    assert receipt(api.tools["ax_tree"](app="pid:200", window="Deck.key"))["ok"] is True
+    assert [args[0] for args in state["helper"]] == ["element", "observe"], state["helper"]
+    assert json.loads(state["helper"][0][1]).get("observe", False) is False
+    assert json.loads(state["helper"][1][1])["window"] == "Deck.key"
+    state["helper"].clear()
+    combined = receipt(api.tools["element_act"](**action, observe=True))
+    assert combined["ok"] is True and combined["observation"]["ok"] is True
+    assert [args[0] for args in state["helper"]] == ["element"], state["helper"]
+    assert json.loads(state["helper"][0][1])["observe"] is True
+    assert state["front"] == SAFARI and inputs(state) == []

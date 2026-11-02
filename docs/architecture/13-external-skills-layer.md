@@ -36,7 +36,7 @@ ClawHub lands atomically with file hashes; direct review attempts precede `skill
 
 ### Desktop actions and result views
 
-`skills/unix_computer_use/` separates quiet macOS AX from foreground input, binds coordinates to screenshots and records remote completion. Its `SKILL.md` owns never-raise targeting, receipts and platform limits; native tests use owned fixtures.
+`skills/unix_computer_use/`: quiet AX and foreground input; one macOS helper resolves/reads or acts/observes, preserving the action receipt on postread failure. `SKILL.md` owns targeting, bounds and receipts; native tests use owned fixtures.
 
 Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/tool_result.py`, `loop_tool_execution.py`.
 

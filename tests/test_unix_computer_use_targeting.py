@@ -59,6 +59,22 @@ def helper_op(argv: list[str]) -> list[str]:
     return [str(a) for a in argv[idx + 1:]]
 
 
+def observing(helper):
+    """``observe`` (resolve and tree in ONE helper process), for a fake without its own answer to it ("no fake"),
+    answered from that fake's ``resolve`` and ``tree`` answers."""
+    def answer(args, state):
+        out = helper(args, state)
+        if args[0] != "observe" or not str(out.get("error") or "").startswith("no fake"):
+            return out
+        spec = json.loads(args[1])
+        found = helper(["resolve", spec["app"]], state) if spec["app"] else {"ok": True, "candidates": [app_dict(state["front"])]}
+        if not found.get("ok"):
+            return {**found, "stage": "resolve"}
+        target = found["candidates"][0]
+        return {**helper(["tree", str(target["pid"]), str(spec["max_nodes"]), str(spec["timeout_ms"])], state), "target": target}
+    return answer
+
+
 def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""), lsappinfo=True, on_input=None):
     """A faked local Mac: lsappinfo reports ``state['front']``; the native helper answers through ``helper(args, state)``;
     ``on_input(argv, state)`` runs when cliclick is called (a key that moves the front, for instance)."""
@@ -113,7 +129,7 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""
                     "truncated": False, "limit": int(args[1]), "total": 2}
         return {"ok": False, "error": f"no fake for {op}"}
 
-    answer = helper or default_helper
+    answer = observing(helper or default_helper)
 
     def run(cmd, *a, **k):
         argv = [str(part) for part in cmd]
@@ -376,9 +392,10 @@ def test_capabilities_report_real_grants_and_targeting(tmp_path, monkeypatch):
 def test_ax_tree_reads_a_named_app_without_bringing_it_forward(tmp_path, monkeypatch):
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["ax_tree"](app="Keynote", max_nodes=40, timeout_ms=500))
-    assert out["ok"] is True and out["app"]["pid"] == 200 and out["window"] == "Deck.key"
-    assert [args[0] for args in state["helper"]] == ["resolve", "tree"], "resolve, then read; never activate"
-    assert state["helper"][1][1:] == ["200", "40", "500", "window", "false"]
+    assert out["ok"] is True and out["app"]["pid"] == 200 and out["window"] == "Deck.key" and "target" not in out
+    assert [args[0] for args in state["helper"]] == ["observe"], "resolve and read in one helper process; never activate"
+    assert json.loads(state["helper"][0][1]) == {"app": "Keynote", "max_nodes": 40, "timeout_ms": 500, "root": "window",
+                                                 "include_web": False, "text_limit": 200, "window": ""}
     assert state["front"] == SAFARI, "reading does not move the front"
     missing = receipt(api.tools["ax_tree"](app="Nope"))
     assert missing["ok"] is False and missing["reason"] == "not_running"
