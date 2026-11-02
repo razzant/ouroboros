@@ -301,3 +301,25 @@ def test_hurry_of_a_presence_turns_lane_row_refuses_typed_and_seeds_nothing(root
     assert seen["without_row"] == "task_not_live"
     assert seen["with_row"] == "presence_hurry_unsupported" and seen["http"] == (409, "presence_hurry_unsupported")
     assert seeded == []
+
+
+def test_the_owners_running_list_and_count_leave_a_presence_turn_to_its_place(root):
+    """Review R7: the mind's recent running tasks and its queue fact's ``running_count`` listed and counted a
+    correspondent's Presence turn as an unlabelled running task. As the roster (N2) and the owner-turn count (N8)
+    read it, it is its place's (live works names it ``inline_presence``); an owner turn beside it stays listed."""
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.tools.recent_tasks import _running_tasks
+    from supervisor import queue
+
+    seen = {}
+
+    def scenario(author, task):
+        _admit_lane_row(task)
+        _lane_turn(root, "direct", "owner-turn", 96)
+        queue.publish_queue_snapshot(reason="r7_probe")
+        seen["tid"] = task["id"]
+        seen["listed"] = [row["task_id"] for row in _running_tasks(root)]
+        seen["count"] = _queue_context_fact({"budget_drive_root": str(root)})["running_count"]
+
+    _live_turn(root, scenario)
+    assert seen["listed"] == ["owner-turn"] and seen["count"] == 1
