@@ -166,7 +166,11 @@ def _promotion_pool_disabled_from_snapshot(ctx: ToolContext) -> str:
         reason = str(snapshot.get("worker_pool_disabled_reason") or "")
         if reason not in {"", "unknown"}:
             return reason
-        if int(snapshot.get("worker_total") or 0) <= 0:
+        # Availability as ``model_detach.pool_available`` reads it: any started process answers. The
+        # project pool idles at zero slots after boot and after every quiet period (the lane's spare is
+        # the one resident), and a promote is what makes it grow; only an empty table is absence.
+        started = int(snapshot.get("worker_total") or 0) + int(snapshot.get("lane_carrier_total") or 0)
+        if started <= 0:
             return "no_workers"
         return ""
     except Exception:

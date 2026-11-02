@@ -237,7 +237,8 @@ def _queue_context_fact(task: Dict[str, Any]) -> Dict[str, Any]:
         rows = snapshot.get(key)
         fact[key + "_count"] = sum(isinstance(row, dict) for row in rows) if isinstance(rows, list) else None
     fact["reaping_count"] = snapshot.get("reaping_count")
-    fact["worker_total"] = snapshot.get("worker_total")
+    fact["worker_total"] = snapshot.get("worker_total")  # project slots: what max_workers bounds; idle is 0
+    fact["lane_carrier_total"] = snapshot.get("lane_carrier_total")  # the conversation lane's carriers, apart
     assignable = snapshot.get("assignable_idle_workers")
     if assignable is not None:
         fact["free_worker_slots"] = max(0, int(assignable))
