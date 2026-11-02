@@ -436,6 +436,7 @@ Ownership` section is delivered beside them.
 | 27 | size_cap_paydown | If the diff was shaped by a size limit (module cap, function gate, byte debt, or a reference book's size — added book text is paid by shortening the same book, the pairwise contribution-base rule): was it paid by making the code simpler where it lives? A reduction is honest when the reader holds fewer concepts, branches and state afterwards — dead code and duplicates removed, an existing owner reused; the same logic in fewer lines or tighter formatting is not one. An extraction is honest only when each resulting file has one responsibility you can state in one sentence without naming the other file, and the files have no mutual imports. A cap-driven bucket, a one-caller passthrough, or bytes bought by deleting contract-bearing comments, docstrings, messages or tests is a defect to report, not a paydown (BIBLE P7 «first simplify what exists»; DEVELOPMENT.md "Paying down a size cap"). | advisory when applicable |
 | 28 | capability_placement | Does the change add to the body a capability or a control that a setting, a declarative contribution or a skill could carry? If it opens a seam, does the seam ship with its first consumer, and does core consume the contract without naming a skill or vendor (DEVELOPMENT "Capability placement")? An honest answer is advice for the author, never a block. | advisory |
 | 29 | copy_mechanism | Does the change add or change a mechanism that copies a project, workspace or store (a checkout, clone, snapshot, retained view or scratch tree)? Does it name its job, the fault it prevents, its size on a small install and its remover (DEVELOPMENT "Live subagents")? A new kind of copy is a plan-review question. An honest answer is advice for the author, never a block. | advisory |
+| 30 | execution_placement | Where does this execute, and which interpreter does it share? Work added to the server process stays bounded by logical change: a pass over an unchanged live set reads nothing, and owner input, Stop and Panic never wait behind it. Cognition (an agent loop, a context build, a wake's preparation, a Presence body) runs in a custodied worker, except the disclosed `inline_call` and `inline_degraded` executors (ARCHITECTURE §10 invariant 24). An honest answer is advice for the author, never a block. | advisory |
 
 ### Body severity rules
 
@@ -443,7 +444,7 @@ Ownership` section is delivered beside them.
 - Items 12-13 and 15-21 are conditionally critical: FAIL only when the condition
   applies. If the condition does not apply, write verdict PASS with a short
   reason (e.g. "Not applicable — no new tool").
-- Items 22-27 are advisory: FAIL produces a warning but does not block. Item 24
+- Items 22-30 are advisory: FAIL produces a warning but does not block. Item 24
   (`cache_friendliness`) passes with "Not applicable" when the diff touches no
   prompt/context assembly.
 - Item 14 (self_consistency) is conditionally critical: FAIL only when the
