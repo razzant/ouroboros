@@ -205,3 +205,17 @@ def test_pool_counts_count_project_slots_and_report_lane_carriers_apart(monkeypa
     assert counts["lane_carrier_total"] == 1 and counts["lane_carrier_idle"] == 1
 
 
+# ---- the rollback export carries the format an older body treats as current -----------------------
+
+def test_the_rollback_export_is_stamped_format_one(published):
+    from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION
+
+    root, _now = published
+    queue.PENDING.append(_task("a", origin_message_text="x" * 2000, metadata={"owner_corpus": "x" * 2000}))
+    assert queue.persist_queue_snapshot("admit") is True
+    assert _read(root, "queue_snapshot.json")[FORMAT_KEY] == FORMAT_VERSION
+    assert queue.publish_queue_snapshot("server_shutdown") is True
+    exported = _read(root, "queue_snapshot.json")
+    assert exported[FORMAT_KEY] == 1 and queue_observation.SHARED_KEY not in exported
+    assert exported["pending"][0]["task"]["origin_message_text"] == "x" * 2000
+    assert queue_observation.load_queue_document(root, fresh=True)["pending"][0]["task"]["origin_message_text"] == "x" * 2000

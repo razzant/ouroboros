@@ -307,7 +307,7 @@ def test_rollback_export_embeds_every_row_for_an_older_reader(published):
     assert queue_observation.SHARED_KEY in _read(root, "queue_snapshot.json")
     assert queue.publish_queue_snapshot("pre_restart_exit") is True
     exported = _read(root, "queue_snapshot.json")
-    assert queue_observation.SHARED_KEY not in exported and exported[FORMAT_KEY] == FORMAT_VERSION
+    assert queue_observation.SHARED_KEY not in exported and exported[FORMAT_KEY] == 1, "the shape an older body calls current"
     for row in exported["pending"]:  # the shape an older body restores: ``dict(row["task"])`` with the text inline
         assert isinstance(row["task"]["origin_message_text"], str) and row["task"]["origin_message_text"] == OWNER_TEXT
         assert row["task"]["metadata"]["owner_corpus"] == OWNER_TEXT

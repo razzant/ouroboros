@@ -307,7 +307,9 @@ def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
     payload = {
         SCHEMA_VERSION_KEY: QUEUE_SNAPSHOT_SCHEMA_VERSION,
-        FORMAT_KEY: FORMAT_VERSION,
+        # Embedded rows are the shape format 1 named; an older body treats only 1 as current and would
+        # otherwise run its legacy conversion over this export (RV_MAIN, queue publication minor).
+        FORMAT_KEY: 1 if capture["rollback_readable"] else FORMAT_VERSION,
         "pending_count": len(capture["pending"]), "running_count": len(capture["running"]),
         **capture["pool"],
         "acceptance_fences": capture["acceptance_fences"],
