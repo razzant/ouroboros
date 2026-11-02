@@ -434,13 +434,17 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
 @pytest.mark.parametrize("name,previous_release,previous_version", [
     (name, 'd51b09bd61944f2e4d000f2fcce5e9a890f209fc', '0.1.0')
     for name in ('live_conversation', 'gemini_live', 'grok_realtime', 'openai_realtime')
-] + [('live_conversation', '96816f122', '0.1.1')])
+] + [('live_conversation', '96816f122', '0.1.1'),
+     ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
-def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, name, previous_release, previous_version, edited):
+def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
+                                                                               previous_version, edited):
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import compute_content_hash, save_enabled
     from tests.test_builtin_skill_platforms import git_payload
 
+    # The Unix release applies on macOS/Linux only; pin a host it applies to.
+    monkeypatch.setattr("ouroboros.contracts.skill_manifest.host_platform", lambda: "linux")
     seeds, drive = env
     repo = pathlib.Path(__file__).resolve().parents[1]
     git_payload(previous_release, f"skills/{name}", seeds / name)
@@ -463,7 +467,8 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.29', 'grok_realtime': '0.1.10', 'gemini_live': '0.1.19', 'openai_realtime': '0.1.9'}.get(name, '0.1.1')
+        version = {'live_conversation': '0.1.29', 'grok_realtime': '0.1.10', 'gemini_live': '0.1.19', 'openai_realtime': '0.1.9',
+                   'unix_computer_use': '0.6.1'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)
         assert compute_content_hash(installed) != previous_hash

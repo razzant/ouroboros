@@ -483,6 +483,19 @@ def _read_file_parity_block(ctx: Any, fp: "pathlib.Path") -> str:
     return _runtime_data_read_block(ctx, fp)
 
 
+def _canonical_task_source(ctx: Any, fp: "pathlib.Path", raw: bytes) -> bool:
+    """Whether ``fp`` is a digest-named source in a task's canonical store: write-once, it outlives
+    execution drives and the age sweep of ``uploads/views``, so it stays its own lasting address."""
+    from ouroboros.tool_access import canonical_data_root
+
+    try:
+        parts = fp.relative_to(canonical_data_root(ctx) / "task_results" / "artifacts").parts
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return (len(parts) == 4 and parts[1] == "source_handles"
+            and f"-{hashlib.sha256(raw).hexdigest()}." in parts[3])
+
+
 def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_original: bool = False) -> Tuple[Optional[Dict[str, str]], str]:
     """Validate a LOCAL image path against the SAME trust boundary the agent already
     holds via read_file/run_command (allowed roots + protected-artifact read_bytes
@@ -540,7 +553,7 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str, *, retain_origin
     except Exception as e:
         return None, _refuse(ctx, f"⚠️ Failed to read image file: {e}")
     source_path = str(fp)
-    if retain_original:
+    if retain_original and not _canonical_task_source(ctx, fp, raw):
         # Retain the admitted bytes BEFORE decoding/conversion, even on refusal.
         from ouroboros.image_preparation import retain_original as retain
         from ouroboros.tool_access import canonical_data_root

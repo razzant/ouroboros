@@ -36,7 +36,7 @@ from ouroboros.secret_masking import (
 )
 from ouroboros.mcp_headers import validate_headers
 from ouroboros.mcp_schema import filter_schema_literals, redact_metadata, tool_metadata
-from ouroboros.tools.tool_result import ToolResult
+from ouroboros.tools.tool_result import ToolResult, _replace_tool_result
 from ouroboros.platform_layer import IS_WINDOWS
 from ouroboros.config import get_runtime_mode
 from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
@@ -45,6 +45,9 @@ from ouroboros.workspace_executor import resolve_process_env, validate_process_e
 from ouroboros import mcp_catalog
 from ouroboros.mcp_schema import (
     _redact_error_text as _redact_error_text,
+    _content_part_text as _content_part_text,
+    _serialize_content_part as _serialize_content_part,
+    _stringify_call_result as _stringify_call_result,
     _exception_text, _model_facing_description, _model_facing_result, _normalize_input_schema,
 )
 
@@ -780,6 +783,7 @@ async def _call_tool_async(
     from ouroboros.model_wait import ModelWaitInterrupted
     from ouroboros.usage_accounting import UsageAccountingError
     from ouroboros.store import StoreError
+    from ouroboros.mcp_result_images import with_returned
     unsent_joined = False
 
     async def _do() -> ToolResult:
@@ -807,7 +811,7 @@ async def _call_tool_async(
                 active[2]["settled"] = True
             refusal.mcp_unsent_joined = True
             raise refusal
-        return _tool_result_from_call_result(result)
+        return with_returned(_tool_result_from_call_result(result), result)
 
     # Launch admission precedes transport entry: a stdio server starts there.
     try:
@@ -825,36 +829,6 @@ async def _call_tool_async(
         raise
 
 
-def _stringify_call_result(result: Any) -> str:
-    """Stringify MCP content parts without inventing fields."""
-    parts: List[str] = []
-    is_error = bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
-    for item in getattr(result, "content", []) or []:
-        text = getattr(item, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-            continue
-        # Best-effort JSON dump for non-text parts.
-        try:
-            parts.append(json.dumps(_serialize_content_part(item), ensure_ascii=False))
-        except Exception:
-            parts.append(repr(item))
-    # structuredContent is protocol data in its own right (E5, capinv-447):
-    # carry it even when text/content parts exist, unless it duplicates one.
-    structured = getattr(result, "structuredContent", None)
-    if structured is not None:
-        try:
-            dumped = json.dumps(structured, ensure_ascii=False)
-        except Exception:
-            dumped = repr(structured)
-        if dumped not in parts:
-            parts.append(f"structuredContent: {dumped}" if parts else dumped)
-    body = "\n\n".join(parts).strip() or "(empty result)"
-    if is_error:
-        return f"⚠️ MCP_TOOL_ERROR: {body}"
-    return body
-
-
 def _tool_result_from_call_result(result: Any) -> ToolResult:
     """Preserve the SDK error bit without trusting result-body markers."""
     is_error = bool(
@@ -867,29 +841,6 @@ def _tool_result_from_call_result(result: Any) -> ToolResult:
         text=_stringify_call_result(result),
         meta={"mcp_is_error": is_error},
     )
-
-
-def _serialize_content_part(item: Any) -> Dict[str, Any]:
-    """Best-effort conversion of an MCP content part into a JSON-safe dict."""
-    out: Dict[str, Any] = {}
-    for attr in ("type", "uri", "mimeType", "data", "annotations"):
-        value = getattr(item, attr, None)
-        if value is not None and not callable(value):
-            out[attr] = value
-    # EmbeddedResource carries its payload in a NESTED resource object (E5,
-    # capinv-447): omitting it dropped the text/blob of every embedded resource.
-    resource = getattr(item, "resource", None)
-    if resource is not None and not callable(resource):
-        nested: Dict[str, Any] = {}
-        for attr in ("uri", "mimeType", "text", "blob"):
-            value = getattr(resource, attr, None)
-            if value is not None and not callable(value):
-                nested[attr] = str(value) if attr == "uri" else value
-        if nested:
-            out["resource"] = nested
-    if "uri" in out:
-        out["uri"] = str(out["uri"])  # AnyUrl is not JSON-serializable
-    return out
 
 
 # Sync wrapper.
@@ -1458,9 +1409,10 @@ class MCPManager:
             return self._resolve_locked(prefixed_name)[0]
 
     def _call_tool_result(
-        self, prefixed_name: str, arguments: Dict[str, Any]
+        self, prefixed_name: str, arguments: Dict[str, Any], ctx: Any = None,
     ) -> ToolResult:
-        """Invoke one MCP tool while retaining host-attested provider facts."""
+        """Invoke one MCP tool while retaining host-attested provider facts; the calling
+        task's ``ctx`` lets ``mcp_result_images`` keep and project returned protocol images."""
         with self._lock:
             resolution, cfg, tool = self._resolve_locked(prefixed_name)
             timeout = self._tool_timeout_sec
@@ -1502,28 +1454,19 @@ class MCPManager:
         except BaseException as exc:  # noqa: BLE001 - any failure is reported
             not_sent = unsent(exc)
             if not_sent and isinstance(exc, (OwnerPauseRefused, StoreError)):
-                from ouroboros.tools.tool_result import launch_refusal_result, _replace_tool_result
+                from ouroboros.tools.tool_result import launch_refusal_result
                 return _replace_tool_result(launch_refusal_result(exc),
                                             meta_updates={"mcp_call_not_sent": True})
             body = f"⚠️ MCP_TOOL_ERROR: {_exception_text(exc, cfg)}"
-            text = _model_facing_result(cfg, tool.raw_name, body)
-            return ToolResult(
-                status="error",
-                code="MCP_ERROR",
-                text=text,
-                meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent},
-            )
-        text = _model_facing_result(
-            cfg,
-            tool.raw_name,
-            _redact_error_text(result.text, cfg),
-        )
-        return ToolResult(
-            status=result.status,
-            code=result.code,
-            text=text,
-            meta={**dict(result.meta), "dynamic_provider": True},
-        )
+            return ToolResult(status="error", code="MCP_ERROR", text=_model_facing_result(cfg, tool.raw_name, body),
+                              meta={"dynamic_provider": True, "mcp_call_not_sent": not_sent})
+        # The remote call is complete here; projecting it never turns it into a failure.
+        from ouroboros.mcp_result_images import project_returned
+        projected = project_returned(result, getattr(result, "returned", None), ctx, cfg, tool.raw_name)
+        if projected is None:
+            projected = _replace_tool_result(result, text=_model_facing_result(
+                cfg, tool.raw_name, _redact_error_text(result.text, cfg)))
+        return _replace_tool_result(projected, meta_updates={"dynamic_provider": True})
 
     def call_tool(self, prefixed_name: str, arguments: Dict[str, Any]) -> str:
         """Synchronously invoke an MCP tool and return its text projection."""
@@ -1586,6 +1529,6 @@ def call_mcp_tool(name: str, arguments: Dict[str, Any]) -> str:
     return get_manager().call_tool(name, arguments or {})
 
 
-def _call_mcp_tool_result(name: str, arguments: Dict[str, Any]) -> ToolResult:
-    """Internal typed ToolRegistry call helper."""
-    return get_manager()._call_tool_result(name, arguments or {})
+def _call_mcp_tool_result(name: str, arguments: Dict[str, Any], ctx: Any = None) -> ToolResult:
+    """Internal typed ToolRegistry call helper; ``ctx`` is the calling task's context."""
+    return get_manager()._call_tool_result(name, arguments or {}, ctx)
