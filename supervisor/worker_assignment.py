@@ -963,8 +963,13 @@ def assign_tasks() -> None:
 
         refused_this_pass = set()  # failed physical claims are not residual demand,
         deferred_this_pass = set()  # unless contention deferred them: the same work retries
+        from supervisor.worker_pool_lifecycle import is_project_slot
+
         for w in _pool().WORKERS.values():
-            while (w.busy_task_id is None and worker_ready(w) and not getattr(w, "resume_hold", "")
+            # Queued work goes to project slots only; the conversation lane's carriers are
+            # admitted by routing and never chosen for PENDING (owner decision 1A).
+            while (is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
+                    and not getattr(w, "resume_hold", "")
                     and getattr(w, "active_capacity", True) and _pool().PENDING):
                 chosen_idx, blocked = _choose_candidate(
                     queue, remaining, unresolved_invalid_id_set, refused_this_pass, _started_projection(), set())

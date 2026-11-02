@@ -209,13 +209,16 @@ def offer_to_author(root, task: dict, event, *, wake: bool = True) -> bool:
                        **({"context_source_ref": source} if source else {}),
                        **({"facts": list(event.facts)} if event.facts is not None else {}),
                        **{key: task[key] for key in ("attachment_manifest", "attachment_manifest_ref") if key in task}}, ensure_ascii=False)
-    def append():
+    def append(admit=None):
         if not write_task_message(root, text, author, source_task_id=task["id"], provenance="place_event",
                                   msg_id=msg_id,
                                   sender_origin={"place_id": task["metadata"]["focus"]["place_id"],
                                                  "conversation_key": event.conversation_key},
                                   place_arrival={"source_event_id": event.source_event_id,
-                                                 "message": dict(event.message), "wake": wake}):
+                                                 "message": dict(event.message), "wake": wake},
+                                  admit=admit):
+            if admit is not None and not admit():
+                return False  # the remote author stopped reading: ordinary admission takes the arrival
             raise OSError("The current author could not retain this place arrival; retry.")
         return True
     return (accept_author_mail(root, author, event.conversation_key, append)

@@ -236,8 +236,11 @@ def presence_review_wait(binding: ReviewWaitBinding, ctx: Any, checkpoint: dict,
         if not private_main_contact(block, binding.task_id) or checkpoint.get("reason") != "owner":
             raise ValueError("Presence can park only for its review or private owner question")
     lent = _yield_conversation(binding, ctx, checkpoint)
+    # A carried author parks through the pooled owner wait its carrier bound (the slot is lent);
+    # an inline author keeps the in-process wait.
+    wait = getattr(ctx, "owner_wait_callback", None)
     try:
-        outcome = direct_owner_wait(ctx, checkpoint)
+        outcome = wait(ctx, checkpoint) if callable(wait) else direct_owner_wait(ctx, checkpoint)
     except BaseException:
         if lent:
             ctx._presence_conversation_lost = "task_ended"

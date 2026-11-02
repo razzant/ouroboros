@@ -457,6 +457,8 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
     from ouroboros.budget_pause import (
         STATE_PAUSED, STATE_PAUSING, budget_pause_row, exact_pause_marker, set_budget_pause,
     )
+    from ouroboros.model_detach import detached_fields
+    from ouroboros.task_carrier import INLINE_EXECUTORS
     from supervisor import queue as queue_mod
     from supervisor.queue import _queue_lock
 
@@ -503,7 +505,12 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         fence = queue_mod.ACCEPTANCE_FENCES.get(marker["root_task_id"]) or {}
         worker = ctx.WORKERS.get(meta.get("worker_id"))
         owner = fence.get("pooled_owner")
-        parked = {"direct_owner": {"task_attempt": attempt}} if direct_turn and "pooled_owner" not in fence else None
+        # A conversation-lane turn has a row; its carrier may be an inline executor (a thread of this
+        # process on a pid-less pseudo-slot) whose fence is in-process, like the old direct turn's.
+        inline = worker is not None and getattr(worker, "executor", "worker") in INLINE_EXECUTORS
+        lane_turn = bool(task.get("_is_direct_chat")) or bool(evt.get("_is_direct_chat"))
+        parked = ({"direct_owner": {"task_attempt": attempt}}
+                  if (direct_turn or inline) and "pooled_owner" not in fence else None)
         if (not direct_turn and worker is not None and isinstance(owner, dict) and worker.busy_task_id == task_id
                 and type(owner.get("pid")) is int and owner["pid"] == worker.proc.pid
                 and type(owner.get("task_attempt")) is int and owner["task_attempt"] == attempt):
@@ -521,8 +528,11 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         ctx.RUNNING.pop(task_id, None)
         paused_task = dict(task)
         paused_task["_budget_pause"] = marker
-        if direct_turn:
-            # The direct lane never enqueued this row, so it lacks the sequence,
+        # The detach stamps ride the durable pause row (``model_detach.detached_fields``): the row's
+        # task never saw them, so a parked lane turn takes them here, as the direct turn's record did.
+        paused_task.update(detached_fields(paused_task, row))
+        if direct_turn or lane_turn:
+            # The conversation lane never enqueued this row, so it lacks the sequence,
             # priority and ``queued_at`` that ``enqueue_task`` would have given
             # it; the sort key and the census phase need them (queue lock held).
             counter = getattr(queue_mod, "QUEUE_SEQ_COUNTER_REF", None)

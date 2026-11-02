@@ -79,6 +79,10 @@ def pool(tmp_path, monkeypatch):
     original = workers.Worker(0, Process(42), InputQueue(), busy_task_id="owner")
     affirm_ready(original)
     slots[0] = original
+    # The project pool's own growth and retirement are read here; the conversation lane's
+    # spare and its replenishment are ``tests/test_conversation_lane_pool.py``'s (4A).
+    from supervisor import conversation_lane
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", lambda: None)
     started = time.time() - 4000
     running["owner"] = {"task": root_task, "worker_id": 0, "attempt": 3,
                         "started_at": started, "last_heartbeat_at": time.time()}
@@ -93,9 +97,10 @@ def pool(tmp_path, monkeypatch):
                            event=event, wait=wait, created=created)
 
 
-def maintain_capacity():
+def maintain_capacity(demand: int = 0):
+    """``demand``: queued work the forecast reports; growth buys only that (4A), never a spare."""
     worker_owner_wait.maintain_owner_wait_capacity()
-    worker_pool_lifecycle.reconcile_worker_capacity(lambda: 0)
+    worker_pool_lifecycle.reconcile_worker_capacity(lambda: demand)
 
 
 def quiesce_and_reap(worker):
@@ -137,7 +142,7 @@ def test_snapshot_failure_never_lends_capacity_or_confirms_park(pool, monkeypatc
 
 def test_replacement_readiness_and_same_stack_resume(pool):
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     assert replacement.reaping and replacement.active_capacity
     assert pool.original is workers.WORKERS[0] and len(pool.created) == 1
@@ -173,7 +178,7 @@ def test_foreign_or_stale_event_does_not_park(pool, field, value):
 
 def test_dead_parked_worker_is_removed_without_respawn(pool):
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     pool.original.proc.alive = False
     assert workers.respawn_worker(0)
@@ -216,7 +221,7 @@ def test_ordinary_pool_does_not_grow_to_configured_max(pool, monkeypatch):
 
 def exhausted_replacement(pool):
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     replacement.proc.alive = False
     replacement.readiness_exhausted = True
@@ -289,7 +294,7 @@ def test_stop_policy_keeps_its_authority_at_resume(pool, monkeypatch, policy, gr
     from ouroboros import cancel_intents
 
     park(pool)
-    maintain_capacity()
+    maintain_capacity(demand=1)
     replacement = workers.WORKERS[1]
     replacement.reaping = False
     affirm_ready(replacement)
@@ -373,7 +378,7 @@ def test_cold_assignment_restores_old_clock_without_budget_replay_classification
 def test_stopped_last_sleeper_preserves_enabled_capacity_only(pool, monkeypatch, replacement_exists, disabled):
     park(pool)
     if replacement_exists:
-        maintain_capacity()
+        maintain_capacity(demand=1)
     if disabled:
         monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "worker_crash_storm")
     workers.RUNNING.pop("owner")

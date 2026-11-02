@@ -275,6 +275,20 @@ def execution_owner_record(drive_root: Any, task: Dict[str, Any], kind: str) -> 
         from ouroboros.review_operation import controller_identity
 
         record["controller"] = controller_identity()
+    # The carrier facts beside the origin (``task_carrier``): a pooled attempt is a
+    # project-lane worker's; a conversation-lane admission stamped its lane and
+    # executor on the task before this record is (re)bound, and they travel with
+    # the kind. A legacy record names neither (additive; old rows decode).
+    from ouroboros.task_carrier import EXECUTOR_WORKER, EXECUTORS, LANE_CONVERSATION, LANE_PROJECT
+
+    prior = task.get("_execution_owner") if isinstance(task.get("_execution_owner"), dict) else {}
+    if kind == "pooled":
+        record.update(lane=LANE_PROJECT, executor=EXECUTOR_WORKER)
+    else:
+        if prior.get("lane") in {LANE_PROJECT, LANE_CONVERSATION}:
+            record["lane"] = prior["lane"]
+        if prior.get("executor") in EXECUTORS:
+            record["executor"] = prior["executor"]
     return record
 
 

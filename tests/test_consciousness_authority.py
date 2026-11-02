@@ -277,28 +277,25 @@ def test_act_keeps_the_light_positive_paths(tmp_path, monkeypatch):
 
 
 def test_the_lane_attaches_the_level_to_the_wake_contract(monkeypatch, tmp_path):
+    """The door admits the wake bare; the carrier's first step derives the level's two consequences."""
     import queue
-    import threading
 
-    from ouroboros import agent as agent_module
     from supervisor import workers
-    from tests.test_consciousness_wake_lane import _lane, _wait_for
+    from tests.conversation_carrier_support import carry
+    from tests.test_consciousness_wake_lane import _lane
 
-    _lane(monkeypatch, tmp_path, event_q=queue.Queue())
+    spare = _lane(monkeypatch, tmp_path, event_q=queue.Queue())
     seen: list = []
-    done = threading.Event()
 
     class Actor:
         def handle_task(self, task):
             seen.append(task)
-            done.set()
             return []
 
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kw: Actor())
     receipt = workers.handle_wake_direct(1, "wake", {**WAKE_META, "consciousness_autonomy": "act"})
-    assert receipt["admitted"] is True
-    assert done.wait(10) and _wait_for(lambda: bool(seen))
-    task = seen[0]
+    assert receipt["admitted"] is True and seen == []  # nothing of the body ran in the server
+    carry(workers, spare, Actor())
+    task, = seen
     assert task["task_contract"]["disabled_tools"] == list(ca.ACT_DISABLED)
     assert task["metadata"]["runtime_mode_cap"] == "light"
 
