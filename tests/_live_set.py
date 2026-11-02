@@ -344,6 +344,49 @@ def _published_change(meter: Any, root: pathlib.Path, stage: str, result: Dict[s
     return _measured_pass(meter, f"L:{stage}:publication-change", change, sm, root, stop, result)
 
 
+def _crash_after_each_replacement(root: pathlib.Path) -> List[Dict[str, Any]]:
+    """E4 under a kill: the publication dies after its n-th file replacement, for each n until one publishes whole. What is on
+    disk then (a kill leaves it so; here a refused replacement stops the rest) is what a restart and a reader meet."""
+    import os
+
+    from ouroboros.queue_observation import load_queue_document, queue_stamp
+    from supervisor import queue
+
+    real, facts = os.replace, []
+    for allowed in range(0, 8):
+        done: List[str] = []
+
+        def replace(src, dst, *args, allowed=allowed, done=done, **kwargs):
+            if len(done) >= allowed and os.path.basename(os.fspath(dst)) in _QUEUE_FILES:
+                raise OSError("killed here")
+            if os.path.basename(os.fspath(dst)) in _QUEUE_FILES:
+                done.append(os.path.basename(os.fspath(dst)))
+            return real(src, dst, *args, **kwargs)
+
+        os.replace = replace
+        try:
+            with queue._queue_lock:
+                queue.PENDING.append(_task(f"live-crash-{allowed}"))
+                queue.persist_queue_snapshot(reason="live_crash")
+            published = _publish_as_the_tick_does(queue)
+        except Exception:
+            published = False
+        finally:
+            os.replace = real
+        document = load_queue_document(root)
+        stamp = queue_stamp(document)
+        dispatch = load_queue_document(root, "queue_dispatch.json")
+        facts.append({"allowed": allowed, "replaced": done, "published": published, "certifies": bool(stamp),
+                      "documents_agree": bool(stamp) and dispatch.get("generation") == stamp.get("generation")
+                      and f"live-crash-{allowed}" in str(document.get("pending"))})
+        if published:
+            break
+    return facts
+
+
+_QUEUE_FILES = frozenset({"queue_snapshot.json", "queue_dispatch.json", "direct_roots.json", "queue.alive"})
+
+
 def _reader_sees_owner_text(root: pathlib.Path) -> bool:
     from ouroboros.queue_observation import load_queue_document
 
@@ -415,6 +458,7 @@ def measure(meter: Any, srv: Any, client: Any, result: Dict[str, Any], root: pat
     change.update(row_published=f"live-change-{STAGES[-1]}" in document, owner_text_copies=document.count(OWNER_TEXT[:400]),
                   reader_sees_owner_text=_reader_sees_owner_text(root))
     out["change"] = change
+    out["crashes"] = _crash_after_each_replacement(root)
     out["heartbeat"] = _heartbeat_facts(meter, srv, client, result, root, stop)
     out["state_change"] = _state_change_facts(client, root)
 

@@ -133,7 +133,7 @@ def measure(base: pathlib.Path, k: int, **plan: Any) -> Dict[str, Any]:
     # The delegated copies live under the worktree root the build and the boot both name (tests/_scale_root.py).
     env = {**os.environ, "OUROBOROS_DATA_DIR": str(root), "OUROBOROS_SETTINGS_PATH": str(root / "settings.json"),
            "OUROBOROS_REPO_DIR": str(repo), "OUROBOROS_HOST_SERVICE_PORT": "0",
-           "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(worktree_root(root))}
+           "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(worktree_root(root)), "COST_STORE_JOURNAL": str(plan.get("journal") or "")}
     facts_path, spec_path, out_path = home / "facts.json", home / "spec.json", home / "measured.json"
     _child("tests._scale_root", [str(root), str(k), str(facts_path)], env, home / "build.log")
     facts = json.loads(facts_path.read_text(encoding="utf-8"))

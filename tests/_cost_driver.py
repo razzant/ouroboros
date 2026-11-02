@@ -83,7 +83,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
 from tests._cost_meter import BOUNDARY, CostMeter, tag_of, tagged
-from tests._scale_root import CURRENT, money, spend_limit_usd, terminal_detail
+from tests._scale_root import CURRENT, force_store_journal, money, spend_limit_usd, terminal_detail
 
 READY_TIMEOUT_SEC = 240.0  # the transport bound of this measurement, not a judgment about the boot
 # The supervisor is held before its first tick, and the body's driver parked, for the whole measurement;
@@ -854,6 +854,7 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
 
         import server as srv
 
+        force_store_journal()
         _mark(result, "imported")
         _stub_external_effects(srv, result, meter)
         stubs = _stub_duty_effects(result)
@@ -898,6 +899,10 @@ def run(spec: Dict[str, Any]) -> Dict[str, Any]:
                     from tests import _live_set
 
                     _live_set.measure(meter, srv, client, result, root, spec, stubs)
+                elif spec.get("plan") == "stand":  # the production-shaped stand: that set, the rooms and the turns
+                    from tests import _stand
+
+                    _stand.measure(meter, srv, client, result, root, spec, stubs)
                 else:
                     _measure_contract(meter, srv, client, result, root, facts, stubs)
             finally:
