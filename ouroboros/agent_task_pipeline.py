@@ -1433,13 +1433,13 @@ def build_review_context(env: Any) -> str:
         # the panel, tests, custody and binding, none of which this section decides.
         lines: List[str] = ["## Review Continuity", f"- repo_key={repo_key}"]
 
-        marker_current, look_unreadable = stale_marker_status(state, pathlib.Path(env.drive_root), repo_key)
-        if marker_current:
+        marker, look_unreadable = stale_marker_status(state, pathlib.Path(env.drive_root), repo_key)
+        if marker:
             lines.append(
-                f"- stale_marker={state.last_stale_from_edit_ts[:19]}: "
-                f"{_truncate_with_notice(state.last_stale_reason or 'worktree edit invalidated advisory freshness', 220)}"
+                f"- stale_marker={marker['ts'][:19]}: "
+                f"{_truncate_with_notice(marker['reason'] or 'worktree edit invalidated advisory freshness', 220)}"
             )
-            lines.append(f"  invalidated_by={state.stale_marker_attribution_note()}")
+            lines.append(f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}")
             if look_unreadable:
                 lines.append(f"  preflight_unreadable={_truncate_with_notice(look_unreadable, 220)} (marker unverified)")
 
@@ -1551,7 +1551,7 @@ def build_review_context(env: Any) -> str:
 
         from ouroboros.section_floor import HostSection
 
-        operative = '\n'.join(continuity_status_lines(state, repo_dir, (marker_current, look_unreadable)) + lines[continuation_start:]
+        operative = '\n'.join(continuity_status_lines(state, repo_dir, (marker, look_unreadable)) + lines[continuation_start:]
                               + ['Historical review ledger: review_status().'])
         history = format_status_section(state, repo_dir=repo_dir)
         if history:
