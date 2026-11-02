@@ -129,7 +129,7 @@ def test_park_is_durable_before_ack_and_preserves_running_ownership(pool):
 
 
 def test_snapshot_failure_never_lends_capacity_or_confirms_park(pool, monkeypatch):
-    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
     worker_owner_wait.handle_owner_wait(pool.event, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "refused"
     assert pool.original.active_capacity and not pool.created
@@ -202,7 +202,7 @@ def test_owner_wait_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
 def test_resume_snapshot_failure_keeps_original_parked(pool, monkeypatch):
     park(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
     maintain_capacity()
     assert not pool.original.active_capacity and pool.original.in_q.empty()
     assert load_task_result(pool.root, "owner")["owner_wait"]["state"] == "waiting"
@@ -253,7 +253,7 @@ def test_exhausted_reservation_and_original_rollback_together(pool, monkeypatch,
 
         monkeypatch.setattr(worker_owner_wait, "set_owner_wait", fail_first)
     elif failure == "snapshot":
-        monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **k: False)
+        monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **k: False)
     else:
         def fail_command(*a, **k):
             raise OSError("command unavailable")
@@ -500,7 +500,7 @@ def test_failed_grant_rolls_back_marker_and_wait_together(pool, monkeypatch, fai
     park(pool)
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
     if failure == "snapshot":
-        monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kw: False)
+        monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: False)
     else:
         def fail_command(*args, **kwargs):
             raise OSError("input queue unavailable")

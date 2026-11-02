@@ -22,6 +22,7 @@ from pathlib import Path
 import re
 
 from ouroboros import query_data_sql as sql, store
+from ouroboros.queue_observation import SHARED_KEY
 from ouroboros.tool_capabilities import RESULT_VIEW_PARAMS
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -363,7 +364,14 @@ def _record(ctx, root, kind, identity, child, state_file, op, where, tail, cap, 
         value = {**json.loads(raw), "removers": place_removers(root)}
         raw = _canonical(value)
         return raw, value, True, False, len(raw), False
-    return raw, json.loads(raw), False, False, len(raw), False
+    value = json.loads(raw)
+    if kind == "queue_snapshot" and SHARED_KEY in value:  # replicated task values are published once; the agent reads whole rows
+        from ouroboros.queue_observation import expand_shared
+
+        value = expand_shared(value)
+        raw = _canonical(value)
+        return raw, value, True, False, len(raw), False
+    return raw, value, False, False, len(raw), False
 
 
 def _query_data(ctx: ToolContext, *, op: str, db="current", query="", kind="", ids=None,

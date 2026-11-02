@@ -1227,7 +1227,7 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
                 detail='root_resume_generation_changed',
                 extra={'root_task_id': root_task_id, 'root_grant_id': selection['root_grant_id'],
                        'root_resume_generation': selection['root_resume_generation']})
-        return bool(q.persist_queue_snapshot(reason='budget_hold_selected'))
+        return bool(q.publish_queue_snapshot(reason='budget_hold_selected'))  # durable before the selection stands
 
     from ouroboros.owner_pause import complete_consumed_member_resume
     refused = (complete_consumed_member_resume(result_root, root_task_id, task_id, completing, publish, withdraw)

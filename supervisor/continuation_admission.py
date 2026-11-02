@@ -99,7 +99,7 @@ def _replay(q: Any, predecessor: str, nonce: str, successor: str) -> Optional[Di
                                   **carried_execution_fields(binding))
             if row is not None and row.get("_continuation_prepared"):
                 prepared = row.pop("_continuation_prepared")
-                if q.persist_queue_snapshot(reason="owner_continue_binding_recovered") is not True:
+                if q.publish_queue_snapshot(reason="owner_continue_binding_recovered") is not True:
                     row["_continuation_prepared"] = prepared
                     return {"ok": False, "error": "queue_snapshot_persist_failed",
                             "successor_task_id": successor, "unconfirmed": True}
@@ -890,9 +890,9 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
             q.release_task_admission(successor, token)
             refused, unadmitted = {"ok": False, "error": str(admitted["_admission_blocked"]),
                                    "successor_task_id": successor}, True
-        elif q.persist_queue_snapshot(reason="owner_continue_admitted") is not True:
+        elif q.publish_queue_snapshot(reason="owner_continue_admitted") is not True:  # durable before ok
             q.PENDING[:] = [row for row in q.PENDING if str(row.get("id") or "") != successor]
-            unadmitted = q.persist_queue_snapshot(reason="owner_continue_rollback") is True
+            unadmitted = q.publish_queue_snapshot(reason="owner_continue_rollback") is True
             q.release_task_admission(successor, token)
             # The claim stays: the same nonce retries this admission, a new one is refused.
             refused = {"ok": False, "error": "queue_snapshot_persist_failed", "successor_task_id": successor}
@@ -914,7 +914,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                 return {"ok": False, "error": "continuation_publication_unconfirmed",
                         "successor_task_id": successor, "unconfirmed": True, "detail": str(exc)[:200]}
             prepared = admitted.pop("_continuation_prepared")
-            if q.persist_queue_snapshot(reason="owner_continue_committed") is not True:
+            if q.publish_queue_snapshot(reason="owner_continue_committed") is not True:
                 admitted["_continuation_prepared"] = prepared
                 return {"ok": False, "error": "queue_snapshot_persist_failed",
                         "successor_task_id": successor, "unconfirmed": True}

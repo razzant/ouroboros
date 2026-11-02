@@ -670,8 +670,8 @@ def _run_supervisor(settings: dict) -> None:
 
         from supervisor.queue import (
             enqueue_task, enforce_task_timeouts, enqueue_evolution_task_if_needed,
-            persist_queue_snapshot, restore_pending_from_snapshot,
-            queue_deep_self_review_task, sort_pending,
+            persist_queue_snapshot, publish_queue_changes, restore_pending_from_snapshot,
+            queue_deep_self_review_task, sort_pending, tick_publisher_started,
         )
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
@@ -812,7 +812,7 @@ def _run_supervisor(settings: dict) -> None:
     _last_custody_reap = [0.0]  # recovered checking copies become eligible off-loop after readiness
     _last_review_job_reconcile = [time.time()]
     # The watchdog was started before startup recovery; never start another here.
-
+    tick_publisher_started()  # queue marks publish on this loop's tick while it lives (queue_publication)
     while not _restart_requested.is_set() and not _supervisor_stop.is_set() and not _exit_signalled.is_set():
         try:
             _loop_liveness[1], _loop_liveness[0] = loop_phase_facts(_loop_liveness, "events", new_tick=True), time.monotonic()
@@ -867,8 +867,7 @@ def _run_supervisor(settings: dict) -> None:
             if _restart_requested.is_set():
                 break  # restart just triggered (drain done) — exit without assigning new work (bridge intake already ran early this iteration)
             assign_tasks()
-            if persist_queue_snapshot(reason="main_loop") is False:  # None: a saved queue kept as it is
-                raise RuntimeError("queue publication failed")
+            publish_queue_changes()  # the one publisher: writes outside Q when the revision moved; raises on failure
             if _consciousness is not None and not draining and not _restart_lifecycle.agent_restart_pending():
                 try:
                     _consciousness.tick(time.time())

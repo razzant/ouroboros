@@ -95,10 +95,16 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # tree did not bear it out, so the three invariants below were not running on
     # them. Sets are the tool-derived exact read sets on these bytes.
     "supervisor/queue_snapshot.py": ("supervisor/queue.py", "_queue", frozenset({
-        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "INITIALIZED", "PENDING", "PRIOR_DIRECT_ROOTS",
+        "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "PENDING", "PRIOR_DIRECT_ROOTS",
         "QUEUE_PUBLICATION", "QUEUE_SEQ_COUNTER_REF", "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock",
-        "append_jsonl", "atomic_write_text", "enqueue_task", "parse_iso_to_ts",
+        "append_jsonl", "enqueue_task", "parse_iso_to_ts",
         "persist_queue_snapshot", "restore_invalid_depth_admission", "sort_pending",
+    })),
+    # L5 (server-saturation sprint): publication left the restore leaf for its own owner; the
+    # capture reads the live maps and the publication record through the same handle.
+    "supervisor/queue_publication.py": ("supervisor/queue.py", "_queue", frozenset({
+        "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES", "INITIALIZED", "PENDING", "QUEUE_PUBLICATION",
+        "QUEUE_SNAPSHOT_PATH", "RUNNING", "_queue_lock", "atomic_write_text",
     })),
     "supervisor/queue_timeouts.py": ("supervisor/queue.py", "_queue", frozenset({
         "BUDGET_ROOT_FENCES", "DRIVE_ROOT", "FINALIZATION_GRACE_SEC", "HEARTBEAT_STALE_SEC", "PENDING",

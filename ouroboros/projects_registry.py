@@ -917,7 +917,9 @@ def task_presentation_snapshot(drive_root: Any, task_id: str, *, task: Any = Non
                 sources.append(stored)
         except Exception:
             log.debug("task presentation result lookup failed for %s", tid, exc_info=True)
-        snapshot = read_json_dict(pathlib.Path(drive_root) / "state" / "queue_snapshot.json") or {}
+        from ouroboros.queue_observation import load_queue_document
+
+        snapshot = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
         for row in [*list(snapshot.get("running") or []), *list(snapshot.get("pending") or [])]:
             queued = row.get("task") if isinstance(row, dict) else None
             if isinstance(queued, dict) and str(queued.get("id") or row.get("id") or "") == tid:

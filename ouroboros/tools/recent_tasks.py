@@ -187,18 +187,12 @@ def _queue_snapshot(drive_root: pathlib.Path) -> tuple[Dict[str, Any], bool]:
     Never written means nothing was ever queued; a written snapshot that cannot be
     read, or lists its rows in a shape this reader cannot walk, proves no absence.
     """
-    path = drive_root / "state" / "queue_snapshot.json"
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
+    from ouroboros.queue_observation import load_queue_document
+
+    data = load_queue_document(drive_root)  # shared task values expanded, parsed once per publication
+    if data.get("_snapshot_missing"):
         return {}, False
-    except (OSError, UnicodeDecodeError):
-        return {}, True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}, True
-    if not isinstance(data, dict) or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
+    if data.get("_snapshot_invalid") or any(not isinstance(data.get(key, []), list) for key in ("running", "pending")):
         return {}, True
     return data, False
 
@@ -214,8 +208,7 @@ def _owner_record(row: Dict[str, Any] | None, queued: Dict[str, Any]) -> Dict[st
 
 
 def _running_tasks(drive_root: pathlib.Path, binding: str | None = None) -> List[Dict[str, Any]]:
-    snapshot, _error = _read_json(drive_root / "state" / "queue_snapshot.json")
-    snapshot = snapshot or {}
+    snapshot, _error = _queue_snapshot(drive_root)
     running = snapshot.get("running")
     if not isinstance(running, list):
         return []

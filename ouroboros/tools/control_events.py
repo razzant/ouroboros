@@ -158,10 +158,12 @@ def _promotion_pool_disabled_from_snapshot(ctx: ToolContext) -> str:
     already says the executor pool was deliberately disabled.
     """
     try:
+        from ouroboros.queue_observation import load_queue_document
+
         root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-        snapshot = json.loads(
-            (root / "state" / "queue_snapshot.json").read_text(encoding="utf-8")
-        )
+        snapshot = load_queue_document(root)
+        if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+            return ""
         reason = str(snapshot.get("worker_pool_disabled_reason") or "")
         if reason not in {"", "unknown"}:
             return reason

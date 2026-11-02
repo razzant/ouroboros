@@ -177,7 +177,7 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
             # reads the durable grant as consumed (#1196, F3); it decides nothing
             # while the task stays RUNNING here.
             worker.active_capacity = False
-            if not queue.persist_queue_snapshot(reason="owner_wait_parked"):
+            if not queue.publish_queue_snapshot(reason="owner_wait_parked"):  # durable before the park stands
                 raise RuntimeError("owner wait queue snapshot was not persisted")
         except Exception as exc:
             if (not park_written and isinstance(exc, StoreBusy) and exc.reason == "contention"
@@ -362,7 +362,7 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
             meta["budget_paused_sec"] = paused
             meta.pop("sleep_parked_at", None)
             try:
-                if not queue.persist_queue_snapshot(reason="owner_wait_resumed"):
+                if not queue.publish_queue_snapshot(reason="owner_wait_resumed"):  # durable before resume_granted
                     raise RuntimeError("owner wait resume snapshot was not persisted")
                 _command(worker, task_id, resumed, "resume_granted")
             except Exception:
@@ -387,7 +387,7 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
             # The durable grant stands without its put: rewrite ``waiting`` outside Q, best effort.
             try:
                 set_owner_wait(_pool().DRIVE_ROOT, task_id, wait, expected_wait_id=wait["wait_id"])
-                queue.persist_queue_snapshot(reason="owner_wait_grant_failed")
+                queue.publish_queue_snapshot(reason="owner_wait_grant_failed")
             except Exception:
                 log.warning("Owner-wait rollback remains unpersisted for %s", task_id, exc_info=True)
     if quiz_id and not control_wake:

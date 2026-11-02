@@ -102,7 +102,7 @@ def release_agent_restart(request_id: str, reason: str) -> None:
     with queue._queue_lock:
         if _AGENT_RESTART.get("request_id") == request_id and agent_restart_pending():
             _AGENT_RESTART.update(status="released", refusal=reason)
-            queue.persist_queue_snapshot(reason="agent_restart_released")
+            queue.publish_queue_snapshot(reason="agent_restart_released")  # the receipt the requester polls
 
 
 def defer_evolution_restart(tx: dict, *, terminal_retry=None, task_attempt=None) -> str:
@@ -176,7 +176,7 @@ def _accept_agent_restart(ctx) -> bool:
                 _AGENT_RESTART.update(status="refused", refusal="requester_not_active_or_intake_closed")
             else:
                 _AGENT_RESTART.update(status="accepted", started=_started_restart_work())
-            queue.persist_queue_snapshot(reason="agent_restart_intent")
+            queue.publish_queue_snapshot(reason="agent_restart_intent")  # the receipt the requester polls
             return _AGENT_RESTART.get("status") == "accepted"
         finally:
             queue._queue_lock.release()
@@ -727,7 +727,7 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
                 if agent_restart_pending():
                     _AGENT_RESTART_REPLY.clear()
                     _AGENT_RESTART_REPLY.update(request_id=request_id, status="refused", refusal="restart_already_pending")
-                    queue.persist_queue_snapshot(reason="agent_restart_refused")
+                    queue.publish_queue_snapshot(reason="agent_restart_refused")
                     return
                 _AGENT_RESTART.clear()
                 _AGENT_RESTART.update({**evt, "status": "awaiting", "started": {}})
@@ -964,7 +964,10 @@ def _perform_supervisor_restart(server,
             ctx.update_state(lambda live: live.__setitem__("session_id", server.uuid.uuid4().hex))
         except Exception:
             server.log.warning("Restart session id not rotated: runtime state unavailable", exc_info=True)
-        ctx.persist_queue_snapshot(reason="pre_restart_exit")
+        from supervisor.queue import publish_queue_snapshot
+
+        # Embedded rows: an older body after a rollback restores this document (queue_publication).
+        publish_queue_snapshot(reason="pre_restart_exit", rollback_readable=True)
     except BaseException:
         from supervisor.queue import reopen_queue_returns
 
