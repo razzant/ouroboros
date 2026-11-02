@@ -94,27 +94,31 @@ def session_inputs(provider, window, reserve, root):
     return module.ROUTE, model, route, asdict(limit), factory
 
 
-def report_session(core, tools, *, root, scratch, window, reserve, mode, provider):
-    from devtools.context_fit_report import measure_core, REPO
+def report_session(core, tools, *, root, scratch, window, reserve, mode, provider, task=None, schemas=None):
+    """The offline call envelope of one measuring task. ``task`` and ``schemas`` are the report's own: the task the core was
+    captured for and the initial tool selection, shared by the plan, the refusal bound and the call host. Without them a
+    plain direct turn and the registry's initial selection."""
+    from devtools.context_fit_report import measure_core, surface_counts, tool_context
     from ouroboros.call_peers import LiveCallHub
     from ouroboros.call_protocol import CallSpec
     from ouroboros.context_fit import build_context_fit_plan, MinimumViewUnfit
     from ouroboros.contracts.live_conversation import LiveConfig
     from ouroboros.live_conversation import ConversationHost
     from ouroboros.memory_view import snapshot_from_json
-    from ouroboros.tools.tool_context import ToolContext
+    from ouroboros.tool_policy import initial_tool_schemas
     from skills.live_conversation.driver import INITIAL_TOOLS, call_tools, session_options
 
     transport, model, route, output, factory = session_inputs(provider, window, reserve, root)
     evidence = declared_evidence(window, reserve, asdict(model.facts), output)
-    task = dict(id=core.section_task_id, chat_id=int(snapshot_from_json(core.memory_view_json).spec.room_id),
-                _is_direct_chat=True, type='task')
+    task = task or dict(id=core.section_task_id, chat_id=int(snapshot_from_json(core.memory_view_json).spec.room_id),
+                        _is_direct_chat=True, type='task')
+    schemas = initial_tool_schemas(tools, context_mode=mode) if schemas is None else schemas
     with cold_density():
         try:
             plan = build_context_fit_plan(SimpleNamespace(drive_root=root), core, task, preferred_mode=mode,
-                tool_schemas=tools.schemas(), route_resolver=lambda *a, **kw: (route, evidence))
+                tool_schemas=schemas, route_resolver=lambda *a, **kw: (route, evidence))
         except MinimumViewUnfit:
-            result = measure_core(core, tools.schemas(), root=root, window=window, reserve=reserve, mode=mode,
+            result = measure_core(core, schemas, root=root, window=window, reserve=reserve, mode=mode, task=task,
                                   route=route, route_facts=asdict(model.facts), response_limit=output)
             result['diagnostic_notes'].append('Task preparation refused; the session seam was not reached.')
             return result
@@ -123,8 +127,7 @@ def report_session(core, tools, *, root, scratch, window, reserve, mode, provide
         turn = SimpleNamespace(config=config, catalog_model=model, route=transport, model=route['model'],
             native_model=model.id, spec=spec, opening='', feature={
                 'call_tools': call_tools(scratch / 'feature'), 'initial_tools': INITIAL_TOOLS})
-        ctx = ToolContext(repo_dir=REPO, drive_root=scratch / 'host', task_id=task['id'],
-                          current_chat_id=task['chat_id'], is_direct_chat=True)
+        ctx = tool_context(scratch / 'host', task)  # the host writes under scratch; its task facts are the capture's
         ctx.context_fit_plan = plan
         tools.set_context(ctx)
         hub = LiveCallHub(spec)
@@ -133,6 +136,7 @@ def report_session(core, tools, *, root, scratch, window, reserve, mode, provide
             result = measure_session(host, factory, session_options(host), observation_fp='')
         finally:
             hub.close('diagnostic_done')
+    result['tools']['by_surface'] = surface_counts(host.schemas, own=host.call_tools)
     result['diagnostic_notes'] = [
         'Bundled default model and call options; saved feature settings/languages, opening turn and live mailbox are not supplied.',
         'Real host tool selection, call tools, driver instructions and provider wire are included; no session was opened.',
