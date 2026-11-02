@@ -13,11 +13,17 @@
   <link rel="stylesheet" href="/onboarding/static/model_roles.css">
 </head>
 <body>
-  <div class="onboarding-appearance">
-    <span class="theme-choice-label" id="onboarding-appearance-label">Appearance</span>
-    <div data-theme-control aria-labelledby="onboarding-appearance-label"></div>
-    <span class="theme-status" data-theme-status role="status"></span>
-  </div>
+  <header class="onboarding-top">
+    <div class="onboarding-brand">
+      <h1 class="wizard-title">Ouroboros</h1>
+      <p class="wizard-subtitle">Your accounts, your models, one Ouroboros.</p>
+    </div>
+    <div class="onboarding-appearance">
+      <span class="theme-choice-label" id="onboarding-appearance-label">Appearance</span>
+      <div data-theme-control aria-labelledby="onboarding-appearance-label"></div>
+      <span class="theme-status" data-theme-status role="status"></span>
+    </div>
+  </header>
   <div id="root"></div>
   <script>
     window.__OURO_ONBOARDING_BOOTSTRAP__ = __ONBOARDING_BOOTSTRAP__;

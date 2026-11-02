@@ -515,7 +515,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     const modelRoles = createModelRolesEditor({ hostId: 'settings-model-roles',
         onChange: (settings) => { syncProcessingPreference(settings); onSettingsEdited(); } });
     // Accounts → API keys: the key rows, their Test and the "More providers" fold (settings_connections.js).
-    const connections = createConnectionsEditor({ root: page, onChange: () => onSettingsEdited() });
+    const connections = createConnectionsEditor({ root: page, onChange: () => onSettingsEdited(),
+        pageDraft: () => ({ OPENAI_BASE_URL: byId('s-openai-base-url')?.value ?? '' }) });
     modelRoles.mount();
     initMcpSettings({ onChange: onSettingsEdited });
     initSubagentsSection({

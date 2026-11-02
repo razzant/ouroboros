@@ -101,7 +101,9 @@ const API_PROVIDER_LABELS = {
 // Credential shapes that make a provider usable, mirroring the runtime's
 // PROVIDER_CREDENTIAL_GROUPS: any ONE group whose every key is present counts.
 // Only the fields the transport cannot start without are listed here; optional
-// region/scope/base-url companions are not evidence of a missing key.
+// region/scope/base-url companions are not evidence of a missing key. The
+// compatible endpoint is `compatible_endpoint_configured`: its own address (key
+// optional), or the legacy address with the OpenAI key it travels with.
 const API_PROVIDER_CREDENTIALS = {
     openrouter: [['OPENROUTER_API_KEY']],
     openai: [['OPENAI_API_KEY']],
@@ -111,8 +113,22 @@ const API_PROVIDER_CREDENTIALS = {
     minimax: [['MINIMAX_API_KEY']],
     cloudru: [['CLOUDRU_FOUNDATION_MODELS_API_KEY']],
     gigachat: [['GIGACHAT_CREDENTIALS'], ['GIGACHAT_USER', 'GIGACHAT_PASSWORD']],
-    'openai-compatible': [['OPENAI_COMPATIBLE_BASE_URL'], ['OPENAI_BASE_URL']],
+    'openai-compatible': [['OPENAI_COMPATIBLE_BASE_URL'], ['OPENAI_BASE_URL', 'OPENAI_API_KEY']],
 };
+
+/**
+ * The built-in compatible connection's one pair, the twin of `provider_models.compatible_endpoint`:
+ * the dedicated address with its own key (blank = no auth), else the legacy `OPENAI_BASE_URL` with
+ * `OPENAI_API_KEY`. Neither pair borrows the other's key. `legacy` says which pair a draft reaches and
+ * `apiKeySetting` the setting its key is read from, which discovery names for a kept (masked) key.
+ * @returns {{baseUrl: string, apiKey: string, apiKeySetting: string, legacy: boolean}}
+ */
+export function compatibleEndpoint(settings = {}) {
+    const value = (key) => String(settings?.[key] ?? '').trim();
+    const legacy = !value('OPENAI_COMPATIBLE_BASE_URL');
+    const [url, key] = legacy ? ['OPENAI_BASE_URL', 'OPENAI_API_KEY'] : ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'];
+    return { baseUrl: value(url), apiKey: value(key), apiKeySetting: key, legacy };
+}
 
 /** Every settings key that can make an API provider selectable. */
 export const API_PROVIDER_CREDENTIAL_KEYS = [...new Set(
