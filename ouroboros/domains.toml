@@ -651,6 +651,7 @@ D20 = "Presence"
 "ouroboros/skill_conflicts.py" = "D14"
 "ouroboros/skill_lifecycle_queue.py" = "D14"
 "ouroboros/skill_loader.py" = "D14"
+"ouroboros/skill_discovery_reuse.py" = "D14"  # exact reuse of skill discovery by the change keys it read
 "ouroboros/skill_schedule_suggestions.py" = "D14"
 "ouroboros/skill_context_snapshot.py" = "D14"
 "ouroboros/skill_catalogue.py" = "D14"

@@ -45,8 +45,6 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import pathlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
@@ -108,18 +106,12 @@ def row_meta(row: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 class MembershipFacts(NamedTuple):
-    """The registry facts room membership reads, taken once per call; ``rooms`` is
-    the room rule over the ``bindings`` snapshot the fingerprint names."""
+    """The registry facts room membership reads, taken once per call; ``rooms`` is the room rule over the same
+    ``bindings`` snapshot. The first three are compared as they are (``legacy_units``), never through a digest."""
     project_chat_ids: FrozenSet[int]
     bindings: Dict[str, int]
     projects_by_source_key: Dict[Tuple[Any, ...], FrozenSet[int]]
     rooms: Any
-
-    def fingerprint(self) -> str:
-        payload = json.dumps([sorted(self.project_chat_ids), sorted(self.bindings.items()),
-                              sorted((list(key), sorted(chats)) for key, chats in self.projects_by_source_key.items())],
-                             ensure_ascii=False, default=str)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def membership_facts(root: Any) -> MembershipFacts:
@@ -509,7 +501,7 @@ def _task_triples(entries: Iterable[Entry]) -> Tuple[_Triple, ...]:
 
 
 def _lineage_answers(facts: MembershipFacts, triples: Tuple[_Triple, ...]) -> Optional[Tuple[int, ...]]:
-    """The room rule's answer for each triple, the one membership input ``facts.fingerprint`` leaves out: a
+    """The room rule's answer for each triple, the one membership input the registry facts leave out: a
     task result admitted later, or a lineage the store could not read under contention, changes it with
     no row written. ``None`` while the store cannot answer every task: a count made then is not reused."""
     if not facts.rooms.warm({task_id for triple in triples for task_id in triple} - {""}):
@@ -545,7 +537,7 @@ def legacy_units(store: ChronicleStore, root: Any) -> List[LegacyUnit]:
     authority, facts = _authority(store), membership_facts(root)
     from ouroboros import dialogue_store as ds
     ds.require_imported(root, "chat")
-    key = (authority, facts.fingerprint())
+    key = (authority, facts[:3])  # the registry facts themselves: equal values, the same verdicts
     cached = _UNITS.get(str(root.resolve()))
     if cached is not None and cached[0] == key and cached[2] is not None \
             and _lineage_answers(facts, cached[1]) == cached[2]:

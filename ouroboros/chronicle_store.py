@@ -318,6 +318,7 @@ class _Snapshot:
     transaction closed): the same filters and order and no statement. Each record handed out is parsed
     anew from its stored text, as the index returns it; ``memo`` holds facts one capture derives once.
     Of the stored tail facts it holds what its view reads (``tail_scope``); a proposal's capture extends its ``tables``."""
+    proposed = False  # a proposal's capture: it reads an unsaved record as published (``stored_state``)
 
     def __init__(self, tables, tail_scope, memo=()):
         records, folded, sealed, marks, state, acting, self.parts, *tail = self.tables = tables
@@ -421,6 +422,7 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],
                                        proposed["room_id"], proposed.get("target_id", ""), _json(proposed)]],
                               *snapshot.tables[1:]], snapshot.tail_scope, kept)
+        snapshot.proposed = True
     token = _CAPTURE.set((str(store.index_path), snapshot))
     try:
         yield snapshot.memo
@@ -457,6 +459,11 @@ class ChronicleStore:
         """The size of ``records.jsonl`` the reads reflect: the file's, or the size a pinned capture indexed."""
         snapshot = self._pinned()
         return snapshot.state("offset", 0) if snapshot is not None else self.log_path.stat().st_size
+
+    def stored_state(self) -> Optional[int]:
+        """The journal size whose records a pinned capture reads; ``None`` outside one and in a proposal's."""
+        snapshot = self._pinned()
+        return None if snapshot is None or snapshot.proposed else snapshot.state("offset", 0)
 
     # --- projection --------------------------------------------------------------------------------
 
