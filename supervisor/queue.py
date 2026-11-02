@@ -979,5 +979,6 @@ from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional publi
     _subtree_progressing,
     _task_deadline_ts,
     _task_drive_for_task,
+    enforce_due_task_timeouts,
     enforce_task_timeouts,
 )

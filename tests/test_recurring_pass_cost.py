@@ -185,3 +185,214 @@ def test_l2_an_unanswering_store_infers_nothing_and_keeps_every_accepted_carrier
 
     monkeypatch.setattr(store_hot_facts, "cold_custody_rows", busy)
     assert sleep_custody.reconcile(env.q, runtime=env.runtime) == {"sleeper"}, "unknown is not an orphan"
+
+
+# ---- L14: the running rails on every supervisor tick ------------------------------------------------
+
+def _live_tree(tmp_path, monkeypatch, name: str, children: int):
+    """A root with ``children`` running descendants and as many queued ones: every shape the rails ask about."""
+    root = tmp_path / name
+    root.mkdir()
+    queue, _state, workers = _install_queue(root, monkeypatch)
+    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900.0)
+    monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: None)
+    workers.RUNNING["root"] = {"task": {"id": "root", "root_task_id": "root"}, "worker_id": 0, "attempt": 1,
+                               "started_at": 1000.0, "last_progress_at": 1000.0}
+    for index in range(children):
+        child = f"child-{index}"
+        workers.RUNNING[child] = {"task": {"id": child, "root_task_id": "root", "parent_task_id": "root"},
+                                  "worker_id": index + 1, "attempt": 1, "started_at": 1000.0,
+                                  "last_progress_at": 1000.0}
+        workers.PENDING.append({"id": f"queued-{index}", "root_task_id": "root", "parent_task_id": child})
+    return queue, workers
+
+
+def test_l14_a_pass_walks_each_live_row_once_not_once_per_running_row(tmp_path, monkeypatch):
+    """O(R+P), never O(R·(R+P)): the walk is the only per-row cost, so its count is the law. Every row is
+    silent: a row with its own recent progress short-circuits the terms a per-row rescan would hide in."""
+    from supervisor import queue_timeouts, silence_attention
+
+    walks = []
+    real = queue_timeouts._ancestors
+    monkeypatch.setattr(queue_timeouts, "_ancestors", lambda task: walks.append(1) or real(task))
+    monkeypatch.setattr(silence_attention, "observe", lambda *_a: None)
+
+    def one_pass(name, children):
+        queue, workers = _live_tree(tmp_path, monkeypatch, name, children)
+        workers.PENDING[:] = [row for row in workers.PENDING if row["id"] != "queued-0"]  # a row with none queued below
+        walks.clear()
+        queue._enforce_task_timeouts_locked(workers, 5000.0, 0, {})
+        return len(walks), len(workers.RUNNING) + len(workers.PENDING)
+
+    for name, children in (("small", 1), ("large", 50)):
+        counted_walks, live = one_pass(name, children)
+        assert counted_walks == live, (name, counted_walks, live)
+
+
+@pytest.mark.parametrize("progressing, expect_observed", [(True, False), (False, True)])
+def test_l14_the_index_keeps_every_decision_a_scan_made(tmp_path, monkeypatch, progressing, expect_observed):
+    """The companion: a fresh grandchild still spares its root, a parked diagnostic never does, and a truly
+    silent tree still reaches attention. Walked through the chain and through ``root_task_id`` alike."""
+    from supervisor import queue_timeouts, silence_attention
+
+    queue, workers = _live_tree(tmp_path, monkeypatch, "tree", 2)
+    workers.PENDING.clear()
+    now = 5000.0
+    for meta in workers.RUNNING.values():
+        meta["last_progress_at"] = now - 2000.0
+    workers.RUNNING["child-1"]["task"]["root_task_id"] = ""  # only the parent chain ties it to the root
+    workers.RUNNING["child-1"]["task"]["parent_task_id"] = "child-0"
+    workers.RUNNING["child-0"]["task"]["root_task_id"] = ""
+    if progressing:
+        workers.RUNNING["child-1"]["last_progress_at"] = now - 10.0
+    workers.PENDING.append({"id": "diag", "root_task_id": "root", "metadata": {"work_diagnostic": {
+        "kind": "silence", "task_id": "root", "root_task_id": "root", "episode_id": "episode", "task_attempt": 1}}})
+    observed = []
+    monkeypatch.setattr(silence_attention, "observe", lambda _q, tid, *_a: observed.append(tid))
+    monkeypatch.setattr(silence_attention, "recovered", lambda *_a: None)
+    assert queue._subtree_progressing("root", now, 900.0) is progressing
+    assert queue_timeouts._tree_activity().progress.get("child-0", 0.0) == (now - 10.0 if progressing else now - 2000.0)
+    queue._enforce_task_timeouts_locked(workers, now, 0, {})
+    assert ("root" in observed) is expect_observed, observed
+
+
+def test_l14_a_descendants_unread_observation_still_defers_its_ancestors_idle_judgment(tmp_path, monkeypatch):
+    from supervisor import silence_attention
+
+    queue, workers = _live_tree(tmp_path, monkeypatch, "tree", 1)
+    workers.PENDING.clear()
+    now = 5000.0
+    for meta in workers.RUNNING.values():
+        meta["last_progress_at"] = now - 2000.0
+    observed = []
+    monkeypatch.setattr(silence_attention, "observe", lambda _q, tid, *_a: observed.append(tid))
+    queue._enforce_task_timeouts_locked(workers, now, 0, {}, pending_events={"child-0"})
+    assert "root" not in observed and "child-0" not in observed
+    queue._enforce_task_timeouts_locked(workers, now, 0, {}, pending_events=None)
+    assert not observed, "an unreadable bus defers idle for everyone"
+    queue._enforce_task_timeouts_locked(workers, now, 0, {}, pending_events=set())
+    assert set(observed) == {"root", "child-0"}
+
+
+class _Tick:
+    """The tick's entry under a clock this test owns, counting the passes it let through."""
+
+    def __init__(self, monkeypatch, queue):
+        from supervisor import queue_timeouts
+
+        self.now, self.passes, self.reads = 10_000.0, 0, 0
+        self.queue_timeouts, self.queue = queue_timeouts, queue
+        real = queue_timeouts.enforce_task_timeouts
+
+        def counted_pass(**kwargs):
+            self.passes += 1
+            return real(**kwargs)
+
+        monkeypatch.setattr(queue_timeouts, "enforce_task_timeouts", counted_pass)
+        monkeypatch.setattr(queue_timeouts.time, "time", lambda: self.now)
+        monkeypatch.setitem(queue_timeouts._clocks, "members", None)
+        monkeypatch.setitem(queue_timeouts._clocks, "due", 0.0)
+
+    def __call__(self, advance: float = 0.0) -> int:
+        self.now += advance
+        before = self.passes
+
+        def pending():
+            self.reads += 1
+            return set()
+
+        self.queue_timeouts.enforce_due_task_timeouts(pending)
+        return self.passes - before
+
+
+def _clocked(tmp_path, monkeypatch, name="clocks", **task):
+    root = tmp_path / name
+    root.mkdir()
+    queue, _state, workers = _install_queue(root, monkeypatch)
+    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900.0)
+    monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: None)
+    monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 60.0)
+    monkeypatch.setattr(queue, "_request_finalization_grace", lambda *_a, **_k: "control")
+    workers.RUNNING["task"] = {"task": {"id": "task", "root_task_id": "task", **task}, "worker_id": 0, "attempt": 1,
+                               "started_at": 10_000.0, "last_progress_at": 10_000.0}
+    return queue, workers
+
+
+def test_l14_a_tick_with_no_clock_due_and_no_membership_change_does_nothing(tmp_path, monkeypatch):
+    queue, _workers = _clocked(tmp_path, monkeypatch)
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 1, "the first tick of a process judges every row once"
+    reads = tick.reads
+    for _second in range(5):
+        assert tick(1.0) == 0
+    assert tick.reads == reads, "a tick that runs no pass asks the bus nothing"
+
+
+def test_l14_a_deadline_is_met_on_its_own_tick_not_on_the_cadence(tmp_path, monkeypatch):
+    import datetime
+
+    queue, workers = _clocked(tmp_path, monkeypatch, deadline_at=datetime.datetime.fromtimestamp(
+        10_005.0, datetime.timezone.utc).isoformat())
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 1
+    assert tick(4.0) == 0
+    assert "finalization_requested_at" not in workers.RUNNING["task"]
+    assert tick(1.0) == 1, "the hard clock itself wakes the pass"
+    assert workers.RUNNING["task"]["finalization_reason"] == "deadline"
+    assert tick(1.0) == 1, "an open grace stays per tick: progress may withdraw it, its end reaps"
+
+
+def test_l14_a_ceiling_is_met_on_its_own_tick(tmp_path, monkeypatch):
+    queue, workers = _clocked(tmp_path, monkeypatch, execution_timeout_sec=5)
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 1
+    assert tick(4.0) == 0
+    assert tick(1.0) == 1
+    assert workers.RUNNING["task"]["finalization_reason"] == "absolute_ceiling"
+
+
+def test_l14_a_pending_deadline_wakes_the_pass_and_settles_without_the_cadence(tmp_path, monkeypatch):
+    import datetime
+
+    queue, workers = _clocked(tmp_path, monkeypatch)
+    workers.PENDING.append({"id": "queued", "deadline_at": datetime.datetime.fromtimestamp(
+        10_003.0, datetime.timezone.utc).isoformat()})
+    from supervisor import queue_timeouts
+
+    submitted = []
+    monkeypatch.setattr(queue_timeouts, "_queue_pending_deadline", lambda task, **_k: submitted.append(task["id"]))
+    monkeypatch.setattr(queue_timeouts, "pending_deadline_expirable", lambda _task: True)
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 1 and not submitted
+    assert tick(2.0) == 0 and not submitted
+    assert tick(1.0) == 1 and submitted == ["queued"]
+
+
+def test_l14_membership_and_the_cadence_each_bring_the_pass_back(tmp_path, monkeypatch):
+    from ouroboros.config import BODY_MAINTENANCE_INTERVAL_SEC
+
+    queue, workers = _clocked(tmp_path, monkeypatch)
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 1 and tick(1.0) == 0
+    workers.RUNNING["new"] = {"task": {"id": "new", "root_task_id": "new"}, "worker_id": 1, "attempt": 1,
+                              "started_at": tick.now, "last_progress_at": tick.now}
+    assert tick() == 1, "a row nobody judged yet"
+    assert tick(1.0) == 0
+    workers.PENDING.append({"id": "queued"})
+    assert tick() == 1
+    assert tick(BODY_MAINTENANCE_INTERVAL_SEC) == 1, "what no clock names (a setting, silence) is seen within the cadence"
+
+
+def test_l14_a_clock_set_back_cannot_park_the_pass(tmp_path, monkeypatch):
+    queue, _workers = _clocked(tmp_path, monkeypatch)
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 1
+    assert tick(-3600.0) == 1, "a due instant beyond the cadence is a clock that moved, never a reason to wait"
+
+
+def test_l14_an_empty_queue_keeps_the_tick_free(tmp_path, monkeypatch):
+    root = tmp_path / "empty"
+    root.mkdir()
+    queue, _state, _workers = _install_queue(root, monkeypatch)
+    tick = _Tick(monkeypatch, queue)
+    assert tick() == 0 and tick.reads == 0
