@@ -2415,6 +2415,17 @@ contents have a separate, initially unchecked choice in the details (owner choic
 2026-10-30T16:48Z). Show the exact copies, the whole-copy loss warning and omitted
 path counts before confirmation; saved results and held commits remain. These
 copies are neither automatic candidates nor falsely labelled unable to go.
+`Folders of deleted projects` is one read-only fold under the groups (owner choices
+2026-11-01T17:46Z and 22:27Z): no key, share, headline or action. A folder lists
+under the place already holding its bytes, or as outside the total; a shared one
+is one row, a nested one part of its parent. Not counted yet, not measured yet,
+could not be read, not found and never had a folder stay five answers; a size never
+promises space. Measure walks folders outside the roots after the places; Stop keeps
+the places and folders it finished (before the places finish, the previous count),
+and the rest read not measured yet. Those folders are found first, with the
+remaining projects' folders once any is listed (to relate them), so a disk that
+does not answer can hold the start of a count; Stop requests cancellation through
+the existing count owner.
 
 ## 6. Account group / row anatomy
 
