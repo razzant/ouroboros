@@ -156,6 +156,11 @@ def ensure_workers_healthy() -> None:
         _WORKER_LIFECYCLE_LOCK.release()
 
 
+# Per slot id: the dead process whose death this process journaled. While its replacement's spawn stays refused the
+# reaper hands that slot back to every tick (``reaping`` cleared for recovery): one death is one row, not one a tick.
+_DEATHS_RECORDED: Dict[int, Any] = {}
+
+
 def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
     """Capture exact task/slot ownership before handing off any dead worker.
 
@@ -184,16 +189,19 @@ def _ensure_workers_healthy_locked(queue: Any) -> tuple[List[int], bool]:
         project = is_project_slot(w)
         project_deaths += int(project)
         busy_crashes += int(project and w.busy_task_id is not None)
-        _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
-            "ts": _pool().utc_now_iso(), "type": "worker_dead_detected", "worker_id": wid,
-            "exitcode": exitcode, "busy_task_id": w.busy_task_id,
-            "task_type": task.get("type"), "task_description": str(task.get("description") or "")[:200],
-            "uptime_sec": round(time.time() - meta["started_at"]) if meta and meta.get("started_at") else None,
-            "attempt": (meta or {}).get("attempt"),
-            "signal": -exitcode if isinstance(exitcode, int) and exitcode < 0 else None,
-        })
+        recorded, _DEATHS_RECORDED[wid] = _DEATHS_RECORDED.get(wid) is w.proc, w.proc
+        if not recorded:
+            _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+                "ts": _pool().utc_now_iso(), "type": "worker_dead_detected", "worker_id": wid,
+                "exitcode": exitcode, "busy_task_id": w.busy_task_id,
+                "task_type": task.get("type"), "task_description": str(task.get("description") or "")[:200],
+                "uptime_sec": round(time.time() - meta["started_at"]) if meta and meta.get("started_at") else None,
+                "attempt": (meta or {}).get("attempt"),
+                "signal": -exitcode if isinstance(exitcode, int) and exitcode < 0 else None,
+            })
         if task and project:
             crashed_tasks.append({"task_id": w.busy_task_id, "task_type": task.get("type")})
+        if task and project and not recorded:
             _pool().append_jsonl(_pool().DRIVE_ROOT / "logs" / "supervisor.jsonl", {
                 "ts": _pool().utc_now_iso(), "type": "worker_crash_task_dump", "worker_id": wid,
                 "task": task, "started_at": meta.get("started_at"),

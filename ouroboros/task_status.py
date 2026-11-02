@@ -37,6 +37,7 @@ from ouroboros.post_task_checkpoint import (
     _TERMINAL_ACCOUNTING_SCRUB_FIELDS,
     project_replica_task_result_fields,
 )
+from ouroboros.task_reads import TaskReads
 from ouroboros.task_store import select_lineage
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
@@ -768,6 +769,13 @@ def load_effective_task_result(
     )
 
 
+class _SweepReads(TaskReads):
+    """One sweep's queue document, intents and events tail, read once; WHOLE documents (a heal persists them)."""
+
+    def load(self, root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+        return load_task_result(root, task_id)
+
+
 def reconcile_orphaned_running_tasks(
     drive_root: Any, *, exclude_task_ids: frozenset[str] = frozenset(),
     expired_quizzes: Optional[List[Any]] = None,
@@ -791,12 +799,14 @@ def reconcile_orphaned_running_tasks(
     ``updated_at`` at decision time, and, given ``write_guard`` (the supervisor's
     queue-ownership fence, queue -> row lock order), by live queue ownership; the
     monotonic guard in ``write_task_result`` protects a newer terminal/cancel write.
-    Idempotent; safe at boot and on a periodic tick.
+    Idempotent; safe at boot and on a periodic tick. Candidates are read in one batch, the sweep's other
+    facts once (``_SweepReads``); rows a caller's guard refuses anyway (``queue_owned_task_ids``) are excluded unread.
 
     ``expired_quizzes`` collects ``(task_id, quiz_id)`` for every question this
     sweep expired, so the supervisor-side caller can send the same live frame the
     task-done seam sends. This module stays free of a supervisor import.
     """
+    from ouroboros.cancel_intents import has_active_intent
     from ouroboros.task_custody import attempt_basis
     from ouroboros.task_results import write_task_result
     from ouroboros.obligations import result_rows
@@ -808,9 +818,17 @@ def reconcile_orphaned_running_tasks(
                    if row.get("status") in {STATUS_RUNNING, STATUS_INTERRUPTED}]
     except Exception:
         return 0
+    reads = _SweepReads(root)
     for row in running:
         task_id = str(row.get("task_id") or row.get("id") or "")
         if not task_id or task_id in exclude_task_ids:
+            continue
+        try:
+            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot, reads=reads)
+        except Exception:
+            continue
+        eff_status = str(effective.get("status") or "").strip().lower()
+        if eff_status not in SETTLED_STATUSES:
             continue
         # An ACTIVE cancel intent means cancellation custody already owns this
         # row and will settle it with its own outcome and text; at boot that
@@ -818,20 +836,12 @@ def reconcile_orphaned_running_tasks(
         # would win the race and publish infra_failed for a task the owner was
         # told is being cancelled. An UNREADABLE intent store is the same
         # refusal: this sweep never settles over an unknown cancel authority.
+        # Asked of the rows this sweep would settle, right before the write.
         try:
-            from ouroboros.cancel_intents import has_active_intent
-
             if has_active_intent(root, task_id, strict=True):
                 continue
         except Exception:
             log.debug("Orphan reconcile skipped %s: cancel authority unreadable", task_id, exc_info=True)
-            continue
-        try:
-            effective = effective_task_result(root, row, materialize_artifacts=False, _boot=boot)
-        except Exception:
-            continue
-        eff_status = str(effective.get("status") or "").strip().lower()
-        if eff_status not in SETTLED_STATUSES:
             continue
         persist_fields = {
             key: effective[key]

@@ -132,6 +132,19 @@ def orphan_reconcile_write_guard(task_id: str, *, stop_event: Any = None):
         yield not _stop_requested(stop_event) and (not queue.INITIALIZED or queue.task_settlement_liveness(task_id) is False)
 
 
+def queue_owned_task_ids() -> frozenset:
+    """The ids the queue holds now (RUNNING, PENDING, a busy slot): ``orphan_reconcile_write_guard``
+    refuses every one of them (``task_settlement_liveness`` is True), so the periodic orphan
+    reconcile excludes them unread instead of projecting each to a write it would refuse."""
+    from supervisor import queue, workers
+
+    if not queue.INITIALIZED:
+        return frozenset()  # no supervisor here: its guard refuses nothing
+    with queue._queue_lock:
+        return frozenset({*queue.RUNNING, *(str(task.get("id") or "") for task in queue.PENDING),
+                          *(w.busy_task_id for w in workers.WORKERS.values() if w.busy_task_id)} - {""})
+
+
 def _stop_requested(stop_event: Any = None) -> bool:
     """Closed generation, stop or restart: no mutation or daemon start afterward.
     The per-generation token also keeps an old off-loop pass from writing."""
@@ -1223,7 +1236,7 @@ def _periodic_zombie_reconcile(*, stop_event: Any = None) -> None:
 
         expired_quizzes: list = []
         reconcile_orphaned_running_tasks(
-            DATA_DIR, expired_quizzes=expired_quizzes, boot=False,
+            DATA_DIR, exclude_task_ids=queue_owned_task_ids(), expired_quizzes=expired_quizzes, boot=False,
             write_guard=lambda task_id: orphan_reconcile_write_guard(task_id, stop_event=stop_event),
         )
         _publish_expired_quiz_frames(expired_quizzes)
