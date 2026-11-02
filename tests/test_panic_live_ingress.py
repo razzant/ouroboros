@@ -95,7 +95,7 @@ def _exercise(surface):
     mp.setattr(state, "load_state", forbidden)
     mp.setattr(state, "init", forbidden)
     mp.setattr(message_bus, "log_chat", forbidden)
-    mp.setattr(host_service, "_chat_rows", forbidden)
+    mp.setattr(host_service, "_accepted_inbound", forbidden)
     try:
         if surface.startswith("external"):
             _seed_token(root, permissions=["inject_chat"])

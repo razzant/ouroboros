@@ -469,7 +469,7 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_passive.py, claudexor_contracts.py — passive quota read and envelope types (docs/PASSIVE_QUOTA_READ.md)
     claudexor_quota.py — Owned-daemon refresh/reset/receipt proxies; catalog negotiation, exact key/body and typed errors, no start/retry/browser token (§3 Agent accounts; §4)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
-    host_service.py, host_notify.py — Loopback-only Host Service API; POST /notify beside it: a granted skill's sentence becomes one signed `skill_notice` System row in the owner's chat (§12)
+    host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
     history_paging.py, history_chronology.py — a room's own pages over the dialogue store, frozen room-bound cursors, gaps, the import frontier, a Project's `latest_arrival`; no stored history copy (§3 History reads)
     cost_breakdown.py — Ledger-derived dashboard buckets and root-task detail over the same physical-attempt authority

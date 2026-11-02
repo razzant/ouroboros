@@ -356,7 +356,7 @@ def test_a_store_an_older_body_published_gains_the_root_windows_at_boot(tmp_path
         newest_root_ids(tmp_path, 2)
     ensure_current_store(tmp_path)  # the boot's schema step
     with store.open_store(tmp_path, write=False) as txn:
-        assert txn.meta("schema_version") == store.SCHEMA_VERSION == 9
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION == 10
         assert sorted(row[0] for row in txn.conn.execute(names)) == ["tasks_project_root_ts", "tasks_root_ts"]
     assert newest_root_ids(tmp_path, 2) == newest_root_ids(tmp_path, 2, project_id="room") == ["root2", "root1"]
     assert project_result_counts(tmp_path, "room") == (3, 1)
@@ -443,6 +443,116 @@ def test_a_valid_index_keeps_a_placement_whose_own_sidecar_was_damaged(tmp_path,
         assert packs.handle_bytes(tmp_path, "kept", handle["path"]).startswith(b"# focus")
         assert packs.handle_info(tmp_path, "kept", handle["path"]) == {
             "size": handle["size"], "sha256": handle["sha256"], "loose": False}
+
+
+# ---- the Host Service operation read: one accepted message over k-scaled room, routing and task history
+
+OP_ROWS_PER_K, OP_NOTES_PER_K, OP_TASKS_PER_K = 20, 20, 10
+OPERATIONS = {"managed": "op-managed", "direct": "op-direct", "pending": "op-pending"}
+
+
+def _operation_history(*, damaged: bool = False):
+    def build(root, k):
+        """One host-accepted message per answer path (a managed task's, a direct turn's final row, none yet),
+        each older than every unrelated row. Unrelated history grows with k: answers in the same room (each
+        its own task), routing annotations of other messages, saved tasks started by other messages, with
+        4 KB results. The maintenance job has run: the store is at rest, ``damaged`` adding a torn first row
+        it can never derive and older-writer rows it derived after it."""
+        from ouroboros import dialogue_store, store, store_hot_facts
+        from ouroboros.project_dialogue import append_chat_annotation, build_owner_message_ref
+        from ouroboros.task_results import write_task_result
+        from ouroboros.task_store import read_document
+        from tests._dialogue import seed
+        from tests.test_host_service_api import _seed_token
+        from tests.test_host_service_operations import CHAT, SKILL, TOKEN
+
+        def inbound(message_id, second):
+            return {"ts": f"2026-10-01T00:00:{second:02d}+00:00", "session_id": "s1", "direction": "in",
+                    "chat_id": CHAT, "user_id": 0, "text": f"work {message_id}", "source": f"skill:{SKILL}",
+                    "client_message_id": message_id, "transport": {}, "task_id": ""}
+
+        accepted = {path: inbound(message_id, second) for second, (path, message_id) in enumerate(OPERATIONS.items())}
+        refs = {path: build_owner_message_ref(chat_id=CHAT, client_message_id=row["client_message_id"], ts=row["ts"],
+                                              text=row["text"]) for path, row in accepted.items()}
+        final = {"ts": "2026-10-01T00:01:00+00:00", "direction": "out", "chat_id": CHAT, "text": "direct answer",
+                 "task_id": "turn-direct", "origin_message_ref": refs["direct"], "task_terminal_status": "completed"}
+        unrelated = [{"ts": "2026-10-01T01:00:00+00:00", "direction": "out", "chat_id": CHAT, "text": "an answer",
+                      "task_id": f"other-{unit}-{index}"} for unit in range(k) for index in range(OP_ROWS_PER_K)]
+        seed(root, live={"chat": [*accepted.values(), final, *unrelated]})
+        dialogue_store.ensure(root)  # the production cutover stores the chain, oldest first
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "state.json").write_text(json.dumps({"session_id": "s1"}), encoding="utf-8")
+        _seed_token(root, skill=SKILL, token=TOKEN, permissions=["inject_chat"])
+        write_task_result(root, "task-managed", "completed", result="managed answer", origin_message_ref=refs["managed"])
+        write_task_result(root, "template", "completed", chat_id=CHAT, result="r" * 4000, ts="2023-01-01T00:00:00+00:00")
+        template = read_document(root, "template")
+        for unit in range(k):
+            with store.open_store(root, write=True) as txn:
+                for index in range(OP_TASKS_PER_K):
+                    other = build_owner_message_ref(chat_id=CHAT, client_message_id=f"other-{unit}-{index}",
+                                                    ts="2026-10-01T01:00:00+00:00", text="an answer")
+                    _stored(txn, template, f"other-{unit}-{index}", "2026-10-01T01:00:00+00:00", origin_message_ref=other)
+            for index in range(OP_NOTES_PER_K):
+                assert append_chat_annotation(root, f"other-{unit}-{index}", action="promote_chat_to_task",
+                                              target=f"other-{unit}-{index}", status="scheduled")
+        if damaged:
+            with store.open_store(root, write=True) as txn:
+                _stored(txn, template, "0-torn", "2023-01-01T00:00:00+00:00")
+                txn.conn.execute("UPDATE task_bodies SET body='{' WHERE task_id='0-torn'")
+                txn.conn.execute("UPDATE tasks SET origin=NULL")  # as older writers left every row
+        try:
+            store_hot_facts.run_hot_facts(root)
+        except ValueError:
+            assert damaged, "only the torn row may stop the job"
+        with store.open_store(root, write=False) as txn:
+            assert [row[0] for row in txn.conn.execute("SELECT task_id FROM tasks WHERE origin IS NULL")] == (
+                ["0-torn"] if damaged else [])
+        return {}
+    return build
+
+
+def _operation_reads(root, monkeypatch):
+    """The real ``GET /chat/operations/{ref}`` handler on a real Starlette request, run on this thread's loop."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    from ouroboros.gateway import host_service
+    from tests.test_host_service_operations import CHAT, TOKEN, _isolate_queue
+
+    _isolate_queue(monkeypatch, root, [])
+    app = host_service.create_host_service_app(root, bridge_getter=lambda: None)
+
+    def read(message_id):
+        operation = f"{CHAT}:{message_id}"
+        request = Request({"type": "http", "method": "GET", "path": f"/chat/operations/{operation}",
+                           "headers": [(b"x-skill-token", TOKEN.encode())], "query_string": b"",
+                           "path_params": {"operation_ref": operation}, "app": app})
+        response = asyncio.run(host_service._api_chat_operation(request))
+        return response.status_code, json.loads(response.body)
+
+    return lambda: {path: read(message_id) for path, message_id in OPERATIONS.items()}
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_an_operation_read_costs_the_same_beside_1_or_30_units_of_room_routing_and_task_history(
+        tmp_path, monkeypatch, damaged):
+    """Each answer path reads its own records: the accepted row by its name, the tasks its typed origin
+    names, the dialogue rows indexed under it. Unrelated answers in the same room, routing annotations and
+    tasks other messages started are never visited, nor a damaged row the job named once (it is read only
+    if its stored text could name the message). Both sizes give the same answers."""
+    def boundary(root, _facts):
+        reads = _operation_reads(root, monkeypatch)
+        reads()
+        return reads
+
+    answers = _flat(tmp_path, monkeypatch, _operation_history(damaged=damaged), boundary)
+    assert answers[K_SMALL] == answers[K_LARGE]
+    shown = {path: (status, body.get("status"), body.get("text"), body.get("task_id"))
+             for path, (status, body) in answers[K_SMALL].items()}
+    assert shown == {"managed": (200, "completed", "managed answer", "task-managed"),
+                     "direct": (200, "completed", "direct answer", None),
+                     "pending": (200, "pending", None, None)}
 
 
 # ---- the consciousness tick: its allowance read over k days of usage history ---------------------
