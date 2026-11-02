@@ -377,6 +377,7 @@ D20 = "Presence"
 "ouroboros/gateway/skill_source_contracts.py" = "D11"
 "ouroboros/gateway/skill_sources.py" = "D11"
 "ouroboros/gateway/state.py" = "D11"
+"ouroboros/gateway/state_publication.py" = "D11"  # the /api/state display publication: one producer per revision
 "ouroboros/gateway/reply_preparation.py" = "D11"
 "ouroboros/gateway/storage.py" = "D11"
 "ouroboros/gateway/main_decisions.py" = "D11"  # addressed canonical Main questions and human recovery controls
@@ -956,12 +957,14 @@ D20 = "Presence"
 "supervisor/owner_stop.py" = "D09"
 "supervisor/queue.py" = "D08"
 "supervisor/queue_snapshot.py" = "D08"
+"supervisor/queue_publication.py" = "D08"  # queue publication by revision: marks under Q, one publisher outside it
 "ouroboros/queue_observation.py" = "D08"
 "supervisor/restart_retention.py" = "D08"
 "supervisor/owner_pause_control.py" = "D08"
 "supervisor/owner_pause_resume.py" = "D08"
 "supervisor/work_stop_migration.py" = "D08"
 "supervisor/continuation_admission.py" = "D08"
+"supervisor/tree_census.py" = "D08"  # one tree's writer census, its inputs read once per change of its rows
 "supervisor/sleep_wake.py" = "D08"
 "supervisor/direct_roots.py" = "D08"  # the main loop's off-lock fragment, written beside the snapshot
 "supervisor/direct_pause.py" = "D08"
@@ -1094,6 +1097,7 @@ allowed = [
   "D05->D02",
   "D05->D04",
   "D05->D07",
+  "D05->D08",
   "D05->D09",
   "D05->D10",
   "D05->D11",
@@ -1281,7 +1285,6 @@ lazy_only = [
   "D04->D20",
   "D05->D03",
   "D05->D06",
-  "D05->D08",
   "D05->D14",
   "D05->D20",
   "D06->D03",
