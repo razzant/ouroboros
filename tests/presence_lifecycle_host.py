@@ -216,13 +216,6 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
         kwargs.update(repo_dir=ROOT, drive_root=h.data, agent_factory=h.factory)
         return run_presence_turn(**kwargs)
 
-    # The proactive tool calls the module owner directly; keep its actual execution
-    # manager and admission while observing the same production agent constructor.
-    if scenario == "proactive":
-        import functools
-        patch.setattr("ouroboros.presence_runner.run_presence_turn",
-                      functools.partial(run_presence_turn, agent_factory=h.factory))
-
     app = create_host_service_app(h.data, presence_runner=runner)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
