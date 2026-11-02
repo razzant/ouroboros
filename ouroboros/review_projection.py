@@ -31,6 +31,7 @@ _AWAITING_REASON = "No answer recorded: the host returned at the dispatch barrie
 # carried on outcome_axes.execution.plan_review; the earlier engine's classes (unanswered,
 # none_answered, answered_open) survive only as the cause sentences of finished tasks.
 PLAN_REVIEW_OBJECTIONS_OPEN = "objections_open"  # objections stood open at delivery
+PLAN_REVIEW_UNREADABLE = "unreadable"  # the record could not be read at delivery: the review's state is unknown
 
 if TYPE_CHECKING:  # annotation-only names; lazy under future annotations, never imported at runtime
     from ouroboros.review_records import ReviewActorRecord, ReviewRequest

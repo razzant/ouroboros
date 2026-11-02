@@ -476,9 +476,11 @@ function objectiveWarned(record) {
 }
 
 // outcome_axes.execution.plan_review picks its sentence by lookup, never by its spelling; absent classes keep fallback.
-function planReviewKey(record, fallback) {
+// After the author's stop a class saying the work went on yields to terminal_plan_review_open. Twin: _plan_review_key.
+function planReviewKey(record, fallback, stopped = false) {
     const key = `plan_review_${String(record?.outcome_axes?.execution?.plan_review || '')}`;
-    return Object.hasOwn(TASK_CAUSE_PHRASES, key) ? key : fallback;
+    if (!Object.hasOwn(TASK_CAUSE_PHRASES, key)) return fallback;
+    return stopped && PLAN_REVIEW_WENT_ON.has(key) ? 'terminal_plan_review_open' : key;
 }
 
 // The browser twin of project_dialogue._join_cause_clauses: one line, one
@@ -500,17 +502,19 @@ const explicitAuthorStop = (d) => d?.reason === 'author_stop' || (d?.reason === 
 const authorStopRationale = (d) => (explicitAuthorStop(d) ? String(d.author_disposition?.rationale || '').split(/\s+/).filter(Boolean).join(' ') : '');
 
 // Recorded standing limitations: deferred children and terminal_plan_review_open, worded by its class when present.
-// Twin: project_dialogue._terminal_limitations. Open classes exclude the merely awaited case.
-const PLAN_REVIEW_OPEN_CLASSES = new Set(['plan_review_unanswered', 'plan_review_none_answered', 'plan_review_answered_open', 'plan_review_objections_open']);
+// Twin: project_dialogue._terminal_limitations. Open classes exclude the merely awaited case; all but unreadable (an
+// unknown state) say the work went on, which after the author's stop no clause says.
+const PLAN_REVIEW_WENT_ON = new Set(['plan_review_unanswered', 'plan_review_none_answered', 'plan_review_answered_open', 'plan_review_objections_open']);
+const PLAN_REVIEW_OPEN_CLASSES = new Set([...PLAN_REVIEW_WENT_ON, 'plan_review_unreadable']);
 
-function terminalLimitations(record, reason, held = false) {
+function terminalLimitations(record, reason, held = false, stopped = false) {
     const deferred = Number(record?.outcome_axes?.objective?.deferred_count || 0) > 0;
-    const planKey = reason === 'plan_review_advisory' ? reason : 'terminal_plan_review_open';
+    const planKey = reason === 'plan_review_advisory' && !stopped ? reason : 'terminal_plan_review_open';
     // The class rides the live event and the replayed row where the result-only flag does not;
     // a HELD task states the hold as its primary cause and never a limitation of work that went on.
     const open = !held && (record?.terminal_plan_review_open === true
         || PLAN_REVIEW_OPEN_CLASSES.has(`plan_review_${String(record?.outcome_axes?.execution?.plan_review || '')}`));
-    return [deferred ? taskReasonPhrase('child_results_deferred') : '', open ? taskReasonPhrase(planReviewKey(record, planKey)) : ''];
+    return [deferred ? taskReasonPhrase('child_results_deferred') : '', open ? taskReasonPhrase(planReviewKey(record, planKey, stopped)) : ''];
 }
 
 // Independent functional causes precede review provenance, never replacing it.
@@ -536,6 +540,7 @@ export function taskReasonDetail(evt, codes = []) {
         ? (typedReason || storedReason) : storedReason;
     const origin = record.cancel_origin;
     const held = severity === 'error' && String(objective?.source || '').startsWith('plan_review_');
+    const authorStop = completion?.action === 'stop' && severity !== 'cancelled';  // the author's own, never the owner's
     const reviewCause = !taskStoppedWithSummary(evt) && decision?.status
         && (decision.status !== 'accepted' || Object.hasOwn(TASK_CAUSE_PHRASES, decisionCause))
         && (['done', 'warn'].includes(severity) || explicitAuthorStop(decision)
@@ -553,8 +558,9 @@ export function taskReasonDetail(evt, codes = []) {
         clause = joinCauseClauses(cancelCauseClauses(origin, record));
     } else if (held) {
         clause = phrase(String(objective.reason || ''));
-    } else if (!reason || reason === 'final_message') {
-        clause = completion?.action === 'stop' && severity !== 'cancelled' ? taskReasonPhrase('author_stop')
+    } else if (!reason || reason === 'final_message' || (authorStop && reason === 'plan_review_advisory')) {
+        // A stop is the primary cause; the plan clause its exit stamped stands among the limitations below.
+        clause = authorStop ? taskReasonPhrase('author_stop')
             : severity === 'done' && record.outcome_axes?.execution?.plan_review === 'awaiting' ? taskReasonPhrase('plan_review_awaiting') : '';
     } else {
         const receiptVeto = objective?.receipt_veto;
@@ -581,7 +587,7 @@ export function taskReasonDetail(evt, codes = []) {
             ? `${count} uncommitted file${count === 1 ? '' : 's'} remain${count === 1 ? 's' : ''} in the saved candidate` : '';
     const line = joinCauseClauses([clause, ...warningClauses, phrase(reviewCause), rationale, remainderClause,
         ...acceptanceIncidentClauses(decision, reason, causePhraseLookup),
-        ...terminalLimitations(record, reason, held), custody ? taskReasonPhrase(custody) : '',
+        ...terminalLimitations(record, reason, held, authorStop), custody ? taskReasonPhrase(custody) : '',
         terminalDeliveryClause(record.terminal_delivery)]);  // the host twin appends the delivery clause last too
     return (severity === 'cancelled' || remainderClause) && line && !/[.!?…)\u2026]$/.test(line) ? `${line}.` : line;
 }
@@ -1274,7 +1280,8 @@ function summarizeChatLiveEventView(evt) {
                 task_id: evt.subagent_task_id || evt.task_id,
                 parent_task_id: evt.parent_task_id, root_task_id: evt.root_task_id }) : '';
         const stopDetail = (evt.task_completion ?? evt.outcome_axes?.execution?.task_completion)?.action === 'stop' ? taskReasonDetail(evt) : '';
-        const reasonDetail = cancelDetail || stopDetail || (evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
+        const reasonDetail = cancelDetail || stopDetail || (evt.outcome_axes?.execution?.plan_review
+            ? taskReasonDetail(evt) : evt.reason_code ? taskReasonPhrase(evt.reason_code) : '');
         // Completed frames take label and phase from their authoritative outcome axes.
         const completionSeverity = rawEvent === 'completed' ? taskOutcomeSeverity(evt) : 'done';
         const event = rawEvent === 'completed'

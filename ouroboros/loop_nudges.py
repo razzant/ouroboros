@@ -101,19 +101,24 @@ def _plan_gate_disclosure(
     llm_trace: Dict[str, Any],
     *,
     forced_reason: str = "",
+    author_stop: bool = False,
 ) -> str:
     # Normal finalization reuses the reducer projection that decided this
     # exact candidate. The trace copy is presentation-only, granting no
-    # permission; forced rails recompute with their explicit rail input.
+    # permission; forced rails (and a stop, which no gate decided) recompute,
+    # and the decision they disclose replaces the projection the outcome reads
+    # (none when no plan is engaged now: an earlier hold's view never outlives
+    # it). Only the stop's own call says it stopped (``author_stop``).
     from ouroboros.owner_hurry import plan_review_disclosure
 
-    projected = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
-    decision = (
-        projected
-        if not forced_reason and isinstance(projected, dict)
-        else _loop()._plan_gate_decision(ctx, llm_trace, hard_rail=forced_reason)
-    )
-    return plan_review_disclosure(decision, forced_reason)
+    decision = llm_trace.get("plan_gate", llm_trace.get("force_plan_decision"))
+    if forced_reason or author_stop or not isinstance(decision, dict):
+        for stale in ("plan_gate", "force_plan_decision"):
+            llm_trace.pop(stale, None)
+        decision = _loop()._plan_gate_decision(ctx, llm_trace, hard_rail=forced_reason)
+        if decision.get("required"):
+            llm_trace["plan_gate"] = decision
+    return plan_review_disclosure(decision, forced_reason, author_stop=author_stop)
 
 
 def _inject_note(note: Optional["task_pacing.PacingNote"], messages: List[Dict[str, Any]], tools: ToolRegistry,
