@@ -152,3 +152,26 @@ def test_a_newer_capture_is_never_overwritten_by_an_older_one_at_the_same_revisi
     assert [row["id"] for row in _read(root, "queue_snapshot.json")["pending"]] == ["a", "b"], "the newer facts stay on disk"
 
 
+# ---- N11: the retry-custody publication repeats only when the claim's facts change ---------------
+
+def test_the_retry_custody_publication_repeats_only_when_the_claims_facts_change(tmp_path, monkeypatch):
+    from supervisor import workers
+
+    pending = [{"id": "held", "type": "task", "_terminalization_retry": {"status": "cancelled", "trigger": "x", "reason": "pending"}}]
+    monkeypatch.setattr(workers, "PENDING", pending)
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    (tmp_path / "logs").mkdir()
+    publications = []
+    monkeypatch.setattr(queue, "publish_queue_snapshot", lambda **kw: publications.append(kw["reason"]) or True)
+    workers._PUBLISHED_RETRY_CUSTODY.clear()
+    for _ in range(3):  # three assignment passes with the same unresolved claim
+        workers._persist_pending_terminalization_retries(["held"])
+    assert publications == ["pending_terminal_event_retry"], "one publication for one set of facts"
+    pending[0]["_terminalization_retry"]["reason"] = "still pending, new detail"
+    workers._persist_pending_terminalization_retries(["held"])
+    assert len(publications) == 2, "a changed claim fact publishes again"
+    workers._persist_pending_terminalization_retries([])
+    workers._persist_pending_terminalization_retries(["held"])
+    assert len(publications) == 3, "a claim that left and returned is a change"
+
+
