@@ -21,11 +21,12 @@ from ouroboros.context_measurement import (
     ContextProfile as ContextProfile, MeasurementBasis as MeasurementBasis,
     MainFitMeasurement as MainFitMeasurement, MainFitDisposition as MainFitDisposition,
     measure_main_fit as measure_main_fit, reclaim_low_water_margin as reclaim_low_water_margin,
+    BOOK_NOTE_KEY, required_book_addition,
 )
 if TYPE_CHECKING:
     from ouroboros.physical_attempt_context import PhysicalAttemptContext
 
-from ouroboros.context_layout import reference_doc_sections
+from ouroboros.context_layout import reference_doc_sections, whole_development_book
 from ouroboros.section_floor import (HostSection, render_governance, rendered_texts, section_views,
                                      _governance_blocks as _section_governance, _system_blocks)
 from ouroboros.reference_books import ReferenceBook
@@ -158,6 +159,7 @@ class ContextFitPlan:
             request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
             if start_work and known_window:
                 request += math.ceil((record.boundary if record else window_tokens) / context_budget.RECLAIM_LOW_WATER_DIVISOR)
+            request -= math.ceil(required_book_addition(self, start) * ratio)  # nothing narrows to pay for the book
             deficit = max(request - window_tokens if known_window and window_tokens else 0, int(refused_tokens or 0))
             if deficit > 0 or select_mode:
                 snapshot = snapshot_from_json(self.core.memory_view_json) if self.core.memory_view_json else None
@@ -288,6 +290,28 @@ class ContextCore:
     section_task_id: str = ""
     # The connections map (``tool_connections.connection_views``): the Low/Max text, then the Nano text.
     connections: Tuple[str, str] = ("", "")
+    # This task's own direct requirement of the whole handbook (``development_required``), beside
+    # ``docs_need_development``, which then holds what the subject alone says for Max.
+    development_required: bool = False
+
+    def required_book_tokens(self, mode: str) -> int:
+        """What the directly required handbook adds to the ordinary view of ``mode``, 0 when that view holds it.
+
+        Compact views keep their chapter map beside it; Max for another subject carries the map in the book's
+        place. It counts against the window only: every owner target, automatic narrowing and rescue is sized
+        without it. A missing source adds nothing: the capture discloses the gap instead of a partial book.
+        """
+        full = mode == "max" and not self.compact_reference_docs
+        if not self.development_required or not self.development_md.strip() or (full and self.docs_need_development):
+            return 0
+        chapter_map = reference_doc_sections(None, context_mode="max", include_development=False, architecture_text="",
+                                             development_text=self.development_md, books=self.reference_books)[1] if full else ""
+        # Characters as the request estimate counts them: its own system item (comma included), less the map and its
+        # separator inside B; the estimate is chars/4 over the whole request.
+        item = len(json.dumps({"text": whole_development_book(self.development_md), "type": "text"}, ensure_ascii=False,
+                              sort_keys=True, separators=(",", ":"))) + 1
+        replaced = len(json.dumps(chapter_map, ensure_ascii=False)) + 2 if chapter_map else 0
+        return max(0, (item - replaced + 3) // 4)
 
 
 def _governance_blocks(env: Any, core: ContextCore, *, mode: str) -> Tuple[Any, ...]:
@@ -616,7 +640,8 @@ class MinimumViewUnfit(ValueError):
     physical = True  # False: the request itself fits the window, only the start work room beside it does not
 
     def __init__(self, message: str, *, fixed_tokens: int, memory_tokens: int,
-                 reserve_tokens: int, window_tokens: int, ratio: float, work_room_tokens: int = 0):
+                 reserve_tokens: int, window_tokens: int, ratio: float, work_room_tokens: int = 0,
+                 required_book_tokens: int = 0):
         # Retain the fitter's exact rounding: fixed + memory is calibrated once.
         self.raw_input_tokens = fixed_tokens + memory_tokens
         self.measurement_density = ratio
@@ -628,10 +653,13 @@ class MinimumViewUnfit(ValueError):
         self.deficit_tokens = max(0, self.estimated_input_tokens + reserve_tokens - window_tokens)
         self.work_room_tokens = work_room_tokens
         self.work_room_deficit_tokens = max(0, self.fixed_input_tokens + reserve_tokens + work_room_tokens - window_tokens)
+        # Set only when the ordinary view fits and this task's required handbook alone does not: never a rescue's.
+        self.required_book_tokens = math.ceil(required_book_tokens * ratio)
         super().__init__(f"{message}: fixed input={self.fixed_input_tokens}, memory view={self.memory_view_tokens}, "
                          f"reply/working reserve={reserve_tokens}, window={window_tokens}, "
                          f"deficit={self.deficit_tokens}, work room={work_room_tokens}, "
-                         f"fixed/work-room deficit={self.work_room_deficit_tokens} tokens")
+                         f"fixed/work-room deficit={self.work_room_deficit_tokens} tokens"
+                         + (f", required handbook={self.required_book_tokens}" if required_book_tokens else ""))
 
 
 def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...]], user_content_json: str, *, preferred: str,
@@ -643,12 +671,21 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
                       envelope_overhead_tokens: int = 0, start_work: bool = False,
                       ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
-    """Select books once, walk memory once. Unsent book forms share the selected memory, not another budget."""
+    """Select books once, walk memory once. Unsent book forms share the selected memory, not another budget.
+
+    Every automatic choice reads the ordinary view of this capture; a directly required handbook joins it last with
+    its own note, so neither costs a form, mode or schema (owner 1.11.2026). At a fresh start on a known window the
+    ordinary estimate, the book, its note and the reply the ordinary view keeps must fit, else the named refusal.
+    """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
     from ouroboros.memory_view import snapshot_from_json, render_story, render_room, FULL_VIEW
     from ouroboros.tool_policy import select_tool_schemas
 
+    whole_core, whole_governance = core, governance
+    if core.development_required:
+        core = replace(core, development_required=False)
+        governance = {name: _governance_blocks(None, core, mode=name) for name in governance}
     mode = select or start or preferred
     form = {m: "low" if core.compact_reference_docs or m == "nano" else m for m in floor.MODES}
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
@@ -755,12 +792,28 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             raise MinimumViewUnfit("Protected owner words and the minimum view cannot fit the usable input",
                                    fixed_tokens=fixed, memory_tokens=floor.view_tokens(story) + floor.view_tokens(room),
                                    reserve_tokens=reserve, window_tokens=window, ratio=ratio)
-        receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact, mode))
     else:
-        story, room, receipt = "", "", {}
+        story, room, facts = "", "", {}
+    book = whole_core.required_book_tokens(mode)
+    ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
+    note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
+        free=window - reserve - math.ceil((ordinary + book) * ratio) if known_window and (kept is None or start_work) else None
+    ) if book and snapshot else ""
+    if note:  # its own cost, like the book's, stays outside every later automatic choice (``required_book_tokens``)
+        room, facts = "\n\n".join(filter(None, (room, note))), {**facts, BOOK_NOTE_KEY: floor.view_tokens("\n\n" + note)}
+    receipt = floor.view_receipt(snapshot, story, room, floor.with_max_room(facts, room_fact and (
+        {**room_fact, "book_required": True} if book else room_fact), mode, required_book=math.ceil(book * ratio))) if snapshot else {}
     if receipts:
         receipt["host_sections_addressed"] = receipts
-    return {m: (_system_blocks(core, governance[form[m]], story, room, m,
+    if book and kept is None and known_window:
+        reply = context_budget.reply_allowance_tokens(caller_max_tokens=output_reserve, nano=mode == "nano", owner_nano=False,
+                                                      input_tokens=math.ceil(ordinary * ratio), raw_input_tokens=ordinary, window_tokens=window)
+        memory = floor.view_tokens(story) + floor.view_tokens(room)
+        if math.ceil((fixed + book + memory) * ratio) + max(reserve, reply) > window:
+            raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
+                                   fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
+                                   window_tokens=window, ratio=ratio, required_book_tokens=book)
+    return {m: (_system_blocks(whole_core, whole_governance[form[m]], story, room, m,
         section_views(sections[m], receipts)), receipt) for m in floor.MODES}, mode
 
 
@@ -841,7 +894,8 @@ def build_context_fit_plan(
         # Physical rescue only (owner 2026-10-13, #1527): the exact source pointer replaces the whole input only when the
         # owner-Nano request itself overflows; a room-only shortfall or an unfit pointer request names the start (7A).
         from ouroboros.context_input_selection import task_input_pointer
-        pointer = task_input_pointer(env, task, core.user_content_json) if preferred == "nano" and unfit.physical else None
+        pointer = (task_input_pointer(env, task, core.user_content_json)
+                   if preferred == "nano" and unfit.physical and not unfit.required_book_tokens else None)
         if pointer is None:
             raise
         contents, initial_mode = _view_projections(core, governance, pointer, **view_args, ratio=ratio,
@@ -883,6 +937,7 @@ def build_context_fit_plan(
                if json.loads(core.supplementary_messages_json) else {}),
             "user_content": user_content,
             "docs_need_development": core.docs_need_development,
+            **({"development_required": True} if core.development_required else {}),
             "compact_reference_docs": core.compact_reference_docs,
             "reference_book_errors": core.reference_book_errors,
             "reference_sources": [(book.book_id, source.source_path, source.sha256)
@@ -941,4 +996,5 @@ def _physical_context_for_fit(disposition: Any) -> PhysicalAttemptContext:
         response_reserve_tokens=measurement.response_reserve_tokens,
         window_witness_bound=getattr(measurement, "window_witness_bound", False),
         window_observation_fp=measurement.window_observation_fp,
+        required_book_tokens=measurement.required_book_tokens,
     )

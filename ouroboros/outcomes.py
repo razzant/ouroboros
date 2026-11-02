@@ -1085,8 +1085,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # host-fallback prefix table below already assigns to this exact
         # terminal text; calling it a provider failure made the two paths of
         # this one function contradict each other.
-        failure = {"kind": "runtime" if reason_code in {REASON_TASK_EXCEPTION, "context_overflow"} else "provider",
-                   "reason_code": reason_code}
+        failure = {"kind": "runtime" if reason_code in {
+            REASON_TASK_EXCEPTION, "context_overflow", "context_capacity", "required_reference_unavailable",
+        } else "provider", "reason_code": reason_code}
         # Forecasts use context_overflow; actual/legacy provider failures keep llm_api_error.
         # A waited-out outage or unknown outcome keeps its own terminal cause.
         if reason_code in {"llm_api_error", "context_overflow"} and str(usage.get("_last_llm_error_kind") or "") == "context_overflow":

@@ -13,13 +13,14 @@ import pytest
 
 from ouroboros.contracts.live_conversation import Audio, LiveOptions, ToolOutputs
 from ouroboros.contracts.realtime import RealtimeInput, canonical_json
+from tests._socket_seal import block_network_except_socketpair
 
 
 @pytest.fixture(autouse=True)
 def deny_network(monkeypatch):
     def refused(*args, **kwargs):
         raise AssertionError("Gemini tests must use fake sockets")
-    monkeypatch.setattr(socket.socket, "connect", refused)
+    block_network_except_socketpair(monkeypatch, refused)
     monkeypatch.setattr(socket, "create_connection", refused)
 
 

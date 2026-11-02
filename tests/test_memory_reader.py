@@ -131,7 +131,7 @@ def memory(tmp_path, monkeypatch):
     from ouroboros.tools.project_journal import append_journal_milestone
 
     append_journal_milestone(PROJECT, "start", "Начали атлас.", task_id="t1")
-    (root / "projects" / PROJECT / "workpad.md").write_text("# Workpad\n", encoding="utf-8")
+    (root / "projects" / PROJECT / "workpad.md").write_bytes(b"# Workpad\n")  # workpad_write's exact bytes on every OS
     ids = dict(p1=p1, d1=d1, d2=d2, d3=d3, c1=c1, q1=q1, account=account, withdrawn=withdrawn, fix1=fix1, fix2=fix2,
                part=part, draft_part=draft_part, kept=kept, viewed=viewed, gone=gone, note=note)
     return root, store, {name: record["id"] for name, record in ids.items()}

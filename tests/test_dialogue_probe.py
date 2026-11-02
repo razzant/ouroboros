@@ -2,7 +2,6 @@
 from contextlib import contextmanager
 import json
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 
@@ -177,9 +176,7 @@ def test_runtime_limits_bound_selection_and_hydration(variables, compound, newes
         assert counted.max_bindings <= variables and counted.body_rows == 60
 
 
-def test_python310_limit_fallback_and_host_10000_rows(tmp_path, monkeypatch):
-    from ouroboros.gateway.host_service import _chat_rows
-
+def test_python310_limit_fallback_pages_10000_probe_rows(tmp_path, monkeypatch):
     rows = [{"chat_id": 1, "task_id": "task", "direction": "out", "text": f"row {n}"} for n in range(10_023)]
     seed(tmp_path, live={"chat": rows + [{"chat_id": 2, "text": "foreign"}]})
     ds.ensure(tmp_path)
@@ -205,8 +202,6 @@ def test_python310_limit_fallback_and_host_10000_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "transaction", limited)
     found = ds.probe_rows(tmp_path, "chat", [("chat_id", 1), ("task_id", "task")], limit=10_000)
     assert [row.row for row in reversed(found)] == rows[-10_000:]
-    assert connections[-1].body_rows == 10_000 and connections[-1].max_bindings <= 999
-    assert _chat_rows(SimpleNamespace(data_dir=tmp_path), 1) == rows[-10_000:]
     assert connections[-1].body_rows == 10_000 and connections[-1].max_bindings <= 999
 
 

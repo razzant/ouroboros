@@ -89,6 +89,12 @@ RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
 REFUSAL_PASSES = (("host_copies", "bodies"), ("floor", "books", "unseen_bodies"))
+# A physical unfit of a directly required handbook is its owner's or caller's to resolve; the host switches nothing.
+# ``{}`` takes "; a Continue keeps it" exactly where that terminal's cause offers Continue (``owner_continue``).
+REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owner's Context mode, or a new task "
+                         "without this requirement{}.")
+#: A round's size refusal on a known window that holds the view without the required handbook (``context_renewal``).
+REQUIRED_BOOK_UNFIT_KEY = "_context_required_book_unfit"
 
 def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
     """Roots (an integrating task that is not a direct chat turn) leave two eighths for their work; a wake

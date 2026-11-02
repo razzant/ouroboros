@@ -1,24 +1,20 @@
 """The overview is the acting mind's own words; a Light helper never writes it.
 
 The overview note is "what I hold true now", loaded into every context. No Light
-operation writes knowledge any more: the post-task scratchpad upkeep that last carried
-this check is retired (#918: the mind folds its own scratchpad), and so is the post-task
-reflection with its shared nomination writer. An answer of the shared Light transport
-that still nominates the overview (and a neighbour beside it) after reading it whole
-writes neither. The mind's own ``knowledge_write`` of the overview is untouched.
+operation writes knowledge any more: the post-task scratchpad upkeep and reflection
+that nominated notes are retired (#918: the mind folds its own scratchpad). The one
+Light helper left, the fallback memory writer over the Light transport, drafts
+a page even when its answer still nominates the overview (and a neighbour beside it),
+and writes neither. The mind's own ``knowledge_write`` of the overview is untouched.
 """
 
 from __future__ import annotations
 
 import json
 
-from ouroboros import consolidator as c
 from ouroboros import knowledge as store
 from ouroboros.tools import knowledge as knowledge_tools
 from ouroboros.tools.registry import ToolContext
-from tests import test_consolidator_context_fit as fit_helpers
-
-fit = fit_helpers.fit
 
 _MIND_OVERVIEW = "---\nsummary: What I hold true now.\n---\n# Orientation\n\nThe mind's own words.\n"
 _OVERVIEW_EDIT = {"topic": "overview", "scope": "global", "edits": [
@@ -44,33 +40,22 @@ def _mind_writes_the_overview(root) -> bytes:
     return _overview(root).path.read_bytes()
 
 
-class ReadsTheOverviewFirst:
-    """A Light actor that reads the whole current overview, then answers."""
+def test_a_light_draft_nominating_the_overview_and_a_neighbour_writes_neither(tmp_path, monkeypatch):
+    from tests import _memory_inventory_shared as shared
+    from tests.test_memory_fallback import _Light, _consciousness, _run, light_route
 
-    def __init__(self, answer: str):
-        self.answer, self.prompts = answer, []
-
-    def chat(self, **kwargs):
-        self.prompts.append(kwargs["messages"][0]["content"])
-        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.01}
-        if len(self.prompts) == 1:
-            return {"content": "", "tool_calls": [{"id": "read-overview", "type": "function", "function": {
-                "name": "knowledge_read", "arguments": json.dumps({"topic": "overview", "scope": "global"})}}]}, usage
-        return {"content": self.answer}, usage
-
-
-def test_a_light_operation_writes_neither_the_overview_nor_its_neighbour(tmp_path, fit):
+    shared.world(tmp_path)
+    _consciousness(monkeypatch, False)
+    light_route(monkeypatch)
     before = _mind_writes_the_overview(tmp_path)
-    answer = json.dumps({"knowledge_entries": [_OVERVIEW_EDIT, _NEIGHBOUR], "compressed_block": "compressed"})
-    llm = ReadsTheOverviewFirst(answer)
-    reads = c.KnowledgeReadContext(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="light-operation"))
+    answer = json.dumps({"text": "The owner asked; Ouroboros answered.", "quotes": [],
+                         "knowledge_entries": [_OVERVIEW_EDIT, _NEIGHBOUR]})
+    llm = _Light(answer)
 
-    content, _usage = c._call_consolidation_llm(llm, "Summarize this episode for my working memory.",
-                                                "Light memory operation", knowledge=reads)
+    assert _run(tmp_path, llm).outcome == "published"  # the draft acts; its nominations are ignored
 
     prompt = _normalized(llm.prompts[0])
-    assert "knowledge_entries" not in prompt and "nominat" not in prompt
-    assert len(llm.prompts) == 2 and content == answer  # read whole, then answered as text
+    assert len(llm.prompts) == 1 and "knowledge_entries" not in prompt and "nominat" not in prompt
     assert _overview(tmp_path).path.read_bytes() == before
     assert not _neighbour(tmp_path).path.exists()
 

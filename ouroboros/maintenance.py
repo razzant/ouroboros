@@ -352,13 +352,11 @@ def _appearances_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dic
 
 def _hot_facts_due(root: pathlib.Path, row: Dict[str, Any], facts: Dict[str, Any], child: bool) -> bool:
     """Rows written before the hot-fact columns (or by an older writer since) wait for a classification
-    pass (``store_hot_facts.run_hot_facts``); a root without such rows has nothing to do. A failed pass
-    waits on its damaged input, which the runner compares itself, so it is no reason to spawn the child."""
-    from ouroboros.store_hot_facts import underived
+    pass (``store_hot_facts.run_hot_facts``); a root without such rows has nothing to do, and neither has
+    one whose only such rows are the damaged input its last pass named, unchanged (``hot_facts_due``)."""
+    from ouroboros.store_hot_facts import hot_facts_due
 
-    if row.get("state") == "failed":
-        return child
-    return underived(root)
+    return hot_facts_due(root, row, child)
 
 
 def _hot_facts_run(root: pathlib.Path, should_stop: Callable[[], bool]) -> Dict[str, Any]:

@@ -19,6 +19,7 @@ from ouroboros.context_fit import ContextCore as _ContextCore
 from ouroboros.context_runtime_facts import snapshot_labelled
 from ouroboros.contracts.task_contract import normalize_bool
 from ouroboros.memory import Memory
+from ouroboros.reference_books import BOOK_ENTRYPOINTS
 from ouroboros.store import StoreError
 
 log = logging.getLogger("ouroboros.context")
@@ -262,16 +263,45 @@ def _bound_tree_is_body(task: Dict[str, Any], ctx: Any) -> Optional[bool]:
     return True if fact == BODY_TRUE else False if fact == BODY_FALSE else None
 
 
-def development_resident(task: Dict[str, Any], ctx: Any) -> bool:
+def development_required(task: Dict[str, Any]) -> bool:
+    """This task's own direct requirement of the whole handbook in every mode (owner 1.11.2026).
+
+    Only its contract's ``context_requires_development`` is true: ``start_task`` authors that key for the new
+    task alone, and no descendant or follow-up inherits it. A top-level value alone is the older answer about
+    the subject in Max, and ``context_requires_self_body_docs`` is a subject marker: neither is this requirement.
+    """
+    contract = task.get("task_contract")
+    return isinstance(contract, dict) and contract.get("context_requires_development") is True
+
+
+def required_book_unavailable(core: Any) -> Dict[str, Any]:
+    """The existing source-unavailable refusal when the capture could not read a handbook the task directly requires,
+    else ``{}``, under its own typed cause (``required_reference_unavailable``, which Continue may continue; the other
+    authority refusals keep theirs). No map or partial book stands in for it; without the requirement the gap stays a
+    disclosed one in the view, as before."""
+    if not core.development_required or core.development_md.strip():
+        return {}
+    path = BOOK_ENTRYPOINTS["development"]
+    error = next((line for line in core.reference_book_errors if path in line), f"{path} could not be read.")
+    return {"reason_code": "required_reference_unavailable", "source": {"kind": "reference_book", "path": path},
+            "human_label": f"this task's directly required development handbook ({path})",
+            "detail": (f"{error} The whole book is this task's own requirement; no map or partial book stands in. "
+                       "Restore the source, then Continue with that requirement; changing it needs an explicit new task."),
+            "recovery_choices": ["retry_after_source_recovery", "start_explicit_fresh_task"]}
+
+
+def development_resident(task: Dict[str, Any], ctx: Any, *, subject_only: bool = False) -> bool:
     """Whether docs/DEVELOPMENT.md stays whole in Max, by the subject of the work (BIBLE P1, owner 6A).
 
-    The task's own ``context_requires_development`` wins either way (absent is not false); a delegated child
-    or an external API/CLI/scheduled surface gets the pointer unless the task itself asks for the handbook;
-    self-body work keeps it; a bound work tree ``body_fact`` proves foreign gets the pointer. Anything else,
-    an unbound task or a tree whose body fact is unknown, keeps the book: missing facts never narrow it.
+    The task's own ``context_requires_development`` wins either way (absent is not false), read from its row and
+    then its contract, which survives restore and Continue; ``subject_only`` asks what the subject alone says. A
+    delegated child or an external API/CLI/scheduled surface gets the pointer unless the task itself asks for the
+    handbook; self-body work keeps it; a bound work tree ``body_fact`` proves foreign gets the pointer. Anything
+    else, an unbound task or a tree whose body fact is unknown, keeps the book: missing facts never narrow it.
     Project membership is not a signal.
     """
-    explicit = task.get("context_requires_development")
+    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+    explicit = None if subject_only else task.get("context_requires_development", contract.get("context_requires_development"))
     if explicit is not None:
         return normalize_bool(explicit)
     if _explicit_self_body_docs_flag(task) is True:
@@ -385,7 +415,7 @@ def _capture_declared_context_core(
         dynamic_text="\n\n".join(parts),
         dynamic_sections=capture_sections(parts, prefix='dynamic'),
         user_content_json=json.dumps(user_builder(task), ensure_ascii=False, sort_keys=True),
-        docs_need_development=_task_requires_self_body_docs(task),
+        docs_need_development=_task_requires_self_body_docs(task), development_required=development_required(task),
         reference_books=tuple(sources["books"]), reference_book_errors=tuple(sources["book_errors"]),
         compact_reference_docs=True,
         dynamic_head_text=sources.get("design_nav", ""),
