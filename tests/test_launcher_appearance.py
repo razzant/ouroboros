@@ -105,6 +105,7 @@ def windows(monkeypatch):
     """The Windows path with its native seams replaced by recorders (the macOS title bar: test_launcher_window_chrome)."""
     monkeypatch.setattr(la, "_WINDOWS", True)
     monkeypatch.setattr(launcher_window_chrome, "_MACOS", False)
+    monkeypatch.setattr(launcher_window_chrome, "_LINUX", False)
     # app_mode: AppsUseLightTheme as (value, type); None = no value, "no key" = no Personalize key.
     state = types.SimpleNamespace(writes=[], refreshes=[], high_contrast=False, hresult=0, app_mode=None, read=[])
     monkeypatch.setitem(sys.modules, "winreg", _registry(state))

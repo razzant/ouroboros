@@ -673,9 +673,10 @@ def _toggle_card(page, card, expanded):
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
 def test_wheel_aimed_at_a_card_moves_the_feed_unless_a_scroller_there_consumes_it(
         direct_server_with_data, browser_engine, tmp_path):
-    """#1524: a real wheel on a card's heading, summary row or actions moves the feed exactly as far as
-    the same wheel over plain feed, for a collapsed or an expanded root or child card and for Main's
-    live card, whose actions row is where the UI lane's Linux WebKit once saw a wheel scroll nothing.
+    """#1524: a real wheel moves the feed exactly as far as the same wheel over plain feed, on the heading
+    and summary row of a collapsed or an expanded root or child card, and on the heading, foot, actions
+    row and action button of Main's live card, whose actions row is where the UI lane's Linux WebKit once
+    saw a wheel scroll nothing.
     A bounded scroller there takes the wheel instead, and a part that swallows it is told apart, so a
     swallowed wheel could not pass as this. The claim is this engine run's: Linux WebKit and the system
     WKWebView are their own runs."""

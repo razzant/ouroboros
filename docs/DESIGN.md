@@ -175,9 +175,8 @@ A screen that cannot read the choice follows its host (owner 26.10, #1111 A). Th
 window opens at once in the room colour of the Mac's appearance or Windows' app mode; when
 its page reads a different choice, the window changes once to that palette without
 waiting to be shown; setup opens the same way, then its page paints the saved choice.
-The pre-server windows (already running, Git required, startup failed) follow the device. A Windows contrast theme keeps the main window dark, others white. No
-Windows desktop has shown these frames yet; Linux keeps its toolkit's first colour,
-unobserved. The login page follows this browser's saved choice, else the device; the
+The pre-server windows (already running, Git required, startup failed) follow the device. A Windows contrast theme keeps the main window dark, others white. Hosted frames cover
+Windows' light host; GTK's web view opens in its theme's room, unqualified. The login page follows this browser's saved choice, else the device; the
 Telegram connecting page the Mini App's, else Telegram's light or dark. Login and pre-server
 pages inline `theme.js` and `ui.css`; Telegram's restates only room and ink. Older frozen
 launchers need a new desktop app for this; source-handoff shells take source updates. Login

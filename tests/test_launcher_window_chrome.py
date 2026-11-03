@@ -347,6 +347,7 @@ def assert_ordinary(native):
 
 def test_the_leaf_is_inert_off_macos(monkeypatch):
     monkeypatch.setattr(wc, "_MACOS", False)
+    monkeypatch.setattr(wc, "_LINUX", False)  # GTK's one before_show: test_on_gtk_...
     monkeypatch.setattr(wc, "host_palette", lambda: "")  # the room off macOS: test_launcher_appearance
     window = Window(NSWindow())
     wc.WindowChrome().attach(window)
@@ -688,6 +689,7 @@ def test_off_macos_the_room_is_the_colour_pywebview_paints_first_only_for_a_know
     wc.paint_room(pending)
     pending.events.before_show.fire()  # no NSWindow to paint, and nothing raised into pywebview
     monkeypatch.setattr(wc, "_MACOS", False)
+    monkeypatch.setattr(wc, "_LINUX", False)
     for palette, colour in (("dark", "#0f0f11"), ("light", "#ffffff"), ("", "#123456")):
         monkeypatch.setattr(wc, "host_palette", lambda palette=palette: palette)
         other = Window(NSWindow())
@@ -695,11 +697,92 @@ def test_off_macos_the_room_is_the_colour_pywebview_paints_first_only_for_a_know
         wc.paint_room(other)
         assert other.background_color == colour and other.events.before_show.handlers == []
     monkeypatch.setattr(launcher_appearance, "_WINDOWS", False)
-    linux = Window(NSWindow())
-    linux.html = "<!DOCTYPE html>"
-    wc.paint_room(linux)
-    assert linux.events.before_show.handlers == [] and linux.events.closed.handlers == []  # the caption is Windows'
+    other_os = Window(NSWindow())
+    other_os.html = "<!DOCTYPE html>"
+    wc.paint_room(other_os)
+    assert other_os.events.before_show.handlers == [] and other_os.events.closed.handlers == []  # the caption is Windows'
     wc.paint_room(None)
+
+
+class GtkRgba:
+    """``Gdk.RGBA`` as ``_paint_gtk_room`` and pywebview read and parse it."""
+
+    def __init__(self, red=0.0, green=0.0, blue=0.0):
+        self.red, self.green, self.blue, self.parsed = red, green, blue, None
+
+    def parse(self, text):
+        self.parsed = text
+        return True
+
+
+def gtk_window(theme=(0x35 / 255, 0x35 / 255, 0x35 / 255), known=True, renderer="gtkwebkit2"):
+    """A window as pywebview 5.4's GTK backend leaves it at ``before_show``: its toplevel, its module, its web view."""
+    window = Window(types.SimpleNamespace(get_style_context=lambda: types.SimpleNamespace(
+        lookup_color=lambda name: (known and name == "theme_bg_color", GtkRgba(*theme)))))
+    window.uid = "master"
+    window.painted = []
+    view = types.SimpleNamespace(set_background_color=window.painted.append)
+    window.gui = types.SimpleNamespace(
+        renderer=renderer, Gdk=types.SimpleNamespace(RGBA=GtkRgba),
+        BrowserView=types.SimpleNamespace(instances={"master": types.SimpleNamespace(webview=view)}))
+    return window
+
+
+@pytest.fixture
+def gtk(monkeypatch):
+    """The Linux path. No ``gi`` exists here: the leaf only uses what pywebview's backend module already holds."""
+    monkeypatch.setattr(wc, "_MACOS", False)
+    monkeypatch.setattr(wc, "_LINUX", True)
+
+
+@pytest.mark.parametrize("theme,room", [
+    ((0x35 / 255, 0x35 / 255, 0x35 / 255), "#0f0f11"),  # #353535: Adwaita:dark, and GTK's prefer-dark setting
+    ((0xf6 / 255, 0xf5 / 255, 0xf4 / 255), "#ffffff"),  # #f6f5f4: Adwaita
+])
+def test_on_gtk_the_web_view_opens_in_the_room_of_the_palette_its_theme_resolved(gtk, theme, room):
+    """The surface run 41575443436 saw white on every host while a ``url=`` response was held. Painted in
+    ``before_show``, which pywebview fires just before the first load; nothing happens before it."""
+    window = gtk_window(theme)
+    window.background_color = "#123456"
+    wc.paint_room(window)
+    assert window.painted == [] and len(window.events.before_show.handlers) == 1
+    window.events.before_show.fire()
+    (colour,) = window.painted
+    assert colour.parsed == room
+    assert window.background_color == "#123456"  # pywebview's own GtkWindow rule is not this surface
+
+
+def test_on_gtk_each_seam_paints_once_and_a_preserver_gets_no_windows_caption(gtk):
+    main, setup, preserver = gtk_window(), gtk_window(), gtk_window()
+    preserver.html = "<!DOCTYPE html>"
+    wc.WindowChrome().attach(main)  # launcher_background: the window's caption owner, then this
+    wc.paint_room(setup)  # launcher_onboarding, after its caption owner
+    wc.paint_room(preserver)  # launcher.py's three windows shown before the server
+    for window in (main, setup, preserver):
+        assert len(window.events.before_show.handlers) == 1 and window.events.closed.handlers == []
+        window.events.before_show.fire()
+        assert [colour.parsed for colour in window.painted] == ["#0f0f11"]
+    wc.paint_room(None)
+
+
+@pytest.mark.parametrize("window", [gtk_window(known=False), gtk_window(renderer="qtwebengine")],
+                         ids=["a theme without the colour", "pywebview's Qt backend"])
+def test_on_gtk_an_unknown_palette_or_another_backend_leaves_webkits_white(gtk, window):
+    wc.paint_room(window)
+    window.events.before_show.fire()
+    assert window.painted == []
+
+
+def test_on_gtk_a_refused_colour_is_said_and_never_reaches_pywebview(gtk, caplog):
+    window = gtk_window()
+
+    def refuse(colour):
+        raise RuntimeError("no such surface")
+
+    window.gui.BrowserView.instances["master"].webview.set_background_color = refuse
+    wc.paint_room(window)
+    window.events.before_show.fire()
+    assert "keeps WebKit's white" in caplog.text
 
 
 def test_a_refused_room_colour_keeps_pywebviews_and_the_title_bar_still_integrates(mac, caplog):

@@ -204,8 +204,8 @@ def run_chat_viewport_smoke(
         # overflow:hidden/auto/scroll box, so the wheel reaches #chat-messages
         # whatever sits under the pointer. A wheel aimed at a card's heading or
         # actions is its own check (test_history_continuity_browser.py, #1524);
-        # the Linux report that a card swallows it is not reproduced on macOS
-        # Chromium/Playwright WebKit and is open for Linux and the system WKWebView.
+        # the historical Linux report was not reproduced by card-aimed checks in
+        # macOS/Linux Chromium and Playwright WebKit; the system WKWebView is untested.
         return page.locator("#chat-messages").evaluate(
             """feed => {
                 const box = feed.getBoundingClientRect();

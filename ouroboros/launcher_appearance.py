@@ -34,10 +34,10 @@ Microsoft's sources disagree on whether Windows honours that under a light
 system mode: the attribute reference words TRUE as honoring dark mode "when the
 dark mode system setting is enabled" (Windows 11 build 22000 on), while on
 Microsoft Q&A (question 966330, 16 Aug 2022) a Microsoft engineer reproduced the
-dark caption under a light system and left bug-or-documentation open. No native
-Windows run has checked it here: dark-on-light, Windows 10 and the pixels are
-unproven, not excluded. A refusal's HRESULT is logged once; an accepted call is
-not proof of the pixels.
+dark caption under a light system and left bug-or-documentation open. One hosted
+run showed it dark on build 26100; Windows 10 and every other build are unproven,
+not excluded. A refusal's HRESULT is logged once; an accepted call is not proof of
+the pixels.
 """
 
 from __future__ import annotations
@@ -110,7 +110,7 @@ def host_palette() -> str:
     """The palette a System page paints in this host's WebView2 before it reads a choice; ``""`` if unknown.
 
     WebView2 is Chromium, whose source reads the app mode so (``os_settings_provider_win.cc``, read
-    2026-11-01; no native run has compared them yet): dark only for a DWORD ``AppsUseLightTheme`` of 0,
+    2026-11-01; one hosted run agreed both ways on build 26100): dark only for a DWORD ``AppsUseLightTheme`` of 0,
     light when that value or its key is missing or unreadable. A contrast theme paints its own colours,
     which no room matches: unknown, as is any other OS (``launcher_window_chrome``)."""
     if not _WINDOWS or _high_contrast():
