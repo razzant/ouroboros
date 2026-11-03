@@ -177,11 +177,15 @@ def test_the_model_has_no_argument_that_could_widen_the_profile():
     # a private copy (default) or that root in place; it is never a path and never wider access.
     # `attachment_paths`/`attachment_import` only select this task's own retained inputs (exact manifest
     # relpaths) to attach as engine documents and whether to reuse their import; never a path or access.
+    # `input_files` selects already-readable files; its entries contain no permission or scope override.
     assert properties == {
         "prompt", "subagent_id", "max_seconds", "retry_of", "continue_from", "continue_carrier", "root",
         "bucket", "skill_name", "directory_strategy", "scope_paths", "access", "effort", "mode",
-        "override_plan_readiness", "workspace", "attachment_paths", "attachment_import",
+        "override_plan_readiness", "workspace", "attachment_paths", "attachment_import", "input_files",
     }
+    item = entry.schema["parameters"]["properties"]["input_files"]["items"]
+    assert set(item["properties"]) == {"root", "path"}
+    assert item["additionalProperties"] is False
     assert entry.schema["parameters"]["properties"]["attachment_import"]["enum"] == ["reuse", "new"]
     assert entry.schema["parameters"]["properties"]["attachment_paths"]["items"] == {"type": "string"}
     assert entry.schema["parameters"]["properties"]["workspace"]["enum"] == ["copy", "in_place"]

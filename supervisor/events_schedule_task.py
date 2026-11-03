@@ -694,7 +694,7 @@ def _admit_scheduled_payload(ctx: Any, preparation: Any, r: SimpleNamespace) -> 
         r.task_contract, attempted_depth=r.depth, max_depth=r.max_depth, achieved_depth=None)
     text = _compose_subagent_text(
         r.desc, role=role, expected_output=r.expected_output, constraints=r.constraints, context=r.task_context,
-        task_constraint=r.task_constraint,
+        task_constraint=r.task_constraint, selected_inputs=r.intent.get("prepared_input_files"),
         delegation_budget=admitted_task_contract.get("delegation_budget") if isinstance(admitted_task_contract, dict) else None,
     ) if delegation_role == "subagent" else r.desc
     evt = r.evt
