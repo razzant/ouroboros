@@ -1049,6 +1049,8 @@ class ProviderTestRequest(TypedDict):
     provider_id: str
     overrides: NotRequired[Dict[str, str]]  # flat keys; with ``connection``, that row's field names
     connection: NotRequired[str]  # a named connection of ``provider_id``; absent = the built-in one
+    # The built-in compatible pair under test; absent = the historical resolution (its Clear blanks both addresses).
+    api_key_setting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
 class ProviderTestResponse(TypedDict):

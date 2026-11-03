@@ -35,7 +35,7 @@ CI runs the default suite in two passes, each owned by `scripts/run_tests.py` be
 
 ### The local battery entry point
 
-`python scripts/run_tests.py` (`make test`) always runs the full Node and default Python battery; pytest arguments select focused work. `--selected [--base REF]` uses the commit selector (default base `HEAD`), prints tier/rule/module count and runs both marker passes on them. `--extra-test PATH` or `--full-tests` widens it with `--test-reason`. Missing required Node is red `NOT_RUN`. No hermetic proof is minted.
+`python scripts/run_tests.py` (`make test`) always runs the full Node and default Python battery; pytest arguments select focused work. `--selected [--base REF]` uses the commit selector (default base `HEAD`), prints tier/rule/module count and runs both marker passes on them. The scope reaches pytest in the run's own inventory plugin, not on the command line, here and in the gate (`preflight_inventory.launch_args`): Windows refuses 32,767-character command lines. `--extra-test PATH` or `--full-tests` widens it with `--test-reason`. Missing required Node is red `NOT_RUN`. No hermetic proof is minted.
 
 Full default overlaps duration-sized `--serial-shards` groups; `--sequential` restores the gate split; recheck overlap-only failures with it. `--evidence-dir DIR` gives each pass its own explicit `--ci-evidence-dir`; selected runs add `selection.json` and full inventory JSONL. Never export evidence via `PYTEST_ADDOPTS`: nested pytest could overwrite its parent's results.
 
@@ -68,7 +68,7 @@ OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
 
 ### The tiered commit and CI gates
 
-`commit_reviewed` runs `test_selection.FLOOR_TESTS`, changed tests, direct AST importers and authored widening. Missing/empty floor modules block. Selection includes dirty/untracked candidate files against `HEAD` before commit and `HEAD~1` after (a body candidate: its serving fork). Automatic CI follows ARCHITECTURE §8; local checks and review remain.
+`commit_reviewed` runs `test_selection.FLOOR_TESTS`, changed tests, direct AST importers of changed code and tests, and authored widening. Missing/empty floor modules block. Selected modules are scope, not execution: `LANE_EXCLUSION_EXPR` still skips opt-in markers (`ui_browser`). Selection includes dirty/untracked candidate files against `HEAD` before commit and `HEAD~1` after (a body candidate: its serving fork). Automatic CI follows ARCHITECTURE §8; local checks and review remain.
 
 Imports are a minimum: `extra_tests` covers indirect/dynamic, prompt, skill and cross-language consumers; `full_tests`, unresolved impact. Both need `test_reason`, retained until adoption. Verifier/cutover changes force full: runner/selector, floor, shared helpers/data, pytest configuration, non-version dependency edits and `_CUTOVER`. No product fan-out threshold. Records bind tier, candidate/base/policy, reasons and execution counts; missing/duplicate execution blocks.
 

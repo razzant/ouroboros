@@ -138,7 +138,7 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
     proc = None
     container = ProcessContainer(lifeline=True)
     code, reap_error, evidence_error, fallback, source_gap = 2, "command not started", "", "", ""
-    stopped = launch_error = ""
+    stopped = launch_error = escalation = ""
     reaped = False
     execution = "not_run"
     requested: list[int] = []
@@ -200,7 +200,11 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
                             try:
                                 proc.wait(timeout=_GRACE_SEC)
                             except subprocess.TimeoutExpired:
-                                pass
+                                # The wait, not the output, observed it: the TERM below may cut whatever
+                                # the root still had to do, such as a nested runner's final report.
+                                escalation = (f"root still running after its {_GRACE_SEC} s interrupt window: escalated "
+                                              "to TERM and the forced reap; its own completion is unconfirmed")
+                                report_diagnostic(f"SAFE_TEST_INTERRUPT_ESCALATED {escalation}")
                         # Also when the root already exited: what it left gets TERM grace.
                         container.terminate_tree(_GRACE_SEC)
             reap_error = container.reap()
@@ -217,7 +221,8 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
             if display.is_alive() and (failure := display.finish()) is not None:
                 output.failed("display", failure)
             output.finish(command=command, returncode=None if proc is None else proc.returncode,
-                          stopped=stopped, containment_error=reap_error, launch_error=launch_error)
+                          stopped=stopped, interrupt_escalation=escalation, containment_error=reap_error,
+                          launch_error=launch_error)
             evidence_error = "; ".join(output.errors)
         finally:
             output.close()
@@ -232,13 +237,15 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
         container.close()
         cleanup = {"released": [], "retained": [str(root)]}
         why = ("debug retention" if keep else reap_error or evidence_error)
+        # Both writes carry every observed fact; only the evidence error, cleanup and retention move on.
+        facts = {"command": command, "returncode": code, "containment_error": reap_error, "launch_error": launch_error,
+                 "source_gap": source_gap, "scratch": str(root), "execution": execution, "stopped": stopped,
+                 "interrupt_escalation": escalation, "evidence_fallback": fallback}
         if evidence is not None and not why:
             # Commit the result before deleting anything it describes. A failed
             # evidence write is itself a reason to keep the source tree.
             try:
-                write_record(evidence / "result.json", {"command": command, "returncode": code,
-                             "containment_error": reap_error, "evidence_error": evidence_error, "launch_error": launch_error,
-                             "source_gap": source_gap, "scratch": str(root), "cleanup": "pending"})
+                write_record(evidence / "result.json", {**facts, "evidence_error": evidence_error, "cleanup": "pending"})
                 (root / EVIDENCE_POINTER).unlink()
                 cleanup = release_scratch(root)
                 why = cleanup.get("reason", "")
@@ -248,10 +255,8 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
             retain_tree(root, why)
         if evidence is not None:
             try:
-                write_record(evidence / "result.json", {"command": command, "returncode": code,
-                             "containment_error": reap_error, "evidence_error": evidence_error, "launch_error": launch_error,
-                             "source_gap": source_gap, "scratch": str(root), "cleanup": cleanup, "retention_reason": why,
-                             "execution": execution, "stopped": stopped, "evidence_fallback": fallback})
+                write_record(evidence / "result.json", {**facts, "evidence_error": evidence_error, "cleanup": cleanup,
+                                                        "retention_reason": why})
             except OSError as exc:
                 report_diagnostic(f"SAFE_TEST_EVIDENCE_INCOMPLETE {exc}")
         if why:

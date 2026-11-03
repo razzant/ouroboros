@@ -135,10 +135,11 @@ def test_provider_test_gateway_contract_shape_is_exact():
     request_hints = get_type_hints(ProviderTestRequest, include_extras=True)
     response_hints = get_type_hints(ProviderTestResponse, include_extras=True)
 
-    assert set(request_hints) == {"provider_id", "overrides", "connection"}
-    assert _notrequired_fields(ProviderTestRequest) == {"overrides", "connection"}
+    assert set(request_hints) == {"provider_id", "overrides", "connection", "api_key_setting"}
+    assert _notrequired_fields(ProviderTestRequest) == {"overrides", "connection", "api_key_setting"}
     assert request_hints["provider_id"] is str
     assert get_args(request_hints["connection"]) == (str,)
+    assert get_args(get_args(request_hints["api_key_setting"])[0]) == ("OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY")
     overrides_type = get_args(request_hints["overrides"])[0]
     assert get_origin(overrides_type) is dict
     assert get_args(overrides_type) == (str, str)
@@ -155,6 +156,7 @@ def test_provider_test_gateway_contract_shape_is_exact():
         ("string", "provider_id"),
         ("Object<string, string>=", "overrides"),
         ("string=", "connection"),
+        ("('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=", "api_key_setting"),
     }
     assert _js_typedef_properties(text, "ProviderTestResponse") == {
         ("boolean", "ok"),

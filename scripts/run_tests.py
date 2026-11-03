@@ -224,7 +224,7 @@ def _node_lane() -> int:
 
 
 def _selected(args, evidence) -> int:
-    from ouroboros.preflight_inventory import inventory_problem, read_inventory, selection_passes
+    from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
     from ouroboros.preflight_runner import _probe_dir, _install_worker_probe
     from ouroboros.test_selection import select_tests
 
@@ -258,7 +258,7 @@ def _selected(args, evidence) -> int:
     try:
         probe = _install_worker_probe(root)
         for spec in selection_passes(selection, probe_module=probe, temp_root=root) if code == 0 or args.keep_going else []:
-            command = [sys.executable, "-m", "pytest", *spec.args,
+            command = [sys.executable, "-m", "pytest", *launch_args(spec.args),
                        "--ci-evidence-dir", str(root / spec.label)]
             code = _run(spec.label, command, REPO)
             inventory, problem = read_inventory(root, spec.label)
