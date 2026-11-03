@@ -11,6 +11,7 @@ from __future__ import annotations
 import http.server
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import threading
@@ -31,6 +32,19 @@ REAL_EVIDENCE = preflight_qualification.adoption_test_evidence  # ``isolate`` st
 TASK = "sm1-task"
 OTHER_SHA = "c" * 40
 SCENE_START_ACCENT = "#c93545"   # the scene's own seed accent, never SM1's: the executing checkout may already serve it
+DARK_ROOT, LIGHT_ROOT = ":root {", ':root[data-theme="light"] {'
+# Where an author's edit can stop short of the palette: only ``--accent``, in these theme blocks.
+SHORT_EDITS = {"accent-alone": (DARK_ROOT, LIGHT_ROOT), "dark-only": (DARK_ROOT,)}
+
+
+def _accent_alone(css: str, *openings: str) -> str:
+    for opening in openings:
+        start = css.index(opening)
+        end = css.index("\n}", start)
+        block, found = re.subn(r"(?m)^(\s*--accent:\s*)[^;]+;", rf"\g<1>{scenarios.SM1_NEW_ACCENT};", css[start:end], count=1)
+        assert found == 1, opening
+        css = css[:start] + block + css[end:]
+    return css
 
 
 def _release_inputs(source: pathlib.Path, dest: pathlib.Path) -> None:
@@ -52,6 +66,7 @@ class _Host:
         _release_inputs(source, self.clone)
         css = self.clone / scenarios.SM1_CSS_PATH   # inside a candidate a real SM1 landed, copying it alone makes no change
         css.write_text(scenarios.css_with_accent(css.read_text(encoding="utf-8"), SCENE_START_ACCENT), encoding="utf-8")
+        self.seed_css = css.read_text(encoding="utf-8")
         for args in (("init", "-q", "-b", "ouroboros"), ("config", "core.autocrlf", "false"), ("config", "user.name", "t"),
                      ("config", "user.email", "t@e.invalid"), ("add", "-A"), ("commit", "-q", "-m", "seed")):
             self.git(*args)
@@ -74,6 +89,9 @@ class _Host:
     def git(self, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=str(self.clone), check=True, capture_output=True, text=True).stdout.strip()
 
+    def served_stylesheet(self) -> bytes:
+        return self.served_body if self.served_body is not None else (self.clone / scenarios.SM1_CSS_PATH).read_bytes()
+
     def _author(self) -> tuple[str, str]:
         """The scripted author's writes in its linked candidate, committed as ``commit_reviewed`` does there."""
         self.candidate = self.lane / "worktrees" / f"body_{TASK}"
@@ -81,6 +99,8 @@ class _Host:
         for step in scenarios.sm1_stub_script(self.clone, self.data)["agent"]:
             if isinstance(step, dict) and step.get("tool") == "write_file":
                 (self.candidate / step["arguments"]["path"]).write_text(step["arguments"]["content"], encoding="utf-8")
+        if self.fault in SHORT_EDITS:
+            (self.candidate / scenarios.SM1_CSS_PATH).write_text(_accent_alone(self.seed_css, *SHORT_EDITS[self.fault]), encoding="utf-8")
         subprocess.run(["git", "add", "-A"], cwd=str(self.candidate), check=True)
         subprocess.run(["git", "commit", "-q", "-m", scenarios.SM1_COMMIT_MESSAGE], cwd=str(self.candidate), check=True)
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(self.candidate), check=True, capture_output=True, text=True).stdout.strip()
@@ -164,11 +184,17 @@ class _Oracle(ArtifactOracle):
 
 
 class _Page:
-    def __init__(self, host: _Host) -> None:
-        self.host = host
+    """What a browser computes from the stylesheet this scene serves, in the theme asked for: the palette the scripted
+    author really landed, never a canned accent, so a one-theme or token-only edit fails this chain too."""
 
-    def computed_property(self, _selector, _name):
-        return scenarios.SM1_NEW_ACCENT
+    def __init__(self, host: _Host) -> None:
+        self.host, self.scheme = host, ""
+
+    def color_scheme(self, scheme):
+        self.scheme = scheme
+
+    def computed_property(self, _selector, name):
+        return scenarios.css_theme_tokens(self.host.served_stylesheet().decode("utf-8"))[self.scheme].get(name, "")
 
     goto = screenshot = close = lambda self, *a, **k: None
 
@@ -187,7 +213,7 @@ def lane(tmp_path, monkeypatch):
                     version = (host.clone / "VERSION").read_text(encoding="utf-8").strip()
                     body = json.dumps({"runtime_version": version}).encode("utf-8")
                 elif self.path in scenarios.SM1_SERVED_STYLESHEETS:
-                    body = host.served_body if host.served_body is not None else (host.clone / scenarios.SM1_CSS_PATH).read_bytes()
+                    body = host.served_stylesheet()
                 else:
                     self.send_error(404)
                     return
@@ -311,9 +337,25 @@ def test_one_wrong_identity_fails_exactly_its_own_stage(lane, fault, reason, fai
 
 def test_a_stale_stylesheet_fails_the_byte_check_alone(lane):
     host, ctx = lane()
-    host.served_body = b":root { --accent: #2f7de1; } /* right accent, wrong bytes */"
+    host.served_body = host.git("show", f"{host.sha}:{scenarios.SM1_CSS_PATH}").encode("utf-8") + b"\n/* right palette, wrong bytes */"
     scenarios.run_sm1(ctx)
     assert _failed(ctx) == {"adoption_serves_committed_stylesheets"}
+
+
+@pytest.mark.parametrize("fault", sorted(SHORT_EDITS))
+def test_an_authors_edit_that_stops_short_of_the_palette_fails_the_chain_after_a_clean_adoption(lane, fault):
+    """Everything up to the served bytes is right, so only the palette can say it: the real rehearsal reached exactly this
+    with its dark-only edit. Its first ``--accent`` carried the target, and the source check said so while Light kept the old."""
+    _host, ctx = lane(fault)
+    scenarios.run_sm1(ctx)
+    failed = _failed(ctx)
+    assert failed - {"committed_css_carries_new_accent"} == {"ui_app_palette", "ui_onboarding_palette", "ui_computed_style"}, failed
+    assert ("committed_css_carries_new_accent" in failed) is (fault != "accent-alone"), "the source reads both themes too"
+    problems = ctx.facts["palette_problems"]
+    assert ("--accent is #c93545" in problems["app"]["light"]) is (fault == "dark-only")
+    for document in ("app", "onboarding"):
+        for theme in scenarios.SM1_THEMES:
+            assert "--accent-10 keeps its seed value" in problems[document][theme], "the ladder stayed in every case"
 
 
 def test_a_serving_checkout_whose_status_git_cannot_read_is_not_clean(tmp_path):

@@ -123,14 +123,6 @@ def test_scenario_table_shape():
     assert sum(1 for s in sw1["agent"] if callable(s)) == 3  # wait_tasks + two child dispositions
 
 
-def test_css_accent_helpers_only_touch_the_root_token():
-    css = ":root {\n    --accent: #c93545;\n    --accent-light: #f07a86;\n}\n.x { --accent: red; }\n"
-    assert scenarios.accent_value(css) == "#c93545"
-    changed = scenarios.css_with_accent(css, "#2f7de1")
-    assert scenarios.accent_value(changed) == "#2f7de1"
-    assert changed.count("#2f7de1") == 1 and "--accent-light: #f07a86" in changed and "--accent: red" in changed
-
-
 def test_lane_count_and_stagger_bounds(monkeypatch):
     _short_tmp(monkeypatch)
     assert run_live_lanes.parse_args(["--stub"]).lanes == 4
@@ -761,9 +753,13 @@ class _FakeUI:
         if self.fail_goto is not None:
             raise self.fail_goto
 
+    def color_scheme(self, scheme):
+        self.calls.append(("color_scheme", scheme))
+        self.scheme = scheme
+
     def computed_property(self, selector, prop):
         self.calls.append(("computed_property", selector, prop))
-        return scenarios.SM1_NEW_ACCENT
+        return self.scheme if prop == "--native-color-scheme" else scenarios.SM1_NEW_ACCENT
 
     send_chat = rebind = lambda self, *a, **k: None
 
@@ -785,7 +781,7 @@ def _sm1_ui_tail(ctx: scenarios.LaneContext) -> None:
     if "commit_landed" not in ctx.checks:
         ctx.check("commit_landed", True)
     ctx.restart()
-    scenarios.check_sm1_rendered_palette(ctx, scenarios.SM1_REQUIRED_PALETTE, served=True)
+    scenarios.check_sm1_rendered_palette(ctx, scenarios.SM1_REQUIRED_PALETTE, served=True, seed_css="")
 
 
 def test_ui_client_opens_on_first_use_and_restart_reopens_against_the_new_server(tmp_path):
@@ -800,9 +796,9 @@ def test_ui_client_opens_on_first_use_and_restart_reopens_against_the_new_server
     assert calls[1] == ("close", "http://127.0.0.1:1") and calls[2] == ("open", "http://127.0.0.1:2")
     assert ctx.checks == {"commit_landed": True, "ui_app_palette": True, "ui_onboarding_palette": True,
                           "ui_computed_style": True} and ctx.ui_reason == "" and "ui_reason" not in ctx.facts
-    assert ctx.screenshots == [str(tmp_path / "sm1_app_after_restart.png"),
-                               str(tmp_path / "sm1_onboarding_after_restart.png")]
-    assert [c for c in calls if c[0] == "goto"] == [("goto", "/"), ("goto", "/onboarding")]
+    assert ctx.screenshots == [str(tmp_path / f"sm1_{document}_{theme}_after_restart.png")
+                               for document in ("app", "onboarding") for theme in ("light", "dark")]
+    assert [c for c in calls if c[0] == "goto"] == [("goto", "/"), ("goto", "/"), ("goto", "/onboarding"), ("goto", "/onboarding")]
     ctx.close_ui()
     ctx.close_ui()                                   # idempotent
     assert [c for c in calls if c[0] == "close"] == [("close", "http://127.0.0.1:1"), ("close", "http://127.0.0.1:2")]
@@ -832,8 +828,9 @@ def test_closed_target_degrades_the_ui_checks_typed_and_keeps_every_other_check(
                           "ui_computed_style": False}
     assert ctx.ui_reason == ctx.facts["ui_reason"] == "ui_unavailable:TargetClosedError"
     assert ctx.facts["ui_errors"] == ["TargetClosedError: Target page, context or browser has been closed"]
-    assert not any(ctx.facts["palette_computed"]["app"].values()) and ctx.screenshots == []
-    assert [c[0] for c in calls] == ["open", "goto", "close"]   # closed on the failure, later calls no-ops
+    assert not any(value for theme in ctx.facts["palette_computed"]["app"].values() for value in theme.values())
+    assert ctx.screenshots == []
+    assert [c[0] for c in calls] == ["open", "color_scheme", "goto", "close"]   # closed on the failure, later calls no-ops
 
 
 class _NoopServer:
@@ -885,7 +882,7 @@ def test_lane_with_a_dead_browser_target_is_checks_failed_not_infra_error(tmp_pa
     assert row["facts"]["ui_reason"] == "ui_unavailable:TargetClosedError"
     assert row["ui"] == {"available": False, "reason": "ui_unavailable:TargetClosedError"}
     # lane start: availability probe opened and closed; use: opened after the restart, dead, closed
-    assert [c[0] for c in calls] == ["open", "close", "open", "goto", "close"]
+    assert [c[0] for c in calls] == ["open", "close", "open", "color_scheme", "goto", "close"]
     stored = json.loads((tmp_path / "SM1" / "out" / "lanes" / "SM1_a1" / "result.json").read_text(encoding="utf-8"))
     assert stored["status"] == "fail" and stored["facts"]["ui_reason"] == "ui_unavailable:TargetClosedError"
 
@@ -1096,7 +1093,7 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
     assert scenarios.SM1_CSS_PATHS == ("web/ui.css",)
     prompt = scenarios.sm1_prompt()
     assert "web/ui.css" in prompt and "/onboarding" in prompt and "docs/DESIGN.md" in prompt
-    assert "both browser documents" in prompt
+    assert "both browser documents" in prompt and "both the Light and Dark themes" in prompt
     assert "skip_" not in prompt.lower() and "do not bump" not in prompt.lower() and "bumped in the same diff" in prompt
     script = scenarios.sm1_stub_script(REPO_ROOT)["agent"]
     writes = [s for s in script if isinstance(s, dict) and s.get("tool") == "write_file"]
@@ -1110,7 +1107,8 @@ def test_sm1_changes_the_shared_palette_for_both_documents():
     assert "preflight_review" not in prompt and not any(isinstance(s, dict) and s.get("tool") == "preflight_review" for s in script)
     text = writes[0]["arguments"]["content"]
     original = (REPO_ROOT / scenarios.SM1_CSS_PATH).read_text(encoding="utf-8")
-    assert scenarios.accent_value(text) == scenarios.SM1_NEW_ACCENT
+    assert {theme: tokens["--accent"] for theme, tokens in scenarios.css_theme_tokens(text).items()} == {
+        theme: scenarios.SM1_NEW_ACCENT for theme in scenarios.SM1_THEMES}, "what the paid prompt asks, in both themes"
     # Hermetic preflight can already be running on the target-accent candidate.
     if scenarios.accent_value(original) != scenarios.SM1_NEW_ACCENT:
         assert text != original
@@ -1447,7 +1445,7 @@ def test_ui_client_prefers_the_suite_interface_when_it_has_this_surface(monkeypa
             self.opened = True
             return self
 
-        goto = computed_property = send_chat = screenshot = rebind = close = lambda self, *a, **k: None
+        goto = color_scheme = computed_property = send_chat = screenshot = rebind = close = lambda self, *a, **k: None
 
     fake = type(sys)("tests.system_e2e.interfaces")
     fake.PlaywrightUIClient = Landed

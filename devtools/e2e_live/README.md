@@ -28,6 +28,11 @@ admits it; for the bundled interpreter it adds `--user`, which that guard refuse
 (SM1_a1 of 2026-11-02 logged `Could not find an activated virtualenv` at boot). When the bundled runtime's packages match the selected lock, a venv made with
 `--system-site-packages --without-pip` can reuse them. Verify that exact runtime
 and lock before the rehearsal; this does not qualify the packaged user-site path.
+A lane's clone carries no `node-standalone/`, so on a venv outside the packaged
+launcher the adoption's Node lane resolves `node` from `PATH` and a missing one
+blocks it. Put a runnable Node >= 20.11 first on `PATH` (the bundled
+`node-standalone/bin` qualified as 24.16.0 this way); the stand detects and
+downloads nothing.
 
 ## Scenario acceptance
 
@@ -48,7 +53,7 @@ children and UI root) answer from the lane. Without that scope SM1_a1 of
 
 | Scenario | Work and required evidence | Rationale / limits |
 |---|---|---|
-| SM1 | Change the shared brand accent consistently with DESIGN.md §3 in `web/ui.css`, exercise the app and setup wizard, land a reviewed release through `commit_reviewed` on the task's body candidate, request its adoption with `request_restart(adopt_commit=<that SHA>)` and finish. The full profile uses advanced runtime and blocking enforcement, with no landing skip flags. Acceptance reads the commit the landing call's review record names, and retains the S2 checks there: it includes the changed shared palette with nonempty accent/focus roles, VERSION strictly increases, the landed carriers pass `commit_admission.release_metadata_preflight`, the author's candidate is clean, a real advisory ledger row and the commit gate's review-ledger record of the wave (seats dispatched, both questions answered) exist and usage is positive. After the task's terminal it follows that one commit through the adoption (`adoption_*` checks, next section), then the browser reads the new accent and matching accent/focus roles on both `/` and `/onboarding`. | One shared file does not prove both documents loaded it: the browser oracle detects a missing wizard link or divergent page override. The named accent roles and alpha ladder remain part of the palette. SM1's lane-local release/review/adoption contract is separate from a version-neutral contributor PR; changing its source oracle must not remove those obligations. `vision_evidence_present` records browser/vision tool rows for reviewers to judge, not a host assertion that the image was inspected. `committed_companions` records paths beyond the palette, release carriers, DESIGN and comment-only CSS as facts, not an automatic scope failure: reviewers may identify another legitimate accent consumer. The clean-tree check discloses and tolerates only transient `.ouroboros/` scratch. |
+| SM1 | Change the shared brand accent consistently with DESIGN.md §3 in `web/ui.css`, exercise the app and setup wizard, land a reviewed release through `commit_reviewed` on the task's body candidate, request its adoption with `request_restart(adopt_commit=<that SHA>)` and finish. The full profile uses advanced runtime and blocking enforcement, with no landing skip flags. Acceptance reads the commit the landing call's review record names, and retains the S2 checks there: it includes the changed shared palette with nonempty accent/focus roles, VERSION strictly increases, the landed carriers pass `commit_admission.release_metadata_preflight`, the author's candidate is clean, a real advisory ledger row and the commit gate's review-ledger record of the wave (seats dispatched, both questions answered) exist and usage is positive. The landed `--accent` is the target in both themes. After the task's terminal it follows that one commit through the adoption (`adoption_*` checks, next section), then the browser opens `/` and `/onboarding` fresh in Light and in Dark: that theme must paint, `--accent` must be the target, no accent role, focus role or control fill may keep that theme's seed value, and the documents must match per theme (`palette_computed`, `palette_problems`). | One shared file does not prove both documents loaded it: the browser oracle detects a missing wizard link or divergent page override. The named accent roles and alpha ladder remain part of the palette. `web/ui.css` declares `--accent` per theme and the probe opens Light where the suite's browser lanes open Dark, so one read proves only whichever theme the browser happened to open: a dark-only edit passed those lanes and failed SM1_a1 of 2026-11-03. Each theme is asked for through `prefers-color-scheme`, what System follows; a saved choice paints the same blocks. SM1's lane-local release/review/adoption contract is separate from a version-neutral contributor PR; changing its source oracle must not remove those obligations. `vision_evidence_present` records browser/vision tool rows for reviewers to judge, not a host assertion that the image was inspected. `committed_companions` records paths beyond the palette, release carriers, DESIGN and comment-only CSS as facts, not an automatic scope failure: reviewers may identify another legitimate accent consumer. The clean-tree check discloses and tolerates only transient `.ouroboros/` scratch. |
 | SW1 | The room Subagents capsule selects Swarm before an ordinary send. The scenario requests two parallel helpers; verify at least two completed children with causal parent/root/depth lineage, a `swarm_fanout` receipt covering them, absorbed-child finalization, the with-children cost rollup without retired aliases, positive usage and the `/proc` environment-based orphan check. | Swarm itself guarantees neither promotion nor a plan; plan checks require an explicit planning request. UI choice, child execution and root accounting are separate proofs. An API fallback can continue diagnostics when the browser is unavailable, but cannot pass `ui_swarm_path_exercised`. Children spend under their root's fence. |
 | SK1 | The model authors `SKILL.md` + `plugin.py` and calls `skill_preflight`; the runner reviews, grants exactly the manifest's one privileged permission (`inject_chat`), enables, dispatches, disables and deletes. Require persisted findings plus HTTP 200 with `executable_review` in BOTH the review response and `/api/extensions`; retain separate `author_*` / `dispatch_*` terminals. Dispatch needs the generation-bearing durable row, typed `status=ok`, exact echo and one host-attributed owner-chat relay per successful call. | The product's executable-review gate decides eligibility under the applied enforcement; SK1 sets no enforcement override. Clean state, non-PASS items, status and blocking reason remain facts, because requiring all-PASS would measure author quality instead of the lifecycle. A generation digest alone also appears on failed dispatches. The fixture exercises its declared permission rather than requesting an unused grant. |
 
@@ -58,10 +63,13 @@ Preserve the typed SM1 refusal trail from `commit_refusal_facts`: advisory
 `REVIEW_BLOCKED`), landing skip flags and the terminal `reason_code`
 (for example `budget_exhausted` or `deadline_local`). The stub projects its
 release bump offline through `release_sync.sync_release_metadata` plus the
-README history row and exercises the same hermetic preflight. Its canned review
-answers and scripted author verify the machinery only, not independent semantic
-review or design quality: every stub row carries `machinery_only` and the run's
-verdict output repeats it. A stub attempt also owes `stub_scripted_final_reached`,
+README history row and exercises the same hermetic preflight. The scripted author
+makes the prompt's accent change mechanically through `scenarios.css_with_accent`:
+both themes' `--accent`, the ladder at its alphas, and each theme's opaque roles and
+crimson tones on the new hue at their own lightness, aliases untouched; the Owner,
+Project, status and voice roles stay. Its canned review answers and scripted author
+verify the machinery only, not independent semantic review or design quality: every
+stub row carries `machinery_only` and the run's verdict output repeats it. A stub attempt also owes `stub_scripted_final_reached`,
 because a script that ran out of steps ends its task `completed` as well.
 
 ### SM1's direct adoption
@@ -357,7 +365,8 @@ feasibility fixtures), `tests/test_e2e_live_sm1_checks.py`, `tests/test_e2e_live
 `tests/test_server_runner_absorb_wait.py` and `tests/test_e2e_live_ci_lane.py`;
 `tests/test_web_typography_static.py` owns shared-source loading and variable
 resolution; `tests/test_e2e_live_sm1_palette_browser.py` exercises the two-document
-palette oracle, including missing-source and stale-focus-role failures. The real
+palette oracle in both themes from either opening scheme, including one-theme edits,
+roles left at the seed, missing-source and page-local-role failures. The real
 SM1 stub rehearsal is separately gated by `integration`, `serial` and
 `OUROBOROS_E2E_DEEP=mock`; it starts a real server and the hermetic suite, so
 ordinary focused/default tests must not accidentally launch it.
