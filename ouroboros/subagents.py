@@ -842,6 +842,9 @@ SUBAGENT_INTENT_FIELDS: tuple[str, ...] = (
     "attachment_paths",
     "attachment_import",
     "document_import_intent",
+    # A read-only child's explicit ``input_files``, retained at schedule time (DELEGATED_ADMISSION §3b):
+    # the receipt its first input names and its first session start verifies. [] records an explicit none.
+    "prepared_input_files",
 )
 
 

@@ -43,8 +43,10 @@ def input_source_selection_receipt(task: Mapping[str, Any]) -> dict[str, Any]:
 
     if task_input_sources(task) != "declared":
         return {}
-    selected = ["explicitly selected task documents (attachment_paths), copied as this task's inputs"
-                ] if _selected_documents(task) else []
+    selected = (["explicitly selected task documents (attachment_paths), copied as this task's inputs"
+                 ] if _selected_documents(task) else []) + (
+        ["explicitly selected input files (input_files), retained by the host before this task was queued"]
+        if _selected_input_files(task) else [])
     with_words = declared_inputs_carry_owner_words(task)
     return {
         "input_sources": "declared",
@@ -97,6 +99,18 @@ def _selected_documents(task: Mapping[str, Any]) -> str:
     return ("The parent selected these retained inputs (attachment_paths). The host attaches them to the first "
             "start of this work order as immutable engine documents; a later start attaches only the documents "
             "its own request selects.\n" + "\n".join(f"- {path}" for path in paths))
+
+
+def _selected_input_files(task: Mapping[str, Any]) -> str:
+    """The parent's ``input_files`` disclosure; "" when the task selected none."""
+    rows = task.get("prepared_input_files")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    return ("The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+            "this task. The first start of this work order verifies those copies against these digests and its "
+            "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+            + "\n".join(f"- {row.get('root')}:{row.get('path')} (sha256 {row.get('sha256')}, {row.get('size')} bytes)"
+                        for row in rows if isinstance(row, dict)))
 
 
 def _text(value: Any) -> str:
@@ -193,6 +207,7 @@ def _render_external_work_order(task: Mapping[str, Any]) -> str:
         ("TASK CONTRACT AUTHORITY", remaining_contract),
         ("INHERITED TASK INPUTS", contract.get("attachment_manifest")),
         ("SELECTED DOCUMENTS", _selected_documents(task)),
+        ("SELECTED INPUT FILES", _selected_input_files(task)),
     ]
     authority = {
         "task_id": str(task.get("id") or ""),
