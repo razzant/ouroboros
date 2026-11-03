@@ -185,3 +185,23 @@ def test_a_declaration_is_read_never_inferred(headers, expected):
 
     request = SimpleNamespace(headers=headers, client=SimpleNamespace(host="127.0.0.1"))
     assert declared_settings_origin(request) == expected
+
+
+def test_the_mind_is_told_how_its_own_settings_write_declares_itself(tmp_path, monkeypatch):
+    """A blocked file write to settings.json sends the mind to /api/settings and names the two headers that make
+    its change read as Ouroboros's, with its task (CLIENT_CONTRACT "Declared settings origin"); the file is kept."""
+    from ouroboros import config as cfg
+    from ouroboros.tools.registry import ToolRegistry
+
+    drive, repo = tmp_path / "drive", tmp_path / "repo"
+    drive.mkdir()
+    repo.mkdir()
+    (drive / "settings.json").write_text('{"TOTAL_BUDGET": 10}\n', encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(cfg, "DATA_DIR", drive)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", drive / "settings.json")
+    result = ToolRegistry(repo_dir=repo, drive_root=drive).execute(
+        "write_file", {"root": "runtime_data", "path": "settings.json", "content": "{}\n"})
+    assert "DATA_WRITE_BLOCKED" in result and "/api/settings" in result, result
+    assert "X-Ouroboros-Actor: ouroboros" in result and "X-Ouroboros-Task-Id: <your task id>" in result, result
+    assert (drive / "settings.json").read_text(encoding="utf-8") == '{"TOTAL_BUDGET": 10}\n'
