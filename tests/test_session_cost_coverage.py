@@ -322,11 +322,14 @@ def test_cli_partial_grace_returns_unsettled_result(tmp_path, monkeypatch):
     assert answer["cost_final"] is False and answer["cost_presentation"]["accounting_open"] is True
 
 
-def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatch, fake_route):  # noqa: F811
+@pytest.mark.parametrize("cost_recorded", [False, True])
+def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatch, fake_route, cost_recorded):  # noqa: F811
+    """Joining a legacy successor records the stopped run's partial cost once, whether an older host left it
+    unrecorded or already collected it. The current host creates no new continuation."""
     from tests._review_session_route_shared import FakeGateway
-    from tests.test_review_session_continuation import _engine, _run
+    from tests.test_review_session_continuation import _engine, _run, legacy_successor
 
-    _engine(monkeypatch)
+    posts = _engine(monkeypatch)
     get = FakeGateway.get_run
     def detail(self, rid, **kw):
         result = get(self, rid, **kw)
@@ -336,7 +339,17 @@ def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatc
             result["attemptExecution"] = attempts()
         return result
     monkeypatch.setattr(FakeGateway, "get_run", detail)
-    facts = _run(tmp_path, {}, [], [])
+    checkpoints = []
+    with monkeypatch.context() as legacy_host:
+        if not cost_recorded:
+            # The retired automatic loop continued before settling the stopped run.
+            legacy_host.setattr(custody, "settle_run", lambda *args, **kwargs: None)
+        token = legacy_successor(tmp_path, checkpoints)
+    stopped = custody.lookup(tmp_path, "t-review", "run-1")[1]
+    assert stopped.settled is cost_recorded
+    assert len(usage.read_usage_records(tmp_path)) == int(cost_recorded)
+    facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
+    assert [(request, key) for request, key in posts if "continueFrom" in request] == [({"continueFrom": "run-1"}, token)]
     assert facts["run_id"] == "run-2"
     assert facts["spend"] == 2 and facts["spend_estimated"] is False
     assert facts["usage"]["cost_partial"] is True and facts["usage"]["cost_final"] is False

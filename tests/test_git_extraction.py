@@ -116,8 +116,10 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # place arrivals stay unread until a genuine wake. That sentence is the only change from 6865d432….
     # vcs_restore (#2433) now says it restores index and files and deletes new files in scope,
     # staged or not; that description is the only change from 86389708….
+    # Explicit continuation (#2677): both reviewed-commit aliases add continue_seats and say what review_reference
+    # does with and without author_disposition; those two properties are the only change from 4bb35274….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "4bb352741cbe7992c820a3f785882b02c0f4bf328b1b896af2eedb5ad30ed353"
+        "aa615be195f44087d99ce7394f4bdf4fcd63d3d6f522d8c092dd121c00fe3cd7"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

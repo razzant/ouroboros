@@ -581,8 +581,11 @@ def test_exact_pending_commit_retry_reconciles_before_cycle_cap(tmp_path, monkey
     from types import SimpleNamespace
     from ouroboros.tools import git as git_tools
 
+    drive = tmp_path / "data"  # no recorded round choice to project
+    drive.mkdir()
     ctx = SimpleNamespace(
         repo_dir=tmp_path,
+        drive_root=drive,
         task_id="task-1",
         task_metadata={},
         _review_resume_pending=True,
