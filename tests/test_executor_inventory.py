@@ -105,6 +105,9 @@ INVENTORY: Dict[Site, Row] = {
     ("ouroboros/presence_carrier.py", "_runner", "run_presence_turn"): Row(INSIDE, "the carrier's runner"),
     ("ouroboros/presence_carrier.py", "carry_presence_turn", "run_presence_turn"): Row(INSIDE, "the carrier's body for a Host turn"),
     ("ouroboros/presence_carrier.py", "carry_presence_turn.factory", "make_agent"): Row(INSIDE, "its actor"),
+    ("ouroboros/presence_carrier.py", "carry_saved_turn", "handle_task"): Row(
+        INSIDE, "a moved turn's saved work, in the pool worker the queue dispatched it to"),
+    ("ouroboros/presence_carrier.py", "carry_saved_turn.factory", "make_agent"): Row(INSIDE, "its actor"),
     ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "handle_task"): Row(INSIDE, "a Presence turn's body"),
     ("ouroboros/presence_runner.py", "run_presence_turn._run_current", "make_agent"): Row(INSIDE, "its actor"),
     ("ouroboros/agent.py", "OuroborosAgent._prepare_task_context", "build_llm_messages"): Row(INSIDE, "the task's first step"),

@@ -81,6 +81,14 @@ class PresenceTurnExecution:
             self.return_capacity()
         return published
 
+    def publish_retained(self, error: BaseException) -> None:
+        """Every waiter not yet answered hears that the queue keeps this turn (a moved turn's park): unlike a
+        settlement nothing returns or retires here; the carrier's own settlement does that after its hold."""
+        with self._lock:
+            for future in (self.initial, self.result):
+                if not future.done():
+                    future.set_exception(error)
+
 
 class PresenceTurnExecutions:
     """The Host's live presence turns by durable turn id: start one, or join the one already running.

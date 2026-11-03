@@ -477,6 +477,15 @@ def write_task_result(
         projected_fields = _field_projector(existing, {**prepared_fields, "status": status}) if _field_projector else prepared_fields
         if projected_fields is None:  # projector saw a terminal/stale row: no mutation
             return None
+        # The owner's lift of a producer allowance outlives any writer's older copy of the task (a warm stack's own
+        # dict at its terminal): nothing re-arms the number a restart, a member or a Continue would read (#2566).
+        metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        if isinstance(metadata.get("producer_allowance_lifted"), dict):
+            projected_fields.pop("root_cost_ceiling_usd", None)
+            if isinstance(projected_fields.get("metadata"), dict):
+                projected_fields["metadata"] = {**{key: value for key, value in projected_fields["metadata"].items()
+                                                   if key != "root_cost_ceiling_usd"},
+                                                "producer_allowance_lifted": metadata["producer_allowance_lifted"]}
         # The store reconciles fan-out base witnesses with addressed event union,
         # including an independently repaired execution-root base on copy-back.
         projected_status = str(projected_fields.pop("status", status))

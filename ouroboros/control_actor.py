@@ -5,6 +5,8 @@ control call; the existing fence/grant/CAS records retain who requested it.
 A call may also carry the caller's named decision to go on past held calls
 whose outcome is unknown (``accepting_unknown``); the addressed action's own
 census applies it to its tree and records it (``local_custody_repair``).
+The owner's own Resume door binds itself (``owner_door``) for the one grant decision
+that needs positive owner provenance, which an unbound call never supplies.
 """
 
 from contextlib import contextmanager
@@ -68,6 +70,30 @@ def mind_control(actor_task_id: str, reason: str):
         yield
     finally:
         _ACTOR.reset(token)
+
+
+_OWNER_DOOR = ContextVar("lifecycle_owner_door", default=None)
+
+
+@contextmanager
+def owner_door(door: str):
+    """Bind, for this one call, the owner's own control door it entered through (``api_task_resume``).
+
+    A mind's doors bind ``mind_control`` and automatic paths bind nothing, so neither reads as this door.
+    Its one reader is the owner's choice of 2026-11-02 (#2566): a moved Presence turn's producer allowance.
+    """
+    from ouroboros.utils import utc_now_iso
+
+    token = _OWNER_DOOR.set({"actor": "owner", "door": str(door), "at": utc_now_iso()})
+    try:
+        yield
+    finally:
+        _OWNER_DOOR.reset(token)
+
+
+def owner_door_bound() -> dict:
+    """The owner door this call entered through: ``{}`` when none is bound, or a mind's control call is."""
+    return {} if control_actor() else dict(_OWNER_DOOR.get() or {})
 
 
 def observed_control_stop(root, task=None, *, budget=None, owner=None) -> dict:

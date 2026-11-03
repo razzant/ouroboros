@@ -270,6 +270,8 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
         "finishing_reviews", "late_work", "can_resume", "cancelable", "cancel_origin", "delegated_runs_unreconciled",
         # K8 census facts for every chat (project_id is already a direct-turn field).
         "last_line", "last_line_at", "tool_calls", "detached", "project_name",
+        # A moved text Presence turn takes the owner's Pause (#2566).
+        "presence_pause",
     }
     assert {key: value for key, value in fields.items() if key not in additional_keys} == ActiveDirectTurn.__annotations__
     assert set(fields) - set(ActiveDirectTurn.__annotations__) == additional_keys

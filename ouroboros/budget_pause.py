@@ -98,8 +98,7 @@ RAIL_WRAPUP_LAST_FIT = "wrapup_last_fit"
 RAIL_SOFT_LAND = "soft_land"
 GRACEFUL_RAILS = frozenset({RAIL_GRACEFUL_CEILING, RAIL_WRAPUP_LAST_FIT, RAIL_SOFT_LAND})
 # The owner's Pause of a whole tree (``owner_pause.py``) is not a monetary stop:
-# it rides the SAME exact checkpoint, park and grant, under reason ``owner``,
-# and never requests a stop of work already sent.
+# it rides the SAME exact checkpoint, park and grant, under reason ``owner``, and never requests a stop of work already sent.
 from ouroboros.owner_pause import RAIL_OWNER_PAUSE, REASON_OWNER  # noqa: E402
 # The model's own COLD sleep (``model_sleep``) rides the same park too; only its
 # selected sources, through the supervisor's sleep-wake policy, wake it.
@@ -431,12 +430,12 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
                      expected_pause_id: Optional[str] = None, *,
                      expected_state: Any = None,
                      expected_grant_id: Optional[str] = None,
-                     expected_owner_wait: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                     expected_owner_wait: Optional[Dict[str, Any]] = None, row_update: Any = None) -> Dict[str, Any]:
     """CAS the pause; optional warm-sleep retention transfers its exact wait.
 
-    ``expected_owner_wait`` additionally matches the complete owner-wait row
-    and marks it ``retained`` in the same replace as the new exact pause. The
-    original source stays available; ordinary owner/review waits do not opt in.
+    ``expected_owner_wait`` additionally matches the complete owner-wait row and marks it ``retained`` in the same
+    replace as the new exact pause. The original source stays available; ordinary owner/review waits do not opt in.
+    ``row_update`` rewrites the task's row in this same write: what stands or falls with the transition.
 
     Compare-and-set: ``expected_pause_id``, ``expected_state`` (one state or a
     collection of them) and ``expected_grant_id`` are each checked under the
@@ -479,8 +478,8 @@ def set_budget_pause(root: Any, task_id: str, row: Dict[str, Any],
                   if row.get("state") == STATE_PAUSED and row.get("reason") in {"budget", REASON_AUTHORITY}
                   and (old.get("state") != STATE_PAUSED or old.get("pause_id") != row.get("pause_id")) else {})
         from ouroboros.model_detach import detached_fields
-        return stamp_task_result_schema({**current, **retained_wait, **notice,
-                                         **detached_fields(current, row), "budget_pause": dict(row)})
+        updated = {**current, **retained_wait, **notice, **detached_fields(current, row), "budget_pause": dict(row)}
+        return stamp_task_result_schema(row_update(updated) if row_update else updated)
 
     from ouroboros.task_store import patch_document
     patch_document(root, task_id, update)
@@ -752,9 +751,10 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
     if ctx is None or rail not in RAILS:
         return None
-    # Missing owner/id/root is reported, not parked. Direct chat is eligible:
-    # its queue carrier binds direct_owner_wait at the pooled worker_owner_wait seam.
-    ineligible = ("no_continuation_owner" if not callable(getattr(ctx, "owner_wait_callback", None))
+    # Missing owner/id/root is reported, not parked. Direct chat binds direct_owner_wait at the pooled seam;
+    from ouroboros.presence_carrier import saves_exact_pause  # a moved Presence turn needs no callback (#2566)
+    ineligible = ("no_continuation_owner" if not (callable(getattr(ctx, "owner_wait_callback", None))
+                                                  or saves_exact_pause(ctx, rail))
                   else "no_task_id" if not str(getattr(ctx, "task_id", "") or "")
                   else "no_durable_root" if not (getattr(ctx, "budget_drive_root", None)
                                                  or getattr(ctx, "drive_root", None))
@@ -969,13 +969,13 @@ def enter_owner_pause(limit_ctx: Any) -> None:
             raise ModelWaitInterrupted("owner_pause_authority_unreadable")
         setattr(ctx, "_owner_pause_fence_id", str(fence.get("fence_id") or ""))
         try:
+            from ouroboros.presence_carrier import saves_exact_pause  # a moved Presence turn's qualified park (#2566)
             from ouroboros.review_pause import live_detached_operations
-
             detached = live_detached_operations(str(ctx.task_id))
         except Exception:
             log.debug("Live review operations unreadable at the owner pause boundary", exc_info=True)
             detached = []
-        if not (detached and callable(getattr(ctx, "owner_wait_callback", None))):
+        if not (detached and (callable(getattr(ctx, "owner_wait_callback", None)) or saves_exact_pause(ctx, RAIL_OWNER_PAUSE))):
             break
         from ouroboros.owner_wait import consume_warm_resume, park_owner_pause_warm
 

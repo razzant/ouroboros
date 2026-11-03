@@ -352,6 +352,9 @@ def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
                      "replay_safe": True, "physical_calls": 0}
         ctx.RUNNING.pop(task_id, None)
         resumed_task = dict(task)
+        if task.get("_presence_turn"):  # a Presence turn parks as its own built record, never the lane seed (#2566)
+            from ouroboros.presence_carrier import park_record
+            resumed_task = park_record(task, ctx.DRIVE_ROOT, evt.get("task"))
         resumed_task["_budget_pause"] = dict(pause)
         if prestart:
             resumed_task["_execution_handoff_sec"] = pause["execution_consumed_sec"]
@@ -530,6 +533,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
             marker = {**marker, "fence_id": fence["fence_id"]}
         ctx.RUNNING.pop(task_id, None)
         paused_task = dict(task)
+        if task.get("_presence_turn"):  # a Presence turn parks as its own built record, never the lane seed (#2566)
+            from ouroboros.presence_carrier import park_record
+            paused_task = park_record(task, result_root, evt.get("task"))
         paused_task["_budget_pause"] = marker
         # The detach stamps ride the durable pause row (``model_detach.detached_fields``): the row's
         # task never saw them, so a parked lane turn takes them here, as the direct turn's record did.
@@ -562,6 +568,9 @@ def install_exact_budget_pause(ctx: Any, task_id: str, checkpoint: Dict[str, Any
         # stale ``paused`` over a live grant; the state CAS below is the second
         # rail, for a writer this lock does not cover (#1196, F1).
         persisted = persist_snapshot(reason="budget_pause_exact_continuation")
+        if persisted and task.get("_presence_turn"):  # its custody is durable: the waiting transport hears so now
+            from ouroboros.presence_carrier import answer_parked_turn
+            answer_parked_turn(result_root, task_id)
         confirmed, superseded = False, ""
         from ouroboros.owner_pause import SETTLEMENT_EXTERNAL_RUNNING
 
@@ -1252,6 +1261,12 @@ def select_held_budget_row(q: Any, task: Dict[str, Any], hold: Dict[str, Any],
         withdraw(persist=False)
         return {"ok": False, "error": "snapshot_not_persisted" if refused == "snapshot_not_persisted"
                 else "selection_owner_held", **({"detail": refused} if completing else {})}
+    from ouroboros.presence_carrier import owner_resume_lift
+
+    # The selection stands: the owner's own Resume of a moved Presence turn (#2566) now decides, or there was no Resume.
+    if refusal := owner_resume_lift(task, result_root):
+        withdraw()
+        return refusal
     try:
         write_task_result(result_root, task_id, STATUS_SCHEDULED, reason_code="",
                           resource_limit={"status": "resumed", "auto_resume": False,

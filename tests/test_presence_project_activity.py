@@ -204,7 +204,8 @@ def test_census_lists_the_author_in_its_room_with_stop_only_and_no_queue_row(roo
     census, works, _complete = seen["moved"]
     row, work = _row(census, task_id), _work(works, task_id)
     assert (row["chat_id"], row["project_id"]) == (seen["chat"], PROJECT)
-    assert work["room"] == seen["chat"] and _actions(work) == ["stop"]
+    # Moved to a Project as text, the author takes that work's Pause beside Stop; never Hurry or Wrap up.
+    assert work["room"] == seen["chat"] and _actions(work) == ["pause", "stop"] and row.get("presence_pause") is True
     # The positive control, read in the same body: the filter is the author's, never a phase's.
     assert {"pause", "stop"} <= set(_actions(_work(works, "direct-control")))
     # The restart handover is untouched by the census: the control stays a live direct turn; the direct-roots
@@ -356,11 +357,18 @@ def test_owner_input_in_the_project_reaches_its_one_accepting_author(root, monke
         seen["closed"] = (route(chat, "closed"), presence_execution_witness(tid, drive_root=root))
         with author._owner_message_admission_lock:
             author._accepting_owner_messages = True
-        real = conversation_lease.live_presence_roots
+        real, actor = conversation_lease.live_presence_roots, conversation_lease.presence_author_agent
         monkeypatch.setattr(conversation_lease, "live_presence_roots", lambda drive_root: {
             "roots": [{"task_id": tid, "local": False}], "complete": True})  # as another process reads it
+        # Read from another process, as every carried author is (#2654): no actor here, only its durable intake,
+        # which the delivery re-checks under the mail lock. Closed (its final drain), nothing lands; open, the words do.
+        monkeypatch.setattr(conversation_lease, "presence_author_agent", lambda drive_root, author: None)
+        conversation_lease.close_author_intake(root, tid)
+        seen["remote_closed"] = route(chat, "remote-closed")
+        conversation_lease.open_author_intake(root, tid, task["metadata"]["presence"]["event"]["conversation_key"])
         seen["remote"] = route(chat, "remote")
         monkeypatch.setattr(conversation_lease, "live_presence_roots", real)
+        monkeypatch.setattr(conversation_lease, "presence_author_agent", actor)
         seen["mail"] = [(row.get("kind"), row.get("client_message_id"), row.get("text")) for row in _mailbox(root, tid)]
         # The author's own loop drain reads it as the owner's words, not as a peer's context.
         owner_ctx = SimpleNamespace(task_id=tid, task_attempt=1, drive_root=root, budget_drive_root=root,
@@ -372,9 +380,11 @@ def test_owner_input_in_the_project_reaches_its_one_accepting_author(root, monke
     task_id = _live_turn(root, scenario)
     assert seen["reader"] == [(task_id, True, True)]
     assert seen["single"] == task_id
-    assert seen["two"] == "" and seen["closed"] == ("", True) and seen["remote"] == ""
-    assert seen["mail"] == [("owner_text", "owner-single", "owner words single")]
-    assert seen["directives"] == ["owner words single"]
+    assert seen["two"] == "" and seen["closed"] == ("", True) and seen["remote_closed"] == ""
+    assert seen["remote"] == task_id
+    assert seen["mail"] == [("owner_text", "owner-single", "owner words single"),
+                            ("owner_text", "owner-remote", "owner words remote")]
+    assert seen["directives"] == ["owner words single", "owner words remote"]
 
 
 def test_tell_task_reaches_any_local_accepting_author_and_refuses_the_rest_truthfully(root, monkeypatch):

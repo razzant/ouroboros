@@ -551,6 +551,7 @@ D20 = "Presence"
 "ouroboros/process_overload.py" = "D09"  # physical memory watch that stops a growing test tree
 "ouroboros/test_parallelism.py" = "D09"  # cores-and-memory worker budget shared with nested test runners
 "ouroboros/process_custody.py" = "D09"
+"ouroboros/launch_custody.py" = "D09"  # one selection of service launches across the ledger and ownership copies
 "ouroboros/process_identity.py" = "D09"  # validated birth tokens: the one parser death proof compares
 "ouroboros/process_scope.py" = "D09"
 "ouroboros/project_admission.py" = "D17"

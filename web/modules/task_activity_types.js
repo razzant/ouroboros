@@ -36,6 +36,7 @@
  * @property {Object=} project_admission_hold  // accepted unstarted work waiting for original Project authority
  * @property {boolean=} can_resume Positive current queue/grant authority, never derived from a label.
  * @property {boolean=} cancelable
+ * @property {boolean=} presence_pause  // a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
  * @property {string=} pause_cause  // budget | owner | authority | restart | sleep | unknown; display only
  * @property {boolean=} finishing_reviews  // review work an owner Pause lets finish runs on; display only, no count
  * @property {Object=} late_work  // answered root whose late work remains: title, answered_at; display only
@@ -49,8 +50,8 @@
  * @property {number} chat_id
  * @property {string} project_id
  * @property {string} client_message_id  // empty for managed queue rows
- * @property {string} kind  // direct_chat | managed_task | presence — presentational label; membership in this census, not kind, decides liveness
- * @property {string} phase  // managed: queued | budget_pausing | budget_paused | working | finalizing | unknown; direct: preparing | working | thinking | unknown; presence: preparing | working; parked direct turns retain ID/kind
+ * @property {string} kind  // direct_chat | managed_task | presence — presentational label; membership in this census, not kind, decides liveness; a moved Presence turn the queue keeps or the pool carries is managed_task
+ * @property {string} phase  // managed: queued | budget_pausing | budget_paused | preparing (an exact Resume not taken up yet) | working | finalizing | unknown; direct: preparing | working | thinking | unknown; presence: preparing | working; parked direct turns retain ID/kind
  * @property {number} started_at
  */
 /**

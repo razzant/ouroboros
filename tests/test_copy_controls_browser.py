@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from tests.test_markdown_reading_browser import FENCE_BODY, capture, open_chat, reading_ui  # noqa: F401 - the suite's fixture
+from tests.test_markdown_reading_browser import FENCE_BODY, capture, open_chat
+from tests.test_markdown_reading_browser import reading_ui as reading_ui  # the suite's fixture
 from tests.ui_clipboard_sink import INSTALL, recorded, set_sink
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]

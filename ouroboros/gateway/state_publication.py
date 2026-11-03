@@ -25,7 +25,11 @@ mid-production makes the next probe differ: one more production, never a stale b
 ``files``    the identities of ``state.json`` (and its last-good copy), ``settings.json`` and the
              evolution campaign; ``checkout`` the runtime checkout's identity;
 ``live``     the in-memory census inputs no revision covers: the direct turns (``_direct_turns_source``,
-             the one seam for their source), the post-task owners still running, the budget limit.
+             the one seam for their source), the post-task owners still running, the budget limit;
+``presence`` the live Presence authors' witnesses (``conversation_lease.live_presence_roots``): who holds one,
+             and whether every held one could be read (a released unreadable one makes the census whole again),
+             and the cancel intents (``state/cancel_intents.json``): a recorded Stop a live turn has not taken yet
+             is its work's ``stop_requested``, which no queue or store revision announces.
 
 A component that cannot prove itself unchanged (a bindings file written within the clock tick, a
 service file likewise) makes the key unequal to every other, so it is never reused. A store that
@@ -211,8 +215,20 @@ def _post_task_owners(root: str) -> Tuple[Any, ...]:
     return tuple(facts)
 
 
+def _presence_authors(root: str) -> Any:
+    """The author census the body reads beside the direct turns (``gateway.state._presence_turns_snapshot_safe``)."""
+    from ouroboros.conversation_lease import live_presence_roots
+
+    try:
+        census = live_presence_roots(root)
+        return tuple(sorted((str(row["task_id"]), bool(row["local"])) for row in census["roots"])), census["complete"]
+    except Exception as exc:
+        return _failure(exc)
+
+
 def probe(drive_root: str, roots=frozenset(), *, direct: Optional[Tuple[list, bool]] = None) -> Tuple[Any, ...]:
     """The revision of everything the body reads (module docstring), read before the production."""
+    from ouroboros.cancel_intents import _intents_path_read
     from ouroboros.config import REPO_DIR
     from ouroboros.gateway.state import _git_checkout_identity
     from supervisor.state import TOTAL_BUDGET_LIMIT
@@ -229,6 +245,7 @@ def probe(drive_root: str, roots=frozenset(), *, direct: Optional[Tuple[list, bo
         ("checkout", _git_checkout_identity(REPO_DIR)),
         ("live", json.dumps(direct_rows, sort_keys=True, default=str), complete, _post_task_owners(str(drive_root)),
          TOTAL_BUDGET_LIMIT),
+        ("presence", _presence_authors(str(drive_root)), _file_stamps([_intents_path_read(drive_root)])),
     )
 
 

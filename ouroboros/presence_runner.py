@@ -913,11 +913,11 @@ def current_previous_turn(drive_root: Path, conversation_key: str, *,
 
     # Authors that yielded this conversation while their result awaits review: refs whose
     # facts are read from their own canonical rows, never copied into the pointer.
-    open_turns = [{"task_id": ref, "status": continuation_status(load_task_result(drive_root, ref) or {})}
+    open_turns = [{"task_id": ref, "status": continuation_status(load_task_result(drive_root, ref) or {}, drive_root)}
                   for ref in previous_turn.pop("open_turns", None) or [] if ref != exclude_task_id]
     if previous_turn.get("continuing"):
         # The pointer records the yield; whether that author still lives is its row's fact.
-        status = continuation_status(load_task_result(drive_root, str(previous_turn.get("task_id") or "")) or {})
+        status = continuation_status(load_task_result(drive_root, str(previous_turn.get("task_id") or "")) or {}, drive_root)
         if status != STATUS_RUNNING:
             previous_turn = {**previous_turn, "continuing": False, "author_status": status}
     previous_turn = _previous_turn_source_view(drive_root, previous_turn)
@@ -1087,6 +1087,62 @@ def capture_presence_event(admission: PresenceAdmission, event: PresenceTurnEven
         return task
 
 
+def finish_turn(drive_root: Path, task: Mapping[str, Any], task_id: str, identity: str, event: PresenceTurnEvent,
+                events: Sequence[Mapping[str, Any]], *, own_start: int) -> PresenceTurnResult:
+    """A turn's end, still under its conversation lock: the durable terminal decides, a refused or unknown
+    one is retained (``_refused_turn``), an unreported reply is logged at its conversation and the pointer
+    names this turn without undoing a newer one. Shared by the Host's carrier and a moved turn's saved
+    continuation (``presence_carrier.carry_saved_turn``)."""
+    log_dialogue = functools.partial(_log_dialogue, Path(drive_root), chat_id=int(task["chat_id"]),
+                                     event=event, task=task, task_id=task_id)
+    # Only the durable terminal proves the outcome; a draft or RUNNING row cannot authorize acknowledgement.
+    terminal = _stored_turn(Path(drive_root), task_id, identity)
+    if terminal.get("wake_summary"):
+        from supervisor.worker_chat_lane import _broadcast_task_named
+        _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": terminal["wake_summary"]})
+    row = next((item for item in events if item.get("type") == "presence_result"), None)
+    refusal = _terminal_refusal(terminal)
+    if refusal:
+        metadata = terminal.get("metadata") if isinstance(terminal.get("metadata"), dict) else {}
+        # Scheduled work survives the refusal: the durable ref when the terminal landed, else the
+        # host-built handoff fact of this execution (the terminal write itself may have failed).
+        work_ref = str(metadata.get("presence_work_ref") or (row or {}).get("work_ref") or "")
+        raise _refused_turn(Path(drive_root), task_id, terminal, refusal,
+                            identity=identity, work_ref=work_ref)
+    if not isinstance(row, dict):
+        raise PresenceTurnError("presence_result_missing", "presence_result")
+    continued = terminal.get("presence_continuation") if isinstance(terminal.get("presence_continuation"), dict) else {}
+    result = PresenceTurnResult(
+        outcome=str(row.get("outcome") or "message"),
+        text=str(row.get("text") or ""),
+        task_id=task_id,
+        work_ref=str(row.get("work_ref") or ""),
+        delivery_reporting_version=event.delivery_reporting_version,
+        continuation_ref=task_id if continued else "",
+        output_ref=str(row.get("output_ref") or ""),
+        continuation_version=event.continuation_version,
+        reply_anchor=row.get("reply_anchor"),
+    )
+    from ouroboros.place_reply import project_reply
+    result = project_reply(drive_root, task["metadata"], result)
+    if result.outcome in {"message", "deferred"} and result.text and not result.delivery_reporting_version:
+        log_dialogue(direction="out", user_id=0, text=result.text)
+    # Still under the conversation lock. A replay writes only through the cached-replay repair, under
+    # this same lock, and it leaves a pointer that names a newer turn alone.
+    sends: list[str] | None = []
+    actions: list[dict[str, Any]] = []
+    if event.delivery_reporting_version:
+        rows = _live_task_rows(Path(drive_root), task_id, event.conversation_key)
+        sends = _turn_sends(rows, own_start, same_generation=True)[0]  # the store holds every row this execution wrote
+        actions = _turn_actions(rows, own_start, same_generation=True)
+    outcome, message = _pointer_speech(terminal, result.outcome, str(row.get("message") or result.text))
+    _write_previous_turn(Path(drive_root), event.conversation_key, task_id, outcome=outcome, message=message,
+                         sends=sends or [], actions=actions, work_ref=result.work_ref, finished_at=utc_now_iso(),
+                         delivery=_delivery_state(event.delivery_reporting_version, sends, result.text or message, outcome),
+                         finish_note=str(row.get("finish_note") or ""), lent_at=_first_lent_at(terminal))
+    return result
+
+
 def run_presence_turn(
     *,
     admission: PresenceAdmission,
@@ -1140,6 +1196,14 @@ def run_presence_turn(
             _repair_pointer(Path(drive_root), event.conversation_key, second_cached.task_id)
             return second_cached
         task_id = _retry_target(Path(drive_root), task_id, identity, claim=True)
+        from ouroboros.presence_recovery import CUSTODY_QUEUED, CUSTODY_UNKNOWN, custody_refusal, queue_custody
+
+        stored = _stored_turn(Path(drive_root), task_id, identity)
+        custody = queue_custody(Path(drive_root), task_id, stored) if stored else ""
+        # The queue keeps it: no author, no loss stamp. What a carrier cannot read, its own lane row already answered:
+        # ``dispatch_presence_turn`` admits no id the queue holds, so its retried turn stays the lost attempt it is.
+        if custody == CUSTODY_QUEUED or (custody == CUSTODY_UNKNOWN and carrier_owner is None):
+            raise custody_refusal(stored, task_id, custody)
         live_key = (str(Path(drive_root).resolve()), task_id)
         with _LIVE_LOCK:
             _LIVE_PRESENCE_TASKS.add(live_key)
@@ -1147,6 +1211,7 @@ def run_presence_turn(
             lease.bind_author(task_id)
             return _run_current()
         finally:
+            kept = False
             try:
                 # Inline turns emit no task_done. Only a proven terminal row ends
                 # the question/wait projections; an unknown attempt stays unknown.
@@ -1154,11 +1219,14 @@ def run_presence_turn(
                 if terminal.get("status") in {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}:
                     from supervisor.queue_transitions import reconcile_terminal_task_projections
                     reconcile_terminal_task_projections(Path(drive_root), task_id)
+                from ouroboros.presence_recovery import queue_kept
+                kept = queue_kept(terminal)  # a parked turn's fence is the queue's
             except Exception:
                 log.warning("Presence %s terminal projections remain unconfirmed", task_id, exc_info=True)
             try:
                 from supervisor.queue_transitions import release_turn_acceptance_fence  # no task_done ends a turn
-                release_turn_acceptance_fence(Path(drive_root), task_id)  # before "not live": no open row outlives it
+                if not kept:
+                    release_turn_acceptance_fence(Path(drive_root), task_id)  # before "not live": no open row outlives it
             finally:  # a turn whose release failed still stops reading live
                 with _LIVE_LOCK:
                     _LIVE_PRESENCE_TASKS.discard(live_key)
@@ -1304,52 +1372,15 @@ def run_presence_turn(
         except BaseException:  # its executor ended without a terminal: record that end, never a re-run
             _notify_unresolved_turn(Path(drive_root), task_id)
             raise
-        # Only the durable terminal proves the outcome; a draft or RUNNING row cannot authorize acknowledgement.
-        terminal = _stored_turn(Path(drive_root), task_id, identity)
-        if terminal.get("wake_summary"):
-            from supervisor.worker_chat_lane import _broadcast_task_named
-            _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": terminal["wake_summary"]})
-        row = next((item for item in events if item.get("type") == "presence_result"), None)
-        refusal = _terminal_refusal(terminal)
-        if refusal:
-            metadata = terminal.get("metadata") if isinstance(terminal.get("metadata"), dict) else {}
-            # Scheduled work survives the refusal: the durable ref when the terminal landed, else the
-            # host-built handoff fact of this execution (the terminal write itself may have failed).
-            work_ref = str(metadata.get("presence_work_ref") or (row or {}).get("work_ref") or "")
-            raise _refused_turn(Path(drive_root), task_id, terminal, refusal,
-                                identity=identity, work_ref=work_ref)
-        if not isinstance(row, dict):
-            raise PresenceTurnError("presence_result_missing", "presence_result")
-        continued = terminal.get("presence_continuation") if isinstance(terminal.get("presence_continuation"), dict) else {}
-        result = PresenceTurnResult(
-            outcome=str(row.get("outcome") or "message"),
-            text=str(row.get("text") or ""),
-            task_id=task_id,
-            work_ref=str(row.get("work_ref") or ""),
-            delivery_reporting_version=event.delivery_reporting_version,
-            continuation_ref=task_id if continued else "",
-            output_ref=str(row.get("output_ref") or ""),
-            continuation_version=event.continuation_version,
-            reply_anchor=row.get("reply_anchor"),
-        )
-        from ouroboros.place_reply import project_reply
-        result = project_reply(drive_root, task["metadata"], result)
-        if result.outcome in {"message", "deferred"} and result.text and not result.delivery_reporting_version:
-            log_dialogue(direction="out", user_id=0, text=result.text)
-        # Still under the conversation lock. A replay writes only through the cached-replay repair, under
-        # this same lock, and it leaves a pointer that names a newer turn alone.
-        sends: list[str] | None = []
-        actions: list[dict[str, Any]] = []
-        if event.delivery_reporting_version:
-            rows = _live_task_rows(Path(drive_root), task_id, event.conversation_key)
-            sends = _turn_sends(rows, own_start, same_generation=True)[0]  # the store holds every row this execution wrote
-            actions = _turn_actions(rows, own_start, same_generation=True)
-        outcome, message = _pointer_speech(terminal, result.outcome, str(row.get("message") or result.text))
-        _write_previous_turn(Path(drive_root), event.conversation_key, task_id, outcome=outcome, message=message,
-                             sends=sends or [], actions=actions, work_ref=result.work_ref, finished_at=utc_now_iso(),
-                             delivery=_delivery_state(event.delivery_reporting_version, sends, result.text or message, outcome),
-                             finish_note=str(row.get("finish_note") or ""), lent_at=_first_lent_at(terminal))
-        return result
+        from ouroboros.presence_carrier import park_moved_turn
+
+        # A moved turn that saved an exact pause parks in the queue (#2566): its waiters are answered from
+        # that custody, and this author keeps the conversation until its own effects settled.
+        parked = park_moved_turn(Path(drive_root), task, events, agent=agent, lease=lease, event=event,
+                                 identity=identity, sink=event_sink)
+        if parked is not None:
+            raise parked
+        return finish_turn(Path(drive_root), task, task_id, identity, event, events, own_start=own_start)
 
     if admitted is not None:
         if admitted.conversation_key != str(event.conversation_key or "").strip():

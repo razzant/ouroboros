@@ -303,11 +303,12 @@ def install_fence(root_drive: Any, root_task_id: str, *, request_id: str,
 
 
 def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state: str,
-                    expected_state: str = "", **fields: Any) -> Dict[str, Any]:
+                    expected_state: str = "", row_update: Any = None, **fields: Any) -> Dict[str, Any]:
     """Compare-and-set the fence's state on its own ``fence_id`` (never another Pause's).
 
     ``expected_state`` also binds the state its caller read: a Resume that
     released this same fence after that read refuses a stale write here.
+    ``row_update`` rewrites the root's row in this same write: what stands or falls with the transition.
     """
     from ouroboros.task_results import (
         require_writable_task_result_schema, stamp_task_result_schema,
@@ -331,7 +332,8 @@ def set_fence_state(root_drive: Any, root_task_id: str, *, fence_id: str, state:
         from ouroboros.pause_notices import notice_fields
         notice = (notice_fields(current, root_drive, root_task_id, fence_id, "owner", fence=fence)
                   if state == FENCE_PAUSED and old.get("state") != FENCE_PAUSED else {})
-        return stamp_task_result_schema({**current, **notice, "owner_pause": fence})
+        row = {**current, **notice, "owner_pause": fence}
+        return stamp_task_result_schema(row_update(row) if row_update else row)
 
     from ouroboros.task_store import patch_document
     patch_document(pathlib.Path(root_drive), str(root_task_id), update)

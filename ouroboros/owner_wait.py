@@ -240,9 +240,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_completion_observation", "_completion_held_sha256", "_presence_completion",
             "_presence_completion_owner_revision", "_acceptance_observation",
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
-            "_presence_selection_seq", "_presence_released",
-            "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation", "_owner_reply_revision",
-            "_owner_message_sent",
+            "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
+            "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
+            "_owner_reply_revision", "_owner_message_sent",
         ) if getattr(ctx, key, None) is not None},
         # The block keeps its stored name; the task-acceptance flags it once carried are gone
         # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).
@@ -633,6 +633,11 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
     is cancelled, bought or re-dispatched here. Returns the wake cause.
     """
     callback = getattr(ctx, "owner_wait_callback", None)
+    review = getattr(ctx, "review_wait_callback", None)
+    if not callable(callback) and callable(review):
+        # A moved Presence author parks through its qualified review wait (#2566): its own effects settle, then it
+        # lends the conversation and waits in its carrier's pooled wait; the generic capability stays closed.
+        callback = lambda wait_ctx, checkpoint: review(wait_ctx, checkpoint, limit_ctx.messages)  # noqa: E731
     if not callable(callback):
         raise RuntimeError("owner pause warm park has no worker continuation owner")
     messages, trace = limit_ctx.messages, limit_ctx.llm_trace if isinstance(limit_ctx.llm_trace, dict) else {}
@@ -679,8 +684,15 @@ def consume_warm_resume(ctx: Any) -> bool:
     Any other open fence (a cold root's own consumption released it) needs
     nothing. A fence closed again by a newer Pause returns False: the stack
     parks again. A write failure raises; the caller holds and retries.
+
+    A member that continues reads the stop it inherited from its root again,
+    as its cold restore would (``task_pacing.restore_cost_ceiling``: one read
+    of the root's row): the owner's own Resume of a moved Presence root moved
+    its whole tree off the producer allowance (#2566), whichever path woke
+    this member; its own explicit limit stays as it was.
     """
     from ouroboros.owner_pause import _member_coordinates, fence_closed, launch_lock, read_fence, set_fence_state
+    from ouroboros.task_pacing import CostCeiling, restore_cost_ceiling
 
     root_drive, root_task_id, task_id = _member_coordinates(ctx)
     with launch_lock(root_drive, root_task_id):
@@ -697,14 +709,20 @@ def consume_warm_resume(ctx: Any) -> bool:
                 set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
                                 state=str(fence.get("state") or ""), expected_state=str(fence.get("state") or ""),
                                 selected_members=selected)
-            return True
-        grant = fence.get("resume_grant") if isinstance(fence.get("resume_grant"), dict) else {}
-        if (grant.get("warm") and task_id == root_task_id and not grant.get("consumed_at")
-                and not grant.get("revoked_at")):
-            set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
-                            state=str(fence.get("state") or ""), expected_state=str(fence.get("state") or ""),
-                            resume_grant={**grant, **stamp})
-        return True
+        else:
+            grant = fence.get("resume_grant") if isinstance(fence.get("resume_grant"), dict) else {}
+            if (grant.get("warm") and task_id == root_task_id and not grant.get("consumed_at")
+                    and not grant.get("revoked_at")):
+                set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
+                                state=str(fence.get("state") or ""), expected_state=str(fence.get("state") or ""),
+                                resume_grant={**grant, **stamp})
+                if grant.get("producer_allowance_lifted"):  # the owner's own Resume of a moved Presence turn (#2566)
+                    from ouroboros.presence_carrier import lift_live_allowance
+                    lift_live_allowance(ctx, grant["producer_allowance_lifted"])
+    held = getattr(ctx, "_cost_ceiling", None)
+    if task_id != root_task_id and isinstance(held, CostCeiling):
+        ctx._cost_ceiling = restore_cost_ceiling(ctx, asdict(held))
+    return True
 
 
 def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold: bool = False) -> dict:
@@ -1230,7 +1248,11 @@ def resume_native_loop(tools: Any, state: dict, messages: list, trace: dict,
     if started is not None:
         model_sleep.begin(ctx, started_at=started)
     try:
-        outcome = ctx.owner_wait_callback(ctx, cold_checkpoint)
+        callback, review = getattr(ctx, "owner_wait_callback", None), getattr(ctx, "review_wait_callback", None)
+        if not callable(callback) and not callable(review):
+            raise RuntimeError("required owner wait has no worker continuation owner")
+        # A moved Presence author restores its qualified review or question park through that same seam (#2566).
+        outcome = callback(ctx, cold_checkpoint) if callable(callback) else review(ctx, cold_checkpoint, messages)
     finally:
         if started is not None:
             model_sleep.end(ctx)

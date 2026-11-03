@@ -268,10 +268,22 @@ def parked_stop_view(drive_root: Any, row: dict, task_id: str, fence: dict, *, o
     return stop_presentation(task, {"owner": owner, "budget": {root_id: fence}})
 
 
+def resume_handed_over(drive_root: Any, row: dict) -> bool:
+    """A running attempt holding the owner's exact Resume it has not taken up yet: the same unconsumed, unrevoked
+    grant on its row and its durable pause (``task_admission._exact_resume_granted``). Unreadable is False."""
+    from supervisor.task_admission import _exact_resume_granted
+
+    try:
+        return _exact_resume_granted(row, drive_root)
+    except Exception:
+        return False
+
+
 def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = False) -> dict:
     """One queue row's current control: ``phase`` and, when a stop holds it, its ``view``.
 
-    ``phase`` is ``queued`` (no stop: it dispatches when admitted), ``running``, ``budget_paused`` or
+    ``phase`` is ``queued`` (no stop: it dispatches when admitted), ``running``, ``preparing`` (running, its
+    exact Resume not taken up yet: ``resume_handed_over``), ``budget_paused`` or
     ``budget_pausing`` (``view`` is the row's ``stop_presentation``), or ``unknown`` when a fact the
     reading needs cannot be read. The parked fact gates the view, so a durable point whose grant was
     already selected (``resume_granted``) never asks for another Resume. ``fences`` maps each root to
@@ -285,7 +297,11 @@ def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = F
     if pausing is not False:
         phase = "unknown" if pausing is None else "budget_pausing"
     elif running:  # its stack parked warm under a settled Pause, or it runs
-        phase = "budget_paused" if owner_fence_state(drive_root, row, task_id) == "paused" else "running"
+        # The fence stays closed from an exact Resume's grant until the resumed attempt consumes it: an attempt holding
+        # that grant prepares to continue (a moved Presence turn's carrier takes its conversation first), parked by
+        # nothing and never asking for another Resume.
+        phase = (("preparing" if resume_handed_over(drive_root, row) else "budget_paused")
+                 if owner_fence_state(drive_root, row, task_id) == "paused" else "running")
     else:
         from supervisor.queue_transitions import budget_pause_fact
 

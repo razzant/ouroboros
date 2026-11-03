@@ -66,14 +66,21 @@ def _resume_unstarted_owner_paused_root(q: Any, task: Dict[str, Any], fence: Dic
         if not q.publish_queue_snapshot(reason="owner_pause_root_resumed"):  # durable while launch authority is closed
             rollback()
             return {"ok": False, "error": "snapshot_not_persisted"}
+        from ouroboros.presence_carrier import lift_allowance, lifted_record, owner_resume_decision
+
         try:
+            # The owner's own Resume of a moved Presence turn (#2566) is decided in the one write that releases it:
+            # neither stands without the other. The row takes it below, before any dispatch; a restore reads that write.
+            lift = owner_resume_decision(task, root)
             set_fence_state(root, root_id, fence_id=str(fence.get("fence_id") or ""),
                             state=FENCE_RELEASED, release_reason="owner_resume_unstarted_root",
-                            resume_actor=control_actor())
+                            resume_actor=control_actor(),
+                            row_update=(lambda row: lifted_record(row, lift)) if lift else None)
         except Exception as exc:
             rollback()
             q.publish_queue_snapshot(reason="owner_pause_root_resume_held")
             return {"ok": False, "error": "owner_pause_fence_unwritable", "detail": str(exc)[:200]}
+        lift_allowance(task, lift)
     q.append_jsonl(q.DRIVE_ROOT / "logs" / "events.jsonl",
                    {"ts": utc_now_iso(), "type": "owner_pause_resumed", "task_id": task_id,
                     "root_task_id": root_id, "fence_id": str(fence.get("fence_id") or ""),

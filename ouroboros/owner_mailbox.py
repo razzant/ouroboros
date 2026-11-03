@@ -319,6 +319,7 @@ def write_owner_message(
     quiz_delivery: Optional[Dict[str, Any]] = None,
     card_delivery: Optional[Dict[str, Any]] = None,
     card_press: Optional[Dict[str, Any]] = None,
+    admit: Optional[Any] = None,
 ) -> bool:
     """Write an owner message or typed control entry to a task's mailbox.
 
@@ -332,7 +333,8 @@ def write_owner_message(
     valid): the drain rebuilds the card's frame for the model from it, while
     ``text`` stays the owner's own words; ``card_press`` is the same for a press on a
     finished author's card. ``card_delivery`` names the living-card press
-    ``{card_id, request_id, canonical_root}`` its read settles.
+    ``{card_id, request_id, canonical_root}`` its read settles. ``admit``: a check run under the
+    mail lock before the append (a carried Presence author's intake), False writes nothing.
     """
     from ouroboros.install_identity import StoreForeign, require_owned_root
 
@@ -368,8 +370,8 @@ def write_owner_message(
         if isinstance(attachment_manifest, list):
             from ouroboros.artifacts import attachment_manifest_projection
             entry.update(attachment_manifest_projection(drive_root, task_id, attachment_manifest))
-        if not _append_mail(drive_root, task_id, path, entry):
-            log.warning("Failed to durably append owner message for task %s", task_id)
+        if not _append_mail(drive_root, task_id, path, entry, admit=admit):
+            log.warning("Owner message for task %s not appended (refused by its admission or not durable)", task_id)
             return False
         return True
     except StoreForeign:
