@@ -86,7 +86,8 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
 }
 
 // A pause notice's heads before the words its press recorded, which run up to the notice's retained clause
-// (ouroboros/pause_notices.py notice_text). The words are their author's: never translated (DESIGN "Language").
+// (ouroboros/pause_notices.py notice_text; web/tests/fixtures/pause_notice_parity.json pins both sides). The words
+// are their author's: never translated (DESIGN "Language").
 const PAUSE_HEADS = ['You paused this task: ', 'Ouroboros paused this task: '];
 const PAUSE_RETAINED = ' Its work is retained; Resume continues it.';
 

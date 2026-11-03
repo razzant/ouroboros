@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { buildTimelineItemHtml, cardRowSummary } from '../modules/chat_activity.js';
@@ -98,4 +99,19 @@ test('the words a pause recorded stay as written on both paths; only the frame a
         assert.equal(hostSentenceText(mind), mind);
         assert.equal(hostSentenceText(SAID), SAID);
     } finally { applyPayload({ language: 'en', english: true }); restoreDom(env.prior); }
+});
+
+test('every pause sentence the server writes is cut at the words its press recorded (pause_notice_parity.json)', async () => {
+    const { hostSentenceText } = await import('../modules/host_notice_text.js');
+    const { cases } = JSON.parse(readFileSync(new URL('./fixtures/pause_notice_parity.json', import.meta.url), 'utf8'));
+    assert.ok(cases.some(({ words }) => words === null) && cases.filter(({ words }) => words !== null).length >= 4);
+    try {
+        for (const { name, text, words } of cases) {
+            // The frame is the sentence with the recorded words as its one parameter; any other is one exact sentence.
+            const key = words === null ? text : text.replace(words, '{words}');
+            applyPayload({ language: 'ru', english: false,
+                entries: { [key]: { text: words === null ? '⟨sentence⟩' : '⟨{words}⟩', provenance: 'imported' } } });
+            assert.equal(hostSentenceText(text), words === null ? '⟨sentence⟩' : `⟨${words}⟩`, name);
+        }
+    } finally { applyPayload({ language: 'en', english: true }); }
 });
