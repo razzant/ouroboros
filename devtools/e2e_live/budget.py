@@ -3,9 +3,10 @@
 ``run_live_lanes`` owns the lane pool; this module owns what the lanes may spend together. A lane's spend is read
 from its own durable usage (``lane_spend``). Its known part is what the core counts toward a limit: confirmed prices
 plus disclosed estimates (``_usage_money.exceeds_limit``, #1487), so an estimate binds and is never called final. It
-is UNKNOWN when that read fails, when a lane whose server process was spawned has no usage record at all, or when
-attempts were sent without a final price: never zero. A live lane in that state keeps working under its reservation,
-and its read failure is never raised into another attempt's admission. An ended lane always leaves the flight and
+is UNKNOWN when that read fails, when a lane whose server process was spawned has no usage record at all, when
+attempts were sent without a final price, or when the core calls the lane's ledger degraded: never zero. A live lane
+in that state keeps working under its reservation, and its read failure is never raised into another attempt's
+admission. An ended lane always leaves the flight and
 wakes its waiters, and stays charged ``max(reservation, known spend)``: the known part plus an unknown liability. So
 does a lane that ended without proof its processes are gone, whatever its prices say (``note_stop_unproved``). An
 attempt only that liability keeps out is refused as ``accounting_unavailable``, not as ``budget_cap``.
@@ -16,6 +17,7 @@ import pathlib
 import sqlite3
 import threading
 import time
+from decimal import Decimal
 from typing import Callable
 
 from devtools.e2e_live.scenarios import SCENARIOS, now_iso
@@ -36,31 +38,39 @@ class LaneSpendAbsent(LookupError):
 def lane_spend(data_root: pathlib.Path) -> tuple[float, int]:
     """``(known USD, attempts sent without a final price)`` from ``state/usage.sqlite``, the money authority (``llm_usage`` misses review/advisory/synthesis: 114.81 vs 141.63), or a journal-era ``--seed`` lane's journal; ``LaneSpendAbsent`` when neither exists.
 
-    Known is every settled amount, a confirmed price or a disclosed estimate, as the core sums its ``settled`` bucket (``_usage_money.cash_contribution``). Without a final price means an estimate or partial receipt (its amount is in the known sum, as a floor), a settlement at nothing, or an attempt sent and never settled (``dispatched``, ``unresolved``). A ``reserved`` or ``released`` attempt was never sent and costs nothing.
+    Known is every settled amount, a confirmed price or a disclosed estimate, as the core sums its ``settled`` bucket (``_usage_money.cash_contribution``), each decoded as the core decodes money (``_usage_money.amount``: a numeric string is money, as the core's own export writes a literal a float would change). Without a final price means an estimate or partial receipt (its amount is in the known sum, as a floor), a settlement at nothing, or an attempt sent and never settled (``dispatched``, ``unresolved``). A ``reserved`` or ``released`` attempt was never sent and costs nothing. A ledger the core calls degraded (``usage_store.integrity_degraded``: a journal row it once quarantined, whose money nobody can read) is never final, from the store or the journal: one more unknown, never a known zero.
 
-    The store keeps one current row per attempt. The journal appends one per transition, so it is first reduced as the store's import reduces it: each attempt's latest row (``usage_ledger._final_rows``), the compaction header (no money) left out. Otherwise an estimate and the price that replaced it both counted. The journal is only read, never truncated or quarantined as the core's own reader does. A row it cannot read as a JSON object (torn at the tail or before it, undecodable, not an object: ``iter_jsonl_objects``' ``gap_reasons``) makes the whole reading unknown (``UsageLedgerCorrupt``), never a skipped row: a torn one-shot row is its attempt's only record. So does a journal gone before it opens, never an empty read."""
+    The store keeps one current row per attempt, decoded by its own codec (``usage_store._decode``: a value its typed column cannot hold, a numeric string, stays in ``extra``). The journal appends one per transition, so it is first reduced as the store's import reduces it: each attempt's latest row (``usage_ledger._final_rows``), the compaction header (no money) left out. Otherwise an estimate and the price that replaced it both counted. The journal is only read, never truncated or quarantined as the core's own reader does. A row it cannot read as a JSON object (torn at the tail or before it, undecodable, not an object: ``iter_jsonl_objects``' ``gap_reasons``), or one the core's row rule refuses (``usage_ledger.validate_row_fields``: a cost that is negative or not a number, ``UsageLedgerCorrupt``; a non-finite one, ``UsageNonFiniteMoney``), makes the whole reading unknown, never a skipped row: a torn one-shot row is its attempt's only record. So does a journal gone before it opens, never an empty read."""
+    from ouroboros._usage_money import amount
+    from ouroboros.usage_store import integrity_degraded
+
     store, journal = (pathlib.Path(data_root) / "state" / name for name in ("usage.sqlite", "usage_attempts.jsonl"))
     if store.is_file():
+        from ouroboros.usage_store import _ATTEMPT_CAPTURE, _decode
         conn = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
         try:
-            rows = [(float(cost) if state == "settled" and cost is not None else None, final == 1) for state, cost, final in conn.execute(
-                "SELECT state, cost_usd, cost_final FROM attempts WHERE state IN ('settled', 'dispatched', 'unresolved')")]
+            latest = [_decode(record) for record in conn.execute(
+                f"SELECT {', '.join(_ATTEMPT_CAPTURE)} FROM attempts WHERE state IN ('settled', 'dispatched', 'unresolved')")]
         finally:
             conn.close()
     elif journal.is_file():
-        from ouroboros.usage_ledger import UsageLedgerCorrupt, _final_rows
+        from ouroboros.usage_ledger import UsageLedgerCorrupt, _final_rows, validate_row_fields
         from ouroboros.utils import iter_jsonl_objects
         gaps: set[str] = set()
         with journal.open("rb") as handle:                         # opened here: a vanished journal raises, not reads as empty
             records = [row for row in iter_jsonl_objects(journal, gap_reasons=gaps, _handle=handle) if row.get("kind") != "usage_baseline"]
         if gaps:
             raise UsageLedgerCorrupt(f"usage journal rows not readable as JSON objects ({', '.join(sorted(gaps))}): {journal}")
-        latest = _final_rows(records)
-        rows = [(r["cost_usd"] if r.get("state") == "settled" and type(r.get("cost_usd")) in (int, float) else None, r.get("cost_final") is True)
-                for r in latest.values() if r.get("state") in ("settled", "dispatched", "unresolved")]
+        for row in records:
+            validate_row_fields(row, row.get("seq"))
+        latest = [row for row in _final_rows(records).values() if row.get("state") in ("settled", "dispatched", "unresolved")]
     else:
         raise LaneSpendAbsent(f"no state/usage.sqlite or state/usage_attempts.jsonl under {data_root}")
-    return sum((cost for cost, _final in rows if cost is not None), 0.0), sum(1 for cost, final in rows if cost is None or not final)
+    costs = [amount(row.get("cost_usd")) if row.get("state") == "settled" else None for row in latest]
+    known = float(sum((cost for cost in costs if cost is not None), Decimal(0)))
+    unpriced = sum(1 for cost, row in zip(costs, latest) if cost is None or row.get("cost_final") is not True)
+    return known, unpriced + int(integrity_degraded(pathlib.Path(data_root)))
 
 
 def lane_spend_fact(data_root: pathlib.Path, *, spawned: bool) -> dict:

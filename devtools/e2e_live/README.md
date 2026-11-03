@@ -15,9 +15,13 @@ the `--stub` $0 rehearsal; `ui_probe.py` owns the real-browser client;
 `traces.py` owns each lane's key-redacted trace bundle.
 Keep this opt-in stand outside runtime imports and default local evolution.
 
-Launch the stand like any verification command: `python -I -S scripts/safe_test.py --
-<venv>/bin/python -m devtools.e2e_live.run_live_lanes ...` with a dependency-only venv
-(DEVELOPMENT "Build and CI"). Each lane's server is a real installation started on the
+Launch the keyless `--stub` rehearsal like any verification command: `python -I -S
+scripts/safe_test.py -- <venv>/bin/python -m devtools.e2e_live.run_live_lanes --stub ...`
+with a dependency-only venv (DEVELOPMENT "Build and CI"). The recipe covers that
+rehearsal only: safe_test scrubs every `OUROBOROS_*` variable it does not keep, the
+`--key-env` key (`OUROBOROS_E2E_LIVE_OPENROUTER_KEY`) included, so a paid run under it
+refuses with `key_env_absent` before any spend, and how to launch a paid run is not
+qualified here. Each lane's server is a real installation started on the
 stand's interpreter, so it keeps the boot and adoption dependency sync. For a venv,
 `pip_install_target_args` targets the venv and safe_test's `PIP_REQUIRE_VIRTUALENV`
 admits it; for the bundled interpreter it adds `--user`, which that guard refuses
@@ -69,7 +73,7 @@ After the terminal `adoption.observe_direct_adoption` follows one commit:
 
 | Check | The same commit, observed at |
 |---|---|
-| `adoption_requested_for_reviewed_commit` | the landing's review record (`commit_landings`; the tool text names the record and carries no SHA), the candidate row's newest reviewed commit, the accepted `request_restart` whose own `adopt_commit` spells that SHA (whole, or an abbreviation the tool resolves to it), the handoff authorized for it |
+| `adoption_requested_for_reviewed_commit` | the landing's review record (`commit_landings`; the tool text names the record and carries no SHA), the candidate row's newest reviewed commit, the accepted request whose `adopt_commit` spells that SHA (whole, or an abbreviation the tool resolves to it), the handoff authorized for it. The request is the one the task's newest attempt holds: its first `request_restart` the host answered, since a later call of that attempt only reads that request's receipt and its own arguments are ignored, while a call refused before anything was sent leaves the attempt free |
 | `adoption_qualified_by_real_tests` | the handoff's `tests`: `head` and `tree` bound to the commit. Tier (`selected` or `full`) and source (`proof` or `receipt`) are recorded as they happened; `adoption_test_evidence` already decided that they qualify, the stand adds no gate of its own and writes no receipt |
 | `adoption_settled_and_restart_verified` | `body_adoption_closed` of that handoff id and SHA with outcome `adopted`, and `restart_verify` expecting and observing the SHA |
 | `adoption_recorded_on_task` | the task result's `body_adoptions`, the one durable binding of the archived handoff to this task |
@@ -87,7 +91,10 @@ the commit stays on its candidate and the serving tree does not move),
 `adoption_closed:<outcome>`, `restart_verify_failed`, `server_exited:<rc>` or
 `timeout:<stage>`. An unconfirmed boot is no dead end: the product keeps that handoff
 for the next start, so a later `adopted` of it still settles the wait, and only at the
-deadline does the reason read `adoption_unconfirmed:<reason>`. Refusals, blockers
+deadline does the reason read `adoption_unconfirmed:<reason>`. Such a boot also leaves
+an `unconfirmed` row of the adoption on the task until the adopting boot replaces it,
+after archiving and verifying, so the wait ends only on the task's own `adopted` row
+(`timeout:task_record` at the deadline). Refusals, blockers
 and unconfirmed states stay separate facts of that record. The browser opens fresh on
 the generation the adoption restarted into; the stand starts no second server for it.
 
@@ -167,7 +174,16 @@ header, and only read, never truncated or quarantined. A row it cannot read as a
 object (torn at the tail or before it, undecodable, or not an object) makes the lane's
 reading unknown instead of being skipped, because a torn one-shot row is its attempt's
 only record; a journal that vanishes before it opens is unknown too, never an empty
-read. `llm_usage` omits review/synthesis spend and cannot be
+read. Money is decoded as the core decodes it (`_usage_money.amount`): a numeric string
+is money, as the core's own export writes a literal a float would change, and the store
+keeps such a value in `extra` beside its typed column, so store rows go through the
+store's own codec and both sources through one reduction. A journal row the core's row
+rule refuses (`usage_ledger.validate_row_fields`: a negative, non-numeric or non-finite
+cost) makes the reading unknown. A ledger the core calls degraded
+(`usage_store.integrity_degraded`: a journal row it once quarantined into
+`usage_attempts.quarantine.jsonl`, which its import keeps beside the store) is never
+final, from either source: one more unknown-cost row, never a known $0.
+`llm_usage` omits review/synthesis spend and cannot be
 the stand's money source. Admit only while `spent + unknown liability +
 reserved(in flight) + reservation ≤ cap`. If only in-flight reservations prevent
 admission, wait for settlement and recheck; if `spent + unknown liability +
@@ -180,8 +196,8 @@ Known spend is what the core counts toward a limit (`_usage_money.exceeds_limit`
 #1487): every settled amount, a confirmed price or a disclosed estimate. An estimate
 binds as spent and is never final. Unknown cost is never zero. It means a read that
 failed, no usage record for a lane whose server process was spawned (zero only where
-none ever ran), or attempts sent without a final price: settled at an estimate (its
-amount already counted, as a floor), a partial receipt or nothing, or
+none ever ran), a degraded ledger, or attempts sent without a final price: settled at
+an estimate (its amount already counted, as a floor), a partial receipt or nothing, or
 `dispatched`/`unresolved` when the lane ended. A live lane in that state
 is still working: its reservation stays counted, a failed read answers its last good
 reading and is never raised into another attempt's admission. An ended lane always
@@ -264,11 +280,13 @@ stop that raised counts as unconfirmed. Containment never turns a lost proof int
 pass, because the verdict counts `pass` rows: a passing attempt whose bundle was not
 published (`infra_error:traces_<reason>`, `secret_residue` included) or whose row
 write failed (`infra_error:record_row`) ends `infra_error`, while an earlier `fail` or
-`infra_error` keeps its own reason. A failed row write is not repaired on disk:
-`result.json` is written before the index append, so after a failed append it keeps
-the earlier status, `pass` included, and a failed write of its own can leave it torn.
-The manifest's per-scenario counts, the exit code and the run log count the row as
-`infra_error`. An
+`infra_error` keeps its own reason. `result.json` is written before the index append.
+When only the append failed, that file is written again, once, with the attempt's final
+row; the append is never retried, because whether a failed append left a row, whole or
+torn, is unknown. A failed write of `result.json` itself can leave it torn, and a
+rewrite that fails too is named in the run log (`finalize record_row_correction
+failed`): the file may then still say `pass` or be torn. The manifest's per-scenario
+counts, the exit code and the run log count the row as `infra_error`. An
 unknown spend is no product failure, and a failed browser or stub cleanup is
 recorded without deciding the status. Post-stop `/proc` survivors fail a passing lane and name up
 to twenty PIDs/command heads with an omitted count; without `/proc` the scan

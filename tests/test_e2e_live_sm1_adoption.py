@@ -357,6 +357,36 @@ def test_a_dead_end_ends_the_wait_at_once_with_its_own_reason_and_the_commit_kep
     assert ctx.checks["ui_computed_style"] is False, "a served accent never stands in for the adoption"
 
 
+@pytest.mark.parametrize("turns", [True, False], ids=["then_adopted", "never_adopted"])
+def test_the_wait_ends_on_the_tasks_adopted_row_never_on_its_unconfirmed_one(lane, monkeypatch, turns):
+    """An unconfirmed boot gives the task an ``unconfirmed`` row of the adoption (``body_adoption._waiting``); the boot
+    that adopts archives ``adopted`` and verifies its restart before ``_publish_on_task`` replaces that row. The store
+    here serves that stale row while the closure and the verification are already durable, then the final row: the old
+    wait stopped at any row of the adoption and failed ``adoption_recorded_on_task`` on the stale one. A row that never
+    turns keeps the deadline's own stage."""
+    host, ctx = lane("unconfirmed_then_adopted")
+    final, seen = host.task_row[body_adoption.ADOPTIONS_KEY][-1], []
+
+    def task_result(_task_id):
+        durable = (any(row.get("outcome") == "adopted" for row in ctx.oracle.supervisor_rows("body_adoption_closed"))
+                   and any(row.get("ok") for row in ctx.oracle.events("restart_verify")))
+        row = final if turns and seen else {**final, "outcome": "unconfirmed"}
+        seen.append((row["outcome"], durable))
+        return {**host.task_row, body_adoption.ADOPTIONS_KEY: [row]}
+
+    monkeypatch.setattr(ctx.oracle, "task_result", task_result)
+    scenarios.run_sm1(ctx)
+    facts = ctx.facts["direct_adoption"]
+    assert seen[0] == ("unconfirmed", True), "the stale row was read with the closure and the verification durable"
+    if turns:
+        assert seen == [("unconfirmed", True), ("adopted", True)] and facts["reason"] == "adopted", (seen, facts["reason"])
+        assert _failed(ctx) == set() and facts["on_task"]["outcome"] == "adopted"
+    else:
+        assert {outcome for outcome, _ in seen} == {"unconfirmed"} and facts["reason"] == "timeout:task_record", (seen, facts["reason"])
+        assert _failed(ctx) == {"adoption_recorded_on_task", "adoption_serves_commit", "adoption_serves_committed_stylesheets",
+                                "ui_app_palette", "ui_onboarding_palette", "ui_computed_style"}
+
+
 def test_an_exhausted_script_completes_but_never_counts(lane):
     host, ctx = lane()
     host.task_row["result"] = "Stub: no scripted step left for role probe."
@@ -444,3 +474,80 @@ def test_the_real_owner_refuses_a_commit_without_qualifying_tests_and_keeps_it_u
     fact = adoption.restart_request_fact([{"tool": "request_restart", "result_preview": text, "args": {"adopt_commit": sha}}])
     assert (fact["accepted"], fact["refusal"]) == (False, "ADOPTION_TESTS_REQUIRED")
     assert scenarios.sm1_final_step(f"OK: committed to c: m\n{text}")["final"].startswith(scenarios.SM1_SCRIPT_ERROR)
+
+
+EXACT, UNKNOWN, LATE_ACK = "<the reviewed commit>", "0" * 40, "<the host's acceptance of the request it holds arrives>"
+ADOPT, PLAIN, REASON_ONLY = {"reason": "adopt reviewed fix", "adopt_commit": EXACT}, {"reason": "just restart"}, {"reason": "a different reason"}
+# ``(task attempt, request_restart arguments)`` in call order, and whether the request the host then holds adopts EXACT.
+# With LATE_ACK the host answers no intent itself (a lost ACK), and accepts the held request only at that step.
+REQUESTS = {
+    "adopt_then_reason_only_retry": ([(1, ADOPT), (1, REASON_ONLY)], True),
+    "unconfirmed_adopt_then_late_ack_then_reason_only_retry": ([(1, ADOPT), LATE_ACK, (1, REASON_ONLY)], True),
+    "refused_then_adopt": ([(1, {"reason": "adopt", "adopt_commit": UNKNOWN}), (1, ADOPT)], True),
+    "plain_then_adopt_retry": ([(1, PLAIN), (1, ADOPT)], False),
+    "plain_then_next_attempt_refused_then_adopts": ([(1, PLAIN), (2, {"reason": "adopt", "adopt_commit": UNKNOWN}), (2, ADOPT)], True),
+    "adopt_then_next_attempt_plain": ([(1, ADOPT), (2, PLAIN)], False),
+}
+
+
+@pytest.mark.parametrize("calls,adopts", REQUESTS.values(), ids=REQUESTS.keys())
+def test_the_request_is_the_one_the_host_holds_from_the_rows_the_real_loop_wrote(tmp_path, monkeypatch, calls, adopts):
+    """``request_restart`` through the real loop: the stand reads the rows the product wrote. In one task attempt the
+    first call the host answers sends the request and every later call only reads its receipt, an acceptance or a
+    ``RESTART_<STATUS>: request <id>`` (``control_runtime._request_restart``; a refusal before anything was sent leaves
+    the attempt free); a new attempt holds its own (``owner_wait``). Ground truth is the product's: the restart the task's
+    end sends binds the handoff only when the request held adopts that commit (``body_adoption.bind_restart``). Reading
+    the newest call's arguments turned an exact adoption followed by a reason-only retry into
+    ``restart_without_adoption``, and an ordinary restart followed by an ignored ``adopt_commit`` into a wait for an
+    adoption that never comes."""
+    from ouroboros import loop_tool_execution
+    from ouroboros.tools import control_events
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._shared import write_queue_document
+    from tests.body_candidate_support import host_restart_ack
+
+    serving = make_serving(tmp_path)
+    data = isolate(monkeypatch, tmp_path)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(control_events, "_PROMOTE_CONFIRM_TIMEOUT_SEC", 0)   # a silent host is a lost ACK at once
+    ctx = make_ctx(serving, data, "root-sm1")
+    body_candidate.prepare(ctx)
+    sha = candidate_commit(pathlib.Path(ctx.repo_dir), files={"ouroboros/mod_a.py": "GEN = 'GEN_CAND'\n"})
+    body_candidate.record_reviewed_commit(ctx, sha)
+    old = git(serving, "rev-parse", "HEAD")
+    sent = host_restart_ack(ctx, data, status=None if LATE_ACK in calls else "accepted")
+    registry = ToolRegistry(repo_dir=serving, drive_root=data)
+    registry.set_context(ctx)
+    requests = [step for step in calls if step != LATE_ACK]
+    for index, step in enumerate(calls):
+        if step == LATE_ACK:   # what ``host_restart_ack`` publishes, for the one request already held
+            held = {key: ctx.pending_restart_request[key] for key in ("request_id", "task_id", "task_attempt", "reason")}
+            write_queue_document(data / "state" / "queue_snapshot.json", {"restart_intent": {**held, "status": "accepted"}})
+            continue
+        attempt, arguments = step
+        ctx.task_attempt = attempt
+        arguments = {key: sha if value == EXACT else value for key, value in arguments.items()}
+        loop_tool_execution._execute_single_tool(registry, {"id": f"restart-{index}", "function": {
+            "name": "request_restart", "arguments": json.dumps(arguments)}}, data / "logs", "root-sm1")
+    rows = scenarios.tool_result_rows([json.loads(line) for line in (data / "logs" / "tools.jsonl").read_text(encoding="utf-8").splitlines()])
+    assert [row["tool"] for row in rows] == ["request_restart"] * len(requests), rows
+    assert len([event for event in sent if event.get("type") == "restart_request"]) == len({a for a, _ in requests}), "one request per attempt"
+    if LATE_ACK in calls:   # the receipt branch, as the loop wrote it: the request's own row, then a replay's
+        assert "RESTART_UNCONFIRMED: request " in rows[0]["result_preview"], rows[0]
+        assert rows[-1]["result_preview"].startswith("Restart requested. The previously acknowledged request is unchanged."), rows[-1]
+
+    body_adoption.bind_restart(lambda **_kw: (True, "ok"), data, ctx.pending_restart_reason)(
+        reason="agent_restart_request", unsynced_policy="rescue_and_block")
+    handoff = body_adoption.read(data)
+    assert (handoff.get("cand") == sha and handoff.get("restart_bound") is True) is adopts, handoff
+
+    fact = adoption.restart_request_fact(rows)
+    lane_view = types.SimpleNamespace(data_root=data, clone=serving, oracle=ArtifactOracle(data), server=None)
+    facts = adoption.observe_direct_adoption(lane_view, "root-sm1", rows, {"commit_sha": sha}, timeout=0, stylesheet="VERSION",
+                                             routes=(), poll=0)
+    assert facts["reason"] == ("timeout:settlement" if adopts else "restart_without_adoption"), facts
+    assert adoption.adoption_checks(facts)["adoption_requested_for_reviewed_commit"] is adopts
+    assert fact["accepted"] is True and adoption.names_commit(fact["adopt_commit"], sha) is adopts, fact
+    assert fact["adopt_commit"] in {"", sha} and fact["task_attempt"] == requests[-1][0], fact
+    assert git(serving, "rev-parse", "HEAD") == old, "nothing here restarts or adopts"

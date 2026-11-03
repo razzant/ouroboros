@@ -30,6 +30,7 @@ from devtools.e2e_live.traces import FORK_ROOTS
 
 _REVIEW_RECORD_RE = re.compile(r"review_record_id: (rl-[0-9A-Za-z-]+)")
 _RESTART_REFUSAL_RE = re.compile(r"(RESTART_[A-Z]+)(?:: (ADOPTION_[A-Z_]+))?")
+_RESTART_RECEIPT_RE = re.compile(r"RESTART_[A-Z]+: request \S")   # the host's receipt of a request it holds, not yet accepted
 _LANDED_PREFIX = "OK: committed to "
 _RESTART_ACCEPTED = "Restart requested."
 _RESTART_HANDOVER_EXIT = 42   # ``server_control``: the process handed over to a successor; it did not die
@@ -127,17 +128,33 @@ def names_commit(text: Any, sha: str) -> bool:
     return bool(sha) and len(text) >= 4 and all(char in "0123456789abcdef" for char in text) and sha.lower().startswith(text)
 
 
+def _task_attempt(row: dict) -> int:
+    return int(row.get("task_attempt") or 1)   # as the host keys a restart request: ``int(ctx.task_attempt or 1)``
+
+
 def restart_request_fact(settled_rows: list) -> dict:
-    """The task's newest ``request_restart`` answer; a refusal keeps its typed code."""
+    """The restart request the task's newest attempt holds and the newest answer about it; a refusal keeps its typed code.
+
+    ``control_runtime._request_restart`` sends one request per task attempt: the first call the host answers with
+    acceptance or a receipt (``RESTART_<STATUS>: request <id>``) sent it, and every later call of that attempt only reads
+    that request's receipt, its own ``reason`` and ``adopt_commit`` ignored. A call refused before anything was sent
+    (``⚠️ RESTART_BLOCKED``) leaves the attempt free, and a new attempt holds only its own request (``owner_wait``). So
+    ``adopt_commit`` is that first answered call's, never the newest call's nor any call that merely named a commit."""
     rows = [row for row in settled_rows if str(row.get("tool") or "") == "request_restart"]
     if not rows:
         return {"requested": False}
-    preview = str(rows[-1].get("result_preview") or "")
-    args = rows[-1].get("args") if isinstance(rows[-1].get("args"), dict) else {}
+    attempt = max(map(_task_attempt, rows))
+    mine = [row for row in rows if _task_attempt(row) == attempt]
+    held = [row for row in mine if str(row.get("result_preview") or "").startswith(_RESTART_ACCEPTED)
+            or _RESTART_RECEIPT_RE.search(str(row.get("result_preview") or ""))]
+    request, answer = (held[0], held[-1]) if held else (mine[-1], mine[-1])
+    preview = str(answer.get("result_preview") or "")
+    args = request.get("args") if isinstance(request.get("args"), dict) else {}
     accepted = preview.startswith(_RESTART_ACCEPTED)
     refused = None if accepted else _RESTART_REFUSAL_RE.search(preview)
     return {"requested": True, "accepted": accepted, "adopt_commit": str(args.get("adopt_commit") or ""),
-            "refusal": (refused.group(2) or refused.group(1)) if refused else "", "text": preview[:500]}
+            "refusal": (refused.group(2) or refused.group(1)) if refused else "", "text": preview[:500],
+            "task_attempt": attempt, "calls": len(mine)}
 
 
 def handoff_fact(authorized: list, not_armed: list, unconfirmed: list, closed: list, sha: str) -> dict:
@@ -167,7 +184,9 @@ def restart_verify_fact(events: list, sha: str) -> dict:
 
 
 def task_adoption_fact(task_result: dict, adoption_id: Any, sha: str) -> dict:
-    """The adoption as the authorizing task's own record states it: what binds the archived handoff to this task."""
+    """The adoption as the authorizing task's own record states it: what binds the archived handoff to this task. Its
+    row can lag the handoff: an unconfirmed boot leaves an ``unconfirmed`` one (``body_adoption._waiting``) until the
+    boot that adopts has archived and verified, and only then does ``_publish_on_task`` replace it."""
     from ouroboros.body_adoption import ADOPTIONS_KEY
 
     rows = [row for row in task_result.get(ADOPTIONS_KEY) or [] if isinstance(row, dict)
@@ -265,7 +284,7 @@ def observe_direct_adoption(ctx: Any, task_id: str, settled_rows: list, gate: di
             on_task = task_adoption_fact(_task_result(oracle, task_id), handoff.get("adoption_id"), sha) if handoff["authorized"] else {}
             facts.update(handoff=handoff, restart_verify=verify, on_task=on_task)
             why = _settlement_dead_end(handoff, verify, ctx.server)
-            settled = handoff.get("outcome") == "adopted" and verify.get("ok") and on_task
+            settled = handoff.get("outcome") == "adopted" and verify.get("ok") and on_task.get("outcome") == "adopted"
             if why or settled:
                 facts["reason"] = why or "adopted"
                 break

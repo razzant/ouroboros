@@ -491,9 +491,18 @@ def _retain_attempt(row: dict, ctx: LaneContext | None) -> None:
         row["runtime_outcome"] = runtime_terminal_disclosure(ctx.facts.pop("runtime_result", None))
 
 
-def _record_row(out: pathlib.Path, lane: pathlib.Path, row: dict) -> None:
+def _write_result(lane: pathlib.Path, row: dict) -> None:
     lane.mkdir(parents=True, exist_ok=True)
     (lane / "result.json").write_text(json.dumps(row, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+
+def _record_row(out: pathlib.Path, lane: pathlib.Path, row: dict) -> None:
+    """The attempt's two records, in this order: ``result.json``, then its row in ``result_index.jsonl``."""
+    _write_result(lane, row)
+    _index_row(out, row)
+
+
+def _index_row(out: pathlib.Path, row: dict) -> None:
     append_result_index(out, task_result_row(
         benchmark="e2e_live", instance_id=f"{row['scenario']}_a{row['attempt']}", status=row["status"],
         reason_code=str(row.get("reason_code") or ""), runtime_result=row.get("runtime_outcome"), error=row["error"],
@@ -719,10 +728,22 @@ def run_lane(job: tuple[str, int], args: argparse.Namespace, out: pathlib.Path, 
             default={"published": False, "reason": "collect_error"})
         if row["traces"].get("published") is not True:   # a bundle withheld (residue) or lost: the attempt has no traces
             _evidence_missing(row, f"traces_{row['traces'].get('reason') or 'unpublished'}")
-        if not contained("record_row", lambda: _record_row(out, lane, row) or True, default=False):
-            # result.json is written before the index append: if the append failed, that file keeps the status from
-            # before this step (``pass`` included), or is torn if its own write failed. This row is what the verdict counts.
-            _evidence_missing(row, "record_row")
+        written: list = []
+
+        def record() -> bool:
+            _write_result(lane, row)
+            written.append(True)
+            _index_row(out, row)
+            return True
+
+        if not contained("record_row", record, default=False):
+            _evidence_missing(row, "record_row")   # this row is what the verdict counts
+            if written:
+                # Only the index append failed, after result.json was written with the status from before this step
+                # (``pass`` included): that file alone is written again, once, with this row. The append is never
+                # retried, since whether a failed append left a row, whole or torn, is unknown. A rewrite that fails
+                # too stays named in ``finalize_errors``, and the file may then still say ``pass`` or be torn.
+                contained("record_row_correction", lambda: _write_result(lane, row))
         if args.prune_clones and not may_run:
             shutil.rmtree(clone, ignore_errors=True)
         states[job] = (f"{row['status']} ({row.get('duration_sec')}s)", time.time())

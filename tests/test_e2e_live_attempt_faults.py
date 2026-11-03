@@ -14,6 +14,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -191,8 +192,8 @@ def test_each_finalization_step_survives_the_failure_of_another(tmp_path, monkey
     if step == "traces_withheld":   # the publisher's own refusal returns; it never raises
         monkeypatch.setattr(traces, "publish_lane_traces", lambda *a, **k: {"published": False, "reason": "secret_residue",
                                                                             "files_with_residue": ["logs/events.jsonl"]})
-    if step == "record_row":
-        monkeypatch.setattr(run_live_lanes, "_record_row", _raises)
+    if step == "record_row":   # the real append fails at its open, after result.json was written
+        (tmp_path / "out" / "result_index.jsonl").mkdir(parents=True)
     if step == "orphan_scan":
         from tests.system_e2e import harness
         monkeypatch.setattr(harness, "wait_until", _raises)
@@ -202,8 +203,7 @@ def test_each_finalization_step_survives_the_failure_of_another(tmp_path, monkey
                                  procfs=step == "orphan_scan")
 
     assert row["facts"]["kept"] == "yes" and budget.snapshot()["lanes_in_flight"] == 0
-    assert (lane / "result.json").is_file() is (step != "record_row")
-    stored = json.loads((lane / "result.json").read_text(encoding="utf-8")) if step != "record_row" else row
+    stored = json.loads((lane / "result.json").read_text(encoding="utf-8"))
     assert (stored["status"], stored["reason_code"]) == (row["status"], row["reason_code"]), "the record says what the verdict counts"
     if step == "spend":
         assert row["status"] == "pass" and "finalize_errors" not in row
@@ -228,6 +228,37 @@ def test_each_finalization_step_survives_the_failure_of_another(tmp_path, monkey
     if step == "orphan_scan":
         assert row["checks"]["no_orphans_after_stop"] is False and row["no_orphans_after_stop"] is None
         assert row["orphan_scan"] == "failed", "a scan that raised is not a host without procfs"
+
+
+@pytest.mark.parametrize("correction", ["written", "fails"])
+def test_after_a_failed_index_append_the_record_is_rewritten_once_and_the_append_never_repeated(tmp_path, monkeypatch, correction):
+    """``result.json`` is written before the index append, so a failed append left it saying ``pass`` while the attempt
+    counted ``infra_error``. The index path is a directory here: the real append fails at its open. The record is
+    written again, once, with the attempt's final row; the append is never retried, because whether a failed append
+    left a row, whole or torn, is unknown. A rewrite that fails too is named, and the file is not claimed fixed."""
+    (tmp_path / "out" / "result_index.jsonl").mkdir(parents=True)
+    real_write, real_index, writes, appends = run_live_lanes._write_result, run_live_lanes._index_row, [], []
+
+    def write(lane, row):
+        writes.append(row["status"])
+        if correction == "fails" and len(writes) > 1:
+            raise OSError(28, "No space left on device")
+        real_write(lane, row)
+
+    monkeypatch.setattr(run_live_lanes, "_write_result", write)
+    monkeypatch.setattr(run_live_lanes, "_index_row", lambda out, row: appends.append(row["status"]) or real_index(out, row))
+    row, lane, _budget = _attempt(tmp_path, monkeypatch)
+    stored = json.loads((lane / "result.json").read_text(encoding="utf-8"))
+    assert (row["status"], row["reason_code"]) == ("infra_error", "infra_error:record_row")
+    assert writes == ["pass", "infra_error"] and appends == ["pass"], (writes, appends)
+    assert "IsADirectoryError" in row["finalize_errors"][0]["error"] or os.name == "nt", row["finalize_errors"]
+    if correction == "written":
+        assert (stored["status"], stored["reason_code"]) == (row["status"], row["reason_code"])
+        assert [error["step"] for error in stored["finalize_errors"]] == ["record_row"]
+    else:
+        assert stored["status"] == "pass" and "finalize_errors" not in stored, "a file nothing could rewrite is not claimed fixed"
+        assert [error["step"] for error in row["finalize_errors"]] == ["record_row", "record_row_correction"]
+        assert "No space left" in row["finalize_errors"][-1]["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -610,6 +641,118 @@ def test_a_journal_gone_before_it_opens_is_unknown_never_an_empty_read(tmp_path,
     with pytest.raises(FileNotFoundError):
         run_live_lanes.lane_spend(data)
     assert run_live_lanes.lane_spend_fact(data, spawned=True)["spent_usd"] is None
+
+
+def _seq(rows: list) -> list:
+    """The rows numbered as the journal's writer numbers them: the core's import refuses a journal without that."""
+    return [{**row, "seq": index} for index, row in enumerate(rows, 1)]
+
+
+def _imported(seed: pathlib.Path, name: str) -> pathlib.Path:
+    """What the current core's one-time import (``usage_store.migrate_from_journal``) builds from a copy of a
+    journal-era seed's ledger: the store beside the journal, a torn final row quarantined on the way."""
+    from ouroboros import usage_store
+
+    root = seed.parent / name
+    shutil.copytree(seed / "state", root / "state")
+    usage_store.migrate_from_journal(root)
+    usage_store.forget(root)
+    return root
+
+
+def _core_money(root: pathlib.Path) -> dict:
+    """The core's own answer for a lane's store: the settled bucket, and whether it calls that final."""
+    from ouroboros import usage_store
+    from ouroboros.usage_accounting import usage_writer_snapshot
+
+    try:
+        snapshot = usage_writer_snapshot(root)
+    finally:
+        usage_store.forget(root)
+    return {key: snapshot[key] for key in ("settled_usd", "cost_final", "integrity_degraded")}
+
+
+def _state_files(root: pathlib.Path) -> dict:
+    return {path.name: (path.read_bytes(), path.stat().st_mtime_ns) for path in sorted((root / "state").iterdir())}
+
+
+PRECISE = "0.30000000000000000001"   # a literal a float would change: the core's export writes it as a string (``durable_literals``)
+
+
+def test_a_numeric_string_price_is_known_money_from_the_journal_and_from_the_store_its_import_builds(tmp_path):
+    """The core's money grammar takes a numeric string (``_usage_money.amount``, the row rule's ``_number``), and its
+    import keeps that row whole: the store's typed column cannot hold a string, so it stays in ``extra`` and the store's
+    reader decodes it back. ``type(cost) in (int, float)`` read the journal's two string prices as attempts without a
+    price, and the store's bare column read the same: $0.50 known where the core counts $2.05. Both sources read the
+    core's amount now, and agree."""
+    journal = tmp_path / "journal"
+    _journal(journal, _seq([*_sent("a", ("settled", PRECISE, True)), *_sent("b", ("settled", "1.25", False)),
+                            *_sent("c", ("settled", 0.5, True))]))
+    store = _imported(journal, "store")
+    conn = sqlite3.connect(f"{(store / 'state' / 'usage.sqlite').as_uri()}?mode=ro", uri=True)
+    try:
+        assert conn.execute("SELECT attempt_id, cost_usd FROM attempts ORDER BY attempt_id").fetchall() == [
+            ("a", None), ("b", None), ("c", "0.5")], "the typed column holds the float alone; the strings are in extra"
+    finally:
+        conn.close()
+    assert _core_money(store) == {"settled_usd": 2.05, "cost_final": False, "integrity_degraded": False}
+    assert run_live_lanes.lane_spend(journal) == run_live_lanes.lane_spend(store) == (2.05, 1)
+
+
+@pytest.mark.parametrize("cost,error", [("-1", "UsageLedgerCorrupt"), ("three", "UsageLedgerCorrupt"),
+                                        (float("inf"), "UsageNonFiniteMoney")])
+def test_a_price_the_core_refuses_makes_the_journal_reading_unknown_never_known_or_skipped(tmp_path, cost, error):
+    """The same grammar's other side (``usage_ledger.validate_row_fields``): a negative or non-numeric cost makes a
+    corrupt row and a non-finite one is never stored. None is read as known money, or as one more unknown row beside a
+    reading that otherwise looks whole: the reading itself is unknown."""
+    data = tmp_path / "data"
+    _journal(data, [*_sent("a", ("settled", 2.0, True)), *_sent("b", ("settled", cost, True))])
+    with pytest.raises(Exception) as caught:
+        run_live_lanes.lane_spend(data)
+    assert type(caught.value).__name__ == error, caught.value
+    fact = run_live_lanes.lane_spend_fact(data, spawned=True)
+    assert (fact["spent_usd"], fact["unknown_cost_rows"]) == (None, None) and error in fact["spend_unknown"], fact
+
+
+@pytest.mark.parametrize("shape", ["released_only", "no_rows"])
+@pytest.mark.parametrize("source", ["journal", "store"])
+def test_a_quarantined_journal_row_is_money_nobody_can_read_never_a_known_zero(tmp_path, shape, source):
+    """The core moves a torn final journal row into ``usage_attempts.quarantine.jsonl`` and from then on calls that
+    ledger's money incomplete (``usage_store.integrity_degraded``: never ``cost_final``); its import keeps the file
+    beside the store it builds. The stand never looked: a ledger left with released attempts only, or with no row at
+    all, read as a known $0 through either source, and the ended lane released its reservation. Without a quarantine
+    the same rows are a known $0. Read only: the stand quarantines, truncates and creates nothing."""
+    from ouroboros import usage_journal
+
+    rows = _seq([{"attempt_id": "h", "state": "reserved"}, {"attempt_id": "h", "state": "released"}]) if shape == "released_only" else []
+    torn = json.dumps({"seq": len(rows) + 1, "attempt_id": "x", "kind": "external_unmetered", "state": "settled",
+                       "cost_usd": 4.0, "cost_final": True})[:-20].encode()   # its writer died mid-append
+    with _journal(tmp_path / "seed", rows).open("ab") as journal:
+        journal.write(torn)
+    if source == "store":
+        data = _imported(tmp_path / "seed", "data")
+        assert _core_money(data) == {"settled_usd": 0.0, "cost_final": False, "integrity_degraded": True}
+    else:   # a journal-era seed's own reader quarantined it, and no store was built
+        data = tmp_path / "seed"
+        assert len(usage_journal.read_journal_records(data)[0]) == len(rows)
+    _journal(tmp_path / "clean", rows)
+    assert run_live_lanes.lane_spend(tmp_path / "clean") == (0.0, 0), "the same rows without a quarantine"
+    before = _state_files(data)
+    assert "usage_attempts.quarantine.jsonl" in before and before["usage_attempts.jsonl"][0] == b"".join(
+        json.dumps(row).encode() + b"\n" for row in rows), "the core truncated the journal before the torn row"
+
+    assert run_live_lanes.lane_spend(data) == (0.0, 1)
+    assert run_live_lanes.lane_spend_fact(data, spawned=True) == {"spent_usd": 0.0, "unknown_cost_rows": 1}
+    budget = run_live_lanes.RunBudget(30.0, 8.0)
+    assert budget.admit(("SW1", 1), 1, data, dispatch_index=0)[0]
+    budget.settle(("SW1", 1))
+    snap = budget.snapshot()
+    assert (snap["spent_usd"], snap["unknown_liability_usd"]) == (0.0, 8.0) and "SW1_a1" in snap["spend_unknown"], snap
+    after = _state_files(data)
+    assert {name: after[name] for name in before} == before, "read only: nothing quarantined or truncated, the store unchanged"
+    sidecars = {name: content for name, content in after.items() if name not in before}   # a WAL store's read-only reader
+    assert set(sidecars) <= {"usage.sqlite-wal", "usage.sqlite-shm"} and sidecars.get("usage.sqlite-wal", (b"",))[0] == b"", \
+        "nothing created but SQLite's own reader sidecars, and no frame written"
 
 
 class _Spawned(_NoopServer):
