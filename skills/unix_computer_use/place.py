@@ -166,18 +166,18 @@ class PlaceMixin:
 
         A separate short-lived process so that a stuck or crashing native call can be killed
         and never takes the host down, and so that every answer is read anew (AppKit caches
-        refresh only on a main run loop the server does not turn)."""
-        cmd = [self._helper_python(), "-I", str(pathlib.Path(__file__).with_name("macos_native.py")), op, *[str(a) for a in args]]
+        refresh only on a main run loop the server does not turn). The answer is the last whole JSON line, also of
+        the output a helper stopped at its timeout left (an ``element`` receipt is printed before the read after it)."""
+        # -I ignores PYTHONDONTWRITEBYTECODE; keep the signed interpreter bundle read-only.
+        cmd = [self._helper_python(), "-I", "-B", str(pathlib.Path(__file__).with_name("macos_native.py")), op, *[str(a) for a in args]]
         rc, out, err = self._try(cmd, timeout=timeout)
         for line in reversed(out.strip().splitlines()):
-            if line.startswith("{"):
-                try:
-                    parsed = json.loads(line)
-                except ValueError:
-                    break
-                if isinstance(parsed, dict):
-                    return parsed
-                break
+            try:
+                parsed = json.loads(line) if line.startswith("{") else None
+            except ValueError:
+                continue  # a line cut off mid-write by a stopped helper
+            if isinstance(parsed, dict):
+                return parsed
         return {"ok": False, "error": f"native helper gave no answer ({(err or out).strip()[:200] or f'exit {rc}'})", "op": op,
                 "no_answer": True}
 
@@ -580,36 +580,38 @@ class PlaceMixin:
         return self._backend_unavailable("window listing")
 
     def ax_tree(self, *, app: str = "", max_nodes: int = 150, timeout_ms: int = 3000, root: str = "window",
-                include_web: bool = False) -> str:
-        """Bounded accessibility read of one window (the frontmost app's, or ``app``'s, without bringing it forward)."""
+                include_web: bool = False, text_limit: int = 200, window: Any = "") -> str:
+        """Bounded accessibility read of one window (the frontmost app's, or ``app``'s, without bringing it forward):
+        the application is resolved and read in ONE helper process (``macos_native.py observe``)."""
         plat = self._plat()
         app = str(app or "").strip()
         max_nodes = max(1, min(2000, int(max_nodes or 150)))
         timeout_ms = max(100, min(15_000, int(timeout_ms or 3000)))
+        text_limit = max(1, min(100_000, int(text_limit or 200)))
         root = "focused" if str(root or "").lower() == "focused" else "window"
         if self._is_remote():
             _name, conn = self._active_connection()
             if conn.get("disabled"):
                 return self._disabled_connection_error(_name, conn)
+            if text_limit != 200 or window not in (None, ""):
+                return self._json_text({"ok": False, "backend": str(conn.get("backend") or ""), "reason": "unsupported_option",
+                                        "error": "text_limit and window apply to the local macOS reader only; a remote answers its own tree"})
             return self._remote_ax_tree(conn)
         if plat == "macos":
-            if app:
-                res = self._native("resolve", app, timeout=15)
-                if not res.get("ok"):
-                    return self._json_text({"ok": False, "platform": plat, "reason": res.get("reason") or "unresolved",
-                                  "error": self._target_error(app, res), "candidates": res.get("candidates") or []})
-                target = res["candidates"][0]
-            else:
-                target = self._front_local()
-                if not target:
-                    return self._json_text({"ok": False, "platform": plat, "reason": "front_unknown", "error": "the frontmost application could not be read"})
-            tree = self._native("tree", target["pid"], max_nodes, timeout_ms, root, "true" if include_web else "false",
-                                timeout=timeout_ms // 1000 + 8)
+            spec = {"app": app, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "root": root, "include_web": bool(include_web),
+                    "text_limit": text_limit, "window": window if window is not None else ""}
+            tree = self._native("observe", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 15)
+            target = tree.pop("target", None)
+            if tree.get("stage") == "resolve":
+                error = self._target_error(app, tree) if app else (tree.get("error") or "the frontmost application could not be read")
+                return self._json_text({"ok": False, "platform": plat, "reason": tree.get("reason") or "unresolved",
+                                        "error": error, "candidates": tree.get("candidates") or []})
             if not tree.get("ok"):
                 failed = {"ok": False, "platform": plat, "app": target, "reason": tree.get("reason") or "ax_unavailable",
                           "error": tree.get("error") or f"the accessibility read failed ({tree.get('reason')})"}
-                if tree.get("errors"):
-                    failed["errors"] = tree["errors"]
+                for key in ("errors", "windows", "ax_exposure"):
+                    if tree.get(key):
+                        failed[key] = tree[key]
                 return self._json_text(failed)
             tree.update({"platform": plat, "app": target, "coordinate_note": "node and mark coordinates are INPUT-space "
                          "(macOS logical points): click them with raw=true; a mark is a position, not proof the element reacts"})
@@ -622,13 +624,15 @@ class PlaceMixin:
         return self._backend_unavailable("accessibility tree")
 
     def element_act(self, *, app: str, do: str, select: dict[str, Any] | None = None, text: str | None = None,
-                    window: Any = "", max_nodes: int = 600, timeout_ms: int = 3000, include_web: bool = False) -> str:
+                    window: Any = "", max_nodes: int = 600, timeout_ms: int = 3000, include_web: bool = False,
+                    observe: bool = False, text_limit: int = 200) -> str:
         """Act on ONE element of ``app`` through the element's own Accessibility action (macOS): ``press`` or
         ``set_value``. The element is named by identity (the window as ``window_list`` prints it, role, exact label,
-        AXIdentifier, nth), never by a mark or node id of an earlier read; it is found and acted on inside one
-        short-lived helper call (``macos_native.py act``), with no pointer and no switch: who is in front is
-        reported, not changed. The helper composes the receipt; this method only resolves the application and
-        says when the helper gave no answer (an unknown outcome, never "not sent")."""
+        AXIdentifier, nth), never by a mark or node id of an earlier read; the application is resolved, the element
+        found and acted on inside ONE short-lived helper call (``macos_native.py element``), with no pointer and no
+        switch: who is in front is reported, not changed. ``observe`` adds a read of the same window after the action
+        (``observation``) within the same ``timeout_ms``. The helper composes the receipt; this method says when the
+        helper gave no answer (an unknown outcome, never "not sent") or stopped after the receipt (the receipt stands)."""
         plat = self._plat()
         app = str(app or "").strip()
         do = str(do or "").strip().lower()
@@ -650,11 +654,10 @@ class PlaceMixin:
         if plat != "macos":
             return self._json_text({"ok": False, "platform": plat, "reason": "unsupported", "dispatched": False, **asked,
                                     "error": "no element actions on Linux in this skill (use the app's own commands or the input tools)"})
-        res = self._native("resolve", app, timeout=15)
-        if not res.get("ok"):
-            return self._json_text({"ok": False, "platform": plat, "reason": res.get("reason") or "unresolved", "dispatched": False, **asked,
-                                    "error": self._target_error(app, res), "candidates": res.get("candidates") or []})
-        target = res["candidates"][0]
+        text_limit = max(1, min(100_000, int(text_limit or 200)))
+        if text_limit != 200 and not observe:
+            return self._json_text({"ok": False, "platform": plat, "reason": "bad_option", "dispatched": False, **asked,
+                                    "error": "text_limit shapes the read after the action: pass observe=true or leave text_limit out"})
         selector: dict[str, Any] = {**asked["select"], "include_web": bool(include_web)}
         if window is not None and window != "":
             selector["window"] = window
@@ -662,9 +665,20 @@ class PlaceMixin:
             selector["text"] = text
         max_nodes = max(1, min(2000, int(max_nodes or 600)))
         timeout_ms = max(100, min(15_000, int(timeout_ms or 3000)))
-        res = self._native("act", target["pid"], do, json.dumps(selector, ensure_ascii=False), max_nodes, timeout_ms,
-                           timeout=timeout_ms // 1000 + 10)
-        out: dict[str, Any] = {"platform": plat, "app": target, "do": do, **res}
+        spec = {"app": app, "do": do, "select": selector, "max_nodes": max_nodes, "timeout_ms": timeout_ms, "observe": bool(observe)}
+        if observe:
+            spec["text_limit"] = text_limit
+        res = self._native("element", json.dumps(spec, ensure_ascii=False), timeout=timeout_ms // 1000 + 10)
+        target = res.pop("target", None)
+        if res.get("stage") == "resolve":
+            return self._json_text({"ok": False, "platform": plat, "reason": res.get("reason") or "unresolved", "dispatched": False, **asked,
+                                    "error": self._target_error(app, res), "candidates": res.get("candidates") or []})
+        if res.pop("checkpoint", None) == "action":
+            # The saved receipt may be an action or a refusal; the later read did not finish.
+            res["observation"] = {"ok": False, "reason": "helper_stopped",
+                                  "error": "the helper stopped before the window read finished (its time ran out or it crashed); "
+                                           "the saved receipt above stands: read the window with ax_tree before acting again"}
+        out: dict[str, Any] = {"platform": plat, "app": target if target is not None else app, "do": do, **res}
         if "dispatched" not in res:
             # Every answer of ``act`` says whether the action call was made; one without that fact is a helper that
             # gave no answer or stopped mid-way: whether it found the element and acted is unknown, never "not sent".

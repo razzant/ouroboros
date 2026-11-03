@@ -6,16 +6,22 @@
 //                                          every paste action it performs, and a decoy field
 //
 // stdin, one command per line: "mark <label>" (log a state snapshot), "replace" (target: swap Commit for a
-// fresh instance), "type <interval_ms> <letters>" (front: post the letters as keystrokes while it stays the
-// active app), "focus <paste|decoy|window>", "clear", "expect <token>" (paste: the clipboard is compared with
-// the token, never logged), "quit". EOF quits too, so a fixture never outlives its test.
+// fresh instance), "decoy" (target: a second window of the SAME process, "<title>-decoy", with its own qa.sentinel),
+// "twinwindow" (target: a third window titled exactly as the decoy), "second" (target: a window with its own field and
+// Commit, shown without activation), "mode <plain|retitle|shift|close>" (target: what
+// Commit also does: retitle its window to "<title>-retitled", bring the decoy in front as the app's main window, both
+// for retitle, or close its window), "type <interval_ms> <letters>" (front: post the letters as keystrokes while it
+// stays the active app), "focus <paste|decoy|window>", "clear", "expect <token>" (paste: the clipboard is compared
+// with the token, never logged), "quit". EOF quits too, so a fixture never outlives its test.
 //
 // Every observation is one JSON line in the log, stamped with ProcessInfo.systemUptime (one clock for both
 // processes). Both roles log their own activation, key-window changes and every application activation the
 // workspace announces, so a focus taken and given back between two samples still shows, and every key event
 // it receives itself with its modifiers (none of the keyboard of other apps). The front role also logs mouse
 // events and the clipboard's change count, never its contents. The target's snapshots carry Commit's frame in
-// global top-left points, the space clicks are sent in. The paste role also logs key-up and modifier events,
+// global top-left points, the space clicks are sent in, and every window's title and windowNumber (its CGWindowID,
+// an id the skill does not supply): the target's qa.sentinel reads "target:N" after N commits ("retitled:N" once
+// retitled), the decoy's always "decoy". The paste role also logs key-up and modifier events,
 // the characters AppKit derived for each key event, the input source in use, every action its menu sent and
 // every paste action its text view performed, so a chord that arrived but pasted nothing is told apart from
 // one that never arrived.
@@ -85,8 +91,25 @@ final class PasteView: NSTextView {
     }
 }
 
+var rawInputCount = 0
+// Before AppKit dispatch, independently of whether a view accepts first mouse or acts on the event.
+// Keep these counts separate from Commit and text changes. No acceptsFirstMouse override/primer.
+final class QAApplication: NSApplication {
+    override func sendEvent(_ event: NSEvent) {
+        if [.leftMouseDown, .leftMouseUp, .keyDown, .keyUp].contains(event.type) {
+            rawInputCount += 1
+            log("raw_input", ["index": rawInputCount, "type": Int(event.type.rawValue),
+                              "window_number": event.windowNumber,
+                              "source_pid": event.cgEvent?.getIntegerValueField(.eventSourceUnixProcessID) ?? -1,
+                              "tag": event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0,
+                              "chars": event.type == .keyDown || event.type == .keyUp ? event.characters ?? "" : ""])
+        }
+        super.sendEvent(event)
+    }
+}
+
 final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTextViewDelegate {
-    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: role == "target" ? 460 : 240),
                           styleMask: [.titled], backing: .buffered, defer: false)
     let field = NSTextField(string: "")
     let status = NSTextField(labelWithString: "idle")
@@ -95,12 +118,26 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     let pasted = PasteView(frame: NSRect(x: 20, y: 60, width: 420, height: 160))
     let decoy = NSTextField(string: "")
     var token: String?
+    let commandGroup = NSBox(frame: NSRect(x: 20, y: 250, width: 420, height: 180))
+    let commandField = NSTextField(string: "")
+    let urlLink = NSButton(title: "Open synthetic reference", target: nil, action: nil)
+    let syntheticCommand = String(repeating: "run λ漢字🧪 e\u{301} ", count: 24) + "[command-end]"
+    let syntheticURL = "https://example.invalid/qa/" + String(repeating: "segment/", count: 45) + "end"
     var commit: NSButton!
     var count = 0
     var pending: [Character] = []
     var typer: Timer?
     var input = ""
     var monitors: [Any] = []
+    let sentinel = NSTextField(labelWithString: "target:0")
+    var decoyWindow: NSWindow?
+    var twinWindow: NSWindow?
+    var commitMode = "plain"
+    var secondWindow: NSWindow?
+    let secondField = NSTextField(string: "")
+    var secondCommit: NSButton?
+    var secondCount = 0
+    var secondStatus = "idle"
 
     func button(_ title: String, _ identifier: String, _ action: Selector, _ frame: NSRect, tag: Int = 0) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
@@ -119,6 +156,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
 
     func applicationDidFinishLaunching(_ note: Notification) {
         window.title = title
+        window.isReleasedWhenClosed = false  // the close mode closes it while the fixture still logs its state
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
         window.setFrameTopLeftPoint(NSPoint(x: visible.minX + (role == "target" ? 40 : 540), y: visible.maxY - 40))
         if role == "target" {
@@ -129,8 +167,26 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             commit = button("Commit", "qa.commit", #selector(commitPressed(_:)), NSRect(x: 240, y: 186, width: 100, height: 32), tag: 1)
             place(status, "qa.status", NSRect(x: 20, y: 150, width: 400, height: 20))
             place(counter, "qa.count", NSRect(x: 20, y: 120, width: 200, height: 20))
+            place(sentinel, "qa.sentinel", NSRect(x: 240, y: 120, width: 200, height: 20))
             _ = button("Twin", "qa.twinA", #selector(twinPressed(_:)), NSRect(x: 20, y: 70, width: 100, height: 32))
             _ = button("Twin", "qa.twinB", #selector(twinPressed(_:)), NSRect(x: 140, y: 70, width: 100, height: 32))
+            commandGroup.title = "Command context"
+            commandGroup.setAccessibilityIdentifier("qa.command_group")
+            commandGroup.setAccessibilityElement(true)
+            commandGroup.setAccessibilityRole(.group)
+            window.contentView!.addSubview(commandGroup)
+            commandField.stringValue = syntheticCommand
+            commandField.isEditable = false
+            commandField.setAccessibilityLabel("Synthetic command")
+            commandField.setAccessibilityIdentifier("qa.command")
+            commandField.frame = NSRect(x: 12, y: 94, width: 392, height: 24)
+            commandGroup.contentView!.addSubview(commandField)
+            urlLink.setAccessibilityIdentifier("qa.url")
+            urlLink.setAccessibilityLabel("Synthetic URL")
+            urlLink.setAccessibilityRole(.link)
+            urlLink.setAccessibilityURL(URL(string: syntheticURL))
+            urlLink.frame = NSRect(x: 12, y: 42, width: 220, height: 32)
+            commandGroup.contentView!.addSubview(urlLink)
             window.orderFrontRegardless()  // shown without taking the front: it is acted on in the background
         } else if role == "paste" {
             installEditMenu()
@@ -189,7 +245,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             let data = handle.availableData
             DispatchQueue.main.async { self.receive(data) }
         }
-        log("ready", state())
+        log("ready", state().merging(["application_class": String(describing: type(of: NSApp!))]) { _, new in new })
     }
 
     func state() -> [String: Any] {
@@ -200,16 +256,29 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             "first_responder": responder(),
             "front_pid": Int(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1),
             "mouse": [mouse.x.rounded(), mouse.y.rounded()],
+            "window_id": window.windowNumber,
+            "raw_input_count": rawInputCount,
         ]
         if role == "target" {
             out["field"] = field.stringValue
             out["count"] = count
             out["status"] = status.stringValue
             out["commit_instance"] = commit?.tag ?? 0
+            out["sentinel"] = sentinel.stringValue
+            out["mode"] = commitMode
+            out["windows"] = windowRows()
+            out["command"] = commandField.stringValue
+            out["url"] = syntheticURL
             if let commit = commit, let primary = NSScreen.screens.first {
                 let frame = window.convertToScreen(commit.convert(commit.bounds, to: nil))
                 out["commit_frame"] = [frame.minX, primary.frame.maxY - frame.maxY, frame.width, frame.height]
                     .map { $0.rounded() }
+            }
+            if let second = secondWindow, let commit = secondCommit {
+                out["secondary"] = ["window_id": second.windowNumber, "title": second.title,
+                                    "key_window": second.isKeyWindow, "first_responder": responder(second),
+                                    "field": secondField.stringValue, "count": secondCount, "status": secondStatus,
+                                    "commit_frame": globalFrame(commit, second), "field_frame": globalFrame(secondField, second)]
             }
         } else if role == "paste" {
             out["text"] = pasted.string
@@ -252,13 +321,46 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         log("find_next", ["sender": (sender as? NSMenuItem)?.title ?? "", "first_responder": responder()])
     }
 
-    func responder() -> String {
-        let first = window.firstResponder
+    func responder(_ selected: NSWindow? = nil) -> String {
+        let first = (selected ?? window).firstResponder
         if first === typed { return "qa.typing" }
         if field.currentEditor() != nil && first === field.currentEditor() { return "qa.field" }
         if decoy.currentEditor() != nil && first === decoy.currentEditor() { return "qa.decoy" }
+        if secondField.currentEditor() != nil && first === secondField.currentEditor() { return "qa.second.field" }
         if let view = first as? NSView, !view.accessibilityIdentifier().isEmpty { return view.accessibilityIdentifier() }
         return first.map { String(describing: type(of: $0)) } ?? "none"
+    }
+
+    func globalFrame(_ view: NSView, _ owner: NSWindow) -> [CGFloat] {
+        let frame = owner.convertToScreen(view.convert(view.bounds, to: nil))
+        return [frame.minX, (NSScreen.screens.first?.frame.maxY ?? 0) - frame.maxY, frame.width, frame.height]
+    }
+
+    func showSecond() {
+        guard secondWindow == nil else { return }
+        let second = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        second.title = title + "-second"
+        second.setFrameTopLeftPoint(NSPoint(x: window.frame.minX, y: window.frame.minY - 20))
+        secondField.frame = NSRect(x: 20, y: 150, width: 200, height: 24)
+        secondField.setAccessibilityIdentifier("qa.second.field")
+        secondField.delegate = self
+        second.contentView!.addSubview(secondField)
+        let commit = NSButton(title: "Commit", target: self, action: #selector(secondPressed(_:)))
+        commit.frame = NSRect(x: 240, y: 146, width: 100, height: 32)
+        commit.setAccessibilityIdentifier("qa.second.commit")
+        second.contentView!.addSubview(commit)
+        secondCommit = commit
+        secondWindow = second
+        second.orderFrontRegardless()
+        log("second_ready", state())
+    }
+
+    @objc func secondPressed(_ sender: NSButton) {
+        secondCount += 1
+        secondStatus = "committed:" + secondField.stringValue
+        log("second_commit", ["count": secondCount, "field": secondField.stringValue,
+                              "window_number": secondWindow?.windowNumber ?? -1])
     }
 
     func pointer(_ event: NSEvent, _ scope: String) {
@@ -284,12 +386,60 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         log(event.type == .keyUp ? "key_up" : "key_down", row)
     }
 
+    /// The target process's windows as AppKit has them: title, windowNumber (the CGWindowID), visible, main, key.
+    func windowRows() -> [[String: Any]] {
+        return [(window, "target"), (decoyWindow, "decoy"), (twinWindow, "twin"), (secondWindow, "second")].compactMap { pair in
+            guard let win = pair.0 else { return nil }
+            return ["role": pair.1, "title": win.title, "number": win.windowNumber, "visible": win.isVisible,
+                    "main": win.isMainWindow, "key": win.isKeyWindow]
+        }
+    }
+
+    /// A window of the target process beside the acted one: a sentinel only, never a Commit.
+    func sideWindow(_ title: String, _ value: String, _ offset: CGFloat) -> NSWindow {
+        let side = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 120), styleMask: [.titled],
+                            backing: .buffered, defer: false)
+        side.isReleasedWhenClosed = false
+        side.title = title
+        let label = NSTextField(labelWithString: value)
+        label.frame = NSRect(x: 20, y: 50, width: 260, height: 20)
+        label.setAccessibilityIdentifier("qa.sentinel")
+        side.contentView!.addSubview(label)
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        side.setFrameTopLeftPoint(NSPoint(x: visible.minX + 80 + offset, y: visible.maxY - 120 - offset))
+        side.orderFrontRegardless()
+        return side
+    }
+
+    /// The decoy becomes what a default lookup finds: in front of the target's window and the app's main window,
+    /// without activating the application (this process stays in the background).
+    func promoteDecoy() {
+        guard let decoy = decoyWindow else { return }
+        decoy.orderFrontRegardless()
+        decoy.makeMain()
+        decoy.makeKey()
+    }
+
     @objc func commitPressed(_ sender: NSButton) {
         count += 1
         status.stringValue = "committed:" + field.stringValue
         counter.stringValue = "count:\(count)"
+        let titleBefore = window.title
+        if commitMode == "retitle" {
+            window.title = title + "-retitled"
+        }
+        sentinel.stringValue = (window.title == title ? "target:" : "retitled:") + "\(count)"
+        if commitMode == "retitle" || commitMode == "shift" {
+            promoteDecoy()
+        }
         log("commit", ["instance": sender.tag, "field": field.stringValue, "count": count,
-                       "app_active": NSApp.isActive, "key_window": window.isKeyWindow])
+                       "app_active": NSApp.isActive, "key_window": window.isKeyWindow, "mode": commitMode,
+                       "title_before": titleBefore, "title_after": window.title, "sentinel": sentinel.stringValue,
+                       "windows": windowRows()])
+        if commitMode == "close" {
+            window.close()
+            log("window_closed", ["title": window.title, "number": window.windowNumber, "visible": window.isVisible])
+        }
     }
 
     @objc func twinPressed(_ sender: NSButton) {
@@ -303,7 +453,10 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             log("decoy_text", ["decoy": decoy.stringValue])
             return
         }
-        log("field_typed", ["field": field.stringValue])
+        let changed = note.object as? NSTextField
+        log("field_typed", ["field": changed?.stringValue ?? field.stringValue,
+                            "identifier": changed?.accessibilityIdentifier() ?? "qa.field",
+                            "window_number": changed?.window?.windowNumber ?? -1])
     }
 
     func textDidChange(_ note: Notification) {
@@ -337,6 +490,17 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
             commit.removeFromSuperview()
             commit = fresh
             log("commit_replaced", ["instance": fresh.tag])
+        case "decoy" where role == "target" && decoyWindow == nil:
+            decoyWindow = sideWindow(title + "-decoy", "decoy", 0)
+            log("decoy_ready", state())
+        case "twinwindow" where role == "target" && twinWindow == nil:
+            twinWindow = sideWindow(title + "-decoy", "twin", 40)
+            log("twin_window_ready", state())
+        case "mode" where role == "target" && words.count == 2 && ["plain", "retitle", "shift", "close"].contains(words[1]):
+            commitMode = words[1]
+            log("mode_set", state())
+        case "second" where role == "target":
+            showSecond()
         case "type" where role == "front" && words.count == 3:
             startTyping(Int(words[1]) ?? 60, words[2])
         case "focus" where role == "paste" && words.count == 2:
@@ -383,6 +547,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
         for down in [true, false] {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down) else { continue }
             event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            event.setIntegerValueField(.eventSourceUserData, value: 42002)  // ordinary foreground-route decoy
             event.post(tap: .cghidEventTap)
         }
     }
@@ -402,7 +567,7 @@ final class Fixture: NSObject, NSApplicationDelegate, NSTextFieldDelegate, NSTex
     }
 }
 
-let app = NSApplication.shared
+let app = QAApplication.shared
 let fixture = Fixture()
 app.delegate = fixture
 app.setActivationPolicy(.regular)
