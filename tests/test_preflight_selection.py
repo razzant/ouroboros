@@ -8,6 +8,7 @@ from ouroboros import commit_admission as admission, preflight_runner as pr, tes
 from ouroboros.preflight_qualification import adoption_test_evidence, full_proof_error
 from tests.test_preflight_runner import _make_repo, _commit_all
 from tests.test_preflight_receipts import receipt_python  # noqa: F401 -- dependency-only lane fixture
+from tests.test_selected_test_cli import TEMPLATE_FIELDS, plugin_values, refuse_long_pytest_launches
 
 pytestmark = pytest.mark.serial  # finite nested pytest controllers; one at a time
 
@@ -72,6 +73,36 @@ def test_selected_widening_executes_the_named_consumer(candidate):
                                   extra_tests=["tests/test_unrelated.py"], test_reason="dynamic dispatch")
     assert error and "unrelated collection" in error
     assert candidate._preflight_test_proof is None
+
+
+def test_a_long_selected_scope_reaches_every_gate_pass_off_the_command_line(candidate, monkeypatch):
+    """The gate launches its passes as the CLI does. A scope of non-ASCII names past one command line (on Windows
+    WinError 206, which the gate would report as a missing pytest) still starts: each pass carries it in its
+    inventory plugin and runs exactly the selection. The bound is far below Windows' 32,767 so that the fixture
+    stays small; the property is the same."""
+    import subprocess
+    import sys
+
+    from ouroboros import preflight_inventory as inventory
+
+    repo = candidate.repo_dir
+    for n in range(40):
+        (repo / f"tests/test_область_{n:02d}_имя_делающее_вектор_каждого_прохода_длиннее.py").write_text(
+            "from leaf import value\n\n\ndef test_it():\n    assert value == 2\n", encoding="utf-8")
+    inline = inventory.selection_passes(selection.select_tests(repo))[0].args
+    assert len(subprocess.list2cmdline([sys.executable, "-m", "pytest", *inline])) > 3_000  # the control
+    launches = refuse_long_pytest_launches(monkeypatch, limit=3_000)
+    assert pr.run_hermetic_pytest(repo, ctx=candidate, selected=True, phase=pr.PRE_COMMIT_PHASE) is None
+    row = candidate._preflight_test_disclosure
+    assert row["tier"] == "selected" and len(row["expected_files"]) == 2 + 40
+    assert sum(not path.isascii() for path in row["expected_files"]) == 40
+    scoped = [launch for launch in launches if "tests/" in launch]
+    assert len(scoped) == 2  # parallel, then serial
+    for launch in scoped:
+        assert not [arg for arg in launch if arg.startswith(inventory.SELECT)]
+    inventory_rows = row["inventory"]
+    assert inventory_rows["parallel"]["expected"] == inventory_rows["parallel"]["executed"] == 2 + 40
+    assert inventory_rows["parallel"]["missing"] == inventory_rows["parallel"]["unexpected"] == []
 
 
 def test_apparatus_change_executes_full_and_reports_actual_failure(candidate):
@@ -234,9 +265,10 @@ def test_a_selected_pass_walks_tests_once_and_collects_exactly_its_modules(tmp_p
     scratch = tmp_path / "scratch"
     first = inventory.selection_passes(SimpleNamespace(tier="selected", files=selected), temp_root=scratch)[0]
     scope = first.args[:first.args.index("tests/") + 1]
-    assert scope == [f"--select-test={path}" for path in selected] + ["tests/"]
-    done = run_in_group([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", *scope,
-                         "-p", first.args[-1]], timeout=120, cwd=repo,
+    assert scope == [f"--select-test={path}" for path in selected] + ["tests/"]  # the spec names the scope
+    # A process is started with the scope off the command line, in the plugin it loads: the same walk.
+    done = run_in_group([sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
+                         *inventory.launch_args(scope), "-p", first.args[-1]], timeout=120, cwd=repo,
                         env={**os.environ, "PYTHONPATH": str(pr._probe_dir(scratch))})
     expected = inventory.read_inventory(scratch, "parallel")[0].get("expected")
     if selected[0].startswith("tests/node_modules"):
@@ -245,6 +277,47 @@ def test_a_selected_pass_walks_tests_once_and_collects_exactly_its_modules(tmp_p
     else:
         assert done.returncode == 0, done.stdout + done.stderr
         assert expected == ["tests/deep/test_b.py::test_three", "tests/test_a.py::test_one", "tests/test_a.py::test_two"]
+
+
+def test_the_inventory_plugin_carries_any_scope_exactly_and_the_launch_leaves_it_off_the_command_line(tmp_path):
+    """The spec still names every module (the workload a proof binds); only a process's command line drops them.
+    What a path can hold travels escaped in the plugin source, and the plugin reads the same strings back: its
+    scope and the file it logs to, also when a module name or the results directory spells every template field."""
+    import re
+
+    from ouroboros import preflight_inventory as inventory
+    # TEMPLATE_FIELDS must stay every field either template has, or "spells every field" below stops being true.
+    assert sorted(set(re.findall(r"__[A-Z]+(?:_[A-Z]+)*__", inventory.SOURCE + pr._WORKER_PROBE_SOURCE))) == sorted(
+        TEMPLATE_FIELDS)
+
+    paths = ["tests/test_a.py", "tests/a dir/test_b.py", "tests/проверки/test_ü.py", "tests/日本語/test_c.py", "tests/test_😀.py",
+             "tests/test_t\t.py", "tests/test_'q\".py", "tests/test_\\b.py", "tests/test_\n\r.py", "tests/test_\u2028.py",
+             "tests/test_\udcff.py", "tests/test_" + "_and_".join(TEMPLATE_FIELDS) + ".py"]  # a name that spells every field
+    for tier, files in (("selected", tuple(paths)), ("full", ())):
+        scratch = tmp_path / tier
+        results = scratch.joinpath(*TEMPLATE_FIELDS)  # a results directory that spells every field
+        results.mkdir(parents=True)
+        for kept in ({"temp_root": results}, {"temp_root": scratch, "inventory_dir": results}):  # the CLI, the gate
+            for spec in inventory.selection_passes(SimpleNamespace(tier=tier, files=files), **kept):
+                named = [arg for arg in spec.args if arg.startswith(inventory.SELECT + "=")]
+                assert named == [f"{inventory.SELECT}={path}" for path in files]
+                launched = inventory.launch_args(spec.args)
+                assert launched == [arg for arg in spec.args if arg not in named] and launched[0] == "tests/"
+                plugin = plugin_values(launched, pr._probe_dir(kept["temp_root"]))
+                assert plugin["_scope"] == list(files)
+                assert plugin["_path"] == results / f"inventory-{spec.label}.jsonl"
+
+
+def test_the_worker_probe_reads_back_its_directories_where_the_root_spells_template_fields(tmp_path):
+    """The selected CLI writes the worker probe under the caller's ``--evidence-dir``, as it does the inventory
+    plugin. A root that spells every template field is still the root: the probe's ``_LOG`` and ``_RESULTS`` are the
+    directories the runner reads back."""
+    import runpy
+
+    root = tmp_path.joinpath(*TEMPLATE_FIELDS)
+    module = pr._install_worker_probe(root)
+    probe = runpy.run_path(str(pr._probe_dir(root) / f"{module}.py"))
+    assert (probe["_LOG"], probe["_RESULTS"]) == (pr._worker_log_dir(root), pr._results_pointer(root))
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unfinished"])

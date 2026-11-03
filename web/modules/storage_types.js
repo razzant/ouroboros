@@ -63,13 +63,63 @@
  * @property {(number|null)=} growth_bytes
  * @property {string=} growth_since
  * @property {'unreadable'=} growth_flag
+ * @property {StorageDeletedProjects=} deleted_projects  // absent on a count saved before it existed: not counted, never none
+ */
+
+/**
+ * One depth-1 entry of a deleted project's folder; files directly in it form the part `(files)`.
+ * @typedef {Object} StorageFolderPart
+ * @property {string} name
+ * @property {number} bytes
+ */
+
+/**
+ * A deleted project whose folder this is.
+ * @typedef {Object} StorageDeletedProject
+ * @property {string} name
+ * @property {string} deleted_at  // when its deletion committed; '' on a record without it
+ * @property {string} provenance  // attached | cloned | genesis | none; '' on a record without it
+ */
+
+/**
+ * A project that remains (closed ones too) and touches this folder.
+ * @typedef {Object} StorageActiveProject
+ * @property {string} name
+ * @property {'same'|'holds'|'inside'} relation  // its folder is this one, lies inside this one, or holds this one
+ */
+
+/**
+ * One folder, whatever number of deleted projects it served. `bytes` is null (unknown, never zero) unless `state` is
+ * measured or partial (at least that much); not_measured: this count did not reach it before it stopped.
+ * @typedef {Object} StorageDeletedFolder
+ * @property {string} path
+ * @property {'measured'|'partial'|'unreadable'|'absent'|'not_measured'} state
+ * @property {number|null} bytes
+ * @property {number} unreadable  // entries inside it that could not be read
+ * @property {string|null} counted_in  // the place whose walk attributed these bytes (they are in the total); null: outside the total
+ * @property {boolean} same_volume  // on the data folder's disk
+ * @property {StorageDeletedProject[]} projects
+ * @property {StorageActiveProject[]} active_projects
+ * @property {StorageFolderPart[]} parts
+ * @property {{count: number, bytes: number}} rest  // the parts beyond the largest eight
+ * @property {('permission_denied'|'not_a_folder'|'read_error')=} reason
+ * @property {string=} within  // the path of the listed folder whose bytes already include this one's
+ * @property {string[]=} holds  // ids of the places whose roots lie inside: their bytes are theirs, not in this size
+ */
+
+/**
+ * Dated by the finished count that holds it. unavailable: the project list could not be read, so some folders may remain.
+ * @typedef {Object} StorageDeletedProjects
+ * @property {'counted'|'unavailable'} state
+ * @property {number} no_folder  // deleted projects with no folder on record: never a row, never zero bytes
+ * @property {StorageDeletedFolder[]} folders
  */
 
 /**
  * A running count: where it is and the places already finished in this run.
  * @typedef {Object} StorageCounting
  * @property {string} started_at
- * @property {string} place
+ * @property {string} place  // a place id; `deleted_projects` while it walks folders no place holds: `current` names the project; `bytes` and `files` count those folders alone
  * @property {string} current
  * @property {number} places_done
  * @property {number} places_total

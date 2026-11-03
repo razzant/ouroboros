@@ -536,13 +536,18 @@ def _collect_running(ctx: Any, content: str, record_id: str, subject: Any) -> Di
     from ouroboros import review_ledger as ledger
     from ouroboros.tools.review_change import run_review_change
 
+    from ouroboros.review_continuation import ContinuationRefused
+
     record = ledger.load_record(ledger.ledger_root(ctx), record_id)
     brief = dict(record.get("brief") or {})
-    return run_review_change(ctx, subject="result", answer=str(content or ""), goal=str(brief.get("goal") or ""),
-                             scope=str(brief.get("scope") or ""),
-                             author_questions=list(brief.get("author_questions") or []),
-                             reason="Collect the running review of this result", _frozen_result=subject,
-                             _rejoin_retry_key=str((record.get("fingerprints") or {}).get("retry_key") or ""))
+    try:  # a continuation chosen on this round is sent first (``review_collection.repair_round``)
+        return run_review_change(ctx, subject="result", answer=str(content or ""), goal=str(brief.get("goal") or ""),
+                                 scope=str(brief.get("scope") or ""),
+                                 author_questions=list(brief.get("author_questions") or []),
+                                 reason="Collect the running review of this result", _frozen_result=subject,
+                                 _rejoin_retry_key=str((record.get("fingerprints") or {}).get("retry_key") or ""))
+    except ContinuationRefused as exc:  # recorded, not sent now: the review stays pending, never a new wave
+        return {"state": "pending", "record_id": record_id, "continuation": exc.payload()}
 
 
 def supersede_result_runs(llm_trace: Dict[str, Any], marker: str) -> None:
@@ -566,23 +571,32 @@ def _bind_review_run(llm_trace: Dict[str, Any], record: Dict[str, Any], subject_
     """The result review bound to the delivered answer, in the task's review runs the outcome axes read.
     ``earlier_request``: the mind judged that the owner's words since this review do not change what was
     asked, so the review of this exact answer stands for the current request too."""
+    from ouroboros.review_seat_outcome import outcome_identity
+
     runs = llm_trace.setdefault("review_runs", [])
     record_id = str(record.get("record_id") or "")
     bound = next((run for run in runs if isinstance(run, dict) and run.get("panel_id") == record_id), None)
+    verdict, outcomes = dict(record.get("verdict") or {}), outcome_identity(record)
+    aggregate = str(verdict.get("aggregate") or "")
+    signal = aggregate if aggregate in {"PASS", "FAIL"} else "DEGRADED"
+    facts = {"aggregate_signal": signal, "aggregate": aggregate, "degraded": signal == "DEGRADED",
+             "reason": str(verdict.get("reason") or ""), "critical_count": len(verdict.get("critical_findings") or []),
+             "dispatch_refusal": str((record.get("dispatch_refusal") or {}).get("kind") or "")}
     if bound is not None:
         if earlier_request:
             bound.update(binding_hash=subject_sha, earlier_request=True)
         if bound.get("binding_hash") == subject_sha:
             bound.pop("superseded_by_revision", None)  # the exact subject it reviewed is current again
+        # A genuinely new outcome under the same record (a continued seat, a late answer under the same
+        # operation) refreshes the binding; the author's earlier informed finish read the old outcome.
+        known = bound.get("outcomes")
+        if (known != outcomes) if known is not None else any(bound.get(k) != facts[k] for k in ("aggregate", "critical_count", "reason")):
+            bound.update(facts)
+            bound.pop("informed_finish", None)
+        bound["outcomes"] = outcomes
         return bound
-    verdict = dict(record.get("verdict") or {})
-    aggregate = str(verdict.get("aggregate") or "")
-    signal = aggregate if aggregate in {"PASS", "FAIL"} else "DEGRADED"
     bound = {"surface": RESULT_KIND, "authority": "host_root", "panel_id": record_id, "record_id": record_id,
-             "binding_hash": subject_sha, "aggregate_signal": signal, "aggregate": aggregate,
-             "degraded": signal == "DEGRADED", "reason": str(verdict.get("reason") or ""),
-             "critical_count": len(verdict.get("critical_findings") or []), "enforcement": enforcement,
-             "dispatch_refusal": str((record.get("dispatch_refusal") or {}).get("kind") or ""),
+             "binding_hash": subject_sha, **facts, "enforcement": enforcement, "outcomes": outcomes,
              **({"earlier_request": True} if earlier_request else {})}
     runs.append(bound)
     return bound
@@ -614,6 +628,12 @@ def _outcome_lines(record: Dict[str, Any]) -> List[str]:
              for name, note in (("critical_findings", ""), ("advisory_findings", ""),
                                 ("additional_findings", "; added reviewer, heard, not counted"))
              for finding in verdict.get(name) or [] if isinstance(finding, dict)]
+    from ouroboros.review_continuation import continuable_seats
+
+    if offers := continuable_seats(record):  # continued only by the author's explicit choice, in the same wave
+        lines.append("Stopped reviewers you may continue: review_change(review_reference="
+                     + json.dumps({"record_id": record.get("record_id"), "task_id": record.get("task_id"), "surface": "result"})
+                     + ", continue_seats=" + json.dumps([{k: o[k] for k in ("seat_id", "operation_id")} for o in offers]) + ").")
     if aggregate == "NOT_DISPATCHED":
         lines.append(str((record.get("dispatch_refusal") or {}).get("message") or "No review was dispatched."))
     elif aggregate not in {"PASS", "FAIL"}:
@@ -662,11 +682,8 @@ def _outcome_received(ctx: Any, llm_trace: Dict[str, Any], record: Dict[str, Any
 
 def _show(ctx: Any, hold: Any, text: str, record: Dict[str, Any], cause: str) -> bool:
     """Hold the delivery once to hand this outcome to its author; ``_result_review_shown`` keeps its identity."""
-    shown = getattr(ctx, "_result_review_shown", None)
-    if not isinstance(shown, set):
-        shown = set(shown or ())
-        ctx._result_review_shown = shown
-    shown.update(_outcome_keys(record))
+    shown = getattr(ctx, "_result_review_shown", None) or []
+    ctx._result_review_shown = list(dict.fromkeys([*shown, *sorted(_outcome_keys(record))]))
     ctx._completion_hold_cause = cause  # each hold names its cause to the delivery owner
     hold(text)
     return True
@@ -821,8 +838,11 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
                     and str(getattr(ctx, "_acceptance_pending_review_choice", "") or "") == "finish"):
                 return False  # the mind chose to finish; the reviewers settle later and leave a mark
             ctx._completion_hold_cause = "pending"
-            hold("[Result review] The review of your result is still running (an addressed message or a seat "
-                 "still answering). Read what reached you; your next delivery collects the same review at $0."
+            unsent = (outcome.get("continuation") or {}).get("message")
+            hold((f"[Result review] The continuation you chose for this review is recorded but was not sent ({unsent}). "
+                  "Your next delivery sends that same recorded choice; nothing is decided again."
+                  if unsent else "[Result review] The review of your result is still running (an addressed message or a "
+                  "seat still answering). Read what reached you; your next delivery collects the same review at $0.")
                  + (" You may instead finish with pending_review=finish; the reviewers then settle later."
                     if pending_review_choice_offered(ctx) else ""))
             return True
@@ -838,13 +858,13 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
     if record is None:
         return False
     stands_for_earlier = str((record.get("subject") or {}).get("diff_sha") or "") not in {"", subject.diff_sha}
+    record_id = str(record.get("record_id") or "")
+    # What this step put before the mind is plain JSON (ids, [record, subject] pairs, refusals by subject), so a
+    # same-ID continuation carries it in its saved state (``owner_wait.continuation_state``).
     if stands_for_earlier:
-        asked = getattr(ctx, "_result_review_request_asked", None)
-        if not isinstance(asked, set):
-            asked = set()
-            ctx._result_review_request_asked = asked
-        if (str(record.get("record_id") or ""), subject.diff_sha) not in asked:
-            asked.add((str(record.get("record_id") or ""), subject.diff_sha))
+        asked = getattr(ctx, "_result_review_request_asked", None) or []
+        if [record_id, subject.diff_sha] not in asked:
+            ctx._result_review_request_asked = [*asked, [record_id, subject.diff_sha]]
             # The one question carries that review's outcome too when its author has not received it yet.
             text = _request_changed_text(ctx, record, outcome=not _outcome_received(ctx, llm_trace, record))
             return _show(ctx, hold, text, record, "earlier_request")
@@ -857,7 +877,7 @@ def result_review_at_delivery(ctx: Any, content: str, llm_trace: Dict[str, Any],
         return False if received else _show(ctx, hold, _findings_text(record, blocking=False), record, "pass")
     if aggregate == "NOT_DISPATCHED":
         ctx._result_review_refused = {**(getattr(ctx, "_result_review_refused", None) or {}), subject.diff_sha: {
-            "ceiling": _ceiling(), "record_id": str(record.get("record_id") or "")}}
+            "ceiling": _ceiling(), "record_id": record_id}}
     blocking = required and enforcement == "blocking"
     if not received or blocking:
         return _show(ctx, hold, _findings_text(record, blocking=blocking), record, "findings")

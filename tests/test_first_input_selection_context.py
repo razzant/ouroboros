@@ -35,7 +35,7 @@ def test_capture_selects_channels_without_removing_governance_or_own_process(tmp
                "MEMORY_REGISTRY", "INSTALLED_SKILLS", "DRIVE_STATE", "SHARED_REVIEW"]
     monkeypatch.setattr(context, "build_memory_sections", source(omitted[0], [omitted[0]]))
     monkeypatch.setattr(context, "build_knowledge_sections", source(omitted[1], [omitted[1]]))
-    for name, marker in zip(("build_health_invariants", "_build_registry_digest",
+    for name, marker in zip(("build_health_invariants", "_build_registry_section",
                              "_build_installed_skills_section", "_drive_state_section"), omitted[2:6]):
         monkeypatch.setattr(context, name, source(marker, marker))
     monkeypatch.setattr(memory, "recent_activity_sections", source("OWN_PROCESS", ["OWN_PROCESS"]))

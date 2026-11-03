@@ -39,6 +39,10 @@ from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
 
+# ``tools.review_result``'s facts of what its delivery step already showed (findings, a changed request asked
+# about, a refusal), each JSON at its owner; carried by value, never decided here.
+_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused")
+
 log = logging.getLogger(__name__)
 
 
@@ -232,7 +236,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_delivery_candidate_revision", "_delivery_control_required",
             "_delivery_evidence_revision", "_delivery_evidence_fingerprint",
             "_delivery_effective_criteria", "_delivery_material_tool_indices",
-            "_acceptance_ack_source_sha256", "_completion_request", "_completion_selected",
+            "_acceptance_ack_source_sha256", "_completion_request", "_completion_conflict", "_completion_selected",
             "_completion_observation", "_completion_held_sha256", "_presence_completion",
             "_presence_completion_owner_revision", "_acceptance_observation",
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
@@ -250,6 +254,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             # restored copy still has live custody in the resuming process.
             "_left_review_wait": (dict(getattr(ctx, "_left_review_wait", None))
                                   if isinstance(getattr(ctx, "_left_review_wait", None), dict) else None),
+            # What the result review already put before the mind, as its owner keeps it (JSON); a review
+            # still running is read again from its ledger, never carried.
+            **{key: getattr(ctx, key) for key in _RESULT_REVIEW_SHOWN if getattr(ctx, key, None)},
         },
     }
 
@@ -1156,11 +1163,14 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._budget_paused_sec = budget_paused_seconds(adopt_handoff_clock(
         state.get("model_wait") or {}, getattr(ctx, "owner_wait_resume", None)))
     # A pre-fold continuation's ``acceptance`` block also carries the deleted task-acceptance
-    # flags (``_task_acceptance_pending`` and friends); they are not restored.
+    # flags (``_task_acceptance_pending`` and friends); they are not restored. A source older than the
+    # result review's shown facts cannot say what was shown: those findings are shown once more.
     review = {key: value for key, value in state["acceptance"].items()
-              if key in {"_acceptance_pending_review_choice", "_left_review_wait"}}
+              if key in {"_acceptance_pending_review_choice", "_left_review_wait", *_RESULT_REVIEW_SHOWN}}
     for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
+    if "_completion_request" in state["delivery"] and "_completion_conflict" not in state["delivery"]:
+        ctx._completion_conflict = None  # saved before this fact rode beside its request: unknown, not "no conflict"
     from ouroboros.route_choice import restored_choice
 
     ctx.route_choice = restored_choice(ctx, state)  # a saved choice, else the legacy classification (D5)

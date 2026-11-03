@@ -1895,8 +1895,16 @@ deck. Telegram receives only a relay that passes his words, as plain text. Main 
 its one receipt line. The row menu (right-click, Shift+F10, ContextMenu on the focused
 row, long press on touch) offers Reply, Copy, Open project and a work card's
 Resume, Pause and Stop… exactly when the card does. Esc/outside press closes it
-and returns focus; selected words keep the browser's menu. On touch the row sinks a
-little while the finger holds and lifts over the dimmed feed while its menu is open.
+and returns focus. Links, selected words and fields keep their native content menu;
+the desktop shell removes only commands that cannot work there (navigation away, stalls or no-ops).
+On touch the row sinks a little while held and lifts over the dimmed feed while its
+menu is open.
+
+Across reading, setup and dialog surfaces, people can copy a link's destination,
+copy selected text and edit fields through familiar host actions (owner choice, 2 Nov 2026).
+Yielding to a menu that the host disables does not meet this rule. Text copy buttons
+share one clipboard path; image copy writes the image. Both report the actual outcome,
+including refusal; text fallback preserves focus and selection.
 
 On a phone a row that offers Reply can be swiped left to reply, as in Telegram: it
 follows the finger, a reply mark at the room's right side fills as it nears the reply
@@ -2415,6 +2423,17 @@ contents have a separate, initially unchecked choice in the details (owner choic
 2026-10-30T16:48Z). Show the exact copies, the whole-copy loss warning and omitted
 path counts before confirmation; saved results and held commits remain. These
 copies are neither automatic candidates nor falsely labelled unable to go.
+`Folders of deleted projects` is one read-only fold under the groups (owner choices
+2026-11-01T17:46Z and 22:27Z): no key, share, headline or action. A folder lists
+under the place already holding its bytes, or as outside the total; a shared one
+is one row, a nested one part of its parent. Not counted yet, not measured yet,
+could not be read, not found and never had a folder stay five answers; a size never
+promises space. Measure walks folders outside the roots after the places; Stop keeps
+the places and folders it finished (before the places finish, the previous count),
+and the rest read not measured yet. Those folders are found first, with the
+remaining projects' folders once any is listed (to relate them), so a disk that
+does not answer can hold the start of a count; Stop requests cancellation through
+the existing count owner.
 
 ## 6. Account group / row anatomy
 
@@ -2467,9 +2486,9 @@ instead, and let the status text carry the claim.
 
 ## 7. Onboarding density
 
-Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider's card (the built-in Default, then the keys added with the card's Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, Disable/Enable and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure, and a supported copy fallback says that it copied rather than claiming an open.
-Models and Agents edit assignments; adding a connection updates available
-choices without replacing an owner's assignments. A model role uses one compact
+Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider's card (the built-in Default, then the keys added with the card's Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, Disable/Enable and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
+Models and Agents edit assignments; a new connection adds choices without
+replacing them. A model role uses one compact
 Source / Model / Account row. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
@@ -2516,17 +2535,15 @@ uses the catalog's existing select: Full system access (default), Working files,
 or Read only. Writable reviewers check private copies; their outputs remain
 evidence without product integration. Access never changes delivery. Catalog refreshes
 preserve the edited value, focus, selection and scroll position. Returning to a
-reviewer's previous source restores that source's model/account draft; a source
-not previously selected starts without another source's pin.
+reviewer's previous source restores that source's model/account draft; a new
+source starts without another source's pin.
 
-The wizard has five steps: Accounts, Models, Review, Budget, Summary. Agent
-connection is inside Accounts; Codex is the recommended connection for starting
-without an API key. Other existing agent connections describe their actual agent
-capability. Signed in reports authentication, not execution, independently of
-the model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
-contextual Retry that preserves the current fields. A known model source allows
+The five wizard steps are Accounts, Models, Review, Budget, Summary. Codex is the
+recommended start without an API key; other connections name their capability.
+Signed in reports authentication, not execution, independently of model-source and suggestion reads. Accounts names pending, failed or partial reads and offers a
+contextual Retry that keeps the fields. A known model source allows
 Continue and manual model entry even when its inventory or automatic suggestions
-cannot be read; an unknown source explains why Continue is unavailable. New
+cannot be read; an unknown source explains why not. New
 subscription-only installs clear only untouched shipped API suggestions without
 access, requiring Main while Light can inherit it and Fallback can stay empty.
 Stored or edited values remain intact.
@@ -2534,30 +2551,33 @@ Stored or edited values remain intact.
 Review & start computes the skipped model and reviewer steps before showing
 Summary. After a failed automatic setup, an explicit recovery action prepares
 all reviewers on the selected Main model, including its account and processing
-choice. This is disclosed as one model for every review, not model diversity.
-The resulting Summary is shown before a separate Start saves it; subsequent
-manual edits remain authoritative. Completion without the automatic preset
+choice. It is disclosed as one model for every review, not diversity.
+Summary shows it before a separate Start saves it; later manual edits stay
+authoritative. Completion without the automatic preset
 leaves later configuration to Settings. Summary names exactly the assignments
 the one atomic Finish saves, including deep self-review. Reviewers remain
 editable with the same controls as Settings. A subscription-only Budget step leads with quota/reset facts and keeps
 optional API spending fields collapsed. "No API key" never claims unlimited free
 work or that paid provider credits were enabled.
 
-The first-run wizard is a compact flow that must not scroll at the default
-desktop window size merely because a step has several fields.
+The first-run wizard is compact; the step rail alone says which step this is. An
+ordinary Accounts state, blank or connected, fits a 980×752 client viewport
+with every row, the limits warning and Continue in view: subscriptions
+are equal rows, two columns where they fit, the warning under them in every state,
+before any connection. A narrow or short window, expanded keys, a sign-in or a long
+error may scroll; Continue, Back and the reason stay on the bottom edge, and focus
+stops clear of them.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.
-- Short-viewport adaptation hides explanatory copy rather than shrinking type.
-  Once copy is hidden, shaving pixels off a title buys nothing and costs the
-  scale.
-- Field labels are sentence case at meta ink — a wizard step shows a dozen at
-  once, and its job is to get one value typed, not to present a grid of
-  headings.
+- Short-viewport adaptation hides explanatory copy, never shrinks type: shaving
+  pixels off a title buys nothing and costs the scale.
+- Field labels are sentence case at meta ink: a step shows a dozen at once to
+  get one value typed, not to present a grid of headings.
 
 ### Advanced settings
 
-The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs, or would have to look up before using it safely, lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control that needs a paragraph of explanation before it can be used safely is an Advanced control by definition. The seams are the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
+The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs or must look up to use safely lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control needing a paragraph of explanation to be safe is Advanced by definition. Seams: the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
 
 ## 8. Migration state
 

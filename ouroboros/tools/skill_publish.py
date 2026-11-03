@@ -818,7 +818,8 @@ def _submit_skill_to_hub(
         except SkillPublishDestinationError as exc:
             raise _PublishFailure(
                 exc.reason_code,
-                "Choose a GitHub destination: the hub, or a git source this account can open pull requests to.",
+                str(exc) if str(exc) != exc.reason_code  # a refusal that names its cause says it
+                else "Choose a GitHub destination: the hub, or a git source this account can open pull requests to.",
             ) from exc
         owner, repo, base_branch = target.owner, target.repo, target.branch
         folder = target.skill_folder(safe_skill)

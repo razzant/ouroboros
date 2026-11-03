@@ -309,8 +309,13 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
             return {"ok": False, "error": "pause_record_unwritable", "detail": str(exc)[:200]}
     # The latch is published outside Q and the launch lock (the barrier captures the live maps under Q
     # itself), before the members are woken and before the reply names it: the reply's
-    # snapshot_persisted is a disk fact, and no wake runs ahead of the publication.
-    persisted = q.publish_queue_snapshot(reason="owner_pause_requested")
+    # snapshot_persisted is a disk fact, and no wake runs ahead of the publication. A raise keeps the
+    # typed refusal this door always had (the fence is the authority; the latch lives in memory).
+    try:
+        persisted = q.publish_queue_snapshot(reason="owner_pause_requested")
+    except Exception as exc:
+        log.warning("Owner pause latch of %s was not published", task_id, exc_info=True)
+        return {"ok": False, "error": "pause_record_unwritable", "detail": str(exc)[:200]}
     if not persisted:
         # The durable fence already holds every launch; the queue latch lives
         # in memory until the next persisted snapshot. Disclosed, not hidden.

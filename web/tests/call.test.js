@@ -294,6 +294,40 @@ test('a call shows its own phases: permission, admission, then every server phas
     } finally { f.session.stop(); }
 });
 
+test('a caption longer than a peer control, counted in UTF-8 bytes, keeps the call and its whole words', async () => {
+    const f = fixture();
+    const words = 'Синтетическая длинная реплика звонка 🐍. '.repeat(300);
+    assert.ok(words.length < 16 * 1024 && new TextEncoder().encode(words).length > 16 * 1024);
+    try {
+        await f.session.start();
+        const socket = f.sockets[0]; socket.connect();
+        f.state({ state: 'live' });
+        const message = data => socket.onmessage({ data: JSON.stringify(data) });
+        message({ type: 'caption', speaker: 'owner', text: words, final: true, item_id: 'owner-1', replace: false });
+        message({ type: 'caption', speaker: 'ouroboros', text: words, final: false, item_id: 'answer-1' });
+        message({ type: 'caption', speaker: 'ouroboros', text: words, final: true, item_id: 'answer-1', replace: true });
+        assert.equal(f.session.state, 'live');
+        assert.deepEqual(f.captions.map(({ speaker, text, final }) => [speaker, text, final]),
+            [['owner', words, true], ['ouroboros', words, false], ['ouroboros', words, true]]);
+        // The same call goes on: a small message reads, the owner still mutes and the audio keeps its item.
+        message({ type: 'flush', epoch: 1 });
+        assert.equal(f.session.epoch, 1);
+        f.session.setMuted(true);
+        assert.deepEqual(socket.sent.at(-1), { type: 'mute', muted: true });
+        // Only the message's size stopped being a refusal.
+        socket.onmessage({ data: 42 });
+        assert.deepEqual([f.session.state, f.session.code], ['failed', 'protocol_mismatch']);
+    } finally { f.session.stop(); }
+    const broken = fixture();
+    try {
+        await broken.session.start();
+        broken.sockets[0].connect();
+        broken.state({ state: 'live' });
+        broken.sockets[0].onmessage({ data: `{"type":"caption","text":"${words}` });
+        assert.deepEqual([broken.session.state, broken.session.code], ['failed', 'protocol_mismatch']);
+    } finally { broken.session.stop(); }
+});
+
 test('only a socket that never answers is bounded; a phase that reports itself has no clock', async () => {
     const silent = fixture();
     try {

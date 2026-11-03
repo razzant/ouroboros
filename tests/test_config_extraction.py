@@ -392,5 +392,6 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     # saved-choice precedence the config read and persist seams share.
     # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
     # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
-    assert counts["ouroboros.settings_defaults"] <= 568
+    # +1: a build's suggested skill sources (OUROBOROS_SKILL_SOURCE_SUGGESTIONS, default none), one commented row.
+    assert counts["ouroboros.settings_defaults"] <= 569
     assert (PACKAGE / "config.py").is_file()

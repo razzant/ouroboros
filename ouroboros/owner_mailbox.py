@@ -141,7 +141,7 @@ def _holds(path: pathlib.Path, msg_id: str) -> bool:
 
 def place_event_retained(drive_root: pathlib.Path, task_id: str, msg_id: str) -> bool:
     """Whether this author already holds a place arrival: its append outlived a lost settlement.
-    An entry is appended only while its author accepts intake, so its final drain reads it.
+    An entry proves mailbox retention, not model reading after a terminal drain.
     Absence proves no non-delivery: terminal cleanup may already have retired the consumed mailbox."""
     from ouroboros.task_custody import task_mail_lock
 

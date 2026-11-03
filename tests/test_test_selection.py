@@ -55,6 +55,54 @@ def test_no_product_hub_or_fraction_threshold(repo):
     assert len(result.files) == 15
 
 
+def test_a_changed_test_module_selects_its_direct_importers_and_no_other_consumer(repo):
+    write(repo, "tests/test_hub.py")
+    write(repo, "tests/test_hub_extra.py")
+    importers = {
+        "tests/test_by_from.py": "from tests.test_hub import helper\n",
+        "tests/test_by_module.py": "import tests.test_hub as hub\n",
+        "tests/test_by_package.py": "from tests import test_hub\n",
+        "tests/test_by_function.py": "def test_x():\n    from tests.test_hub import helper\n",
+        **{f"tests/test_fan_{i}.py": "from tests.test_hub import helper\n" for i in range(12)},  # no fan-out threshold
+    }
+    for path, source in importers.items():
+        write(repo, path, source)
+    write(repo, "tests/test_lookalike.py", "from tests.test_hub_extra import helper\n")  # shares the hub's prefix only
+    write(repo, "tests/test_transitive.py", "from tests.test_by_from import helper\n")  # imports an importer
+    result = selection.select_from_paths(repo, ["tests/test_hub.py"], base="base")
+    assert result.tier == "selected"
+    assert set(result.files) == {"tests/test_floor.py", "tests/test_hub.py", *importers}
+    assert ("tests/test_hub.py", "changed test module") in result.reasons
+    assert all((path, "direct import: tests.test_hub") in result.reasons for path in importers)
+
+
+def test_reasons_name_every_changed_module_an_importer_binds_and_an_unimported_test_stays_alone(repo):
+    write(repo, "tests/test_hub.py")
+    write(repo, "tests/test_both.py", "from ouroboros import leaf\nfrom tests.test_hub import helper\n")
+    ordinary = selection.select_from_paths(repo, ["tests/test_unrelated.py"], base="base")
+    assert ordinary.files == ("tests/test_floor.py", "tests/test_unrelated.py")
+    result = selection.select_from_paths(repo, ["ouroboros/leaf.py", "tests/test_hub.py"], base="base")
+    assert ("tests/test_direct.py", "direct import: ouroboros.leaf") in result.reasons
+    assert ("tests/test_both.py", "direct import: ouroboros.leaf, tests.test_hub") in result.reasons
+
+
+def test_an_unreadable_module_blocks_a_test_only_change_unless_full_is_requested(repo):
+    write(repo, "tests/test_hub.py")
+    write(repo, "tests/test_broken.py", "not python !!!")
+    with pytest.raises(ValueError, match="import scan unavailable for tests/test_broken.py"):
+        selection.select_from_paths(repo, ["tests/test_hub.py"], base="base")
+    full = selection.select_from_paths(repo, ["tests/test_hub.py"], base="base", full_tests=True, test_reason="repair pending")
+    assert full.tier == "full"
+
+
+@pytest.mark.parametrize("apparatus", ["tests/conftest.py", "tests/test_floor.py", "server.py"])
+def test_a_changed_test_module_never_narrows_a_full_escalation(repo, apparatus):
+    write(repo, "tests/test_hub.py")
+    write(repo, "tests/test_by_from.py", "from tests.test_hub import helper\n")
+    result = selection.select_from_paths(repo, ["tests/test_hub.py", apparatus], base="base")
+    assert result.tier == "full" and len(result.files) == result.available
+
+
 @pytest.mark.parametrize("path", ["server.py", "launcher.py", "ouroboros/__init__.py", "ouroboros/body_switch.py",
                                   "ouroboros/body_adoption.py", "supervisor/update_recovery.py",
                                   "ouroboros/launcher_bootstrap.py", "supervisor/git_ops_reset.py",
@@ -146,6 +194,29 @@ def test_git_candidate_includes_dirty_untracked_deleted_and_renamed_inputs(repo)
     assert selection.refresh_selection(repo, result) == result
     with pytest.raises(subprocess.CalledProcessError):
         selection.select_tests(repo, base="missing-base")
+
+
+@pytest.mark.parametrize("action", ["rename", "remove"])
+def test_a_removed_or_renamed_test_module_selects_the_importers_it_would_break(repo, action):
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True).stdout.decode().strip()
+    write(repo, "tests/test_hub.py")
+    write(repo, "tests/test_by_from.py", "from tests.test_hub import helper\n")
+    git("init", "-q")
+    git("config", "user.email", "selection@example.invalid")
+    git("config", "user.name", "Selection tests")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    if action == "rename":
+        git("mv", "tests/test_hub.py", "tests/test_hub_renamed.py")
+    else:
+        git("rm", "-q", "tests/test_hub.py")
+    result = selection.select_tests(repo)
+    assert "tests/test_hub.py" in result.changed
+    assert "tests/test_by_from.py" in result.files  # its import of the old name no longer resolves
+    assert "tests/test_hub.py" not in result.files  # a removed module has nothing to run
+    assert set(result.files) == {"tests/test_floor.py", "tests/test_by_from.py", *(
+        ["tests/test_hub_renamed.py"] if action == "rename" else [])}
 
 
 @pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])

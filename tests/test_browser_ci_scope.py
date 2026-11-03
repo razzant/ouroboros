@@ -290,10 +290,15 @@ def test_collection_guard_refuses_an_empty_lane():
         next(hook)
 
 
-def test_browser_skip_cannot_become_a_successful_required_run():
-    item = SimpleNamespace(config=_config(), nodeid="tests/test_x.py::missing_engine")
-    report = SimpleNamespace(skipped=True, outcome="skipped",
-                             longrepr=("tests/test_x.py", 10, "Skipped: no browser executable"))
+@pytest.mark.parametrize("nodeid,reason", [
+    ("tests/test_x.py::missing_engine", "Skipped: no browser executable"),
+    ("tests/test_process_temp_consumers.py::test_a_long_named_cases_real_server_listens_in_its_own_process_temp",
+     "Skipped: no browser executable"),
+    ("tests/test_process_temp_consumers.py::another_case", "Skipped: a Windows manager listens on a named pipe"),
+])
+def test_browser_skip_cannot_become_a_successful_required_run(nodeid, reason):
+    item = SimpleNamespace(config=_config(), nodeid=nodeid)
+    report = SimpleNamespace(skipped=True, outcome="skipped", longrepr=(nodeid.split("::")[0], 10, reason))
     hook = browser_lane.pytest_runtest_makereport(item, None)
     next(hook)
     with pytest.raises(StopIteration):
@@ -302,24 +307,28 @@ def test_browser_skip_cannot_become_a_successful_required_run():
     assert "UI_BROWSER_SKIPPED" in report.longrepr
 
 
-def test_registered_platform_skip_survives_with_its_recorded_reason():
-    nodeid = "tests/test_settings_restart_browser.py::test_pending_survives_reconnect"
+@pytest.mark.parametrize("nodeid,reason", [
+    ("tests/test_settings_restart_browser.py::test_pending_survives_reconnect",
+     "Skipped: POSIX test launcher; production browser behavior is shared"),
+    ("tests/test_process_temp_consumers.py::test_a_long_named_cases_real_server_listens_in_its_own_process_temp",
+     "Skipped: a Windows manager listens on a named pipe"),
+])
+def test_registered_platform_skip_survives_with_its_recorded_reason(nodeid, reason):
     item = SimpleNamespace(config=_config(), nodeid=nodeid)
     report = SimpleNamespace(
         skipped=True, outcome="skipped", when="setup", nodeid=nodeid,
-        longrepr=("tests/test_settings_restart_browser.py", 17,
-                  "Skipped: POSIX test launcher; production browser behavior is shared"))
+        longrepr=(nodeid.split("::")[0], 17, reason))
     hook = browser_lane.pytest_runtest_makereport(item, None)
     next(hook)
     with pytest.raises(StopIteration):
         hook.send(SimpleNamespace(get_result=lambda: report))
     assert report.outcome == "skipped"
-    assert "POSIX test launcher" in report.ui_browser_platform_skip
+    assert report.ui_browser_platform_skip == reason
 
     reconciliation = browser_lane.LaneReconciliation({nodeid})
     reconciliation.pytest_runtest_logreport(report)
     assert reconciliation.missing == [], "a permitted skip is still an executed node"
-    assert reconciliation.platform_skips[nodeid].endswith("shared")
+    assert reconciliation.platform_skips[nodeid] == reason
 
 
 def test_collected_nodes_that_never_ran_fail_the_lane():

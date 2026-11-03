@@ -1006,10 +1006,10 @@ def _safety_model_call(
         msg: Dict[str, Any] = {}
         usage: Optional[Dict[str, Any]] = None
         try:
-            # The physical sender takes the provider slot; this only carries the deadline.
-            with model_concurrency.model_call_scope(
-                light_model, use_local, _safety_deadline_epoch(ctx)
-            ):
+            deadline = _safety_deadline_epoch(ctx)
+            # The physical sender takes the provider slot; this only carries the deadline. The same
+            # task deadline that ends the slot wait and the retry also bounds the send (#572).
+            with model_concurrency.model_call_scope(light_model, use_local, deadline):
                 msg, usage = chat_observed(
                     client,
                     drive_root=_safety_drive_root(ctx),
@@ -1029,6 +1029,7 @@ def _safety_model_call(
                     response_format=({"type": "json_object"}
                                      if LLMClient.supports_response_format(light_model, use_local=use_local)
                                      else None),
+                    **({"caller_dispatch_deadline_ts": deadline} if deadline is not None else {}),
                 )
         except Exception as e:
             from ouroboros.llm_claudexor import propagate_model_error

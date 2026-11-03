@@ -440,19 +440,151 @@ def test_abort_rechecks_the_captured_process_after_successful_quiescence(tmp_pat
 
 
 def test_active_assisted_pool_dispatches_only_its_authorized_resolver(tmp_path, monkeypatch):
+    """The update's own readiness proof starts the pool inside its marker window, where no project slot may grow
+    later: the resolver's project slot is started and proven there, and the authorized resolver runs on it."""
     system = _system(tmp_path, monkeypatch)
     system.saved()
     assert system.control._quiesce_repo_writers("assisted") == []
-    _update_merge, _tx, metadata = _assisted(system, monkeypatch)
+    update_merge, _tx, metadata = _assisted(system, monkeypatch)
     for task_id in ("ordinary", "resolver"):
         write_task_result(tmp_path, task_id, "scheduled", chat_id=0)
         system.workers.PENDING.append(_queued(task_id, metadata=metadata if task_id == "resolver" else {}))
-    assert system.workers.ensure_worker_pool_started(n=1, allow_disabled_restart=True)
+    assert update_merge.ensure_assisted_resolver_ready("test-sha", timeout_sec=5)
     system.workers.assign_tasks()
     assert system.launches[0].get_nowait()["id"] == "resolver"
     assert set(system.workers.RUNNING) == {"saved", "resolver"}
     assert system.workers.RUNNING["saved"]["retained_for_boot"] is True
     assert [row["id"] for row in system.workers.PENDING] == ["ordinary"]
+
+
+def test_the_resolver_readiness_proof_never_counts_the_conversation_lanes_spare(tmp_path, monkeypatch):
+    """The lane's spare imports the same clean tree and reports ready, but it carries conversation, never the
+    resolver: with the resolver's project child gone, the proof fails and the update unwinds before any marker."""
+    from supervisor import worker_process
+
+    system = _system(tmp_path, monkeypatch)
+    update_merge, _tx, _metadata = _assisted(system, monkeypatch)
+    spawn = worker_process.spawn_worker_process
+
+    def project_child_dies(ctx, wid, commands, events, repo, root):
+        proc = spawn(ctx, wid, commands, events, repo, root)
+        if wid != 0:
+            proc.terminate()
+        return proc
+
+    monkeypatch.setattr(worker_process, "spawn_worker_process", project_child_dies)
+    assert update_merge.ensure_assisted_resolver_ready("test-sha", timeout_sec=0.5) is False
+
+
+def test_a_boot_that_resumes_an_assisted_update_starts_its_resolver_a_project_slot(tmp_path, monkeypatch):
+    """Boot recovery enqueues the authorized resolver after the boot's whole-pool start, inside the marker window
+    the durable transaction keeps, where no project slot may grow: that start owes the resolver its project slot
+    (base's one boot worker was it), and the resolver runs on it."""
+    system = _system(tmp_path, monkeypatch)
+    update_merge, tx, _metadata = _assisted(system, monkeypatch)
+    tx.update(resolver_submitted_id="", owner_chat_id=0)
+    update_merge.write_update_tx(tx)
+    system.workers.spawn_workers()  # the boot's start (server.py), before boot recovery
+    assert update_merge.enqueue_assisted_resolution_task(tx) == "resolver"
+    system.workers.assign_tasks()
+    assert system.launches[0].get_nowait()["id"] == "resolver"
+    assert set(system.workers.RUNNING) == {"resolver"}
+
+
+def _spare_still_importing(system, monkeypatch, tmp_path):
+    """The start returns while the lane's spare (slot 0) still imports and its project slot is already ready: the
+    spare's ``worker_ready`` row comes later (``late``), and the readiness watcher, its own thread, has not run."""
+    from ouroboros.utils import append_jsonl
+    from supervisor import worker_process
+
+    spawn, late, watchers = worker_process.spawn_worker_process, [], []
+
+    def spawn_spare_slower(ctx, wid, commands, events, repo, root):
+        proc = spawn(ctx, wid, commands, events, repo, root if wid else tmp_path / "unreported")
+        if not wid:
+            late.append(lambda: append_jsonl(root / "logs" / "events.jsonl", {
+                "type": "worker_ready", "worker_id": 0, "pid": proc.pid,
+                "process_birth": f"birth-{proc.pid}", "git_sha": "test-sha"}))
+        return proc
+
+    monkeypatch.setattr(worker_process, "spawn_worker_process", spawn_spare_slower)
+    monkeypatch.setattr(system.workers, "threading", SimpleNamespace(
+        Thread=lambda target, args=(), **_kw: SimpleNamespace(start=lambda: watchers.append((target, args)))))
+    return late, watchers
+
+
+@pytest.mark.parametrize("spare", ["reports_later", "stops", "keeps_importing"])
+def test_the_resolver_proof_lands_no_marker_while_the_spare_still_imports(tmp_path, monkeypatch, spare):
+    """Reverse readiness order: the project slot is ready before the lane's spare. The proof returns only once the
+    spare reported its own row at this tree or stopped; a spare still importing fails it before any marker."""
+    from supervisor import update_candidate
+
+    system = _system(tmp_path, monkeypatch)
+    update_merge, _tx, _metadata = _assisted(system, monkeypatch)
+    late, _watchers = _spare_still_importing(system, monkeypatch, tmp_path)
+    clock, waited = [0.0], []
+
+    def sleep(seconds):
+        clock[0] += seconds
+        waited.append(seconds)
+        if spare == "reports_later" and late:
+            late.pop()()
+        elif spare == "stops":
+            system.workers.WORKERS[0].proc.terminate()
+
+    monkeypatch.setattr(update_candidate, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    assert update_merge.ensure_assisted_resolver_ready("test-sha", timeout_sec=0.5) is (spare != "keeps_importing")
+    assert waited  # the project slot's row alone never proved this start: only the spare's own row or stop does
+
+
+@pytest.mark.parametrize("child", ["spare_reports_soon", "spare_reports_after_90s", "spare_never_reports",
+                                   "project_dies"])
+def test_boot_recovery_resumes_once_every_child_imported_or_unwinds_for_the_owner(tmp_path, monkeypatch, child):
+    """The boot's start returns while the lane's spare still imports. Recovery re-materializes the conflicts only
+    once the readiness seam opened every child it started, the resolver's project slot among them, and waits as
+    long as that seam keeps a booting child (a slow one too). Otherwise it stops the children and rolls the update
+    back, and its note tells the owner what happened and what to do: never a stalled resolution."""
+    from supervisor import git_ops, update_candidate, worker_chat_lane
+    from supervisor.worker_pool_lifecycle import worker_ready
+
+    system = _system(tmp_path, monkeypatch)
+    update_merge, tx, _metadata = _assisted(system, monkeypatch)
+    tx.update(resolver_submitted_id="", owner_chat_id=0)
+    update_merge.write_update_tx(tx)
+    late, watchers = _spare_still_importing(system, monkeypatch, tmp_path)
+    system.workers.spawn_workers()  # the boot's start (server.py), before boot recovery
+    if child == "project_dies":
+        system.workers.WORKERS[1].proc.terminate()
+    clock, materialized = [0.0], []
+    reports_at = {"spare_reports_soon": 0.0, "spare_reports_after_90s": 120.0, "project_dies": 0.0}.get(child)
+
+    def sleep(_seconds):
+        clock[0] += 5.0
+        if reports_at is not None and clock[0] >= reports_at and late:
+            late.pop()()
+            for target, args in watchers:  # the readiness seam opens each slot on its own row
+                target(*args)
+
+    capture = git_ops.git_capture
+    monkeypatch.setattr(git_ops, "git_capture", lambda command, **kw: (
+        (0, "", "") if command == ["git", "status", "--porcelain"] else capture(command, **kw)))
+    monkeypatch.setattr(update_candidate, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(update_merge, "_assisted_head_state", lambda _tx: "in_progress")
+    monkeypatch.setattr(update_merge, "_merge_head_sha", lambda: "")
+    monkeypatch.setattr(worker_chat_lane, "preload_owner_control_path", lambda: None)
+    monkeypatch.setattr(git_ops, "rescue_into_tx", lambda *_args, **_kw: {})
+    monkeypatch.setattr(update_merge, "materialize_assisted_merge_live", lambda *_args: materialized.append(
+        sorted(worker_ready(slot) for slot in system.workers.WORKERS.values())) or (True, "", "m0"))
+    result = update_merge._recover_assisted_on_boot(tx, True)
+    if child.startswith("spare_reports"):
+        assert materialized == [[True, True]] and result["resumed"] is True
+        return
+    assert not materialized and result["rolled_back"] is True and clock[0] >= 300.0  # the seam's ceiling
+    assert not any(proc.alive for proc in system.processes.values())  # stopped before the tree changed
+    assert "could not resume after the restart" in result["stash_note"]
+    assert "Apply the update again to retry" in result["stash_note"]
+    held = update_merge.active_update_tx()  # the boot rollback's custody for its restart, never a resolution
+    assert held["phase"] == "marker_cleanup_retry" and held["gate_blocked_reason"] == "rollback_restart_pending"
 
 
 def test_abort_preserves_an_existing_queue_hold_and_releases_the_project_lease(tmp_path, monkeypatch):

@@ -11,6 +11,8 @@ listed once, as the place's turn (``inline_presence``), never as an ordinary poo
 
 from __future__ import annotations
 
+import pytest
+
 from tests.test_presence_project_activity import PROJECT, _live_turn, _move, _routing_ctx, root as root
 
 
@@ -167,3 +169,157 @@ def test_an_inline_executors_turn_is_listed_once_as_its_live_actor(root):
         assert rows == [row for row in registry.snapshot() if row.get("activity_id") == "inline-turn"]
     finally:
         registry.clear()
+
+
+def _checkpoint(root, tid, attempt=1):
+    """What a turn's loop writes at its first ``ready`` boundary (identity fields only): saved work to a stop door."""
+    import json
+
+    from ouroboros.working_checkpoint import checkpoint_path
+
+    checkpoint_path(root, tid, attempt, create=True).write_text(json.dumps(
+        {"task_id": tid, "task_attempt": attempt, "working": {"boundary": "ready", "seq": 1,
+                                                               "saved_at": "2026-11-02T00:00:00+00:00"}}))
+
+
+def _lane_turn(root, kind, task_id, wid):
+    """A running lane row and its durable RUNNING result: an owner turn, or a correspondent's Presence turn."""
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_status import execution_owner_record
+    from supervisor import workers
+    from tests.conversation_carrier_support import lane_row
+
+    presence = {"_presence_turn": True, "source": "presence",
+                "metadata": {"source": "presence", "presence": {"binding_id": "b1"}}} if kind == "presence" else {}
+    task = {"id": task_id, "type": "task", "chat_id": 5, "text": "hi", "_is_direct_chat": True,
+            "_execution_owner": {"kind": kind}, **presence}
+    lane_row(workers, task, wid=wid)
+    write_task_result(root, task_id, "running", chat_id=5, _is_direct_chat=True, result="Task is running.",
+                      execution_owner=execution_owner_record(root, task, kind),
+                      **({"source": "presence", "metadata": presence["metadata"]} if presence else {}))
+    return workers.RUNNING[task_id]["task"]
+
+
+def test_no_stop_door_returns_retains_holds_or_waits_for_a_presence_turn(root):
+    """Review R1: a Restart, an update, a quit or a crash during a Presence turn handed the correspondent's turn back
+    as the owner's saved work (its loop writes working checkpoints like any loop): returned (the owner's notice
+    counted it), retained for boot, recovered as a dispatchable or held successor whose re-entry only refuses, a
+    cancel intent minted for it ("Stopping active task.") and the agent-restart drain waiting for it. Nothing saves a
+    Presence turn's stack (#2566), and base's queue never held one: no door takes it. An owner turn with the same
+    saved work beside it is the control."""
+    import copy
+    from types import SimpleNamespace
+
+    from ouroboros import server_restart
+    from ouroboros.queue_observation import load_queue_document
+    from supervisor import workers
+    from supervisor.restart_retention import prepare_restart_returns, recover_saved_running, retain_saved_running
+
+    seen = {}
+
+    def scenario(author, task):
+        tid = seen["tid"] = task["id"]
+        _admit_lane_row(task)
+        owner = _lane_turn(root, "direct", "owner-turn", 96)
+        for task_id in (tid, "owner-turn"):
+            _checkpoint(root, task_id)
+        ctx = SimpleNamespace(RUNNING=workers.RUNNING, PENDING=workers.PENDING)
+        seen["returns"] = prepare_restart_returns(root, dict(workers.RUNNING), [], transaction_id="tx-r1")
+        seen["retained"] = retain_saved_running(copy.deepcopy(dict(workers.RUNNING)), (), root)
+        rows = [copy.deepcopy(next(row for row in load_queue_document(root)["running"] if row["id"] == tid)),
+                {"id": "owner-turn", "task": copy.deepcopy(owner), "attempt": 1}]
+        returned = {"return_ids": [tid, "owner-turn"], "task_ids": [tid, "owner-turn"]}
+        seen["auto"] = [t["id"] for t in recover_saved_running(copy.deepcopy(rows), root, transaction=returned,
+                                                               cause="owner_restart")]
+        seen["held"] = [t["id"] for t in recover_saved_running(copy.deepcopy(rows), root, transaction={},
+                                                               cause="app_stop")]
+        seen["owned"] = server_restart._owned_live_task_ids(ctx)
+        seen["drain"] = server_restart._live_running_task_ids(ctx)
+
+    _live_turn(root, scenario)
+    tid = seen["tid"]
+    assert seen["returns"] == {"owner-turn"} and seen["retained"] == ["owner-turn"]
+    assert seen["auto"] == ["owner-turn"] and seen["held"] == ["owner-turn"]
+    assert tid not in seen["owned"] and "owner-turn" in seen["owned"]
+    assert tid not in seen["drain"] and "owner-turn" in seen["drain"]
+
+
+@pytest.mark.parametrize("kind, fenced", [("presence", False), ("direct", True)])
+def test_boot_restore_fences_an_unrecovered_owner_row_never_a_presence_turn(root, kind, fenced):
+    """Review R1 at boot: a RUNNING row the stop left unrecovered is fenced with a cancel intent and counted among the
+    boot's "Settling N tasks"; a correspondent's Presence turn is its place's (the Presence sweep settles a lost
+    attempt), never fenced or counted, as base's queue never held one."""
+    from ouroboros.cancel_intents import active_intents
+    from supervisor.queue_snapshot import _fence_snapshot_running_rows
+
+    task = _lane_turn(root, kind, f"{kind}-turn", 97)
+    assert (_fence_snapshot_running_rows([{"id": task["id"], "task": task}], restored_ids=set())
+            == ([task["id"]] if fenced else []))
+    assert (task["id"] in active_intents(root, strict=True)) is fenced
+
+
+def _hurry_door(root, task_id):
+    """The owner's HTTP Hurry door for one id: ``(status, reason_code)``."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from ouroboros.gateway.task_hurry import api_task_hurry
+
+    body = json.dumps({"request_id": "hurry-r3"}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "path": f"/api/tasks/{task_id}/hurry", "headers": [],
+                       "path_params": {"task_id": task_id},
+                       "app": SimpleNamespace(state=SimpleNamespace(drive_root=root))}, receive)
+    response = asyncio.run(api_task_hurry(request))
+    return response.status_code, json.loads(response.body).get("reason_code")
+
+
+def test_hurry_of_a_presence_turns_lane_row_refuses_typed_and_seeds_nothing(root, monkeypatch):
+    """Review R3: the lane row made the Hurry door treat a correspondent's turn as a pooled RUNNING root: it seeded
+    the control task result and the hurry mail reached that turn. A live Presence turn takes no Hurry (as Pause):
+    typed 409, nothing seeded. Without the row (the in-server author alone) the door kept the target's answer."""
+    from ouroboros.gateway.task_hurry import _admit_hurry_locked
+    from supervisor import queue as q
+
+    seeded, seen = [], {}
+    monkeypatch.setattr(q, "ensure_control_task_result", lambda task_id: seeded.append(task_id))
+
+    def scenario(author, task):
+        tid = task["id"]
+        seen["without_row"] = _admit_hurry_locked(tid)[1]
+        _admit_lane_row(task)
+        seen["with_row"] = _admit_hurry_locked(tid)[1]
+        seen["http"] = _hurry_door(root, tid)
+
+    _live_turn(root, scenario)
+    assert seen["without_row"] == "task_not_live"
+    assert seen["with_row"] == "presence_hurry_unsupported" and seen["http"] == (409, "presence_hurry_unsupported")
+    assert seeded == []
+
+
+def test_the_owners_running_list_and_count_leave_a_presence_turn_to_its_place(root):
+    """Review R7: the mind's recent running tasks and its queue fact's ``running_count`` listed and counted a
+    correspondent's Presence turn as an unlabelled running task. As the roster (N2) and the owner-turn count (N8)
+    read it, it is its place's (live works names it ``inline_presence``); an owner turn beside it stays listed."""
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.tools.recent_tasks import _running_tasks
+    from supervisor import queue
+
+    seen = {}
+
+    def scenario(author, task):
+        _admit_lane_row(task)
+        _lane_turn(root, "direct", "owner-turn", 96)
+        queue.publish_queue_snapshot(reason="r7_probe")
+        seen["tid"] = task["id"]
+        seen["listed"] = [row["task_id"] for row in _running_tasks(root)]
+        seen["count"] = _queue_context_fact({"budget_drive_root": str(root)})["running_count"]
+
+    _live_turn(root, scenario)
+    assert seen["listed"] == ["owner-turn"] and seen["count"] == 1

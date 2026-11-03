@@ -285,3 +285,90 @@ def test_wizard_discovery_never_sends_a_saved_key_to_another_endpoint(monkeypatc
     response = asyncio.run(models_api.api_openai_compatible_models(SimpleNamespace(json=read)))
     assert response.status_code == 400 and json.loads(response.body)["code"] == "masked_key_endpoint_changed"
     assert sent == []
+
+
+def _discover(monkeypatch, settings, body):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(models_api, "load_settings", lambda: copy.deepcopy(settings))
+    sent = []
+
+    async def discover(client, provider, label, api_key, url):
+        sent.append((api_key, url))
+        return []
+
+    async def read():
+        return body
+
+    monkeypatch.setattr(models_api, "_fetch_openai_compatible_model_catalog", discover)
+    response = asyncio.run(models_api.api_openai_compatible_models(SimpleNamespace(json=read)))
+    return response.status_code, json.loads(response.body), sent
+
+
+@pytest.mark.parametrize("dedicated_url, legacy_url", [
+    ("https://dedicated.example/v1", "https://legacy.example/v1"),
+    ("https://same.example/v1", "https://same.example/v1"),  # one address, two keys: the URL cannot tell them apart
+])
+def test_discovery_keeps_the_key_of_the_pair_the_draft_selects(monkeypatch, dedicated_url, legacy_url):
+    """#2497: both pairs saved; a draft that cleared the dedicated address reaches the legacy pair, so its kept key
+    is the legacy one, named by ``apiKeySetting``, never the saved effective (dedicated) key; restoring it
+    selects the dedicated key again. A pair's kept key still goes only to the address saved with it."""
+    saved = {"OPENAI_COMPATIBLE_BASE_URL": dedicated_url, "OPENAI_COMPATIBLE_API_KEY": "dedicated-key",
+             "OPENAI_BASE_URL": legacy_url, "OPENAI_API_KEY": "legacy-key"}
+    for setting, url, key in (("OPENAI_API_KEY", legacy_url, "legacy-key"),
+                              ("OPENAI_COMPATIBLE_API_KEY", dedicated_url, "dedicated-key")):
+        status, _body, sent = _discover(monkeypatch, saved, {"baseUrl": url, "apiKey": "***set***", "apiKeySetting": setting})
+        assert (status, sent) == (200, [(key, url)])
+    if dedicated_url != legacy_url:
+        status, body, sent = _discover(monkeypatch, saved, {"baseUrl": dedicated_url, "apiKey": "***set***",
+                                                            "apiKeySetting": "OPENAI_API_KEY"})
+        assert (status, body.get("code"), sent) == (400, "masked_key_endpoint_changed", [])
+
+
+@pytest.mark.parametrize("selector", [{"apiKeySetting": "ANTHROPIC_API_KEY"}, {"apiKeySetting": ["OPENAI_API_KEY"]},
+                                      {"apiKeySetting": "OPENAI_API_KEY", "connection": "beta"}])
+def test_discovery_refuses_an_unknown_or_misplaced_pair_selector(monkeypatch, selector):
+    status, body, sent = _discover(monkeypatch, _SAVED_ENDPOINTS,
+                                   {"baseUrl": "https://saved.example/v1", "apiKey": "***set***", **selector})
+    assert (status, sent) == (400, []) and "apiKeySetting" in body["error"]
+
+
+_SAVED_ENDPOINTS = {
+    "OPENAI_COMPATIBLE_API_KEY": "saved-builtin-key", "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1",
+    CONNECTIONS_KEY: [{"kind": "openai-compatible", "name": "beta", "base_url": "https://beta.example/v1",
+                       "api_key": "saved-beta-key"}]}
+
+
+@pytest.mark.parametrize("connection, requested, same", [
+    ("", "https://SAVED.example:443/v1/", True),
+    ("", "https://saved.example/v1/", True),
+    ("beta", "https://Beta.Example:443/v1", True),
+    ("", "http://saved.example/v1", False),  # plain HTTP is not the TLS endpoint the key was saved for
+    ("", "https://saved.example:8443/v1", False),
+    ("", "https://saved.example/v2", False),
+    ("beta", "https://other.example/v1", False),
+])
+def test_discovery_and_provider_test_bind_a_saved_key_to_one_endpoint_identity(monkeypatch, connection, requested, same):
+    """#2574: a kept key goes to the endpoint it was saved for, spelled any equivalent way, and nowhere else."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(models_api, "load_settings", lambda: copy.deepcopy(_SAVED_ENDPOINTS))
+    sent, probed = [], []
+
+    async def discover(client, provider, label, api_key, url):
+        sent.append((api_key, url))
+        return []
+
+    async def read():
+        return {"baseUrl": requested, "apiKey": "***set***", **({"connection": connection} if connection else {})}
+
+    monkeypatch.setattr(models_api, "_fetch_openai_compatible_model_catalog", discover)
+    monkeypatch.setattr(models_api, "_run_provider_test_with_settings", lambda *args: probed.append(args) or {"ok": True})
+    response = asyncio.run(models_api.api_openai_compatible_models(SimpleNamespace(json=read)))
+    key = "saved-beta-key" if connection else "saved-builtin-key"
+    assert (response.status_code, sent) == ((200, [(key, requested)]) if same else (400, []))
+    # Provider Test of the same draft address keeps or refuses that key by the same identity.
+    tested = models_api._run_provider_test(
+        "openai-compatible", {"base_url" if connection else "OPENAI_COMPATIBLE_BASE_URL": requested},
+        *((connection,) if connection else ()))
+    assert (tested.get("code") != "masked_key_endpoint_changed", len(probed)) == (same, int(same))

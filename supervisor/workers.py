@@ -1173,8 +1173,8 @@ def spawn_workers(n: int = 0) -> None:
     _CTX = mp.get_context(_WORKER_START_METHOD)
     event_q = get_event_q()
     events_cursor, spawned_at = events_log_cursor(), time.time()
-
-    count = n or 1
+    from supervisor.update_merge import RESOLVER_POOL, resolver_slot_owed  # a boot's start owes a resolver its slot
+    count = n or (RESOLVER_POOL if resolver_slot_owed() else 1)
     append_jsonl(
         DRIVE_ROOT / "logs" / "supervisor.jsonl",
         {
@@ -1193,9 +1193,9 @@ def spawn_workers(n: int = 0) -> None:
         for i in range(count):
             in_q = _CTX.Queue()
             proc = spawn_worker_process(_CTX, i, in_q, event_q, REPO_DIR, DRIVE_ROOT)
-            # Slot 0 is the conversation lane's reserved spare (owner decision 4A): the one
-            # worker that starts at boot carries the owner's first turn; project workers grow
-            # on demand (``reconcile_worker_capacity``), an explicit count spawns the rest now.
+            # Slot 0 is the conversation lane's reserved spare (owner decision 4A), the one worker a boot starts
+            # (beside an in-flight assisted update's resolver slot, ``update_merge.RESOLVER_POOL``); project
+            # workers grow on demand (``reconcile_worker_capacity``), an explicit count starts the rest now.
             lane = LANE_CONVERSATION if i == 0 else LANE_PROJECT
             # Unassignable until the readiness seam observes this child's worker_ready row.
             new_workers[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None, reaping=True, booting=True,

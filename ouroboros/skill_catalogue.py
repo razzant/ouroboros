@@ -67,8 +67,8 @@ def session_skill_index(ctx: Any) -> str:
 
     Skills are read from the canonical data root, never a forked task drive. Paths name installed files,
     not immutable copies. Declared-input composition remains explicit.
-    Field bounds and omission markers match the installed-skills context projection;
-    an always-in-context skill's reviewed body follows whole.
+    Field bounds match the installed-skills context projection; a cut field here names how much it omits,
+    and each row's path reads the whole manifest. An always-in-context skill's reviewed body follows whole.
     """
     from ouroboros.contracts.task_contract import task_input_sources
     from ouroboros.skill_loader import discover_skills

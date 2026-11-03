@@ -248,6 +248,8 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         # retry re-POSTs, so the replayed STARTED row keeps the same basis.
         "max_seconds": int(row.get("max_seconds") or 0) if str(row.get("max_seconds") or "").lstrip("-").isdigit() else 0,
         "requested_at": str(row.get("ts") or ""),  # preserve an unbound start's original window
+        # An explicit review continuation's start records the instant its window closes (``review_continuation``).
+        **({"generation_end_at": str(row["generation_end_at"])} if row.get("generation_end_at") else {}),
         "max_seconds_basis": str(row.get("max_seconds_basis") or ""),
         "work_order_source_request": (
             copy.deepcopy(row.get("work_order_source_request"))

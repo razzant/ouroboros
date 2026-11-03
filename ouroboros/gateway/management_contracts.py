@@ -63,7 +63,8 @@ class InstalledSkill(TypedDict, total=False):
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
     provenance: Dict[str, Any]  # a ClawHub install record
     identity_collision: bool
-    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id, name, kind, part}, official (exact endorsed bytes),
+    # The install record joined with the cached catalog of its source (skill_source_catalog.install_listing): source {id (the connected source it
+    # matches now, whatever id it was installed under; absent when none does), name, kind, part (as recorded)}, official (exact endorsed bytes),
     # release, basis, base_known, modified (null: base unknown), update_available {version, digest} | null, withdrawn ({reason, version} for a withdrawn release), left_source,
     # turn_on_when_ready, installed_by, installed_at, and reason and task_id when the record has them (an install Ouroboros made says why and in which task); check {by, notes,
     # at}, pending_update {version, digest}, and update_rejected {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}. null: not installed from a
@@ -119,6 +120,16 @@ class SkillRevisionRequest(TypedDict, total=False):
     """A body naming the skill revision the owner saw (``POST /api/owner/skills/{skill}/attest-review``)."""
 
     expected_content_hash: str
+
+
+class SkillReviewRequest(TypedDict, total=False):
+    """``POST /api/skills/{skill}/review``: no body (or ``{}``) reviews the current bytes. Both fields
+    together continue stopped seats of one earlier Skills-page review on that review's recorded bytes,
+    each ``{seat_id, operation_id}`` exactly as its history row's ``continuable_seats`` names it; any
+    other body answers 400 before a job or a send. A changed payload gains no verdict from it."""
+
+    review_reference: Dict[str, Any]  # {record_id, content_hash} of that review
+    continue_seats: List[Dict[str, str]]
 
 
 class SkillGrantRequest(TypedDict, total=False):
@@ -279,6 +290,7 @@ class SkillReviewResponse(TypedDict, total=False):
     paid: bool
     seats: List[Dict[str, Any]]
     governance: Dict[str, Any]
+    continuable_seats: List[Dict[str, Any]]  # this review's stopped seats its own author may continue
     job_id: str
     job_status: str
     group_id: str
@@ -664,6 +676,8 @@ class OpenAICompatibleModelsRequest(TypedDict):
     baseUrl: str
     apiKey: NotRequired[str]
     connection: NotRequired[str]  # named compatible row; omitted = the built-in pair
+    # which built-in pair a kept apiKey belongs to; omitted = the saved effective pair
+    apiKeySetting: NotRequired[Literal["OPENAI_COMPATIBLE_API_KEY", "OPENAI_API_KEY"]]
 
 
 class LocalModelStartRequest(TypedDict):
@@ -1010,7 +1024,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 __all__ = [
     "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
-    "SkillToggleRequest", "SkillRevisionRequest", "SkillGrantRequest", "SkillDeleteRequest",
+    "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
     "SkillLifecycleQueueResponse",
     "SkillReviewResponse", "SkillReviewHistoryDetailResponse", "SkillReconcileResponse",

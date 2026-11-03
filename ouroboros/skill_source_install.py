@@ -52,6 +52,7 @@ from ouroboros.skill_source_catalog import (
     installed_index,
     installed_release_digest,
     record_matches_row,
+    row_for_record,
     tree_release_digest,
 )
 from ouroboros.utils import utc_now_iso
@@ -83,7 +84,10 @@ def _note(progress: Optional[Callable[[str], None]], message: str) -> None:
 
 
 def _source_fields(row: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: row[key] for key in ("id", "kind", "name", "url", "part") if row.get(key)}
+    fields = {key: row[key] for key in ("id", "kind", "name", "url", "part") if row.get(key)}
+    if row["kind"] in {"hub", "git"}:  # the view it read: another revision or folder is another release line
+        fields.update({key: str(row.get(key) or "") for key in ("ref", "commit", "path")})
+    return fields
 
 
 def _select_check(plan: Dict[str, Any], **options: Any) -> None:
@@ -507,15 +511,10 @@ def install_item(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
     return result
 
 
-def _row_for_record(record: Dict[str, Any], rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    exact = next((row for row in rows if row["id"] == (record.get("source") or {}).get("id")), None)
-    return exact or next((row for row in rows if record_matches_row(record, row)), None)
-
-
 def _candidate_plan(drive_root: pathlib.Path, name: str, record: Dict[str, Any], rows: List[Dict[str, Any]],
                     repo_dir: Optional[pathlib.Path]) -> Dict[str, Any]:
     """The update candidate of an install: its source's current entry (any part of the same hub)."""
-    row = _row_for_record(record, rows)
+    row = row_for_record(record, rows)
     if row is None:
         raise SkillInstallError("source_gone", f"The source {name} came from is no longer connected.")
     for candidate_row in [row, *[r for r in rows if r is not row and record_matches_row(record, r)]]:

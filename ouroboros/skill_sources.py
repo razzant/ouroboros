@@ -10,7 +10,13 @@ an existing install: the basis an install was made under lives in its install re
 an owner act (the UI, or Ouroboros on the owner's instruction, or Cyber Pro); this module only validates
 and persists the list. An enterprise build ships its own list as settings data; a row it marks
 ``managed: true`` keeps the mark through edits, so the Sources page can say who set it. The mark locks
-nothing, and the source changes made from the Sources page or by Ouroboros never set it.
+nothing, and the source changes made from the Sources page or by Ouroboros never set it. A build may
+also offer ``OUROBOROS_SKILL_SOURCE_SUGGESTIONS``: addresses the owner can choose in Add source. A
+suggestion connects nothing and carries no trust; the open-source build offers none.
+
+A repository row reads one view of its repository: a revision (``ref``, a branch or tag; or a pinned
+``commit``; neither follows the default branch) and a folder (``path``; '' is the top folder). Install
+records name that view, so two views of one repository stay two sources.
 """
 
 from __future__ import annotations
@@ -20,13 +26,17 @@ import logging
 import os
 import pathlib
 import re
+import stat
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
 SOURCES_SETTING = "OUROBOROS_SKILL_SOURCES"
+SUGGESTIONS_SETTING = "OUROBOROS_SKILL_SOURCE_SUGGESTIONS"
 FOLDER_SETTING = "OUROBOROS_SKILLS_REPO_PATH"
+# Where a repository keeps skills by a shared convention, beside the folders the ordinary walk finds.
+STANDARD_SKILL_FOLDERS = (".agents/skills",)
 KINDS = ("builtin", "hub", "git", "local", "registry")
 TRUSTS = ("trusted", "review")
 PARTS = ("official", "community")
@@ -38,6 +48,8 @@ LOCAL_ID = "my-folder"
 RESERVED_IDS = frozenset({BUILTIN_ID, HUB_OFFICIAL_ID, HUB_COMMUNITY_ID, CLAWHUB_ID, LOCAL_ID})
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+# Never a ref name (git check-ref-format), and an option or a refspec in a fetch argument.
+_BAD_REF_RE = re.compile(r"^[-+]|\.\.|@\{|[\s:~^?*\[\\\x00-\x1f\x7f]")
 _SCP_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$")
 _MAX_SOURCES = 64
 
@@ -130,8 +142,8 @@ def derived_sources(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     }]
     catalog_url = str(settings.get("OUROBOROS_HUB_CATALOG_URL") or SETTINGS_DEFAULTS["OUROBOROS_HUB_CATALOG_URL"])
     repo, ref = repo_from_catalog_url(catalog_url)
-    if repo:
-        hub = {"kind": "hub", "url": repo, "ref": ref or "main", "confirmed": False}
+    if repo:  # a raw GitHub catalog address names its branch; a repository address follows its default branch
+        hub = {"kind": "hub", "url": repo, **({"ref": ref} if ref else {}), "confirmed": False}
         rows.append({"id": HUB_OFFICIAL_ID, "name": "Ouroboros", "part": "official", "trust": "trusted", **hub})
         rows.append({"id": HUB_COMMUNITY_ID, "name": "Ouroboros Community", "part": "community",
                      "trust": "review", **hub})
@@ -139,6 +151,59 @@ def derived_sources(settings: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows.append({"id": CLAWHUB_ID, "name": "ClawHub", "kind": "registry",
                  **({"url": registry} if registry else {}), "trust": "review", "confirmed": True})
     return _with_settings_folder(rows, settings)
+
+
+def _view_folder(path: Any) -> str:
+    """One repository-relative spelling, including old records with './' or repeated separators."""
+    return "/".join(pathlib.PurePosixPath(str(path or "").strip().strip("/")).parts)
+
+
+def _checked_view(ref: str, commit: str, path: str, *, where: str = "") -> Dict[str, str]:
+    """The ``commit`` (it wins over a ``ref``) or ``ref`` and the ``path`` a repository row stores."""
+    ref, commit, path = ref.strip(), commit.strip().lower(), _view_folder(path)
+    if commit and not _COMMIT_RE.match(commit):
+        raise SkillSourceError(f"{where}commit must be a full 40-character commit id.")
+    if ref and _BAD_REF_RE.search(ref):
+        raise SkillSourceError(f"{where}{ref!r} is not a branch, tag or commit name.")
+    if path and ".." in pathlib.PurePosixPath(path).parts:
+        raise SkillSourceError(f"{where}the folder must stay inside the repository.")
+    out = {"commit": commit} if commit else ({"ref": ref} if ref else {})
+    return {**out, "path": path} if path else out
+
+
+def view_fields(revision: str = "", subfolder: str = "") -> Dict[str, str]:
+    """The row fields of an owner's ``revision`` (a branch, a tag or a full commit id; '' follows the default
+    branch) and ``subfolder`` of a repository ('' is its top folder)."""
+    revision = str(revision or "").strip()
+    commit = revision if _COMMIT_RE.match(revision.lower()) else ""
+    return _checked_view("" if commit else revision, commit, str(subfolder or ""))
+
+
+def source_view(fields: Dict[str, Any]) -> tuple[str, str]:
+    """``(revision, folder)`` a repository row or a recorded source names: its pinned commit or ref ('' follows
+    the default branch) and its folder ('' is the top one)."""
+    return str(fields.get("commit") or fields.get("ref") or ""), _view_folder(fields.get("path"))
+
+
+def standard_skill_dirs(root: pathlib.Path, taken: Any = (), *, listdir: Any) -> List[pathlib.Path]:
+    """The skill folders in ``root``'s ``STANDARD_SKILL_FOLDERS``, without the names in ``taken`` (the ordinary
+    walk's finds keep their folders). An absent folder holds none; any other folder is read with ``listdir``, the
+    caller's own walk reader, which decides what an unreadable one means."""
+    from ouroboros.contracts.skill_manifest import canonical_skill_name
+
+    out: List[pathlib.Path] = []
+    for rel in STANDARD_SKILL_FOLDERS:
+        folder = pathlib.Path(root, rel)
+        try:
+            if not stat.S_ISDIR(folder.stat().st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            pass  # present but not stat-able: the reader meets that failure
+        out += [p for p in listdir(folder) if ((p / "SKILL.md").is_file() or (p / "skill.json").is_file())
+                and canonical_skill_name(p.name) not in taken]
+    return out
 
 
 def normalize_source(row: Any) -> Dict[str, Any]:
@@ -162,21 +227,8 @@ def normalize_source(row: Any) -> Dict[str, Any]:
         out["managed"] = True
     if kind in {"hub", "git"}:
         out["url"] = validate_git_url(str(row.get("url") or ""))
-        ref = str(row.get("ref") or "").strip()
-        commit = str(row.get("commit") or "").strip().lower()
-        if commit and not _COMMIT_RE.match(commit):
-            raise SkillSourceError(f"Source {source_id!r}: commit must be a full 40-character commit id.")
-        if ref and (ref.startswith("-") or any(ch.isspace() for ch in ref) or ".." in ref):
-            raise SkillSourceError(f"Source {source_id!r}: {ref!r} is not a branch name.")
-        if commit:
-            out["commit"] = commit
-        elif ref:
-            out["ref"] = ref
-        path = str(row.get("path") or "").strip().strip("/")
-        if path:
-            if ".." in pathlib.PurePosixPath(path).parts:
-                raise SkillSourceError(f"Source {source_id!r}: path must stay inside the repository.")
-            out["path"] = path
+        out.update(_checked_view(str(row.get("ref") or ""), str(row.get("commit") or ""), str(row.get("path") or ""),
+                                 where=f"Source {source_id!r}: "))
         part = str(row.get("part") or "").strip()
         if part:
             if kind != "hub" or part not in PARTS:
@@ -247,6 +299,34 @@ def sources_problem(settings: Dict[str, Any]) -> str:
     return ""
 
 
+def source_suggestions(settings: Dict[str, Any], rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The build's suggested repositories (``OUROBOROS_SKILL_SOURCE_SUGGESTIONS``, a JSON list of ``{name, url,
+    ref|commit, path, about}``), each with ``connected`` when a row already reads that view. An entry that does
+    not validate is left out and logged; nothing here connects a source or sets a trust."""
+    raw = settings.get(SUGGESTIONS_SETTING)
+    try:
+        data = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or [])
+    except json.JSONDecodeError:
+        log.warning("%s is not valid JSON; no source is suggested", SUGGESTIONS_SETTING)
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in (data if isinstance(data, list) else [])[:_MAX_SOURCES]:
+        try:
+            if not isinstance(item, dict):
+                raise SkillSourceError("a suggestion is an object")
+            url = validate_git_url(str(item.get("url") or ""))
+            fields = _checked_view(str(item.get("ref") or ""), str(item.get("commit") or ""), str(item.get("path") or ""))
+        except SkillSourceError:
+            log.warning("Skipping a suggested skill source that does not validate: %r", item, exc_info=True)
+            continue
+        view = source_view(fields)
+        out.append({"name": str(item.get("name") or "").strip()[:80] or pathlib.PurePosixPath(url.rstrip("/")).stem,
+                    "url": url, **fields, "about": str(item.get("about") or "").strip()[:300],
+                    "connected": any(row.get("url") == url and row["kind"] in {"hub", "git"}
+                                     and source_view(row) == view for row in rows)})
+    return out
+
+
 def source_by_id(rows: List[Dict[str, Any]], source_id: str) -> Optional[Dict[str, Any]]:
     return next((row for row in rows if row["id"] == str(source_id or "")), None)
 
@@ -279,16 +359,28 @@ def _new_id(rows: List[Dict[str, Any]], name: str) -> str:
 
 
 def with_added_source(rows: List[Dict[str, Any]], *, kind: str, url: str = "", path: str = "",
-                      name: str, trust: str) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Add a source; reconnecting the default public hub restores its two views. Nothing is written."""
-    location = {"url": url} if kind in {"hub", "git"} else {"path": path}
+                      name: str, trust: str, revision: str = "",
+                      subfolder: str = "") -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Add a source; reconnecting the default public hub restores its two views. Nothing is written.
+
+    A repository is read at ``revision`` from ``subfolder`` (``view_fields``); another view of a connected
+    repository is another source. A folder on this computer is read as it is."""
+    if kind in {"hub", "git"}:
+        location: Dict[str, Any] = {"url": url, **view_fields(revision, subfolder)}
+    elif str(revision or "").strip() or str(subfolder or "").strip():
+        raise SkillSourceError("A folder on this computer is read as it is: leave the revision and subfolder empty.")
+    else:
+        location = {"path": path}
+    view = source_view(location)
     for row in rows:
-        if kind in {"hub", "git"} and row.get("url") == url and not row.get("part"):
-            raise SkillSourceError(f"{row['name']} already reads this repository.")
+        if kind in {"hub", "git"} and row.get("url") == url and not row.get("part") and source_view(row) == view:
+            raise SkillSourceError(f"{row['name']} already reads this repository"
+                                   f"{' at the same revision and folder' if any(view) else ''}.")
         if kind == "local" and row.get("path") == str(pathlib.Path(path).expanduser()):
             raise SkillSourceError(f"{row['name']} already reads this folder.")
     public = [r for r in derived_sources({}) if r["kind"] == "hub"]
-    if kind == "hub" and public and url.rstrip("/").removesuffix(".git") == public[0]["url"]:
+    if (kind == "hub" and public and url.rstrip("/").removesuffix(".git") == public[0]["url"]
+            and view in {("", ""), source_view(public[0])}):
         missing = [normalize_source(r) for r in public if not source_by_id(rows, r["id"])]
         if missing:
             return [*rows, *missing], missing[0]
@@ -327,7 +419,8 @@ def without_source(rows: List[Dict[str, Any]], source_id: str) -> List[Dict[str,
 
 __all__ = [
     "BUILTIN_ID", "CLAWHUB_ID", "HUB_COMMUNITY_ID", "HUB_OFFICIAL_ID", "KINDS", "LOCAL_ID", "SOURCES_SETTING",
-    "SkillSourceError", "TRUSTS", "derived_sources", "load_sources", "normalize_source", "parse_sources",
-    "repo_from_catalog_url", "repository_owner", "save_sources", "source_by_id", "sources_problem",
-    "validate_git_url", "with_added_source", "with_changed_source", "without_source",
+    "STANDARD_SKILL_FOLDERS", "SUGGESTIONS_SETTING", "SkillSourceError", "TRUSTS", "derived_sources", "load_sources",
+    "normalize_source", "parse_sources", "repo_from_catalog_url", "repository_owner", "save_sources",
+    "source_by_id", "source_suggestions", "source_view", "sources_problem", "standard_skill_dirs",
+    "validate_git_url", "view_fields", "with_added_source", "with_changed_source", "without_source",
 ]

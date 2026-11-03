@@ -18,8 +18,8 @@ from tests.candidate_checkout import (
     assert_served_candidate as _assert_served_candidate,
     case_checkout, require_candidate_interpreter, verify_checkout,
 )
-from ouroboros.test_environment import isolated_environment
-from ouroboros.test_evidence import diagnostic_directory
+from ouroboros.test_environment import isolated_environment, owned_process_temp
+from ouroboros.test_evidence import diagnostic_directory, keep_startup_log
 from tests.fixtures_mock_llm import MockLLMServer
 from tests.ui_chat_viewport_smoke import (
     _CAPTURE_TEST_SOCKET, _OBSERVE_STATE_READS, _emit_ws_frame, _wait_socket_open_quiescent,
@@ -103,17 +103,18 @@ def _wait_health(url: str, timeout_sec: int = 30) -> None:
 def _wait_supervisor_ready(url: str, timeout_sec: int = 45) -> None:
     """Wait past port readiness until the direct test runtime can serve history."""
     deadline = time.time() + timeout_sec
-    last = ""
+    last = error = ""
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(f"{url}/api/state", timeout=2) as resp:  # noqa: S310 - local test server
-                payload = json.loads(resp.read().decode("utf-8"))
+                payload = json.load(resp)
                 if payload.get("supervisor_ready") is True:
                     return
+                error = payload.get("supervisor_error") or error
         except Exception as exc:
             last = str(exc)
         time.sleep(0.25)
-    raise RuntimeError(f"server supervisor did not become ready: {last}")
+    raise RuntimeError(f"server supervisor did not become ready: {error or last}")
 
 
 def _run_core_ui_assertions(url: str) -> None:
@@ -293,7 +294,7 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             OUROBOROS_STARTER_SKILLS='["builtin/telegram"]', OUROBOROS_STARTER_SKILLS_TURN_ON=False,
         )
         (data_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
-        env = isolated_environment(tmp_path, checkout)
+        env = isolated_environment(tmp_path, checkout, process_temp=owned_process_temp())
         env.update({
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
             "OUROBOROS_SERVER_PORT": str(port),
@@ -337,6 +338,7 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             # Only proven teardown releases the copy.
             candidate.release()
 
+        @keep_startup_log(tmp_path, "server-stdio.log")
         def start_server() -> None:
             nonlocal active_proc, active_container
             from ouroboros.process_containment import ProcessContainer
@@ -346,13 +348,9 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
             active_container = ProcessContainer()
             # Pin before spawn.
             candidate.hold()
-            active_proc = active_container.spawn(
-                [_fixture_python(), "server.py"],
-                cwd=checkout,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            with (tmp_path / "server-stdio.log").open("ab") as log:
+                active_proc = active_container.spawn(
+                    [_fixture_python(), "server.py"], cwd=checkout, env=env, stdout=log, stderr=subprocess.STDOUT)
             _wait_health(url)
             _wait_supervisor_ready(url)
             _assert_served_candidate(url, checkout, data_dir, active_proc.pid, candidate)
@@ -364,7 +362,7 @@ def direct_server_with_data(tmp_path, ui_candidate_checkout):
         try:
             start_server()
             yield {
-                "url": url, "data_dir": data_dir, "restart_server": restart_server,
+                "url": url, "data_dir": data_dir, "restart_server": restart_server, "env": env,
                 "repo_dir": checkout, "candidate_identity": candidate.identity,
                 # Static and Python origin proof.
                 "candidate_sentinel": candidate.sentinel_bytes,

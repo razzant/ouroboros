@@ -52,12 +52,14 @@ Boundaries (tags in the output):
   delivery still owed, an open cancel intent). A pass's count includes the threads it started, the
   pool work it submitted and the wakes it caused (a child look it requested, the early delivery
   replay), all joined or run here under its tag before the snapshot. The daemon is absent (every
-  gateway read refuses typed), the maintenance child's spawn is recorded instead of started, and
-  the body's driver thread stays parked while its tick is driven here;
+  gateway read refuses typed), the maintenance child's spawn is recorded instead of started (its
+  jobs run here, and what they report stays on the pass: ``child_reports``), and the body's driver
+  thread stays parked while its tick is driven here;
 - ``T:*`` (B10, last): one owner message as the supervisor loop handles it (the state read, the
   canonical inbound row, the routing pre-pass) and the production direct turn it starts, counted
   up to the turn's first model request (``T:<tag>@request``), where the refused model call ends
-  it: ``T:main`` the process's first owner turn, ``T:mainw`` the next, ``T:main:foreign`` Main
+  it (a turn the product ends before it keeps the supervisor log's record of how: ``ended``):
+  ``T:main`` the process's first owner turn, ``T:mainw`` the next, ``T:main:foreign`` Main
   after a busy install's activity elsewhere, ``T:room`` a project room's turn; at k=1 also
   ``T:main:broad`` after 40 more live rooms and 10 running roots, ``T:main:rows`` after 650
   more open rows over those rooms and ``T:main:archive`` after 40 archived knowledge notes and
@@ -81,6 +83,7 @@ import sys
 import threading
 import time
 import traceback
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
@@ -99,6 +102,35 @@ NEEDLES: Dict[str, List[str]] = {}
 
 class _FirstRequest(BaseException):
     """The turn reached its first model request: its count is taken there and the turn ends (test-only)."""
+
+
+def refused(report: Any, *, rest: bool = False) -> List[str]:
+    """What a maintenance pass's own report (``maintenance.run``) says it did not do: the pass or a job failed (a job
+    raised, or returned ``failed``), or there is no report (its thread died; the child process reports a raised pass
+    as ``failed``: ``maintenance.main``). A refused job did no work, so its cheapness proves nothing (#2465: a pass
+    pointed at another install has every job refused). ``pending`` (contention or resumable work, alike) is owed
+    work, not refused, except at ``rest``: there every job that ran finished (``done``); a resting job is absent."""
+    if not isinstance(report, dict):
+        return [f"no report: {report!r}"]
+    raised = f" ({report['raised']})" if report.get("raised") else ""
+    out = [] if report.get("status") == "completed" else [f"pass {report.get('status')}{raised}"]
+    return out + [f"{name}: {(outcome or {}).get('state')}" for name, outcome in (report.get("jobs") or {}).items()
+                  if (outcome or {}).get("state") == "failed" or (rest and (outcome or {}).get("state") != "done")]
+
+
+def name_owed(where: str, *reports: Any) -> None:
+    """Work the reports left unfinished where that is no refusal (outside a counted rest): named as debt."""
+    if owed := [line for report in reports for line in refused(report, rest=True)]:
+        warnings.warn(f"{where}: owed work left pending {owed}", stacklevel=2)
+
+
+def schedule_child_job(root: pathlib.Path) -> str:
+    """The maintenance child's addressed input change: the job its boot schedules (``legacy_reconcile``) is pending
+    again, its cursor kept, so its run resumes past every drive and records it done. Returns the job's name."""
+    from ouroboros import maintenance_jobs
+
+    maintenance_jobs.record(root, "legacy_reconcile", state="pending")
+    return "legacy_reconcile"
 
 
 def _summary(meter: CostMeter, tag: str) -> Dict[str, Any]:
@@ -502,6 +534,23 @@ def _owner_turn(srv: Any, ctx: Any, chat_id: int, message_id: str) -> int:
     return srv._handle_bridge_update_batch(ctx.bridge, [update], 0, ctx, [0])
 
 
+def _turn_ends(log: pathlib.Path, start: int) -> List[Dict[str, Any]]:
+    """The direct turns' ends the supervisor log recorded after byte ``start`` (a refused turn's
+    ``direct_chat_error`` with its error: ``worker_chat_lane._report_direct_chat_error``), read after the boundary."""
+    rows: List[Any] = []
+    if not log.exists():
+        return rows
+    with open(log, "rb") as handle:
+        handle.seek(start)
+        for line in handle:
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    return [{key: row.get(key) for key in ("type", "error")} for row in rows
+            if isinstance(row, dict) and str(row.get("type") or "").startswith("direct_chat_")]
+
+
 def _boot_census(srv: Any, root: pathlib.Path) -> None:
     """What precedes the owner's first turn on a live install and is not that turn's: the boot's first worker
     verifies the server generation and stamps it (no worker is spawned here), and the health block's stray-server
@@ -545,7 +594,8 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
         NEEDLES["T:main:rows"] = [grown["main_newest"]]
         return grown
 
-    shape_steps = {"history": lambda: shapes.turn_history(root, k), "steady": lambda: shapes.steady_state(root),
+    shape_steps = {"history": lambda: shapes.turn_history(root, k),
+                   "steady": lambda: shapes.steady_state(root, refused=refused),
                    "activity": activity, "breadth": breadth, "rows": rows,
                    "archive": lambda: shapes.archive_history(root, shapes.ARCHIVED)}
     plan = ["history", "steady", "census", ("T:main", 1), ("T:mainw", 1), "activity", ("T:main:foreign", 1),
@@ -563,8 +613,12 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
                                                           "seconds": round(time.monotonic() - started, 2)}
         else:
             tag, chat_id = step
+            log = root / "logs" / "supervisor.jsonl"
+            start = log.stat().st_size if log.exists() else 0
             _boundary(meter, result, tag, lambda chat_id=chat_id, index=index: _owner_turn(
                 srv, ctx, chat_id, f"cost-turn-{index}"), timeout=600.0)
+            if f"{tag}@request" not in result:  # how it ended instead, as the product recorded it
+                result["responses"][tag]["ended"] = _turn_ends(log, start)
             _lane_rows_ended()
 
 
@@ -632,16 +686,26 @@ def _drain(meter: CostMeter, tag: str, sm: Any, root: pathlib.Path, stop: thread
     before the pass — (run under its tag, as B6's job runner does: a child process the meter cannot
     see would hide the work a pass dispatched; on a thread of its own, as the child process starts:
     it inherits no connection pool, so the connections the jobs open are the same at every size
-    instead of depending on what the pass's thread leased before) and the early delivery replay it woke."""
+    instead of depending on what the pass's thread leased before) and the early delivery replay it woke. What the
+    child reports stays on the pass's tag (``child_reports``), where B7 reads it: a thread does not lose it."""
     from ouroboros import maintenance
 
     def child_pass() -> None:
-        worker = threading.Thread(target=lambda: maintenance.run(root, should_stop=lambda: False),
-                                  name="maintenance-child-jobs")
+        done: Dict[str, Any] = {}
+
+        def jobs() -> None:
+            try:
+                done["report"] = maintenance.run(root, should_stop=lambda: False)
+            except Exception as exc:  # what the child process reports for a pass that raised (maintenance.main)
+                done["report"] = {"status": "failed", "jobs": {}, "raised": f"{type(exc).__name__}: {exc}"}
+
+        worker = threading.Thread(target=jobs, name="maintenance-child-jobs")
         worker.start()
         worker.join(600.0)
         if worker.is_alive():
             result["errors"].append(f"{tag}: the child's jobs did not finish")
+        else:
+            result.setdefault("child_reports", {}).setdefault(tag, []).append(done.get("report"))
 
     for _round in range(3):
         alive = meter.join_spawned(tag, timeout=180.0)
@@ -682,7 +746,7 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
     """One addressed input change per duty, after whose arrival the duty has work again (the live set's own six in
     tests/_live_set.py). Each returns what it changed."""
     from ouroboros import delegate_custody as custody
-    from ouroboros import maintenance_jobs, owner_quiz, store
+    from ouroboros import owner_quiz, store
     from ouroboros.cancel_intents import request_cancel
     from ouroboros.delegate_collection import observe_run
     from ouroboros.late_review_marks import OWED_SET
@@ -715,7 +779,7 @@ def _companions(srv: Any, root: pathlib.Path, facts: Dict[str, Any]) -> Dict[str
         return "an owed late-review row that names nothing it can owe"
 
     def child_job() -> str:
-        maintenance_jobs.record(root, "legacy_reconcile", state="pending")
+        schedule_child_job(root)
         srv_child = __import__("ouroboros.maintenance", fromlist=["child"]).child
         srv_child.request()
         return "legacy_reconcile scheduled and the child look requested"
@@ -854,7 +918,9 @@ def _measure_duties(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pa
     for _attempt in range(3):
         if not maintenance.due(root):
             break
-        tagged("D:maintenance-child:jobs", lambda: maintenance.run(root, should_stop=lambda: False))
+        report = tagged("D:maintenance-child:jobs", lambda: maintenance.run(root, should_stop=lambda: False))
+        if refused(report):  # every duty below would be measured on an install whose maintenance never ran
+            result["errors"].append(f"D:maintenance-child:jobs refused: {refused(report)}")
     result["child_jobs"] = {**_summary(meter, "D:maintenance-child:jobs"), "still_due": maintenance.due(root)}
     tagged("D:maintenance-child:boot", sm._tick_maintenance_child)
     meter.join_spawned("D:maintenance-child:boot", timeout=180.0)

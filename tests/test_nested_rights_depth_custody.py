@@ -725,5 +725,9 @@ def test_evolution_cleanup_preserves_unresolved_invalid_depth_rows(
     if evolution_block:
         assert load_task_result(tmp_path, sibling["id"])["status"] == STATUS_CANCELLED
     else:
-        assert not result_exists(tmp_path, sibling['id'])
+        # Low positive funds reach the ordinary authority gate; this unclaimed
+        # sibling is cancelled with its reason, never silently dropped.
+        stored = load_task_result(tmp_path, sibling["id"])
+        assert (stored["status"], stored["reason_code"], stored["authority_reason"]) == (
+            STATUS_CANCELLED, "evolution_authority_missing", "task_mismatch")
     assert not result_exists(tmp_path, task['id'])

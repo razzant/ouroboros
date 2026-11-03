@@ -57,12 +57,15 @@ def _owner_instruction_error(ctx: ToolContext, owner_source: Any) -> str:
 
 
 def _handle_skill_sources(ctx: ToolContext, action: str = "list", url: str = "", path: str = "", name: str = "",
-                          trust: str = "", source_id: str = "", owner_source: Any = None, **_kw: Any) -> str:
+                          trust: str = "", source_id: str = "", owner_source: Any = None, revision: str = "",
+                          subfolder: str = "", **_kw: Any) -> str:
+    from ouroboros.config import load_settings
     from ouroboros.skill_source_catalog import probe_source, snapshot_for
     from ouroboros.skill_sources import (
         SkillSourceError,
         load_sources,
         save_sources,
+        source_suggestions,
         with_added_source,
         with_changed_source,
         without_source,
@@ -80,11 +83,12 @@ def _handle_skill_sources(ctx: ToolContext, action: str = "list", url: str = "",
         try:
             rows = load_sources()
             if action == "add":
-                probe = probe_source(drive, url=url, path=path)
+                location = {"url": url, "path": path, "revision": revision, "subfolder": subfolder}
+                probe = probe_source(drive, **location)
                 if probe.get("error"):
                     return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR",
                         text=f"⚠️ SKILL_SOURCES_ERROR: {probe['error']}"))
-                rows, _row = with_added_source(rows, kind=str(probe["kind"]), url=url, path=path,
+                rows, _row = with_added_source(rows, kind=str(probe["kind"]), **location,
                                                name=name or str(probe.get("suggested_name") or "source"),
                                                trust=trust or "review")
             elif action == "trust":
@@ -96,12 +100,15 @@ def _handle_skill_sources(ctx: ToolContext, action: str = "list", url: str = "",
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ERROR",
                 text=f"⚠️ SKILL_SOURCES_ERROR: {exc}"))
     out: List[Dict[str, Any]] = []
-    for row in load_sources():
+    rows = load_sources()
+    for row in rows:
         _snapshot, status = snapshot_for(drive, row)
         out.append({**row, **status})
+    suggested = [item for item in source_suggestions(load_settings(), rows) if not item["connected"]]
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_dump({
-        "sources": out, "note": "trusted installs without review; review reviews each skill. "
-                                "A trust change never rewrites an existing install."})))
+        "sources": out, **({"suggestions": suggested} if suggested else {}),
+        "note": "trusted installs without review; review reviews each skill. A trust change never rewrites an "
+                "existing install. A suggestion is the build's offer, not a connected source."})))
 
 
 def _compact(item: Dict[str, Any], drive: pathlib.Path) -> Dict[str, Any]:
@@ -254,12 +261,16 @@ _SCHEMAS = {
     "skill_sources": {
         "description": (
             "List the skill sources this install reads, with each one's trust (trusted: installs without review; "
-            "review: each skill is reviewed) and read state. action add|trust|remove changes the list: only on the "
-            "owner's instruction (owner_source), except in Cyber Pro."
+            "review: each skill is reviewed), read state and problems, plus repositories the build suggests (never "
+            "connected until added). action add|trust|remove changes the list: only on the owner's instruction "
+            "(owner_source), except in Cyber Pro."
         ),
         "properties": {
             "action": {"type": "string", "enum": ["list", "add", "trust", "remove"], "description": "Default list."},
-            "url": {"type": "string", "description": "add: a git repository address (https or ssh)."},
+            "url": {"type": "string", "description": "add: a git repository address (https, ssh or file)."},
+            "revision": {"type": "string", "description": "add with url: a branch, tag or full commit id; default "
+                                                          "follows the repository's default branch."},
+            "subfolder": {"type": "string", "description": "add with url: the repository folder to read."},
             "path": {"type": "string", "description": "add: a folder on this computer."},
             "name": {"type": "string", "description": "add: the source's name."},
             "trust": {"type": "string", "enum": ["trusted", "review"]},

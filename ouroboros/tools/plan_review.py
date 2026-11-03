@@ -38,6 +38,7 @@ from ouroboros.config import (
     get_review_enforcement,
     get_task_abs_ceiling_sec,
 )
+from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.tools import plan_ask, plan_packet
 from ouroboros.tools.plan_review_runtime import REVIEWER_EFFORT_SCHEMA as _REVIEWER_EFFORT_SCHEMA
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -129,6 +130,9 @@ _SCHEMA = {
             "attach": {"type": "array", "items": {"type": "string"},
                        "description": "Evidence locators for the asked participants (paths with optional ::lines=A-B, task:<id>, chat:<id>); attached bounded, every absence named."},
             "reviewer_effort": {**_REVIEWER_EFFORT_SCHEMA, "description": "Optional panel strength for THIS ask (Auto rows, clamped into the owner's effort range)."},
+            "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": (
+                "Alone: continue stopped session participants of an EARLIER ask, each named as the read's continuable "
+                "offer gives it; the same ask, revision and thread, never a new ask. " + CONTINUE_SEATS_SCHEMA["description"])},
         },
         "required": [],
     },
@@ -228,9 +232,11 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
     retired = sorted(key for key in given if key in RETIRED_FIELDS)
     if retired:
         return _retired_form_refusal(ctx, retired)
-    unknown = sorted(key for key in given if key not in WRITE_FIELDS and key not in ASK_FIELDS)
+    unknown = sorted(key for key in given if key not in WRITE_FIELDS and key not in ASK_FIELDS and key != "continue_seats")
     if unknown:
         return _arg_error(ctx, f"unknown fields {unknown}.")
+    if "continue_seats" in given and len(given) > 1:
+        return _arg_error(ctx, "continue_seats stands alone: it continues stopped participants of an earlier ask.")
     error = _validate_write(given)
     if error:
         return _arg_error(ctx, error)
@@ -246,6 +252,8 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
         record = plan_record.load_plan_record(state_root, task_id)
     except plan_record.PlanRecordInvalid as exc:
         return _refuse(ctx, "TOOL_ERROR", f"ERROR: PLAN_RECORD_UNREADABLE: {exc}. Nothing was written; the recorded plan state stands.")
+    if "continue_seats" in given:
+        return _continue(ctx, record, given["continue_seats"], state_root=state_root, task_id=task_id)
     legacy, legacy_error = plan_record.legacy_facts(state_root, task_id)
     latest = plan_record.latest_revision(record)
     revision_fields: Optional[Dict[str, Any]] = None
@@ -308,6 +316,30 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
         except Exception:
             log.warning("plan_task read: pending seats could not be collected", exc_info=True)
     return _publish(ctx, record, effect=effect, notes=notes, legacy=legacy, legacy_error=legacy_error)
+
+
+def _continue(ctx: ToolContext, record: Mapping[str, Any], selections: Any, *, state_root: Any, task_id: str) -> str:
+    """The explicit continuation of stopped session participants inside their own ask (``plan_ask.continue_participants``)."""
+    from ouroboros.review_continuation import ContinuationRefused
+
+    try:
+        outcome = plan_ask.continue_participants(ctx, record, selections, state_root=state_root, task_id=task_id)
+    except ContinuationRefused as exc:  # refused before any choice, or recorded with nothing sent (its repeat sends it)
+        return _refuse(ctx, "TOOL_ERROR" if exc.recorded else "TOOL_ARG_ERROR",
+                       f"ERROR: PLAN_CONTINUATION_{'UNSENT' if exc.recorded else 'REFUSED'}: "
+                       + json.dumps(exc.payload(), ensure_ascii=False, default=str) + " " + exc.consequence())
+    except (plan_record.PlanRecordInvalid, ValueError, OSError) as exc:
+        return _refuse(ctx, "TOOL_ERROR", f"ERROR: PLAN_CONTINUATION_FAILED: {exc}. A recorded choice is repaired and sent "
+                       "by repeating the same continue_seats.")
+    names = ", ".join(f"{item['seat_id']} as {item['operation_id']}" + (" (rejoined)" if item["rejoined"] else "")
+                      for item in outcome["continued"] if not (item["window_spent"] or item["not_sent"]))
+    spent = ", ".join(item["seat_id"] for item in outcome["continued"] if item["window_spent"])
+    unsent = ", ".join(item["seat_id"] for item in outcome["continued"] if item["not_sent"])
+    notes = [f"Continued in ask {outcome['ask_id']}: {names}. Same ask, revision and seat; the reply arrives in your mailbox."] if names else []
+    notes += [f"Not sent in ask {outcome['ask_id']}: {spent}. The original review window ended first; no reply will arrive."] if spent else []
+    notes += [f"Not sent in ask {outcome['ask_id']}: {unsent}. Its start was recorded by a call that never sent it; continue it "
+              "again from the offer below to start it within what remains of the original window."] if unsent else []
+    return _publish(ctx, outcome["record"], effect="continue", notes=notes)
 
 
 def _refuse_unroutable(ctx: ToolContext, exc: Any, *, revision_fields: Optional[Dict[str, Any]], body: bool, body_note: str,
@@ -532,6 +564,10 @@ def _publish(ctx: ToolContext, record: Mapping[str, Any], *, effect: str, notes:
     # the tool's read says the same, never "nothing holds".
     decision = _decision(ctx, record, legacy, unreadable=legacy_error.get("source") == "plan_review_state")
     text = ("\n".join(notes) + "\n\n" if notes else "") + render_record(record, decision, legacy, legacy_error)
+    offers = plan_ask.continuation_offers(state_root, record)
+    if offers:  # a stopped session participant continues only by this explicit choice, inside its own ask
+        text += ("\n\nContinuable stopped participants (plan_task(continue_seats=[{seat_id, operation_id}])): "
+                 + json.dumps(offers, ensure_ascii=False, default=str))
     latest = plan_record.latest_revision(record)
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text, meta={
         "plan_effect": effect,

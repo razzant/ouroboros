@@ -11,6 +11,256 @@ from ouroboros import call_protocol as cp
 from ouroboros.call_peers import LiveCallHub
 from ouroboros.gateway.call_ws import serve_peer
 
+PEER_CONTROL_BYTES = 16 * 1024  # published as call_socket.max_control_bytes
+# Fewer characters than a peer's control may carry bytes, and far more UTF-8 bytes than that.
+LONG_WORDS = "Синтетическая длинная реплика звонка 🐍. " * 400
+
+
+def hello(role=cp.PEER_OWNER):
+    return json.dumps({"type": "hello", "protocol": 1, "role": role, "mic": True, "speaker": True, "rate": 24000})
+
+
+class PeerSocket:
+    """The far side of the real socket door: one scripted peer and everything it is sent."""
+
+    def __init__(self, *texts):
+        self.incoming = asyncio.Queue()
+        self.sent, self.frames, self.closed = [], [], []
+        for text in texts:
+            self.incoming.put_nowait({"type": "websocket.receive", "text": text})
+
+    async def accept(self):
+        pass
+
+    async def receive(self):
+        return await self.incoming.get()
+
+    async def send_text(self, text):
+        self.sent.append(json.loads(text))
+
+    async def send_bytes(self, data):
+        self.frames.append(data)
+
+    async def close(self, **reason):
+        self.closed.append(reason)
+        self.incoming.put_nowait({"type": "websocket.disconnect"})
+
+
+async def _joined(hub):
+    while not hub.peers():
+        await asyncio.sleep(.001)
+
+
+@pytest.mark.parametrize("role,skill", [(cp.PEER_OWNER, ""), (cp.PEER_MEETING, "synthetic-transport")],
+                         ids=["owner_surface", "companion"])
+def test_long_queued_captions_survive_flush_and_close_and_reach_the_peer_whole(role, skill):
+    assert len(LONG_WORDS) < PEER_CONTROL_BYTES < len(LONG_WORDS.encode("utf-8"))
+    monologue = LONG_WORDS * 64  # no second, larger limit waits behind the first
+
+    async def scenario():
+        hub = LiveCallHub(cp.CallSpec("synthetic-long-caption", 1, "synthetic", "synthetic"))
+        socket = PeerSocket(hello(role))
+        door = asyncio.create_task(serve_peer(socket, hub, role=role, skill=skill))
+        await asyncio.wait_for(_joined(hub), 5)
+        # Nothing here awaits, so the door cannot drain: flush and close meet these still queued.
+        hub.play(b"\x01\x00" * 480, "answer")
+        hub.send_caption("ouroboros", LONG_WORDS, False, "answer")
+        hub.send_caption("owner", monologue, True, "words")
+        barge_in = hub.flush()
+        hub.send_caption("ouroboros", LONG_WORDS + "!", True, "answer", replace=True)
+        hub.close("finished")
+        await asyncio.wait_for(door, 5)
+        assert not socket.frames, "a flush retires queued audio of the older epoch"
+        assert hub.epoch == barge_in + 1, "closing flushes again, over the same queue"
+        last_flush = max(i for i, m in enumerate(socket.sent) if m["type"] == "flush")
+        assert socket.sent[last_flush]["epoch"] == hub.epoch
+        assert [(m["speaker"], m["text"], m["final"], m["item_id"]) for m in socket.sent[last_flush + 1:]
+                if m["type"] == "caption"] == [("ouroboros", LONG_WORDS, False, "answer"), ("owner", monologue, True, "words"),
+                                               ("ouroboros", LONG_WORDS + "!", True, "answer")]
+        assert socket.sent[-1]["type"] == "state" and socket.sent[-1]["state"] == cp.STATE_CLOSED
+        assert socket.closed and all(reason == {"code": 1000} for reason in socket.closed)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("over", [0, 1], ids=["at_the_bound", "one_byte_over"])
+def test_a_peers_control_stays_bounded_in_utf8_bytes_at_the_socket_door(over):
+    def control(words):
+        return json.dumps({"type": "context", "text": words, "source": "synthetic"}, ensure_ascii=False,
+                          separators=(",", ":"))
+
+    room = PEER_CONTROL_BYTES + over - len(control("").encode("utf-8"))
+    words = "🐍" * (room // 4) + "x" * (room % 4)
+    assert len(words) < PEER_CONTROL_BYTES / 3, "the bound counts bytes, never characters"
+    assert len(control(words).encode("utf-8")) == PEER_CONTROL_BYTES + over
+
+    async def scenario():
+        hub = LiveCallHub(cp.CallSpec("synthetic-peer-bound", 1, "synthetic", "synthetic"))
+        socket = PeerSocket(hello(), control(words))
+        door = asyncio.create_task(serve_peer(socket, hub, role="owner"))
+        events = []
+        while not any(isinstance(event, (cp.PeerControl, cp.PeerLeft)) for event in events):
+            event = hub.next_event(0)
+            if event is None:
+                await asyncio.sleep(.001)
+            else:
+                events.append(event)
+        socket.incoming.put_nowait({"type": "websocket.disconnect"})
+        await asyncio.wait_for(door, 5)
+        while (event := hub.next_event(0)) is not None:
+            events.append(event)
+        hub.close("fixture_cleanup")
+        return socket, events
+
+    socket, events = asyncio.run(scenario())
+    if over:
+        assert socket.closed[0] == {"code": 1008, "reason": "invalid_call_control"}
+        assert [type(e) for e in events] == [cp.PeerJoined, cp.PeerLeft] and events[1].reason == "invalid_call_control"
+    else:
+        assert [type(e) for e in events] == [cp.PeerJoined, cp.PeerControl, cp.PeerLeft]
+        assert events[1].message["text"] == words
+
+
+@pytest.mark.parametrize("kind", cp.SERVER_MESSAGE_TYPES)
+def test_bounded_codec_keeps_reading_server_controls(kind):
+    message = {"type": kind}
+    assert cp.decode_control(cp.encode_control(message)) == message
+
+
+def test_a_long_server_caption_is_whole_json_beyond_the_bounded_peer_reader():
+    caption = {"type": "caption", "speaker": "ouroboros", "text": LONG_WORDS, "final": True, "item_id": "answer",
+               "replace": False}
+    text = cp.encode_control(caption)
+    assert len(text) < PEER_CONTROL_BYTES < len(text.encode("utf-8"))
+    assert json.loads(text) == caption
+    with pytest.raises(ValueError, match="too large"):
+        cp.decode_control(text)  # the peer reader keeps its bound; nothing reads server text through it
+
+
+def test_a_peer_cannot_send_the_hosts_own_messages():
+    forged = json.dumps({"type": "caption", "speaker": "owner", "text": "Forged words.", "final": True, "item_id": "one"})
+
+    async def scenario():
+        hub = LiveCallHub(cp.CallSpec("synthetic-forged-caption", 1, "synthetic", "synthetic"))
+        socket = PeerSocket(hello(), forged)
+        await asyncio.wait_for(serve_peer(socket, hub, role="owner"), 5)
+        hub.close("fixture_cleanup")
+        return socket
+    assert asyncio.run(scenario()).closed[0] == {"code": 1008, "reason": "invalid_call_control"}
+
+
+@pytest.mark.parametrize("door", ["owner", "companion"])
+def test_a_call_open_body_stays_bounded_before_decoding(door, tmp_path, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway import call_ws, host_call, host_service
+
+    body = json.dumps({"chat_id": 1, "client_message_id": "я" * (PEER_CONTROL_BYTES // 2)}, ensure_ascii=False).encode("utf-8")
+    if door == "owner":
+        answer = TestClient(Starlette(routes=call_ws.call_routes())).post("/api/call/open", content=body)
+        assert (answer.status_code, answer.json()["code"]) == (409, "control_too_large")
+    else:
+        async def authenticated(*_args):
+            return "synthetic_skill", {}
+        monkeypatch.setattr(host_call, "_authenticated", authenticated)
+        answer = TestClient(host_service.create_host_service_app(tmp_path)).post("/call/open", content=body)
+        assert (answer.status_code, answer.json()["code"]) == (413, "control_too_large")
+
+
+def _loopback(app):
+    """Serve ``app`` with uvicorn on a free loopback port, in its own thread."""
+    import socket
+    import threading
+    import time
+
+    import uvicorn
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="off"))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, name="call-door-loopback", daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        assert thread.is_alive() and time.monotonic() < deadline, "the loopback server did not start"
+        time.sleep(.01)
+    return server, thread, sock
+
+
+def test_words_no_text_frame_can_carry_end_the_call_at_their_sender_and_leave_no_phantom_peer():
+    """A real socket, door, hub and driver; only the provider and the page are scripted.
+
+    Malformed provider JSON can carry an unpaired surrogate, which no UTF-8 text frame can.
+    Refused only inside a peer's socket, it left that dead peer registered, so a paid call
+    kept running with nobody listening while later valid words went nowhere."""
+    from starlette.applications import Starlette
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed
+
+    from ouroboros.call_peers import close_hub, open_owner_hub
+    from ouroboros.gateway import call_ws
+    from tests.test_live_conversation_driver import Host, started
+
+    broken = "Synthetic partial answer \ud83d"
+    hub, created = open_owner_hub(cp.CallSpec("synthetic-unencodable-caption", 1, "synthetic", "synthetic"))
+    assert created
+    server, thread, sock = _loopback(Starlette(routes=call_ws.call_routes()))
+    received, closed = [], []
+
+    async def until(predicate, facts):
+        deadline = asyncio.get_running_loop().time() + 20  # a hang detector, not a latency claim
+        while not predicate():
+            assert asyncio.get_running_loop().time() < deadline, facts()
+            await asyncio.sleep(.01)
+
+    async def scenario():
+        host = Host()
+        host.hub = hub
+        task, session = await started(host)
+        try:
+            async with connect(f"ws://127.0.0.1:{sock.getsockname()[1]}/ws/call/{hub.call_id}") as page:
+                async def read():
+                    try:
+                        async for text in page:
+                            received.append(json.loads(text))
+                    except ConnectionClosed:
+                        pass
+                    closed.append(page.close_code)
+                reader = asyncio.create_task(read())
+                await page.send(hello())
+                session.emit("ready", input_rate=24000, output_rate=24000)
+                await until(lambda: any(m.get("state") == cp.STATE_LIVE for m in received), lambda: received)
+                # Valid words, more UTF-8 bytes than a peer's control may carry, cross the real socket whole.
+                session.emit("caption", speaker="owner", item_id="owner-long", text=LONG_WORDS, final=True)
+                await until(lambda: any(m.get("text") == LONG_WORDS for m in received), lambda: closed)
+                session.emit("caption", speaker="ouroboros", item_id="answer", text=broken, final=False)
+                session.emit("caption", speaker="ouroboros", item_id="answer", text="Synthetic final answer.", final=True)
+                await until(lambda: task.done() or closed, lambda: hub.peers())
+                assert task.done(), {"call": "still running", "registered_peers": hub.peers(), "page_closed": closed}
+                with pytest.raises(UnicodeEncodeError):
+                    await task  # the words' sender ends the call, at its first unsendable caption
+                close_hub(hub.call_id, "call_failed")  # the turn's own teardown
+                await until(lambda: closed, lambda: received[-3:])
+                await reader
+            await until(lambda: not hub.peers(), lambda: {"registered_peers": hub.peers()})
+            return host
+        finally:
+            close_hub(hub.call_id, "fixture_cleanup")
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 20)
+
+    try:
+        host = asyncio.run(scenario())
+    finally:
+        server.should_exit = True
+        thread.join(10)
+        sock.close()
+    assert not thread.is_alive()
+    captions = [(m["speaker"], m["text"], m["final"]) for m in received if m["type"] == "caption"]
+    assert captions == [("owner", LONG_WORDS, True)], "nothing after the refused caption is shown"
+    assert [(row["speaker"], row["text"]) for row in host.captions] == [("owner", LONG_WORDS)]
+    assert received[-1]["type"] == "state" and received[-1]["state"] == cp.STATE_CLOSED
+    assert received[-1]["reason"] == "call_failed" and closed == [1000]
+
 
 def test_mixed_audio_and_meeting_bye_keep_nonowner_provenance():
     hub = LiveCallHub(cp.CallSpec("synthetic-mix", 1, "synthetic", "synthetic"), rates=(24000, 24000))
@@ -85,6 +335,9 @@ def test_presence_utterance_identity_and_mixed_audio_attribution_survive(tmp_pat
     rows = chat_rows(tmp_path)
     assert len(rows) == 2
     assert rows[0]["client_message_id"] == "meeting:join:heard:one"
+    for direction, name in (("in", "long-heard"), ("out", "long-spoken")):
+        assert record_call_utterance(tmp_path, task, direction=direction, text=LONG_WORDS.strip(), utterance_id=name)
+        assert chat_rows(tmp_path)[-1]["text"] == LONG_WORDS.strip()
     assert rows[1]["client_message_id"] == "meeting:join:spoken:two"
     assert rows[0]["sender_label"] == "meeting audio"
     assert rows[0]["transport"]["actor"]["display_name"] == "meeting audio"

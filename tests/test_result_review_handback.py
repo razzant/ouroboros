@@ -726,8 +726,9 @@ def test_a_collected_review_that_changed_after_its_collection_rendered_is_handed
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     collect, rendered = review_collection.collect_change, []
 
-    def change_after_render(ctx_, reference):
-        payload = collect(ctx_, reference)
+    def change_after_render(ctx_, reference, continue_seats=None):
+        assert continue_seats is None  # this is an ordinary free collection, not a continuation choice
+        payload = collect(ctx_, reference, continue_seats)
         rendered.append(json.dumps(payload))
         _revise_seat(review_ledger.ledger_root(ctx_), payload["record_id"], row={"status": "completed"},
                      outcome={"status": "interrupted"}, finding=LATE)  # a later answer of the same operation

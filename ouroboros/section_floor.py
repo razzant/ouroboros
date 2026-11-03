@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 from ouroboros.context_layout import TIER0_ALWAYS_FULL
 
@@ -52,9 +52,13 @@ def labelled_section(section: str, label: Callable[[str], str]) -> str:
                    operative_view=None if section.operative_view is None else label(section.operative_view))
 
 
-def relocated_text(section: HostSection, reader: str) -> str:
+def relocated_text(section: HostSection, reader: str, *, start_room: Union[bool, str] = False) -> str:
+    """``start_room``: the step paid this start's allowance while the physical window held the whole request;
+    a mode name says the owner's budget for that mode framed it, ``True`` the start's own room."""
+    soft = f"the owner's {start_room.capitalize()} mode budget" if isinstance(start_room, str) else "this start's room"
+    bound = f"{soft}, not for the physical window" if start_room else "the physical window"
     return (section.operative_view + "\n\n"
-            + f"[Host section details omitted for the physical window; retained full text: {reader}.]")
+            + f"[Host section details omitted for {bound}; retained full text: {reader}.]")
 
 
 def retain_section(section: HostSection, *, root: str, task_id: str) -> dict:
@@ -69,9 +73,10 @@ def retain_section(section: HostSection, *, root: str, task_id: str) -> dict:
 
 
 def section_views(sections: Iterable[HostSection], receipts: Iterable[Mapping]) -> dict[str, str]:
-    readers = {row["section_id"]: row["reader"] for row in receipts}
-    return {part.section_id: relocated_text(part, readers[part.section_id]) for part in sections
-            if part.section_id in readers and part.operative_view is not None}
+    rows = {row["section_id"]: row for row in receipts}  # a receipt without the flag renders as recorded before it
+    return {part.section_id: relocated_text(part, rows[part.section_id]["reader"],
+                                            start_room=rows[part.section_id].get("start_room", False))
+            for part in sections if part.section_id in rows and part.operative_view is not None}
 
 
 def render_sections(sections: Iterable[HostSection], fallback: str, addressed: Mapping[str, str]) -> str:

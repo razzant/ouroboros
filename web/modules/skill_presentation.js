@@ -142,6 +142,14 @@ export function displayAddress(value) {
     return String(value || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
 }
 
+/** Where a source reads: its address, then a repository's revision (`at main`, `at commit 1a2b3c4`) and folder. */
+export function sourceAddressText(source = {}) {
+    const address = displayAddress(source.url || source.path || '');
+    if (!source.url) return address;
+    const at = source.commit ? `commit ${String(source.commit).slice(0, 7)}` : String(source.ref || '');
+    return [`${address}${at ? ` at ${at}` : ''}`, source.path ? `folder ${source.path}` : ''].filter(Boolean).join(' · ');
+}
+
 /** A repository address as its short name: «CrossRead/scholion» for a GitHub address. */
 export function repoLabel(value) {
     return displayAddress(value).replace(/^github\.com\//i, '');

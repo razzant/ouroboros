@@ -19,6 +19,7 @@ import json
 import pathlib
 import random
 import re
+import socket
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -233,9 +234,22 @@ class Recorder:
 
 @pytest.mark.parametrize("mode", ["inline", "auto", "caption", "off"])
 def test_registered_screenshot_reaches_the_physical_request_as_pixels(mcp, monkeypatch, mode):
+    from ouroboros import pricing
     from ouroboros.llm import LLMClient
     from ouroboros.loop_llm_call import _prepare_main_messages
 
+    # No tariff for the synthetic model: reservation/settlement still run with unknown pricing.
+    monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_a, **_k: {})
+    remote_lookups = []
+    resolve = socket.getaddrinfo
+
+    def loopback_only(host, *args, **kwargs):
+        if host not in ("127.0.0.1", "::1", "localhost"):
+            remote_lookups.append(str(host))
+            raise OSError(f"unexpected remote lookup in the image fixture: {host}")
+        return resolve(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", loopback_only)
     result = mcp.registry.execute_result(TOOL, {})
     messages, trace = _batch(mcp, [_row(result)])
     monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", mode)
@@ -245,6 +259,8 @@ def test_registered_screenshot_reaches_the_physical_request_as_pixels(mcp, monke
                                       drive_root=mcp.data, task_id=TASK, task_attempt=ATTEMPT, event_queue=None,
                                       use_local=False)
         llm.chat(sent, model="openrouter::fixture/vision", tools=None, max_tokens=16, no_proxy=True, timeout=20)
+    assert not remote_lookups, remote_lookups  # pricing failures may be handled while the image request succeeds
+    assert len(recorder.bodies) == (2 if mode == "caption" else 1)  # the caption is also a real loopback request
     wire = recorder.bodies[-1]
     assert [hashlib.sha256(image).hexdigest() for image in _pixels(wire)] == (
         [hashlib.sha256(PNG).hexdigest()] if mode in {"inline", "auto"} else [])

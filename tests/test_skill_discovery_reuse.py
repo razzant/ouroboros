@@ -143,6 +143,25 @@ def test_each_change_is_seen_and_the_reuse_equals_a_fresh_discovery(install, tmp
     assert (after == before) is (change == "unrelated_state")
 
 
+def test_a_manifest_written_in_a_connected_folders_standard_folder_is_seen(install, tmp_path, monkeypatch):
+    """A connected folder's ``.agents/skills`` (``skill_sources.STANDARD_SKILL_FOLDERS``) is read one level below
+    the two the walk lists: a manifest written into a package folder already there moves the inventory."""
+    data, counts = install
+    checkout = tmp_path / "checkout"
+    _package(checkout / "group", "omega")
+    manifest = _package(checkout / ".agents" / "skills", "sigma") / "SKILL.md"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.unlink()  # its folder is there before its manifest, as an author or a checkout writes it
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(checkout))
+    before = {skill.name for skill in discover_skills(data)}
+    walks = counts["walks"]
+    assert {skill.name for skill in discover_skills(data)} == before and counts["walks"] == walks  # reused
+    manifest.write_text(text, encoding="utf-8")
+    after = _dump(discover_skills(data))
+    assert "omega" in before and "sigma" not in before
+    assert "sigma" in {skill["name"] for skill in json.loads(after)} and after == _fresh(data)
+
+
 def test_a_declared_entry_under_a_skipped_cache_name_is_part_of_the_identity(install):
     """The hash re-adds a manifest-declared script under ``node_modules``; its edit is seen though the tree skips it."""
     data, _counts = install

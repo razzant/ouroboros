@@ -1,7 +1,7 @@
 ---
 name: unix_computer_use
 description: Local and remote desktop observation and input, with macOS semantic actions, explicit foreground control, screenshot-bound coordinates and honest outcome receipts.
-version: 0.6.1
+version: 0.6.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -247,7 +247,8 @@ Input receipts (the same contract on every backend):
 - On a local or SSH Mac, `cliclick` exits 0 and only warns on stderr when the
   posting process lacks the Accessibility grant (the OS drops the event) or
   when a character has no key code in the active keyboard layout (nothing is
-  typed; measured 27.10.2026 under a Cyrillic layout). Such receipts are
+  typed; measured 27.10.2026 under a Cyrillic layout); the paste chord program
+  warns the same way and then posts nothing. Such receipts are
   `ok: false` with `reason: permission_denied` / `untypable_characters` and no
   input mark (a completed clipboard write or switch before it keeps its own,
   `clipboard_done` / `activation_done`); the hint names the method that failed
@@ -324,12 +325,20 @@ Backend matrix (honest limitations):
   combos the base key is tapped while modifiers are held (`cmd+s` = hold cmd,
   tap s). On a local or SSH Mac and on X11 a letter's case under a modifier adds
   no Shift (`cmd+S` = `cmd+s`; Shift is named: `cmd+shift+s`), and a bare `A` is a
-  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`) and
-  pastes with `cmd+v`, after the target was verified in front (a refusal leaves
-  the clipboard alone; the receipt says whether the clipboard was replaced,
-  also when the paste chord after it failed); use it for
-  long or non-ASCII text, which `cliclick t:` types slowly. `via` accepts
-  `type` or `paste`; anything else is refused.
+  capital. `type_text` with `via=paste` writes the clipboard (`pbcopy`, given
+  UTF-8 and told so whatever locale the process inherited, as over SSH) and
+  pastes with Command and the key that gives `v` under Command in the active
+  keyboard layout, with exactly the Command flag (an `osascript` JavaScript
+  program, the same over SSH, posting under the Accessibility grant cliclick
+  needs; no Automation grant), after the target was verified in front (a
+  refusal leaves the clipboard alone; the receipt says whether the clipboard
+  was replaced, also when the paste chord after it failed); use it for long or
+  non-ASCII text, which `cliclick t:` types slowly. Neither the layout's typed
+  `v` nor a fixed US key is that key everywhere (measured on an AppKit Edit
+  menu: Russian – PC, Dvorak – QWERTY ⌘, Dvorak); a layout with none
+  (Turkmen) is `untypable_characters` and nothing is posted. `helper_stderr`
+  names the key sent; a dispatched paste does not prove the focused element
+  took it. `via` accepts `type` or `paste`; anything else is refused.
 - Linux X11: key/hold validation also requires loadable `libX11` (discovered by
   `ctypes.util.find_library`); missing validation refuses without sending a prefix.
   `xdotool` (input and the active window), `gnome-screenshot`/`scrot`
@@ -409,9 +418,11 @@ Backend matrix (honest limitations):
   (`dispatched: null`, `transport_failed`; a clipboard marker that did come
   back is kept as a fact), never "not sent". cliclick's stderr is read the same
   way as locally. `type_text` with `via=paste` writes the Mac's clipboard
-  (`pbcopy`) and pastes, and the receipt says whether the clipboard stage
-  completed (a failed write sends nothing: `clipboard_failed`, `dispatched:
-  false`). `window_list` lists applications and the frontmost one (no window
+  (`pbcopy`, told the text is UTF-8 whatever locale ssh forwarded) and pastes
+  with the same chord program through the Mac's own `osascript` in the same
+  ssh call, and the receipt says whether the clipboard stage completed (a
+  failed write sends nothing: `clipboard_failed`, `dispatched: false`).
+  `window_list` lists applications and the frontmost one (no window
   titles over SSH); a listing that failed or named nothing is `apps_unread`,
   an unread front says `front_unread`. The remote Mac must have
   Screen Recording, Accessibility and (for activation) Automation grants
@@ -447,7 +458,8 @@ check and are available to observe-only consciousness (owner decision
 Layout: `plugin.py` (registration, coordinate contract, local input),
 `place.py` (targets, activation, the receipt composer `_finish` shared by every
 transport, window rows, element reads), `remote.py` (OSWorld and SSH
-transports), `macos_native.py` (the helper process). The skill intentionally
+transports), `macos_native.py` (the helper process), `paste_chord.js` (the
+macOS paste chord, local and over SSH). The skill intentionally
 does not hide OS permission requirements, and missing backends produce explicit
 errors with the capability report instead of guessing. The agent should prefer
 semantic application APIs when available and should ask the human before
