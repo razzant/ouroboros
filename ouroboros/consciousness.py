@@ -11,7 +11,9 @@ the owner's work in Main or any room and beside the focuses, which never hold it
 Tick order, each step a typed outcome: disabled → its own live wake → not yet due → the
 rolling-24h allowance (an unreadable ledger is the disclosed skip
 ``allowance_unknown``, never a silent block; known spend at the daily limit is
-``allowance_exhausted``) → an owner chat must be bound → launch.
+``allowance_exhausted``) → an owner chat must be bound → launch. A skip keeps the window it met
+(``allowance_fact``, the projection a wake's preparation carries) in its event and in the one
+overwritten ``consciousness_last_skip`` state key, which the mind's status read shows.
 What is left of that allowance is the launched tree's producer ceiling
 (``metadata.root_cost_ceiling_usd``, В26=A): the in-task stop pauses the wake when its known
 spend reaches it — no extra planning margin is subtracted or skipped (owner 2026-10-07) — while the
@@ -69,6 +71,7 @@ NEXT_WAKE_STATE_KEY = "consciousness_next_wake_at"
 INTERVAL_STATE_KEY = "consciousness_next_interval_sec"
 LAST_WAKE_STATE_KEY = "consciousness_last_wake_at"
 APPOINTMENT_STATE_KEY = "consciousness_appointment_at"  # the scheduled time; skips and refusals move only the next attempt
+LAST_SKIP_STATE_KEY = "consciousness_last_skip"  # the newest skipped wake with the allowance window it met; overwritten
 OWN_WAKE_STATE_KEY = "consciousness_own_wake"  # the admitted clock actor, retained across carrier changes/restart
 OBSERVATION_STATE_KEY = "consciousness_observation_boundary"  # chat position + transition state the last ACCEPTED wake observed
 OBSERVATION_BOOTSTRAP_STATE_KEY = "consciousness_observation_bootstrap_since"
@@ -83,6 +86,14 @@ SNAPSHOT_KEYS = ("enabled", "level", "next_wake_at", "last_wake_at", "last_wake_
 
 def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat() if ts else ""
+
+
+def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
+    """The one projection of the allowance window a wake decision met: a wake's preparation and a skip's
+    record carry the same keys (known spend, unmetered calls, the limit, spend by cause, the reset time);
+    null is unknown, never 0."""
+    return {**{key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
+            "resets_at": window.get("resets_at") or None}
 
 
 def panic_blocks_wake(drive_root: Any) -> bool:
@@ -166,11 +177,11 @@ class BackgroundConsciousness:
             log.debug("consciousness: runtime state unreadable", exc_info=True)
             return {}
 
-    def _set_next_wake(self, at: float, *, appointment: bool = False) -> None:
+    def _set_next_wake(self, at: float, *, appointment: bool = False, skip: Optional[Dict[str, Any]] = None) -> None:
         from supervisor import state
 
         self._next_wake_at = float(at)
-        keys = {NEXT_WAKE_STATE_KEY: self._next_wake_at}
+        keys = {NEXT_WAKE_STATE_KEY: self._next_wake_at, **({LAST_SKIP_STATE_KEY: skip} if skip else {})}
         if appointment:
             self._appointment_at = self._next_wake_at
             keys[APPOINTMENT_STATE_KEY] = self._appointment_at
@@ -250,14 +261,16 @@ class BackgroundConsciousness:
                 return "not_due"
             window = self._allowance_view(now, fresh=True)
             if window.get("status") == STATUS_UNKNOWN:
-                return self._skip("allowance_unknown", now + self.floor, now=now, error=str(window.get("error") or ""))
+                return self._skip("allowance_unknown", now + self.floor, window, now=now,
+                                  error=str(window.get("error") or ""))
             # Known spend reached the daily allowance (#1487: unresolved bounds are
             # disclosed exposure, not spending). No extra early margin skips a wake.
             if window.get("status") == STATUS_EXHAUSTED or float(window.get("remaining_usd") or 0.0) <= 0.0:
                 resets = parse_deadline_ts(str(window.get("resets_at") or ""))
-                return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor), now=now)
+                return self._skip("allowance_exhausted", max(resets.timestamp() if resets else 0.0, now + self.floor),
+                                  window, now=now)
             if not self._owner_chat_id():
-                return self._skip("waiting_for_first_conversation", now + self.floor, now=now)
+                return self._skip("waiting_for_first_conversation", now + self.floor, window, now=now)
         return self._launch(now, int(self._owner_chat_id() or 0), window)
 
     def _settle_unreported_terminal(self) -> bool:
@@ -288,10 +301,14 @@ class BackgroundConsciousness:
         self._wake_finished(task_id, ok, pooled=True)
         return False
 
-    def _skip(self, reason: str, next_at: float, *, now: float, error: str = "") -> str:
+    def _skip(self, reason: str, next_at: float, window: Dict[str, Any], *, now: float, error: str = "") -> str:
+        """A skipped wake keeps the allowance window it met (``allowance_fact``) in its event and in the one
+        overwritten ``consciousness_last_skip`` key, written with the next wake time: a status read answers
+        whether it stopped for money with no second reader or writer."""
         self._last_wake_outcome, self._last_error = f"skipped:{reason}", error
-        self._set_next_wake(next_at)
-        self._record("consciousness_wake_skipped", reason=reason, next_wake_at=_iso(next_at), error=error)
+        skip = {"reason": reason, "next_wake_at": _iso(next_at), "error": error, "allowance": allowance_fact(window)}
+        self._set_next_wake(next_at, skip={"at": _iso(now), **skip})
+        self._record("consciousness_wake_skipped", **skip)
         return f"skipped:{reason}"
 
     def _launch(self, now: float, chat_id: int, window: Dict[str, Any]) -> str:
@@ -330,7 +347,7 @@ class BackgroundConsciousness:
             "now": now, "reason": reason, "level": level, "repo_dir": str(self._repo_dir),
             "last_wake_at": self._last_wake_at, "last_wake_task_id": self._last_wake_task_id,
             "disabled_tools": list(metadata.get("disabled_tools") or []),
-            "window": {key: window.get(key) for key in ("settled_usd", "unknown_unmetered", "limit_usd", "spend_by_cause")},
+            "window": allowance_fact(window),
             "counted_roots": live_consciousness_roots(), "max_tasks": get_consciousness_max_tasks(),
             "interval": self._interval(), "appointment_at": self._appointment_at,
         }

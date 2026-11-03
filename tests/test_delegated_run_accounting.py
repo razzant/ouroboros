@@ -328,6 +328,8 @@ def test_the_terminal_payload_carries_the_applied_model_and_the_mismatch_delta(t
         "requested": "model sonnet",
         "effective": "model claude-opus-5",
         "reason": "session_route_resolves_its_own_model",
+        "note": "The engine names the model it ran by its own alias; the names differ, capabilities were "
+                "not compared. A disclosure, not a failure.",
     }]
 
     # Agreement (or aliases matching exactly): no delta is invented.

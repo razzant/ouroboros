@@ -474,6 +474,9 @@ def render_record(record: Mapping[str, Any], decision: Mapping[str, Any], legacy
                      + (f" — «{ask['message']}»" if ask.get("message") else "") + ": " + "; ".join(parts))
         if stored.get("omissions"):  # recorded by plan_evidence when the ask was prepared; the ask's result shows it too
             lines.append("  evidence omitted: " + "; ".join(f"{o.get('locator')} ({o.get('reason')})" for o in stored["omissions"]))
+            hint = plan_packet.omission_hint(stored["omissions"])
+            if hint:
+                lines.append(f"  {hint}")
         if ask["revision"] is None:  # a reading's listed objections are advice: they never enter the fold
             points = [f"{p.get('seat_id')}/{item.get('id')}: {item.get('text')}" for p in stored.get("participants") or []
                       if isinstance(p.get("reply"), dict) for item in p["reply"].get("objections") or []]

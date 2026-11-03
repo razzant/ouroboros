@@ -42,6 +42,7 @@ from ouroboros.consciousness_authority import (
     runtime_mode_cap_for,
 )
 from ouroboros.context_health import safe_read
+from ouroboros.deadline_utils import ago_text
 from ouroboros.dialogue_provenance import dialogue_speaker, is_presence_task, reaction_note, wordless_reaction
 
 log = logging.getLogger(__name__)
@@ -87,15 +88,6 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat()
 
 
-def _ago(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    if seconds >= 86400:
-        return f"{seconds // 86400} d {(seconds % 86400) // 3600} h ago"
-    if seconds < 3600:
-        return f"{max(1, seconds // 60)} min ago"
-    return f"{seconds // 3600} h {(seconds % 3600) // 60} min ago"
-
-
 def _parse_iso(value: Any) -> Optional[float]:
     try:
         return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
@@ -116,7 +108,7 @@ def previous_wake_text(drive_root: Any, task_id: str, *, now: float) -> str:
         if not row:
             return "unreadable"
         stamp = _parse_iso(terminal_time_fact(row).get("occurred_at"))
-        ago = _ago(now - stamp) if stamp is not None else "at an unknown time"
+        ago = ago_text(now - stamp) if stamp is not None else "at an unknown time"
         line = f"«{row['wake_summary']}»" if row.get("wake_summary") else "no line"
         outcome = "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(row, {})]
         return (f"{task_id}, {outcome} {ago}; "
@@ -152,7 +144,7 @@ def _card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, now: float,
     label = question_status(state, facts, bool(block.get("wait_for_answer")))
     asked_at = str(block.get("asked_at") or "")
     asked_ts = _parse_iso(asked_at)
-    age = f", {_ago(now - asked_ts)}" if asked_ts is not None else ""
+    age = f", {ago_text(now - asked_ts)}" if asked_ts is not None else ""
     preview = _clip_preview(block.get("question") or "question text unavailable")
     return f"- owner card {quiz_id} on task {task_id}: {label}{age}; {preview}"
 
@@ -169,7 +161,7 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
     parts = []
     for key, word in (("answered_at", "answered"), ("asked_at", "asked")):
         stamp = _parse_iso(block.get(key))
-        parts.append(f"{word} {_ago(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
+        parts.append(f"{word} {ago_text(now - stamp)}" if stamp is not None else f"{word} at an unknown time")
     options = block.get("options") if isinstance(block.get("options"), list) else []
     index = block.get("answered_index")
     comment = str(block.get("comment") or "")
@@ -192,7 +184,7 @@ def _answered_card_line(task_id: str, quiz_id: str, block: Dict[str, Any], *, no
 
 def _closed_card_line(task_id, quiz_id, block, *, now):
     stamp = _parse_iso(block.get("closed_at"))
-    when = _ago(now - stamp) if stamp is not None else "at an unknown time"
+    when = ago_text(now - stamp) if stamp is not None else "at an unknown time"
     actor = str(block.get("closed_actor") or "unknown actor")
     if actor == "model" and block.get("closed_by_task_id"):
         actor += f" task {block['closed_by_task_id']}"
@@ -325,7 +317,7 @@ def _event_line(kind: str, row: Dict[str, Any], results: Dict[str, Dict[str, Any
                 rooms: Any, projects: Dict[str, str], now: float, *, when: str = "") -> str:
     """One chat-row event, or (``when`` given) a task terminal read from its result."""
     stamp = _parse_iso(row.get("ts"))
-    when = when or (_ago(now - stamp) if stamp is not None else "at an unknown time")
+    when = when or (ago_text(now - stamp) if stamp is not None else "at an unknown time")
     task_id = str(row.get("task_id") or "")
     if kind in {"owner_message", "correspondent_message"}:
         return (f"- {_KIND_WORDS[kind][0]} in {rooms.label(row)}, {when}: "
@@ -458,7 +450,7 @@ def _transition_line(fact: Dict[str, Any], results: Dict[str, Dict[str, Any]], r
                      now: float, projects: Dict[str, str]) -> Tuple[str, str]:
     """``(kind, line)`` for one canonical transition."""
     kind, task_id, stamp = fact["kind"], fact["task_id"], fact["stamp"]
-    ago = _ago(now - stamp) if stamp is not None else "at an unknown time"
+    ago = ago_text(now - stamp) if stamp is not None else "at an unknown time"
     if kind == "card_answer":
         return kind, _answered_card_line(task_id, fact["quiz_id"], fact["block"], now=now)
     if kind == "card_state":
@@ -834,7 +826,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
                         appointment_at: float = 0.0) -> str:
     """Fill ``prompts/CONSCIOUSNESS.md`` for one wake; every placeholder is substituted.
 
-    "On time" is lateness below ``_ago``'s one-minute display granularity, not a new scheduling threshold.
+    "On time" is lateness below ``ago_text``'s one-minute display granularity, not a new scheduling threshold.
     """
     template = safe_read(pathlib.Path(repo_dir) / PROMPT_REL) or _FALLBACK_TEMPLATE
     from ouroboros.consciousness_view import places_text, roots_text, spend_text
@@ -844,10 +836,10 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
         spent = f"at least {spent}"  # unmetered rows in the window: the number is a floor
     reason_text = str(reason or "heartbeat")
     if appointment_at:
-        reason_text += f" ({'on time' if now - appointment_at < 60 else 'due ' + _ago(now - appointment_at)})"
+        reason_text += f" ({'on time' if now - appointment_at < 60 else 'due ' + ago_text(now - appointment_at)})"
     facts = {
         "reason": reason_text,
-        "last_wake_ago": _ago(now - last_wake_at) if last_wake_at else "no wake since this process started",
+        "last_wake_ago": ago_text(now - last_wake_at) if last_wake_at else "no wake since this process started",
         "previous_wake": previous_wake,
         "events": events or "nothing new",
         "level": {"observe": "Advises", "act": "Acts", "full": "Evolves"}[normalized],

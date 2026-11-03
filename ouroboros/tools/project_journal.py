@@ -75,6 +75,13 @@ def _scope_authority(ctx: ToolContext) -> tuple[str, Dict[str, Any]]:
     return ("root" if root else "scoped"), metadata
 
 
+def may_publish_focus(ctx: ToolContext) -> bool:
+    """Whether this actor's focus line is its own to publish: an independent root, never a child or a
+    speaker (``_update_focus``'s rule; its one exception, a Project-bound inline speaker, is Presence).
+    The round's facts name an absent line only for such an actor."""
+    return _scope_authority(ctx)[0] == "root"
+
+
 def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
     own_value = placed_project_id(ctx)
     if own_value not in (None, "") and not isinstance(own_value, str):

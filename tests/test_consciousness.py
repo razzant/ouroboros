@@ -21,6 +21,7 @@ from ouroboros import dialogue_store
 from ouroboros.consciousness import (
     ARCHIVED_INBOX_REL,
     INTERVAL_STATE_KEY,
+    LAST_SKIP_STATE_KEY,
     LAST_WAKE_STATE_KEY,
     LEGACY_INBOX_REL,
     NEXT_WAKE_STATE_KEY,
@@ -546,6 +547,45 @@ def test_allowance_exhausted_skips_until_the_window_frees(clock, monkeypatch):
     clock.clock._next_wake_at = T0
     assert clock.clock.tick(T0 + 5) == "skipped:allowance_exhausted"
     assert clock.clock.next_wake_at == T0 + 5 + FLOOR
+
+
+def test_a_skipped_wake_records_the_allowance_window_it_met(clock, monkeypatch):
+    """A46: "did it stop for money?" is answered by the skip itself. Its event and the one overwritten
+    ``consciousness_last_skip`` key, written with the next wake time, carry the projection of the window a
+    wake's preparation carries (``allowance_fact``); unknown stays null, never 0, and a later ordinary wake
+    leaves the newest skip as it was."""
+    resets_at = "2027-02-01T00:00:00+00:00"
+    causes = [{"cause": "own", "label": "Its own wakes", "usd": 20.4, "unmetered_calls": 2}]
+    exhausted = {**AVAILABLE, "status": "exhausted", "settled_usd": 20.4, "remaining_usd": 0.0,
+                 "resets_at": resets_at, "unknown_unmetered": 2, "spend_by_cause": causes}
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(exhausted))
+    now = T0 + FLOOR + 1
+    assert clock.clock.tick(now) == "skipped:allowance_exhausted"
+    met = {"settled_usd": 20.4, "unknown_unmetered": 2, "limit_usd": 20.0, "spend_by_cause": causes, "resets_at": resets_at}
+    [event] = [row for row in _events(clock.root) if row["type"] == "consciousness_wake_skipped"]
+    assert {key: event[key] for key in ("reason", "next_wake_at", "error", "allowance")} == {
+        "reason": "allowance_exhausted", "next_wake_at": resets_at, "error": "", "allowance": met}
+    assert clock.store[LAST_SKIP_STATE_KEY] == {"at": _iso(now), "reason": "allowance_exhausted",
+                                                "next_wake_at": resets_at, "error": "", "allowance": met}
+    assert clock.store[NEXT_WAKE_STATE_KEY] == clock.clock.next_wake_at
+    # An unreadable ledger: the configured limit is known, the spend is not.
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: {
+        "status": "allowance_unknown", "error": "OSError: ledger", "limit_usd": 20.0, "settled_usd": None,
+        "accounted_usd": None, "remaining_usd": None, "resets_at": "", "spend_by_cause": None})
+    later = now + 10
+    clock.clock._next_wake_at = later
+    assert clock.clock.tick(later) == "skipped:allowance_unknown"
+    skip = clock.store[LAST_SKIP_STATE_KEY]
+    assert skip["reason"] == "allowance_unknown" and skip["error"] == "OSError: ledger" and skip["at"] == _iso(later)
+    assert skip["allowance"] == {"settled_usd": None, "unknown_unmetered": None, "limit_usd": 20.0,
+                                 "spend_by_cause": None, "resets_at": None}
+    # The wake that is admitted later is prepared with the same projection, and the skip stays the newest skip.
+    monkeypatch.setattr(clock_module, "allowance_window", lambda root, now=None, **_display_read: dict(AVAILABLE))
+    clock.clock._next_wake_at = later + 20
+    assert clock.clock.tick(later + 20) == "launched"
+    assert clock.launches[-1]["prepare"]["window"] == clock_module.allowance_fact(AVAILABLE)
+    assert set(clock.launches[-1]["prepare"]["window"]) == set(skip["allowance"])
+    assert clock.store[LAST_SKIP_STATE_KEY] == skip
 
 
 def test_no_owner_chat_waits_for_the_first_conversation(clock):

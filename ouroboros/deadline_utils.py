@@ -108,6 +108,17 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def ago_text(seconds: float) -> str:
+    """Elapsed seconds in words for a dated fact, at one-minute granularity ("1 min ago" below it):
+    the one formatter of the wake's lines and the round's own focus line."""
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400} d {(seconds % 86400) // 3600} h ago"
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)} min ago"
+    return f"{seconds // 3600} h {(seconds % 3600) // 60} min ago"
+
+
 def seconds_until(value: Any) -> Optional[float]:
     """Non-negative wall-clock seconds until an ISO instant; None when unparsable."""
     parsed = parse_deadline_ts(value)

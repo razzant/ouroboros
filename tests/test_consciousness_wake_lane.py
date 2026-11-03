@@ -556,7 +556,8 @@ def test_set_next_wakeup_clamps_persists_and_speaks_honestly(tmp_path, monkeypat
 
 def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_facts(tmp_path, monkeypatch):
     """#1324: status is a read for the caller, never a line in the owner's chat;
-    in-memory clock facts are named as not read, not guessed. Start and stop keep
+    in-memory clock facts are named as not read, not guessed. The newest skip is a
+    persisted fact with the allowance window it met (A46). Start and stop keep
     their supervisor path and their owner notice."""
     from ouroboros.tools import control
     from supervisor import events_runtime_controls, state
@@ -565,9 +566,13 @@ def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_fac
     (tmp_path / "locks").mkdir(parents=True)
     state.init(tmp_path)
     state.save_state({})  # an initialized install: only explicit init creates state (#1307)
+    skip = {"at": "2026-09-26T09:30:00+00:00", "reason": "allowance_exhausted", "next_wake_at": "2026-09-26T10:00:00+00:00",
+            "error": "", "allowance": {"settled_usd": 20.4, "unknown_unmetered": 0, "limit_usd": 20.0,
+                                       "spend_by_cause": [], "resets_at": "2026-09-26T10:00:00+00:00"}}
     state.update_state(lambda st: st.update({
         "bg_consciousness_enabled": True, "consciousness_next_wake_at": 1790416800.0,
-        "consciousness_last_wake_at": 1790413200.0, "consciousness_next_interval_sec": 900}))
+        "consciousness_last_wake_at": 1790413200.0, "consciousness_next_interval_sec": 900,
+        "consciousness_last_skip": skip}))
     ctx = SimpleNamespace(task_id="w1", pending_events=[], drive_root=tmp_path, task_metadata={})
     with mock.patch.dict(os.environ, {"OUROBOROS_BG_WAKEUP_MIN": "120", "OUROBOROS_BG_WAKEUP_MAX": "600"}):
         facts = json.loads(control._toggle_consciousness(ctx, "status"))
@@ -578,6 +583,7 @@ def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_fac
     assert facts["stored_next_wake_at"] == "2026-09-26T10:00:00+00:00"
     assert facts["last_wake_ended_at"] == "2026-09-26T09:00:00+00:00"
     assert facts["configured_bounds_sec"] == {"min": 120, "max": 600, "source": "owner settings, not the state file"}
+    assert facts["last_skip"] == skip and facts["notes"][1].startswith("last_skip is the newest skipped wake")
     assert "last_wake_outcome" not in facts and "early-wake" not in facts["notes"][1]
     assert "no event moves it" in facts["notes"][0]
 
@@ -636,7 +642,7 @@ def test_consciousness_status_reads_the_callers_canonical_root_and_writes_nothin
     assert facts["source"] == str(canonical / "state" / "state.json")
     assert facts["enabled"] is False and facts["chosen_interval_sec"] == 1800
     assert facts["stored_next_wake_at"] == 0  # recorded zero stays zero, not a guessed time
-    assert facts["not_recorded"] == ["last_wake_ended_at"] and "last_wake_ended_at" not in facts
+    assert facts["not_recorded"] == ["last_wake_ended_at", "last_skip"] and "last_wake_ended_at" not in facts
     # A root task with no budget root reads its own drive, which IS its canonical root.
     facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=forked), "status"))
     assert facts["source"] == str(forked / "state" / "state.json") and facts["enabled"] is True
@@ -653,8 +659,9 @@ def test_consciousness_status_names_a_read_gap_instead_of_defaults(tmp_path):
         before = _tree(root)
         facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=root), "status"))
         assert _tree(root) == before, "a status read must not write"
-        assert facts["not_read"] == ["enabled", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec"]
-        assert not {"enabled", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec"} & set(facts)
+        assert facts["not_read"] == ["enabled", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec",
+                                     "last_skip"]
+        assert not {"enabled", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec", "last_skip"} & set(facts)
         assert facts["source"] == str(root / "state" / "state.json") and facts["observed_at"]
         return facts["read_gap"]
 

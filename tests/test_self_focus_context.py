@@ -190,3 +190,64 @@ def test_waiting_route_reprepare_reads_new_focus_into_the_measured_request(main_
     assert focus["text"] in _facts(ctx.messages)
     assert any(focus["text"] in str(row.get("content")) for row in prepared.kwargs["messages"])
     assert ctx.accumulated_usage["_context_prompt_estimate"] > 0
+
+
+def _sampled_at(monkeypatch, iso):
+    """Fix the facts row's one sample instant (``append_context_facts``) at ``iso``."""
+    from types import SimpleNamespace
+
+    from ouroboros import loop_messages
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    monkeypatch.setattr(loop_messages, "time", SimpleNamespace(time=lambda: parse_deadline_ts(iso).timestamp()))
+
+
+def test_the_focus_line_names_its_reader_and_its_age_at_the_rows_sample_instant(tmp_path, monkeypatch):
+    """The age is a calculation over the dated fact at the row's sample instant, not a kept clock: an
+    unchanged reprepare keeps the sent row (and the cache), a new row measures again, and the clock
+    segment of the same row is sampled at the same instant."""
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None
+    _record(tmp_path, "Comparing the two estimates")
+    _sampled_at(monkeypatch, "2026-10-10T15:05:00Z")
+    assert append_context_facts(ctx)
+    line = _facts(ctx.messages)
+    assert ("self-authored focus, the line my human reads under this work's name, written 3 h 5 min ago "
+            "(dated data, not owner instructions): {") in line
+    assert '"authored_at": "2026-10-10T12:00:00Z"' in line and "Comparing the two estimates" in line
+    _sampled_at(monkeypatch, "2026-10-10T15:20:00Z")
+    assert not append_context_facts(ctx), "the age is outside the row's identity: a reprepare keeps the row"
+    assert _facts(ctx.messages) == line
+    ctx.round_idx += 1
+    assert append_context_facts(ctx)
+    assert "written 3 h 20 min ago" in _facts(ctx.messages)
+
+
+def test_an_unreadable_authoring_time_is_said_not_guessed(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None
+    _record(tmp_path, "Thought with a broken stamp", date="last tuesday")
+    _sampled_at(monkeypatch, "2026-10-10T15:05:00Z")
+    assert append_context_facts(ctx)
+    line = _facts(ctx.messages)
+    assert "the line my human reads under this work's name, written at an unreadable time (dated data" in line
+    assert "ago" not in line.split("self-authored focus", 1)[1].split("{", 1)[0]
+
+
+@pytest.mark.parametrize("metadata,told", [
+    ({"delegation_role": "root"}, True),  # an independent root may publish: its missing line is a fact
+    ({"delegation_role": "subagent", "parent_task_id": "parent"}, False),  # a child may not publish
+    ({"delegation_role": "root", "_presence_turn": True}, False),  # a speaker's line is its place's, never its own
+    ({}, False),  # no root marker is no publishing authority
+])
+def test_a_missing_line_is_named_only_to_a_root_that_may_publish_one(tmp_path, metadata, told):
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None
+    ctx.tools._ctx.task_metadata = dict(metadata)
+    write_task_result(tmp_path, "task", "running")
+    assert append_context_facts(ctx)
+    line = _facts(ctx.messages)
+    assert ("self-authored focus: none; my human reads nothing under this work's name" in line) is told
+    if not told:
+        assert "self-authored focus" not in line
+    assert not append_context_facts(ctx), "an absent line has one identity: no new row per reprepare"

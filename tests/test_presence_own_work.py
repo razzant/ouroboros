@@ -547,7 +547,7 @@ def test_an_unconfirmed_presence_promote_is_readable_as_pending_by_its_own_bindi
 
     out = _start_task(ctx, "Compile the figures", title="Figure compilation")
 
-    assert out.startswith("Accepted, waiting to start:")
+    assert out.startswith("Not confirmed yet:")
     task_id = emitted[0]["task_id"]
     stub = load_task_result(tmp_path, task_id)
     # Emitted, not scheduled: the supervisor alone grants that; the provenance is the event's own.
