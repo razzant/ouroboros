@@ -58,10 +58,7 @@ from ouroboros.tools.commit_gate import (
     commit_preflight_choice_error as _commit_preflight_choice_error,
     resolve_root_task_id,
 )
-from ouroboros.review_cycles import (
-    REASON_REVIEW_CYCLES_EXHAUSTED,
-    emit_review_cycles_exhausted,
-)
+from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, emit_review_cycles_exhausted
 from ouroboros.tools.review_revalidation import handle_revalidation_failure  # noqa: F401
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd  # noqa: F401
 from ouroboros.tools.parallel_review import (
@@ -127,13 +124,14 @@ def _free_cycle_gate(
     retry_key = _commit_review_retry_key(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
                                          binding_fingerprint=fp)
     ctx._current_review_retry_key = retry_key
-    peer = exact_open_peer(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal, fingerprint=fp)
-    if peer is not None:  # this call repeats its exact open attempt: rejoin it, under its own paid contract
+    from ouroboros.tools.review_collection import bind_commit_collection, recorded_round_choice
+    peer = recorded_round_choice(ctx, retry_key) or exact_open_peer(
+        ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal, fingerprint=fp)
+    if peer is not None:  # this call repeats its exact open attempt (or its round's recorded choice): rejoin it
         ctx._review_resume_pending, ctx._pending_review_attempt, pending = True, peer, peer
         ctx._current_review_attempt_number = int(peer.attempt or 0)
         ctx._current_review_contract_fingerprint = contract_fp = str(peer.review_contract_fingerprint or contract_fp)
         ctx._current_review_retry_key = retry_key = str(peer.review_retry_key)
-    from ouroboros.tools.review_collection import bind_commit_collection
     error, retry_key = bind_commit_collection(ctx, fp, retry_key)
     if error:
         return error
@@ -1143,7 +1141,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        scope: str = "", review_reference: Optional[dict] = None,
                        author_disposition: Optional[dict] = None, root: str = "",
                        preflight_reviewer: str = "", reviewers: Optional[List[str]] = None, reason: str = "",
-                       wake_on: Any = None, since_review: str = "") -> str:
+                       wake_on: Any = None, since_review: str = "", continue_seats: Optional[list] = None) -> str:
     """Stage, review, and commit files with unified pre-commit review."""
     from ouroboros import body_candidate  # lazy: the Git tools reach the candidate owner only when committing
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
@@ -1154,10 +1152,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     continuation = review_reference is not None or author_disposition is not None
     collecting_reference = review_reference is not None and author_disposition is None
     from ouroboros.tools.review_collection import collected_open_peer, prepare_commit_collection
-    if collecting_reference:
+    if collecting_reference or continue_seats is not None:
         try:
-            source = prepare_commit_collection(ctx, review_reference, commit_message=commit_message,
-                mutations=(review_rebuttal, goal, scope, reviewers, reason, preflight_reviewer, ctx._review_since))
+            source = prepare_commit_collection(ctx, review_reference, commit_message=commit_message, continue_seats=continue_seats,
+                mutations=(review_rebuttal, goal, scope, reviewers, reason, preflight_reviewer, ctx._review_since, author_disposition))
             commit_message = source.commit_message
         except ValueError as exc:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
@@ -1448,6 +1446,7 @@ def _run_git_network_cmd(cmd: List[str], cwd: pathlib.Path) -> str:
 
 
 def get_tools() -> List[ToolEntry]:
+    from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
     from ouroboros.review_doctrine import AUTHOR_DISPOSITION_SCHEMA
     from ouroboros.review_waiting import wake_on_schema
     reviewed_commit_contract = (  # one contract, two leads: the older name keeps it whole for callers that see only that name
@@ -1473,7 +1472,8 @@ def get_tools() -> List[ToolEntry]:
         "reason": {"type": "string", "default": "", "description": "Why these reviewers; required when an Advisory panel is narrowed. Missing reason refuses at $0 before staging."},
         "skip_advisory_review": {"type": "boolean", "default": False, "description": "Record that this commit deliberately goes without a preflight (preflight: skipped). The deterministic checks, the tests (see skip_tests) and the panel still run; the opposite of preflight_reviewer."},
         "goal": {"type": "string", "default": "", "description": "High-level goal of this change. Used by the panel's coupling questions to judge completeness."}, "scope": {"type": "string", "default": "", "description": "Declared scope boundary. Without a goal it is the intended transformation the panel's coupling questions judge the change against (completeness, forgotten adjacent surfaces)."},
-        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task returned, for the free explicit Advisory or Cyber Pro continuation."},
+        "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task returned. With author_disposition: the free explicit Advisory or Cyber Pro continuation. Without it: collect that paid gate under its ordinary checks before Git, sending nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
+        "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference and no author_disposition: " + CONTINUE_SEATS_SCHEMA["description"]},
         "author_disposition": AUTHOR_DISPOSITION_SCHEMA,
         "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS, finding or obligation carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},
     }

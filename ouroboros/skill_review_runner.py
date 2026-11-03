@@ -101,7 +101,7 @@ _UI_REVIEW_FIELDS = (
     "content_hash", "job_id", "record_id", "group_id", "review_round", "snapshot_attempt",
     "snapshot_revised", "task_id", "root_task_id", "origin_task_id",
     "origin_root_task_id", "presentation_owner_task_id", "chat_id", "source",
-    "terminal_reason", "started_at", "finished_at", "executions", "panel",
+    "terminal_reason", "started_at", "finished_at", "executions", "panel", "continuable_seats",
 )
 
 
@@ -250,8 +250,10 @@ def _review_provenance(ctx: Any, source: str, skill_name: str) -> Dict[str, Any]
 
 def _ledger_history_rows(drive_root: pathlib.Path, skill_name: str) -> list[Dict[str, Any]]:
     """This skill's review ledger records as the card's history rows, oldest first: the lifecycle facts the
-    record's brief kept (job, group, source), the gate's status of its verdict, its panel and executions."""
+    record's brief kept (job, group, source), the gate's status of its verdict, its panel and executions,
+    and a Skills-page record's stopped seats the page itself may continue (``continuable_seats``)."""
     from ouroboros import review_ledger as ledger
+    from ouroboros.review_continuation import continuable_seats
     from ouroboros.review_execution_projection import review_executions_from_actor_usage
     from ouroboros.tools.review_change import review_result
     from ouroboros.tools.review_skill import legacy_actor_records, outcome_status, skill_record_rows
@@ -278,6 +280,9 @@ def _ledger_history_rows(drive_root: pathlib.Path, skill_name: str) -> list[Dict
             "terminal_reason": reason, "started_at": str(record.get("ts") or ""), "finished_at": str(record.get("ts") or ""),
             "panel": dict(record.get("panel") or {}),
             "executions": review_executions_from_actor_usage(legacy_actor_records(result)),
+            # Only the page's own reviews (``gateway.extensions._ApiReviewCtx``): a task's are its own to continue.
+            **({"continuable_seats": offers} if record.get("task_id") == "api_skill_review"
+               and (offers := continuable_seats(record)) else {}),
         })
     return rows
 
@@ -830,7 +835,7 @@ def _outcome_payload(
         payload["dispatch_refusal_code"] = outcome.dispatch_refusal_code
     if getattr(outcome, "turn_on_when_ready", ""):
         payload["turn_on_when_ready"] = outcome.turn_on_when_ready
-    for key in ("record_id", "reused", "pending", "paid", "seats", "governance"):
+    for key in ("record_id", "reused", "pending", "paid", "seats", "governance", "continuable_seats"):
         value = getattr(outcome, key, None)
         if value:
             payload[key] = value

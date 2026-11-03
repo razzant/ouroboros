@@ -409,7 +409,8 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/skills/daemons": Shape("200:SkillDaemonsResponse 500:ErrorResponse"),
     "GET /api/skills/lifecycle-queue": Shape("200:SkillLifecycleQueueResponse"),
     "POST /api/skills/{skill}/review": Shape(
-        "200:SkillReviewResponse", note=f"the review runs inside the request (minutes); a duplicate is status pending; {_IN_LANE}"),
+        "200:SkillReviewResponse 400:ErrorResponse", "SkillReviewRequest",
+        note=f"the review runs inside the request (minutes); a duplicate is status pending; {_IN_LANE}"),
     "GET /api/skills/{skill}/review-history/{job_id}": Shape("200:SkillReviewHistoryDetailResponse 400,404,503:ErrorResponse"),
     "POST /api/skills/{skill}/grants": Shape(f"200:SkillGrantResponse {_SKILL_REFUSAL}", "SkillGrantRequest", note=_IN_LANE),
     "POST /api/skills/{skill}/reconcile": Shape("200:SkillReconcileResponse 400:ErrorResponse"),

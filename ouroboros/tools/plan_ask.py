@@ -64,7 +64,8 @@ log = logging.getLogger(__name__)
 _PARTICIPANT_FACT_KEYS = ("recovery_binding", "operation_id", "operation_state", "late_result_pending",
                           "awaiting_since", "pending_invocation_id", "delegated_run_id",
                           # B1 typed failure facts and the substrate's disclosures travel with the seat
-                          "failure_code", "reset_at", "http_status", "transport_status", "reported_cause", "capability_delta")
+                          "failure_code", "reset_at", "http_status", "transport_status", "reported_cause", "failure_details",
+                          "capability_delta")
 # Receipts the substrate produced for this seat (absent when it produced none): the applied
 # account, the engine's resolved model, the room-read coverage and the host's read attestation.
 _PARTICIPANT_RECEIPT_KEYS = ("resolved_model", "applied_profile", "profile_continuity_receipt", "auth_route_receipt",
@@ -699,6 +700,9 @@ def record_reply(ctx: Any, *, state_root: pathlib.Path, task_id: str, ask_id: st
     if ask is None or participant is None:
         return None
     facts = reply_facts_from_row(row)
+    if (participant.get("superseded_operation_ids")
+            and str(facts.get("operation_id") or "") != str(participant.get("operation_id") or "")):
+        return record  # a reopened seat takes only its successor's reply; a row naming no operation is not one
     if facts.get("status") == "pending" and participant.get("status") != "pending":
         return record  # a settled seat is never re-opened by a late pending echo
     if facts.get("status") == "pending" and all(participant.get(key) == value for key, value in facts.items()):
@@ -707,7 +711,8 @@ def record_reply(ctx: Any, *, state_root: pathlib.Path, task_id: str, ask_id: st
     if facts.get("status") != "pending" and ask.get("record_id"):
         reply_ref = settle_ledger_seat(state_root, task_id, str(ask["record_id"]), seat_id, facts, raw_text=str(row.get("text") or ""))
         if reply_ref:
-            record = plan_record.update_participant(state_root, task_id, ask_id=ask_id, seat_id=seat_id, facts={"reply_ref": reply_ref})
+            record = plan_record.update_participant(state_root, task_id, ask_id=ask_id, seat_id=seat_id, facts={
+                "reply_ref": reply_ref, **({"operation_id": facts["operation_id"]} if facts.get("operation_id") else {})})
             if participant.get("status") == "pending":  # it settles now
                 _keep_late_reply_in_view(state_root, task_id, ask, participant, facts, reply_ref)
     if ctx is not None:
@@ -737,7 +742,8 @@ def _keep_late_reply_in_view(state_root: pathlib.Path, task_id: str, ask: Mappin
     lines += [f"Prose: {' '.join(str(reply['prose']).split())}"] if str(reply.get("prose") or "").strip() else []
     lines += [f"- objection {o.get('id')}: {' '.join(str(o.get('text') or '').split())}" for o in reply.get("objections") or []]
     late_review_marks.publish_late_review(state_root, {
-        "surface": "plan_review", "task_id": task_id, "publication_id": f"plan-late:{ask.get('ask_id')}:{seat}",
+        "surface": "plan_review", "task_id": task_id, "publication_id": f"plan-late:{ask.get('ask_id')}:{seat}"
+        + (f":{facts['operation_id']}" if participant.get("superseded_operation_ids") else ""),
         "chat_id": ended.get("chat_id"), "lines": lines,
         "settled_at": str(facts.get("answered_at") or ""), "source_ref": {**source, "task_id": str(reply_ref.get("task_id") or task_id)},
         "subject": {"ask_id": str(ask.get("ask_id") or ""), "seat_id": seat, "plan_revision": ask.get("revision"),
@@ -814,8 +820,11 @@ def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: 
 
     delivered = False
     try:
+        # A completion after an explicit continuation is its own frame, never the earlier one's.
+        continued = sorted(str(p.get("operation_id") or "") for p in participants if p.get("superseded_operation_ids"))
         delivered = write_task_message(pathlib.Path(str(usage_ctx.drive_root)), plan_packet.settled_frame(ask_id, participants, objections, custody=settled_wave),
-                                       task_id, source_task_id=task_id, provenance="system", msg_id=f"plan-complete:{task_id}:{ask_id}")
+                                       task_id, source_task_id=task_id, provenance="system",
+                                       msg_id=f"plan-complete:{task_id}:{ask_id}" + "".join(f":{op}" for op in continued))
     except Exception:
         log.warning("plan ask %s settled-wave frame failed for %s", ask_id, task_id, exc_info=True)
     finally:
@@ -824,6 +833,99 @@ def settle_released_reply(usage_ctx: Any, *, request: Any, task_id: str, actor: 
                 plan_record.release_ask_completion(state_root, task_id, ask_id)
             except Exception:
                 log.warning("plan ask %s: undelivered completion claim could not be released", ask_id, exc_info=True)
+
+
+def continuation_offers(state_root: pathlib.Path, record: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Each ask's stopped session participants an explicit ``continue_seats`` may name (its ledger record's offer)."""
+    from ouroboros import review_ledger as ledger
+    from ouroboros.review_continuation import continuable_seats
+
+    offers = []
+    for ask in record.get("asks") or []:
+        if ask.get("record_id") and any(p.get("status") in ("failed", "not_dispatched") and p.get("route") == "agent_session"
+                                        for p in ask.get("participants") or []):
+            try:
+                offers += [{**offer, "ask_id": ask.get("ask_id")} for offer in continuable_seats(
+                    ledger.load_record(state_root, str(ask["record_id"])))]
+            except ValueError:
+                log.warning("plan ask %s: its ledger record is unreadable; no continuation offer", ask.get("ask_id"))
+    return offers
+
+
+def continue_participants(ctx: Any, record: Mapping[str, Any], selections: Any, *, state_root: pathlib.Path,
+                          task_id: str) -> Dict[str, Any]:
+    """Continue chosen stopped session participants of ONE earlier ask: the same ask, revision and seat.
+
+    The ask's ledger record holds the choice (``review_continuation.arm``), the participant reopens under the
+    successor operation, and this call sends the recorded body as a new turn of the participant's own thread
+    (``continueFrom`` never applies to a thread turn), released at the dispatch barrier: the reply settles
+    through the custody hook into the same ask. No ``prepare_ask``, no new ask id, no new paid wave."""
+    import time
+
+    from ouroboros import review_ledger as ledger
+    from ouroboros.delegate_custody import custody_root
+    from ouroboros.review_continuation import ContinuationRefused, Roster, arm, parse_selections
+
+    chosen, found = parse_selections(selections), {}
+    for ask in record.get("asks") or []:
+        for participant in ask.get("participants") or []:
+            ops = {str(participant.get("operation_id") or ""), *(str(op) for op in participant.get("superseded_operation_ids") or [])}
+            found.update({seat: (ask, participant) for seat, op in chosen if seat == participant.get("seat_id") and op in ops})
+    if len(found) != len(chosen) or len({str(ask.get("ask_id")) for ask, _ in found.values()}) != 1:
+        raise ContinuationRefused("unknown_seat", "each choice names a participant operation of one earlier ask",
+                                  continuation_offers(state_root, record))
+    ask = next(iter(found.values()))[0]
+    held = ledger.load_record(state_root, str(ask.get("record_id") or "")) if ask.get("record_id") else None
+    if not held:
+        raise ContinuationRefused("ledger_unavailable", f"ask {ask.get('ask_id')} has no review ledger record to hold the choice")
+
+    def carried(seat: str) -> Dict[str, Any]:
+        _now, participant = _ask_and_participant(plan_record.load_plan_record(state_root, task_id), str(ask.get("ask_id") or ""), seat)
+        return dict(participant or {})
+
+    def transition(seat: str, decision: Dict[str, Any], build: Any) -> Dict[str, Any]:
+        """The participant's compare-and-swap is ``plan_record.reopen_participant`` (the plan record's own lock)."""
+        built = build(carried(seat))
+        facts = {key: value for key, value in built.items()
+                 if key in ("operation_id", "operation_state", "pending_invocation_id", "late_result_pending", "recovery_binding",
+                            "superseded_operation_ids", "failure_code", "reported_cause", "not_dispatched_reason")}
+        facts["status"] = "not_dispatched" if built.get("operation_state") == "not_dispatched" else "pending"
+        record = plan_record.reopen_participant(state_root, task_id, ask_id=str(ask.get("ask_id") or ""), seat_id=seat,
+                                                supersedes=str(decision["supersedes"]), facts=facts)
+        return dict(_ask_and_participant(record, str(ask.get("ask_id") or ""), seat)[1] or {})
+
+    custody = custody_root(ctx)
+    rows = {seat: ("plan_review", {**participant, "slot_id": seat}) for seat, (_ask, participant) in found.items()}
+    outcome = arm(ctx, held, Roster(task_id=task_id, retry_key=str(ask.get("retry_key") or ""), rows=rows,
+                                    transition=transition, carried=carried), selections, drive=state_root, custody=custody)
+    from ouroboros.llm import LLMClient
+    from ouroboros.review_custody import _attempt_key
+    from ouroboros.review_operation import recorded_review_assignment
+    from ouroboros.review_substrate import run_review_request
+
+    decided = {str(row.get("seat_id") or ""): row for row in outcome["record"].get("rows") or []}
+    current = plan_record.load_plan_record(state_root, task_id)
+    for item in outcome["continued"]:  # an open successor is sent under its recorded token; UNKNOWN replays the same bytes
+        _ask, participant = _ask_and_participant(current, str(ask.get("ask_id") or ""), item["seat_id"])
+        if (participant or {}).get("status") != "pending" or participant.get("operation_id") != item["operation_id"]:
+            continue  # a rejoined successor that already settled is read, never sent again
+        request, slot = recorded_review_assignment(custody, task_id=task_id, surface="plan_review",
+                                                   row={"operation_id": item["operation_id"], "slot_id": item["seat_id"]},
+                                                   retry_key=str(ask.get("retry_key") or ""))
+        request = replace(request, reconcile_only=True, drain_deadline=time.monotonic())
+        decision = next(entry for entry in decided[item["seat_id"]]["continuations"]
+                        if entry["operation_id"] == item["operation_id"])
+        pending = getattr(ctx, "_review_pending_invocations", None)
+        if not isinstance(pending, dict):
+            pending = ctx._review_pending_invocations = {}
+        pending[_attempt_key(request, slot)] = {"pending_invocation_id": decision["invocation_id"],
+                                                "operation_id": decision["operation_id"]}
+        result = run_review_request(request, slots=[slot], drive_root=pathlib.Path(ctx.drive_root), llm=LLMClient(), usage_ctx=ctx)
+        for actor in result.actors:
+            record_reply(ctx, state_root=state_root, task_id=task_id, ask_id=str(ask.get("ask_id") or ""),
+                         seat_id=item["seat_id"], row=_actor_row(actor, slot))
+    return {"record": plan_record.load_plan_record(state_root, task_id), "continued": outcome["continued"],
+            "ask_id": ask.get("ask_id")}
 
 
 def collect_pending(ctx: Any, record: Mapping[str, Any], *, state_root: pathlib.Path, task_id: str) -> Dict[str, Any]:

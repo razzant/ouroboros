@@ -39,7 +39,7 @@
  * @property {Object=} health_observations
  * @property {boolean=} dispatch_live
  * @property {Object[]=} review_findings
- * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review
+ * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
  * @property {Object=} grants
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
@@ -85,6 +85,14 @@
 /**
  * @typedef {Object} SkillRevisionRequest
  * @property {string=} expected_content_hash
+ */
+
+/**
+ * No body (or `{}`) reviews the current bytes; both fields continue stopped seats of one earlier
+ * Skills-page review on its recorded bytes, each named as its history row's `continuable_seats` does.
+ * @typedef {Object} SkillReviewRequest
+ * @property {{record_id: string, content_hash: string}=} review_reference
+ * @property {Array<{seat_id: string, operation_id: string}>=} continue_seats
  */
 
 /**
@@ -239,6 +247,7 @@
  * @property {boolean=} paid
  * @property {Object[]=} seats
  * @property {Object=} governance
+ * @property {Object[]=} continuable_seats  // this review's stopped seats its own author may continue
  * @property {string=} job_id
  * @property {string=} job_status
  * @property {string=} group_id

@@ -409,12 +409,14 @@ def prune_review_checkouts(data_root: Any, live_task_ids: Any, *, views_since: O
         def retire(home: pathlib.Path, area: pathlib.Path) -> bool:
             """Under the seat lock: True keeps the copy (and the views it names)."""
             marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
-            task_id, operation = str(marker.get("task_id") or ""), str(marker.get("operation_id") or "")
+            # A copy handed to an explicit successor is that holder's: its receipt and capture decide.
+            task_id = str(marker.get("task_id") or "")
+            operation = str(marker.get("holder_operation_id") or marker.get("operation_id") or "")
             thread = str(marker.get("thread_seat") or "")
             thread_home = bool(thread) and seat_dir(data_root, task_id, f"thread:{thread}").resolve(
                 strict=False) == home
             over = _copy_runs_over(data_root, task_id, area, marker.get("created_at"))
-            if over is False or thread_home and task_id in live():
+            if over is False or (thread_home or marker.get("held_for_continuation")) and task_id in live():
                 report["kept"] += 1
                 return True
             receipt = _receipt(data_root, task_id, operation) if operation else {}
