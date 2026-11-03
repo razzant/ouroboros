@@ -98,12 +98,12 @@
     const owner = sheet.ownerNode && twin.get(sheet.ownerNode);
     if (!owner) continue;
     const style = document.createElement('style');
-    style.textContent = htmlSafeStyleText(await sheetText(sheet));
+    style.textContent = await sheetText(sheet);
     if (sheet.media && sheet.media.mediaText) style.setAttribute('media', sheet.media.mediaText);
     owner.replaceWith(style);
   }
   for (const sheet of document.adoptedStyleSheets || []) {
-    const style = document.createElement('style'); style.textContent = htmlSafeStyleText(await sheetText(sheet)); clone.querySelector('head')?.append(style);
+    const style = document.createElement('style'); style.textContent = await sheetText(sheet); clone.querySelector('head')?.append(style);
   }
   for (const img of clone.querySelectorAll('img[src]')) {
     const data = await dataUrl(new URL(img.getAttribute('src'), location.href).href);
@@ -117,6 +117,14 @@
       else if (a.name === 'style' && a.value.includes('url(')) el.setAttribute('style', await inlineUrls(a.value, location.href));
     }
   }
+  // Escape once at the serialization boundary, including cloned styles with no sheet and template contents.
+  const escapeStyles = (root) => {
+    for (const style of root.querySelectorAll('style')) {
+      if (style.namespaceURI === 'http://www.w3.org/1999/xhtml') style.textContent = htmlSafeStyleText(style.textContent);
+    }
+    for (const template of root.querySelectorAll('template')) if (template.content) escapeStyles(template.content);
+  };
+  escapeStyles(clone);
   const html = '<!doctype html>\n' + clone.outerHTML;
   return { html, missing: [...new Set(missing)] };
 })

@@ -439,7 +439,8 @@ def test_freeze_names_a_copied_var_shorthand_whether_or_not_its_text_is_current(
 @pytest.mark.parametrize("engine", ENGINES)
 def test_freeze_keeps_stylesheet_text_out_of_html(engine, tmp_path):
     """CSS text is not HTML: raw fallback tails and literal CSS strings must not become document nodes.
-    Exercise copied linked CSS, a dynamic style and an adopted sheet; the strings remain visible as CSS content."""
+    Exercise copied linked CSS, dynamic/adopted sheets, and cloned styles without sheets, including in a template;
+    the actual CSS strings remain visible as content."""
     site = tmp_path / "site"
     site.mkdir()
     literal = "</StYle><b id=injected-string>literal</b>"
@@ -464,6 +465,17 @@ def test_freeze_keeps_stylesheet_text_out_of_html(engine, tmp_path):
             const style = document.createElement('style');
             style.textContent = '.dynamic::before { content: ' + JSON.stringify(dynamic) + '; }';
             document.head.append(style);
+            const inactive = document.createElement('style');
+            inactive.type = 'text/plain';
+            inactive.textContent = '</style><b id="injected-inactive">inert</b><style type="text/plain">';
+            document.head.append(inactive);
+            const template = document.createElement('template');
+            template.id = 'kept-template';
+            const nested = document.createElement('style');
+            nested.textContent = '</style></template><b id="injected-template">inert</b><template><style>';
+            template.content.append(nested);
+            document.body.append(template);
+            if (inactive.sheet || nested.sheet) throw new Error('the control must have no stylesheet');
         }""", [adopted, dynamic])
         live.screenshot()
         expected = live.evaluate(content)
@@ -475,6 +487,7 @@ def test_freeze_keeps_stylesheet_text_out_of_html(engine, tmp_path):
         page = reopen_frame(instance, frozen, tmp_path / "frozen")
         assert page.locator('[id^="injected-"]').count() == 0, "stylesheet text introduced HTML after script removal"
         assert page.locator('script').count() == 0
+        assert page.locator('#kept-template').count() == 1
         assert page.evaluate(content) == expected, "escaping the HTML boundary must preserve CSS strings"
         assert page.locator('.target').evaluate("e => getComputedStyle(e).padding") == "6px 6px 6px 1px"
         assert_nothing_fetched(page)
