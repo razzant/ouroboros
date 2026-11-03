@@ -14,7 +14,9 @@ proof-bound installers (ARCHITECTURE §8 "Build scripts"):
   that already contains the tag (today's raw tag commit, or a re-rendered cask)
   gets a single-parent commit instead. ``main`` always fast-forwards, the
   immutable tag stays an ancestor the Stable resolver selects, and a release may
-  be tagged before or after any promotion. The step never writes ``ouroboros``.
+  be tagged before or after any promotion. The step never writes ``ouroboros``;
+  it refuses to run until that branch holds the tag and its download links under
+  a greater development marker (BIBLE P9), a reviewed commit this step never makes.
 
 Before writing it reads only public data: the tag's GitHub release, its
 ``SHA256SUMS``, ``release-evidence.json`` and macOS smoke receipt, and with
@@ -64,7 +66,7 @@ _UPDATE = runpy.run_path(str(ROOT / "supervisor" / "update_source.py"))
 
 REPOSITORY = "razzant/ouroboros"
 API = f"https://api.github.com/repos/{REPOSITORY}"
-STABLE, QA = "main", "ouroboros-stable"
+STABLE, QA, DEVELOPMENT = "main", "ouroboros-stable", "ouroboros"
 CASK_PATH = "Casks/ouroboros.rb"
 PROOF_ID = "macos-arm64"
 RECEIPT = f"release-smoke-{PROOF_ID}.json"
@@ -253,10 +255,11 @@ def release_facts(tag: str, commit: str, *, get: Callable[[str], bytes] = https_
 # --------------------------------------------------------------------------- official refs
 
 def fetch_official(remote: str, cwd: Path | None = None) -> dict[str, str]:
-    """Fresh main and ouroboros-stable, with release tags where the updater keeps them."""
-    _git("fetch", "--quiet", "--no-tags", remote, f"+refs/heads/{STABLE}:refs/remotes/{remote}/{STABLE}",
-         f"+refs/heads/{QA}:refs/remotes/{remote}/{QA}", f"+refs/tags/v*:{_TAGS}/v*", cwd=cwd)
-    return {name: _git("rev-parse", f"{remote}/{name}^{{commit}}", cwd=cwd) for name in (STABLE, QA)}
+    """Fresh main, ouroboros-stable and ouroboros, with release tags where the updater keeps them."""
+    _git("fetch", "--quiet", "--no-tags", remote, *(f"+refs/heads/{name}:refs/remotes/{remote}/{name}"
+                                                    for name in (STABLE, QA, DEVELOPMENT)),
+         f"+refs/tags/v*:{_TAGS}/v*", cwd=cwd)
+    return {name: _git("rev-parse", f"{remote}/{name}^{{commit}}", cwd=cwd) for name in (STABLE, QA, DEVELOPMENT)}
 
 
 def tag_commit(tag: str, cwd: Path | None = None) -> str:
@@ -320,6 +323,32 @@ def plan_promotion(tag: str, commit: str, cask: str, main: str, qa: str,
     return None if new_main is None and new_qa is None else {STABLE: new_main, QA: new_qa}
 
 
+def next_cycle_refusal(tag: str, commit: str, development: str, cwd: Path | None = None) -> str:
+    """Why Stable may not take *tag* yet (BIBLE P9): development must hold the release, its links and a greater marker.
+
+    Nothing later moves these: a marker keeps its links, and QA needs the tag on the next release's line."""
+    if not _is_ancestor(commit, development, cwd):
+        return (f"{DEVELOPMENT} {development[:10]} does not contain {tag}: merge the published release there, which "
+                "brings its history row and download links and lets the next release lead on from it")
+    problem = _SYNC["next_cycle_problem"](tag[1:], _git("show", f"{development}:VERSION", cwd=cwd))
+    if problem:
+        return f"open the next development cycle on {DEVELOPMENT} before {tag} reaches Stable: {problem}"
+    surfaces = ("README.md", "site/install/index.html", "docs/install/index.html")
+    present = set(_git("ls-tree", "-r", "--name-only", development, "--", *surfaces, cwd=cwd).splitlines())
+    texts = [_git("show", f"{development}:{path}", cwd=cwd) for path in surfaces if path in present]
+    if not any("[download-" in text or 'data-release-download="' in text for text in texts):
+        return ""  # a tree without the link projection has nothing to hold
+    named = _SYNC["published_download_version"](*texts)
+    if _PLAIN_TAG.fullmatch(f"v{named}") and _version_key(f"v{named}") >= _version_key(tag):
+        return ""
+    readme = _SYNC["published_download_version"](texts[0]) if "README.md" in present else ""
+    stale = next((v for v in (named, readme) if _PLAIN_TAG.fullmatch(f"v{v}")), "")
+    if stale and _version_key(f"v{stale}") < _version_key(tag):
+        return f"{DEVELOPMENT}'s download links still name {stale}: move them to the published {tag} first"
+    return (f"{DEVELOPMENT}'s download links do not all name one published plain release: "
+            f"move them to the published {tag} first")
+
+
 def push_promotion(plan: dict[str, str | None], remote: str, cwd: Path | None = None) -> None:
     refspecs = [f"{sha}:refs/heads/{branch}" for branch, sha in plan.items() if sha]
     # Atomic and never forced: a branch that moved since the plan rejects both.
@@ -350,6 +379,8 @@ def promote(tag: str, *, remote: str = "origin", cwd: Path | None = None, push: 
     if plan is None:
         print(f"{tag} is already Stable on {STABLE} and {QA}; nothing to push")
         return 0
+    refusal = next_cycle_refusal(tag, commit, refs[DEVELOPMENT], cwd)
+    _expect(not refusal, refusal)
     for branch, sha in plan.items():
         print(f"{branch}: {refs[branch][:10]} -> {sha[:10]}" if sha else f"{branch}: stays at {refs[branch][:10]}")
     if not push:

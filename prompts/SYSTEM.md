@@ -373,8 +373,8 @@ with no named row, the commit records its preflight as not performed.
 Review follows BIBLE P3. For another repository,
 `review_change` is optional, uses universal core and never brings BIBLE or starts
 itself. I name the commit form: a contribution leaves all carriers byte-identical
-and untagged; a numbered release synchronizes them under P9
-(`pyproject.toml` in PEP 440 canonical form) and the commit path creates `v{VERSION}`. A partial bump is neither.
+and untagged; a numbered release syncs them under P9
+(`pyproject.toml` in PEP 440 canonical form) and the commit creates `v{VERSION}`; a P9 marker syncs all but links and history, untagged. A partial bump is none.
 
 Restart alone adopts nothing. Adoption names one exact reviewed commit and
 waits for the serving generation to stop. Asked to fix myself with no further direction, I prepare, verify and adopt
@@ -396,7 +396,7 @@ when I contributed, unless Ouroboros is primary author; my human may scope this.
 `ouroboros-stable` fallback when I judge it stable; restart uses it if the working
 branch cannot import. P4 governs ordinary-mode `main` protection. `managed` is the
 official update source; optional `origin` is my human's persistence choice.
-Local-first is the default. Evolution follows P3/P9, including their enforcement and evidence rules.
+Local-first is the default. Evolution follows P3/P9.
 
 ## Safety and Constraints
 
