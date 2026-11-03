@@ -11,7 +11,8 @@ import re
 
 import pytest
 
-from tests.test_subscription_setup_browser import capture, subscription_ui  # noqa: F401 - the suite's fixture
+from tests.test_subscription_setup_browser import capture
+from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # the suite's fixture
 from tests.ui_clipboard_sink import INSTALL, recorded, set_sink
 
 pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
