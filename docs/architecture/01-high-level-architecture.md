@@ -204,6 +204,7 @@ ouroboros/ — agent core and shared runtime (§6)
   mcp_client.py — identity, token masking, `mcp_<server>__<tool>` names, launch admission, credential origin guard (§6 MCP)
   mcp_schema.py — literal-safe schema/metadata; mcp_catalog.py — published catalogs
   mcp_headers.py, mcp_import.py — header validation/masks/restoration; draft-only import preview (§6 MCP)
+  mcp_task_session.py, mcp_browser_guard.py — stdio session per live task loop; browser-policy callback (§6 MCP)
   safety.py — Safety Supervisor call (typed outcomes: §6 Safety Supervisor outcomes)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
   safety_records.py — verdict-neutral Safety usage and event bookkeeping
@@ -389,7 +390,7 @@ ouroboros/ — agent core and shared runtime (§6)
   tool_policy.py — Round-one tool visibility (the sets live in tool_capabilities.py)
   tool_effects.py, place_guard.py — per-tool effect facts (read · message · write) declared by connectors, and the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
-  browser_policy.py — The browser tool's target and control-request policy: task-granted concrete origins, metadata/private/reserved refusals, the three-valued `runtime_service_kind` (§6 MCP and browser-facing external tools)
+  browser_policy.py — every browser surface's target, script and control-request policy: granted origins, metadata/private/reserved refusals, three-valued `runtime_service_kind` (§6 MCP)
   skill_payload_binding.py — Skill payload targeting: `.seed-origin` distinguishes native from external; read/list/search only for read profiles
   utils.py — atomic/locked JSON, timestamps, hashes, sanitization, subprocess helpers, `truncate_review_artifact`
   jsonl_tail.py — `JsonlChainSnapshot` (captured byte reads of a file chain; the swarm rollup) and the bounded filtered tail over the rotated file logs
@@ -488,7 +489,7 @@ ouroboros/ — agent core and shared runtime (§6)
     registry_core.py, registry_guards.py, registry_guard_process.py, tool_context.py — registry load/schema/dispatch, the capability/resource/update/skill guards, process admission, `ToolContext`/`BrowserState` (protocol: contracts/tool_context.py) (§6 Safety and runtime mode)
     git.py, git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, vcs_read.py, git_review_cycle.py, git_managed_postcommit.py, git_evolution.py — Git/write tools with the deterministic, test and one-wave review commit gates and the author's optional preflight; its leaves: plumbing, repo write/edit, VCS inspection and rollback, the reviewed-commit cycle, managed-merge post-commit gates, evolution-campaign authority (§6 Git and commit review)
     search.py — `web_search`, one leg per Source/Model of `ouroboros/search_routes.py` (§6 Web access mechanisms)
-    browser.py — Playwright browser tools with per-ToolContext lifecycle and thread affinity (§6 MCP and browser-facing external tools)
+    browser.py — Playwright browser tools with per-ToolContext lifecycle and thread affinity (§6 MCP)
     imagegen.py — list_image_models/generate_image/recover_image; explicit routes, artifacts first, separate view/send (docs/IMAGE_GENERATION.md)
     vision.py — Vision LLM tools for browser screenshots and uploaded images
     vision_process.py — Tracked vision-child IPC: validated receipts, result recovery, parent-owned cancellation

@@ -14,9 +14,12 @@ const TRANSPORTS = [
     { value: 'sse', label: 'SSE (Server-Sent Events)' },
     { value: 'stdio', label: 'Local process (stdio)' },
 ];
+// task_session/browser_policy: set by Import and kept as saved, with no control of their own. A held stdio card
+// says what they do; off stdio they are unsupported fields that Save refuses until they are removed.
+const LIFETIME_FLAGS = ['task_session', 'browser_policy'];
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url',
     'command', 'args', 'auth_header', 'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings',
-    'schemas_at_start']);
+    'schemas_at_start', ...LIFETIME_FLAGS]);
 
 let mcpServers = [];
 let mcpStatusByServer = {};
@@ -126,6 +129,45 @@ function isPinned(server) {
     return [true, 'true', 'True'].includes(server.schemas_at_start);
 }
 
+/** A call-lifetime flag the loader applies (``normalize_server_config``'s reading); false or absent is off. */
+function lifetimeFlagOn(value) {
+    return value === true || (typeof value !== 'boolean'
+        && ['1', 'true', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase()));
+}
+
+/** Flags that are on while the transport is not stdio: the loader refuses such a server, so Save does too. */
+function remoteLifetimeFlags(server) {
+    return server.transport === 'stdio' ? [] : LIFETIME_FLAGS.filter((key) => lifetimeFlagOn(server[key]));
+}
+
+/**
+ * Why Save refuses this card, or ''. The loader (``normalize_server_config``) refuses a server whose known
+ * fields its transport does not use (a URL left from another transport included), not one with unknown fields,
+ * which it keeps with a warning; ``unsupportedFields`` already lists both, so only its known names refuse.
+ */
+function refusedFieldsMessage(server) {
+    const refused = unsupportedFields(server).filter((key) => SERVER_FIELDS.has(key));
+    if (!refused.length) return '';
+    const flags = refused.filter((key) => LIFETIME_FLAGS.includes(key));
+    const fields = refused.filter((key) => !LIFETIME_FLAGS.includes(key));
+    const label = (TRANSPORTS.find((item) => item.value === server.transport) || TRANSPORTS[0]).label;
+    return [
+        fields.length ? `${fields.join(', ')} ${fields.length > 1 ? 'are' : 'is'} not used by ${label} servers, `
+            + `so the server would not load with ${fields.length > 1 ? 'them' : 'it'}.` : '',
+        flags.length ? `${flags.join(' and ')} ${flags.length > 1 ? 'apply' : 'applies'} only to Local process `
+            + '(stdio) servers.' : '',
+        'Choose a transport that uses these fields, or use Remove unsupported fields.',
+    ].filter(Boolean).join(' ');
+}
+
+/** The read-only line of a held stdio server: what its Import-set flags do (no control of their own). */
+function lifetimeNote(server) {
+    if (server.transport !== 'stdio' || !lifetimeFlagOn(server.task_session)) return '';
+    return 'task_session: a task’s calls share one running server process until its tool loop ends.'
+        + (lifetimeFlagOn(server.browser_policy)
+            ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests.' : '');
+}
+
 /** What this server costs the request: its part of the connections map, and its call schemas. */
 function weightLabel(server) {
     const status = mcpStatusByServer[String(server.id ?? '')] || null;
@@ -147,7 +189,7 @@ function unsupportedFields(server) {
     if (server.transport === 'stdio' && draft.auth_header && draft.auth_header !== 'Authorization') {
         fields.push('auth_header');
     }
-    return fields;
+    return [...fields, ...remoteLifetimeFlags(server)];
 }
 
 /** The saved-status parts of a card: its badge and its discovered tools' list items. */
@@ -235,6 +277,7 @@ function renderServerCard(server, index) {
     const message = cardMessages.get(server);
     const pending = pendingActions.get(server) || new Set();
     const notice = endpointNotice(server);
+    const lifetime = lifetimeNote(server);
 
     return `
         <article class="mcp-server-card" data-mcp-card data-mcp-index="${index}">
@@ -314,6 +357,7 @@ function renderServerCard(server, index) {
                     <input type="text" class="ui-control" id="mcp-${index}-allowed_tools" aria-label="MCP server ${index + 1}: Allowed tools (optional, comma-separated)" data-mcp-field="allowed_tools" value="${escapeHtml(allowedTools)}" placeholder="search, read_repo" autocomplete="off" spellcheck="false">
                 </div>
             </div>
+            ${lifetime ? `<div class="form-row"><span class="muted" data-mcp-lifetime>${escapeHtml(lifetime)}</span></div>` : ''}
             <div class="settings-inline-status mcp-server-message" data-mcp-message ${message ? `data-tone="${escapeHtml(message.tone)}"` : 'hidden'}>${escapeHtml(message?.text || '')}</div>
             ${unsupported.length ? `<div class="form-row"><span class="muted">Fields retained but not applied: ${escapeHtml(unsupported.join(', '))}</span>
                 <button type="button" class="btn btn-default" data-mcp-clear-unsupported>Remove unsupported fields</button></div>` : ''}
@@ -647,6 +691,8 @@ export function validateMcpSettings() {
     document.querySelectorAll('[data-mcp-card]').forEach((card) => {
         const server = mcpServers[Number(card.dataset.mcpIndex)];
         if (server) errors.push(...validateHeaderFields(card, server, savedMcpSecrets.get(server)?.identity));
+        const refused = server ? refusedFieldsMessage(server) : '';
+        if (refused) errors.push({ input: card.querySelector('[data-mcp-field="transport"]'), message: refused });
     });
     document.querySelectorAll('[data-mcp-field="env"], [data-mcp-field="env_from_settings"]').forEach((input) => {
         let value, parsed = false;

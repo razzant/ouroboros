@@ -618,6 +618,8 @@
  * @property {*=} env_from_settings
  * @property {string[]=} configuration_warnings
  * @property {boolean=} schemas_at_start
+ * @property {boolean=} task_session
+ * @property {boolean=} browser_policy
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens

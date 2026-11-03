@@ -8,6 +8,7 @@ class names, key API endpoints, secret masking, etc.).
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import shutil
@@ -164,6 +165,134 @@ assert.equal(collectMcpSettings().MCP_SERVERS[0].args, 'unsupported');
     result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
                             capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+def test_mcp_ui_keeps_call_lifetime_flags_as_applied_fields():
+    """``task_session``/``browser_policy`` round-trip through the real projection and are not 'retained but not applied'."""
+    node = _node_bin()
+    if not node:
+        pytest.skip("Node is unavailable")
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings } from './web/modules/mcp_settings.js';
+const host = { innerHTML: '', querySelectorAll: () => [] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null };
+globalThis.fetch = async () => ({ ok: false });
+const server = { id: 'chrome', transport: 'stdio', command: 'node', args: ['server.mjs'], enabled: true,
+    task_session: true, browser_policy: true };
+applyMcpSettings({ MCP_ENABLED: true, MCP_SERVERS: [server, { ...server, id: 'plain', task_session: false,
+    browser_policy: false }] });
+const saved = collectMcpSettings().MCP_SERVERS;
+assert.deepEqual(saved.map((row) => [row.task_session, row.browser_policy]), [[true, true], [false, false]]);
+assert.ok(!host.innerHTML.includes('Fields retained but not applied'), host.innerHTML);
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mcp_ui_will_not_save_held_flags_on_a_remote_transport_until_they_are_removed():
+    """Transport select → card notice → Save validation → Remove, through the real card handlers.
+
+    Import cannot reach this draft (it changes no transport and refuses the flags off stdio:
+    tests/test_mcp_import.py); false/false on a remote server stays equivalent to omission.
+    The rendered run that switched back to stdio with its URL still typed (Save then wrote a
+    row the loader refused, and its tools disappeared) is replayed last: each payload the real
+    writer would send goes to the real loader, and Save refuses exactly the ones it drops."""
+    script = r'''
+import assert from 'node:assert/strict';
+import { applyMcpSettings, collectMcpSettings, validateMcpSettings } from './web/modules/mcp_settings.js';
+const handlers = {};
+const field = (name, value) => ({ id: `mcp-0-${name}`, dataset: { mcpField: name }, value, checked: false,
+    addEventListener: (type, fn) => { handlers[`${name}:${type}`] = fn; } });
+const transport = field('transport', 'stdio'), url = field('url', '');
+const clear = { addEventListener: (type, fn) => { handlers['clear:' + type] = fn; } };
+const card = { dataset: { mcpIndex: '0' }, querySelectorAll: (s) => s === '[data-mcp-field]' ? [transport, url] : [],
+    querySelector: (s) => s === '[data-mcp-clear-unsupported]' ? clear : s === '[data-mcp-field="transport"]' ? transport : null };
+const host = { innerHTML: '', querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
+globalThis.document = { getElementById: (id) => id === 'mcp-servers-list' ? host : null,
+    querySelector: () => card, querySelectorAll: (s) => s === '[data-mcp-card]' ? [card] : [] };
+globalThis.fetch = async () => ({ ok: false });
+const HELD = { id: 'held', enabled: true, transport: 'stdio', command: 'node', args: ['server.mjs'],
+    task_session: true, browser_policy: true };
+const notice = () => (host.innerHTML.match(/Fields retained but not applied: ([^<]*)</) || [])[1] || '';
+applyMcpSettings({ MCP_SERVERS: [HELD] });
+assert.equal(notice(), '');
+assert.equal(validateMcpSettings().length, 0);
+transport.value = 'streamable_http'; handlers['transport:input']();
+assert.match(notice(), /task_session, browser_policy/);
+let errors = validateMcpSettings();
+assert.equal(errors.length, 1);
+assert.equal(errors[0].input, transport);
+assert.match(errors[0].message, /task_session and browser_policy apply only to/);
+transport.value = 'stdio'; handlers['transport:input']();  // a display or a passing switch clears nothing
+assert.deepEqual([collectMcpSettings().MCP_SERVERS[0].task_session, collectMcpSettings().MCP_SERVERS[0].browser_policy], [true, true]);
+assert.equal(validateMcpSettings().length, 0);
+transport.value = 'sse'; handlers['transport:input']();
+url.value = 'https://example.test/mcp'; handlers['url:input']();
+assert.equal(validateMcpSettings().length, 1);
+handlers['clear:click']();
+const row = collectMcpSettings().MCP_SERVERS[0];
+assert.ok(!Object.hasOwn(row, 'task_session') && !Object.hasOwn(row, 'browser_policy'), JSON.stringify(row));
+assert.equal(row.transport, 'sse');
+assert.equal(validateMcpSettings().length, 0);
+assert.equal(notice(), '');
+assert.ok(!host.innerHTML.includes('data-mcp-lifetime'));
+applyMcpSettings({ MCP_SERVERS: [HELD, { ...HELD, id: 'policy-off', browser_policy: false }] });
+assert.equal((host.innerHTML.match(/data-mcp-lifetime/g) || []).length, 2);  // a held stdio card says what it does
+assert.equal((host.innerHTML.match(/browser_policy:/g) || []).length, 1);
+for (const off of [false, 'false', '', 0, null]) {  // false/false on a remote server equals omission
+    applyMcpSettings({ MCP_SERVERS: [{ id: 'remote', enabled: true, transport: 'streamable_http',
+        url: 'https://example.test/mcp', task_session: off, browser_policy: off }] });
+    assert.equal(notice(), '', String(off));
+    assert.equal(validateMcpSettings().length, 0, String(off));
+    assert.equal(collectMcpSettings().MCP_SERVERS[0].task_session, off);
+}
+applyMcpSettings({ MCP_SERVERS: [{ id: 'remote', transport: 'sse', url: 'https://example.test/mcp', task_session: 'true' }] });
+assert.match(notice(), /task_session/);  // the loader reads 'true' as on
+assert.equal(validateMcpSettings().length, 1);
+const snaps = [];
+const snap = (label) => snaps.push({ label, refused: validateMcpSettings().map((error) => error.message),
+    server: collectMcpSettings().MCP_SERVERS[0] });
+applyMcpSettings({ MCP_SERVERS: [HELD] });  // the rendered run: stdio → HTTP with a URL, refused, back to stdio
+transport.value = 'streamable_http'; handlers['transport:input']();
+url.value = 'http://127.0.0.1:9/mcp'; handlers['url:input']();
+snap('http-with-held-flags');
+transport.value = 'stdio'; handlers['transport:input']();
+assert.equal(notice(), 'url');
+errors = validateMcpSettings();
+assert.equal(errors.length, 1);
+assert.equal(errors[0].input, transport);
+assert.match(errors[0].message, /^url is not used by Local process \(stdio\) servers, so the server would not load with it\. /);
+assert.equal(collectMcpSettings().MCP_SERVERS[0].url, 'http://127.0.0.1:9/mcp');  // refused, never dropped
+snap('back-on-stdio-with-url');
+handlers['clear:click']();  // only the URL goes: on stdio the held flags are applied fields
+const kept = collectMcpSettings().MCP_SERVERS[0];
+assert.deepEqual([kept.transport, kept.url, kept.task_session, kept.browser_policy], ['stdio', '', true, true]);
+assert.equal(validateMcpSettings().length, 0);
+snap('back-on-stdio-url-removed');
+applyMcpSettings({ MCP_SERVERS: [{ ...HELD, future_field: { retained: true } }] });
+assert.equal(notice(), 'future_field');  // shown as before; the loader keeps it with a warning
+assert.equal(validateMcpSettings().length, 0);
+snap('unknown-field-kept');
+console.log(JSON.stringify(snaps));
+'''
+    result = subprocess.run([_node_bin(), "--input-type=module", "-e", script], cwd=REPO_ROOT,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    from ouroboros import mcp_client
+
+    loaded = {}
+    for snap in json.loads(result.stdout.strip().splitlines()[-1]):  # what the real writer would send, as loaded
+        errors = []
+        loaded[snap["label"]] = (mcp_client.normalize_server_config(snap["server"], errors=errors), errors)
+        assert (loaded[snap["label"]][0] is None) == bool(snap["refused"]), (snap, errors)  # Save refuses the drops
+    assert list(loaded) == ["http-with-held-flags", "back-on-stdio-with-url", "back-on-stdio-url-removed",
+                            "unknown-field-kept"]
+    assert loaded["back-on-stdio-with-url"][1] == ["MCP_CONFIG_ERROR: fields unsupported by this transport: url"]
+    removed = loaded["back-on-stdio-url-removed"][0]
+    assert (removed.transport, removed.task_session, removed.browser_policy) == ("stdio", True, True)
+    assert loaded["unknown-field-kept"][0].configuration_warnings  # kept with the loader's warning, never refused
 
 
 def test_mcp_test_button_preserves_saved_url_only_credentials():

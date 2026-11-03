@@ -237,8 +237,11 @@ def presence_review_wait(binding: ReviewWaitBinding, ctx: Any, checkpoint: dict,
     if checkpoint.get("reason") == REASON_OWNER_PAUSE_WARM:
         # A moved author's warm park under the owner's Pause while critics it started still run (#2566): its own
         # tools, processes and services settle first (Stop ends this wait), then it lends the conversation.
+        from ouroboros.mcp_task_session import close_context_sessions
         from ouroboros.presence_carrier import _HOLD_POLL_SEC  # the cold park's cadence, and its scope memory
 
+        # Its task-session MCP servers carry its task scope: they end here, not with the loop; Resume starts anew.
+        close_context_sessions(ctx, reason="its author parked under the owner's Pause", retire=False)
         stop, found = _hard_stop_check(ctx), {}
         while _custody_blockers(binding.drive_root, binding.task_id, scope=True, found=found) and not stop():
             time.sleep(_HOLD_POLL_SEC)

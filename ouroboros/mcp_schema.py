@@ -154,6 +154,29 @@ def _redact_error_text(text: Any, cfg: Any = None) -> str:
     return out
 
 
+def _stderr_diagnostic(stderr: Any, cfg: Any, limit: int) -> str:
+    """A stdio server's stderr file as one log record, redacted like every server text.
+
+    A task session keeps one such file for its whole task loop, so it is never read whole: past ``limit``
+    bytes the record names the file's size and keeps its last whole lines. That window is redacted before
+    it is cut and starts one longest masked echo early (12 bytes per character bounds a JSON escape), so
+    only an echo begun before it can be partial, and that one lies in the part the cut drops."""
+    import os
+
+    with open(stderr.fileno(), "rb", closefd=False) as raw:
+        size = raw.seek(0, os.SEEK_END)
+        reach = 0 if size <= limit else 12 * max(map(len, filter(None, (*cfg.secret_values, cfg.auth_token))),
+                                                 default=0)
+        start = max(0, size - limit - reach)
+        raw.seek(start)
+        text = _redact_error_text(raw.read().decode("utf-8", errors="replace"), cfg)
+    if size <= limit:
+        return text
+    cut = text.find("\n", size - limit - start)
+    return f"[{size} bytes of stderr; only its last whole lines, within {limit} bytes, follow]\n" + (
+        text[cut + 1:] if cut >= 0 else "")
+
+
 def _exception_text(exc: BaseException, cfg: Any = None) -> str:
     """``Type: message`` of a failure, each group member in brackets and the explicit cause or an
     unsuppressed context in parentheses, all described alike and masked as one text.

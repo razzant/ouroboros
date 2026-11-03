@@ -56,7 +56,7 @@ from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import attach_task_contract
 from ouroboros.outcomes import infra_failed_axes
-from ouroboros import body_candidate, route_choice, subagent_bootstrap, subagent_runtime
+from ouroboros import body_candidate, mcp_task_session, route_choice, subagent_bootstrap, subagent_runtime
 from ouroboros.subagents import (
     SubagentDispatch,
     effort_result_fields,
@@ -1369,6 +1369,7 @@ class OuroborosAgent:
                 cleanup_browser(self.tools._ctx)
             except Exception:
                 log.debug("Failed to cleanup browser", exc_info=True)
+            mcp_task_session.close_context_sessions(self.tools._ctx, reason="its task turn ended")  # never raises
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_type = None

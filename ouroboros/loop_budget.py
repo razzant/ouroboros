@@ -694,6 +694,10 @@ def _cleanup_loop_resources(
             stateful_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             log.warning("Failed to shutdown stateful executor", exc_info=True)
+    # Task-session MCP servers end with their loop on every exit, a cold pause included (the
+    # early return below); a warm owner wait never leaves the loop. Never raises.
+    from ouroboros.mcp_task_session import close_context_sessions
+    close_context_sessions(ctx.tools._ctx)
     _loop()._finalize_task_services(ctx)
     # The full DeliveryCandidate is loop-local: only its compact
     # hash/revision projection remains in llm_trace after this cleanup. Clear
