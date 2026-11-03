@@ -6,7 +6,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    fillFindingsOnOpen, installedSkillModel, installedWhoHtml, isMadeHere, renderInstalledSkillCard, reviewSentence,
+    continuableReview, fillFindingsOnOpen, installedSkillModel, installedWhoHtml, isMadeHere, renderInstalledSkillCard,
+    reviewSentence,
 } from '../modules/skill_card_renderer.js';
 
 const LISTING = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/extensions_v4.json', import.meta.url), 'utf8'));
@@ -332,5 +333,26 @@ test('skill titles prefer the optional title, then connector label, then canonic
         assert.ok(html.includes(`<span data-i18n-authored>${expected}</span>`));
         assert.match(html, /data-skill="demo"/);
         assert.match(html, /skills-detail-label">ID<\/span><span class="skills-detail-value"><code data-i18n-authored>demo<\/code><\/span>/);
+    }
+});
+
+test('a stopped Skills-page reviewer of these bytes is continued by its own action beside a new review', () => {
+    // The real projection after a stopped seat (gateway /api/extensions): the job failed without a verdict
+    // and its record's card row offers the seat (skill_review_runner._ledger_history_rows).
+    const offer = { seat_id: 'review-s', operation_id: 'op-1', run_id: 'run-1', cause: 'Account limit reached' };
+    const stopped = (rows) => skill({ review_status: 'pending', review_gate: { executable_review: false }, executable_review: false,
+        content_hash: 'h1', skill_review: { current: { lifecycle_status: 'failed', content_hash: 'h1', record_id: 'rl-1',
+            terminal_reason: 'no verdict was formed' }, history: rows } });
+    const row = { record_id: 'rl-1', content_hash: 'h1', task_id: 'api_skill_review', continuable_seats: [offer] };
+    const html = traysOf(renderInstalledSkillCard(stopped([row])));
+    assert.match(html, /The review didn’t finish: no verdict was formed/);
+    assert.match(html, /A reviewer stopped with work it can continue from where it stopped\./);
+    const actions = [...html.matchAll(/<button[^>]*data-skill-action="([^"]+)"[^>]*>([^<]+)</g)].map((m) => [m[1], m[2]]);
+    assert.deepEqual(actions.slice(0, 2), [['continue_review', 'Continue review'], ['review', 'Try again']]);
+    assert.deepEqual(continuableReview(stopped([row])), row);
+    // Other bytes, nothing offered, or no record: a new review is the only move.
+    for (const other of [{ ...row, content_hash: 'h0' }, { ...row, continuable_seats: [] }, { ...row, record_id: '' }]) {
+        assert.equal(continuableReview(stopped([other])), null);
+        assert.doesNotMatch(renderInstalledSkillCard(stopped([other])), /continue_review/);
     }
 });

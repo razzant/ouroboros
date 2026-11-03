@@ -153,10 +153,17 @@ def settle_ledger_seat(state_root: pathlib.Path, task_id: str, record_id: str, s
         for seat in rows:
             if str(seat.get("seat_id") or "") != seat_id:
                 continue
+            if seat.get("superseded_operation_ids") and str(facts.get("operation_id") or "") != seat.get("operation_id"):
+                raise ledger.RecordUnchanged()  # a seat an explicit continuation reopened takes only its successor's facts
             status = {"answered": "responded", "unparseable": "responded", "failed": "error", "pending": "pending",
                       "not_dispatched": "not_dispatched"}.get(str(facts.get("status") or "pending"), "pending")
             seat.update(status=status, operation_state=str(facts.get("operation_state") or seat.get("operation_state") or ""),
                         usd=facts.get("cost", seat.get("usd")))
+            # The operation, its typed stop facts and its run: what an explicit continuation is offered from.
+            seat.update({key: facts[key] for key in ("operation_id", "failure_code", "reported_cause", "failure_details")
+                         if facts.get(key)})
+            if facts.get("delegated_run_id"):
+                seat["usage_ref"] = {"delegated_run_id": str(facts["delegated_run_id"])}
             seat.update(review_cost_facts(seat.get("usd"), route=seat["requested"]["route"], model=seat["requested"]["model"]))
             session = str(seat.get("requested", {}).get("route") or "") == "agent_session"
             observed = (str(facts.get("resolved_model") or "") if session else str(facts.get("model") or "")) if status in ("responded", "error") else ""
@@ -183,8 +190,7 @@ def settle_ledger_seat(state_root: pathlib.Path, task_id: str, record_id: str, s
         payload["verdict"] = {**dict(payload.get("verdict") or {}), **_intention_verdict(rows)}
         payload["state"] = ledger.STATE_PENDING if ledger.counted_pending(rows) else ledger.STATE_SETTLED
         payload["panel"]["not_reached"] = ledger.panel_not_reached(rows)
-        known = [float(r["usd"]) for r in rows if isinstance(r.get("usd"), (int, float))]
-        payload["cost"] = {"usd": round(sum(known), 6), "unknown": len(known) < len(rows)}
+        payload["cost"] = ledger.record_cost(rows)
         return payload
 
     try:

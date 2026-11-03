@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict
-from typing import Any
+from typing import Any, List, Mapping
 
 from ouroboros.triad_review import (
     default_output_contract, parse_review_findings, parse_seat_answer, request_output_shape,
@@ -102,7 +102,8 @@ def finalize_seat_outcome(request: Any, slot: Any, actor: Any) -> dict:
         "additional": bool(policy.get("additional")),
         "source_ref": {"task_id": request.task_id or "review", "call_id": f"{actor.operation_id}_{suffix}"},
         "usage_ref": {"ledger_attempt_ids": list(usage.get("ledger_attempt_ids") or []),
-                      "delegated_run_id": str(usage.get("delegated_run_id") or "")},
+                      "delegated_run_id": str(usage.get("delegated_run_id") or ""),
+                      **({"continuity": usage["review_continuity"]} if usage.get("review_continuity") else {})},
     }
     return actor.outcome
 
@@ -159,8 +160,24 @@ def aggregate_outcomes(request: Any, slots: list, actors: list) -> dict:
             "degraded_reasons": reasons, "single_reviewer_no_diversity": len(slots) == 1}
 
 
-def retain_collected_outcome(root, request, slot, actor, *, transcript=""):
-    """Cold observation uses the saved contract and the same durable producer receipt."""
+def outcome_identity(record: Mapping[str, Any]) -> List[str]:
+    """Each settled seat's outcome, advisers included: the per-operation ``outcome_id`` plus that outcome's own
+    terminal status. An explicit continuation (a new operation) or a late answer under the same operation
+    changes it; cost, tests, wait cursors and author decisions that raise the record's revision never do."""
+    from ouroboros.review_ledger import seat_open
+
+    identity = []
+    for row in record.get("rows") or []:
+        if isinstance(row, dict) and not seat_open(row):
+            outcome = row.get("outcome") or {}
+            key = outcome.get("outcome_id") or row.get("outcome_id") or f"{row.get('operation_id') or ''}:{row.get('seat_id') or ''}"
+            identity.append(f"{key}:{outcome.get('status') or row.get('status') or ''}")
+    return sorted(identity)
+
+
+def retain_collected_outcome(root, request, slot, actor, *, transcript="", transcript_gap=""):
+    """Cold observation uses the saved contract and the same durable producer receipt (an unreadable
+    output's named ``session_transcript_gap`` included)."""
     from ouroboros.observability import persist_call
     from ouroboros.triad_review import emit_review_run_errors
 
@@ -171,7 +188,8 @@ def retain_collected_outcome(root, request, slot, actor, *, transcript=""):
         actor.response_ref = persist_call(
             root, task_id=request.task_id or "review", call_id=f"{actor.operation_id}_{suffix}",
             call_type=f"{request.surface}_review_collected",
-            payload={"message": {"content": actor.raw_text, "session_transcript": transcript}, "usage": actor.usage,
+            payload={"message": {"content": actor.raw_text, "session_transcript": transcript,
+                                 **({"session_transcript_gap": transcript_gap} if transcript_gap else {})}, "usage": actor.usage,
                      "error": actor.error, "producer_outcome": {k: v for k, v in asdict(actor).items()
                          if k not in {"raw_text", "usage", "prompt_ref", "response_ref"}}},
             manifest={"surface": request.surface, "slot_id": slot.slot_id, "collection": "attach_only_observation",

@@ -451,6 +451,8 @@ def settle_collected_attempt(root, attempt, seats, record):
                     continue
                 if old.get("operation_id") and incoming.get("operation_id") not in (None, "", old["operation_id"]):
                     continue
+                if old.get("superseded_operation_ids") and incoming.get("operation_id") != old.get("operation_id"):
+                    continue  # a seat reopened by an explicit continuation takes only its successor's outcome
                 rows[key] = {**old, **incoming}
             state.attempts[index] = replace(current, triad_raw_results=list(rows.values()),
                 late_result_pending=any(_row_is_pending(row) for row in rows.values()),

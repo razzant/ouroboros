@@ -896,6 +896,12 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
         active_attempts = [item for item in active_attempts if
             (item.repo_key, item.tool_name, item.task_id) !=
             (source.repo_key, source.tool_name, source.task_id)]
+    elif getattr(ctx, "_collect_commit_source", None) is None:
+        from ouroboros.tools.review_collection import decided_round_attempts
+
+        # A round whose recorded continuation a crash left unprojected is this task's open work too: the staged
+        # bytes decide whether this call rejoins it (``recorded_round_choice``), so no new attempt row opens first.
+        ctx._review_open_peers = decided_round_attempts(ctx, repo_key)
     if not active_attempts:
         return None
     task_id = str(getattr(ctx, "task_id", "") or "")
@@ -904,8 +910,8 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
         # Their reviewers keep custody over retained frozen checkouts, so restaging the live
         # index changes nothing they read: this call stages its own candidate and either
         # rejoins its exact-identity attempt or gets its own panel (``exact_open_peer``).
-        ctx._review_open_peers = [item for item in active_attempts if item.task_id == task_id
-                                  and item.tool_name == tool_name and item.review_retry_key]
+        ctx._review_open_peers = [*ctx._review_open_peers, *(item for item in active_attempts if item.task_id == task_id
+                                  and item.tool_name == tool_name and item.review_retry_key)]
         return None
     # The caller's own exact open attempt is rejoined in every mode before any
     # free-cycle or Cyber continuation: one request never buys a second wave.
@@ -1188,9 +1194,16 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
                     "work continues separately; a [Review settled] notice follows the whole wave. " + note)
     if not pending:
         git_mod._unstage_candidate(ctx)
+    from ouroboros.review_continuation import offers_for
+
+    offers = offers_for(ctx, reference.get("review_record_id"))
+    if offers:  # a stopped session seat continues only by the author's explicit choice, in the same wave
+        choice += ("A reviewer in continuable_seats stopped with work its engine can continue: the same commit tool with "
+                   "review_reference and continue_seats (no author_disposition) continues it on these staged bytes. ")
     text = ("Review outcome returned before commit" + (": reviewers are still running. " if pending else ". ") + note + choice +
             "Current files are preserved; no commit, tag or push occurred.\n" + json.dumps({"review_reference": reference,
-            "review_outcome": asdict(row) if row is not None else {}}, ensure_ascii=False, default=str))
+            "review_outcome": asdict(row) if row is not None else {}, **({"continuable_seats": offers} if offers else {})},
+            ensure_ascii=False, default=str))
     return {"status": "reviewed", "message": text, "review_reference": reference,
             "pre_fingerprint": before, "post_fingerprint": after}
 
@@ -1448,6 +1461,9 @@ def name_review_record(ctx: ToolContext, result: Any) -> Any:
     lines = doctrine_result_lines(getattr(ctx, "_author_commit_record", None))
     if lines:
         suffix += "\n" + "\n".join(lines)
+    if not getattr(ctx, "last_reviewed_commit_sha", ""):  # nothing landed: a stopped seat may still be chosen
+        from ouroboros.tools.review_collection import commit_offer
+        suffix += commit_offer(ctx, record_id)
     return append_published_text(ctx, result, suffix)
 
 
