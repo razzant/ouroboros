@@ -152,7 +152,12 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     old = _git(serving, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
     branch = _git(serving, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
     if not branch:
-        raise AdoptionRefused("ADOPTION_DETACHED", "the serving checkout has a detached HEAD; adoption moves a branch.")
+        raise AdoptionRefused(
+            "ADOPTION_DETACHED",
+            "the serving checkout has a detached HEAD; adoption moves a branch. Startup "
+            "attaches one only at a clean HEAD on a remote release line; otherwise run "
+            "`git checkout -B ouroboros` (or the configured dev branch name) at the HEAD "
+            "to adopt and retry.")
     base = str(row.get("base_sha") or "")
     based = (old == base or _git(serving, "merge-base", "--is-ancestor", base, old, check=False).returncode == 0)
     if cand == old:

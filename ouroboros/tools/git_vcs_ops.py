@@ -232,7 +232,8 @@ def _ff_pull(repo_dir: pathlib.Path) -> str:
     except Exception as e:
         return f"⚠️ PULL_ERROR: Could not determine current branch: {e}"
     if not branch or branch == "HEAD":
-        return "⚠️ PULL_ERROR: Not on a named branch (detached HEAD). Cannot pull."
+        return ("⚠️ PULL_ERROR: Not on a named branch (detached HEAD). Cannot pull. "
+                "Check out a branch first (e.g. `git checkout -B <branch>`).")
     try:
         _git()._run_git_network_cmd(["git", "fetch", "origin"], cwd=repo_dir)
     except Exception as e:

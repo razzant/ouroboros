@@ -529,6 +529,179 @@ def _ensure_local_version_tag() -> None:
     log.info("Created local-only version tag %s at %s", tag_name, head_sha[:8])
 
 
+def _repair_detached_head_branch() -> None:
+    """Attach a detached HEAD to a missing local dev branch when that is safe.
+
+    Cycle adoption (``body_adoption``) and the managed update both move the
+    local dev branch; a checkout left on a detached HEAD (a source install
+    checked out at a tag or SHA) refused them without naming the repair. The
+    boot repair is deliberately narrow: only when HEAD is detached, no local
+    branch of the configured dev name exists, a remote release line contains
+    HEAD and the tree is clean. Everything else is left to the owner; the
+    refusal that follows names the exact command.
+
+    Every probe runs under the rescue-only wall-clock bound, and every
+    uncertain answer — a raised adoption-transition guard, an adoption handoff
+    that exists but cannot be read, a failed or timed-out Git call, an
+    indeterminate branch check — stops the repair instead of guessing: a boot
+    must fail closed here, never stall. The branch is created non-forcing at
+    the validated commit (``git branch <name> <sha>``), so a branch that
+    appears concurrently is refused, never reset, and wherever HEAD goes the
+    branch itself always sits on a verified release-line commit. HEAD is
+    attached (``git symbolic-ref``) only when it still equals that commit and
+    the tree is still clean — a HEAD that moved meanwhile stays detached, and
+    a created-but-unattached branch is harmless. The end state is revalidated;
+    a failure to record the repair row is logged and does not undo the repair.
+    """
+    branch = managed_branch_defaults()[0]
+    hint = f"git checkout -B {branch}"
+
+    try:
+        from ouroboros.body_adoption import helper_dir, holds_checkout
+        from ouroboros.body_adoption import read as read_adoption
+        from ouroboros.body_switch import HANDOFF_NAME
+
+        if holds_checkout(DRIVE_ROOT, current_repo_dir()):
+            return  # an adoption transition owns this tree's refs; never touch them
+        # read() collapses an unreadable handoff to {}; a handoff that exists
+        # but will not parse may be a transition this boot cannot see — treat
+        # it as one.
+        if (helper_dir(DRIVE_ROOT) / HANDOFF_NAME).exists() and not read_adoption(DRIVE_ROOT):
+            log.warning(
+                "An adoption handoff exists but could not be read; an adoption may be in "
+                "progress, so no branch is attached to a detached HEAD this boot. Run `%s` "
+                "yourself if the branch is missing.", hint)
+            return
+    except Exception:
+        log.warning(
+            "Could not check for an adoption transition; not attaching a branch to a "
+            "detached HEAD this boot. Run `%s` yourself if the branch is missing.", hint,
+            exc_info=True)
+        return
+
+    rc, current, _err = rescue_git_capture(["git", "symbolic-ref", "-q", "--short", "HEAD"])
+    if rc == 0 and current.strip():
+        return  # on a named branch; the common boot pays one cheap git call
+    if rc != 1:
+        log.warning(
+            "Could not tell whether HEAD is detached (git exited %s); leaving the checkout "
+            "alone. Run `%s` yourself if the branch is missing.", rc, hint)
+        return
+    rc, head, _err = rescue_git_capture(["git", "rev-parse", "--verify", "HEAD^{commit}"])
+    if rc != 0 or not head.strip():
+        log.warning(
+            "HEAD is not a readable commit; not attaching branch '%s'. Run `%s` at the "
+            "commit you mean.", branch, hint)
+        return
+    head = head.strip()
+
+    # With --quiet, rc 1 is exactly "no such ref"; any other nonzero is a Git
+    # failure and must never read as "the branch is absent".
+    rc, _out, _err = rescue_git_capture(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])
+    if rc == 0:
+        log.warning(
+            "HEAD is detached while local branch '%s' exists elsewhere; leaving both alone. "
+            "Run `%s` yourself only if that is the branch you mean.", branch, hint)
+        return
+    if rc != 1:
+        log.warning(
+            "Could not tell whether local branch '%s' exists (git exited %s); leaving the "
+            "detached HEAD at %s alone. Run `%s` yourself if this is the branch you mean.",
+            branch, rc, head[:12], hint)
+        return
+
+    on_line = ""
+    for remote in _list_remotes(capture=rescue_git_capture):
+        remote_ref = f"refs/remotes/{remote}/{branch}"
+        rc, _out, _err = rescue_git_capture(
+            ["git", "rev-parse", "--verify", "--quiet", remote_ref])
+        if rc != 0:
+            continue
+        rc, _out, _err = rescue_git_capture(
+            ["git", "merge-base", "--is-ancestor", head, remote_ref])
+        if rc == 0:
+            on_line = remote_ref
+            break
+    if not on_line:
+        log.warning(
+            "HEAD is detached at %s and no remote release line (*/%s) contains it; not creating "
+            "branch '%s'. Run `%s` at the HEAD you mean if this is deliberate.",
+            head[:12], branch, branch, hint)
+        return
+
+    rc, status, _err = rescue_git_capture(["git", "status", "--porcelain"])
+    if rc != 0:
+        log.warning(
+            "Could not tell whether the tree at detached HEAD %s is clean; not creating "
+            "branch '%s'. Run `%s` once the tree is settled.", head[:12], branch, hint)
+        return
+    if status.strip():
+        log.warning(
+            "HEAD is detached at %s (on %s) but the tree is not clean; not creating branch '%s'. "
+            "Commit or stash your work, then run `%s`.", head[:12], on_line, branch, hint)
+        return
+
+    # Create the branch non-forcing at the validated commit: `git branch
+    # <name> <sha>` refuses when the name already exists, and wherever HEAD
+    # goes from here the branch itself always sits on a verified release-line
+    # commit, so a concurrent external git process is never serialized — only
+    # made harmless.
+    rc, _out, err = rescue_git_capture(["git", "branch", branch, head])
+    if rc != 0:
+        log.warning(
+            "Could not create branch '%s' at detached HEAD %s: %s. Run `%s` at the "
+            "commit you mean if the branch is missing.", branch, head[:12],
+            err or f"git exited {rc}", hint)
+        return
+    # Attach HEAD only while it still equals the commit the checks validated
+    # and the tree is still clean: `symbolic-ref` rewrites no working-tree
+    # file, so a HEAD that moved meanwhile is simply left detached where its
+    # mover put it.
+    rc, now, _err = rescue_git_capture(["git", "rev-parse", "--verify", "HEAD^{commit}"])
+    if rc != 0 or now.strip() != head:
+        log.warning(
+            "Created branch '%s' at %s but HEAD no longer sits there (now %s); leaving HEAD "
+            "detached — the branch is harmless where it is. Run `git checkout %s` only if "
+            "that is the branch you mean.", branch, head[:12], (now.strip() or "?")[:12], branch)
+        return
+    rc, status, _err = rescue_git_capture(["git", "status", "--porcelain"])
+    if rc != 0 or status.strip():
+        log.warning(
+            "Created branch '%s' at %s but the tree is no longer clean; leaving HEAD "
+            "detached — the branch is harmless where it is. Run `git checkout %s` once the "
+            "tree is settled.", branch, head[:12], branch)
+        return
+    rc, _out, err = rescue_git_capture(
+        ["git", "symbolic-ref", "HEAD", f"refs/heads/{branch}"])
+    if rc != 0:
+        log.warning(
+            "Created branch '%s' at %s but could not attach HEAD to it: %s; leaving HEAD "
+            "detached. Run `git checkout %s`.", branch, head[:12],
+            err or f"git exited {rc}", branch)
+        return
+    rc_now, attached, _err = rescue_git_capture(["git", "symbolic-ref", "-q", "--short", "HEAD"])
+    rc_at, at, _err = rescue_git_capture(["git", "rev-parse", "HEAD^{commit}"])
+    if rc_now != 0 or attached.strip() != branch or rc_at != 0 or at.strip() != head:
+        log.warning(
+            "Attaching branch '%s' did not land on the expected end state (HEAD %s, branch "
+            "%r); leaving the tree as Git left it. Run `%s` only if that is what you mean.",
+            branch, (at.strip() or "?")[:12], attached.strip(), hint)
+        return
+    try:
+        append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "detached_head_branch_repaired",
+            "branch": branch,
+            "head": head,
+            "on_line": on_line,
+        })
+    except Exception:
+        log.warning("Could not record the detached-HEAD repair row; the repair stands.",
+                    exc_info=True)
+    log.info("Attached detached HEAD at %s to local branch '%s' (%s)", head[:12], branch, on_line)
+
+
 def ensure_repo_present() -> None:
     repo = current_repo_dir()
     if not (repo / ".git").exists():
@@ -552,6 +725,12 @@ def ensure_repo_present() -> None:
 
         subprocess.run(["git", "branch", "-M", BRANCH_DEV], cwd=str(repo), check=False)
         subprocess.run(["git", "branch", BRANCH_STABLE], cwd=str(repo), check=False)
+
+    try:
+        _repair_detached_head_branch()
+    except Exception:
+        log.warning("Detached-HEAD branch repair failed; boot continues without it.",
+                    exc_info=True)
 
     if not _is_launcher_managed_repo():
         _ensure_local_version_tag()
