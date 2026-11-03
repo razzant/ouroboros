@@ -53,7 +53,7 @@ def test_configured_readonly_session_receives_own_scope_and_real_lineage_inputs(
 
 
 def test_readonly_input_scan_failure_and_symlink_refuse_before_engine(tmp_path, monkeypatch):
-    from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
+    from ouroboros.delegate_readonly_inputs import prepare_readonly_inputs
     from tests.test_delegated_skill_payload import _payload_ctx
 
     ctx = _payload_ctx(tmp_path, monkeypatch)
@@ -63,7 +63,7 @@ def test_readonly_input_scan_failure_and_symlink_refuse_before_engine(tmp_path, 
     outside.mkdir()
     (scratch / "delegated_readonly_inputs").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError):
-        prepare_folderless_inputs(ctx, "invocation")
+        prepare_readonly_inputs(ctx, "invocation")
     assert list(outside.iterdir()) == []
 
 

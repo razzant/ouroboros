@@ -105,6 +105,7 @@ from ouroboros.delegate_directory import (
     prepare_directory_execution, snapshot_checkout, started_receipt)
 from ouroboros.delegate_registration_policy import resolve_registration
 from ouroboros.delegate_documents import NO_DOCUMENTS, attach_selected_documents, attachment_parameters
+from ouroboros.delegate_readonly_inputs import NO_INPUTS, input_files_parameter, start_inputs
 from ouroboros.subagent_worktrees import registered_checkout
 from ouroboros.delegate_shared import (  # noqa: F401
     _emit,
@@ -405,7 +406,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     _canonical_work_order_fingerprint: str = "", _work_order_source_request: Any = None,
                     _coordination_context: str = "", _initial_bootstrap: bool = False, mode: Optional[str] = None,
                     override_plan_readiness: Optional[bool] = None, _plan_answers: Any = None,
-                    attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False) -> ToolResult:
+                    attachment_paths: Optional[list] = None, _document_intent: str = "", _document_first_start: bool = False,
+                    input_files: Optional[list] = None, _prepared_inputs: Optional[list] = None) -> ToolResult:
     from ouroboros.claudexor_daemon import ensure_owned_gateway
     from ouroboros.delegate_evidence import record_start_blocked
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -432,7 +434,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     invocation_id = snapshot_id = baseline_sha = target_root = authority_source = ""
     binding_fingerprint = ""
     processing_info: Dict[str, Any] = {}
-    resource_ref, directory_options, continuation, documents = {}, {}, NO_CONTINUATION, NO_DOCUMENTS
+    resource_ref, directory_options, continuation, documents, inputs = {}, {}, NO_CONTINUATION, NO_DOCUMENTS, NO_INPUTS
     if recovering:  # the owned recorded request is validated before any fingerprint (#1614)
         binding, refusal = _resolve_retry_invocation(
             ctx, drive, retry_token, text, max_seconds=max_seconds, geometry=(directory_strategy, scope_paths))
@@ -448,8 +450,8 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         (request_body, route, authority, root, key, project_id, owned_project_id,
          project_persistent, seconds, snapshot_id, target_root, baseline_sha,
          authority_source, resource_ref, processing_info, binding_fingerprint,
-         seconds_basis, continuation, ttl_info) = binding
-        invocation_id = retry_token
+         seconds_basis, continuation, ttl_info, retained_inputs) = binding
+        invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
     else:
         route = actor["route"]
         if selector_root:
@@ -523,15 +525,11 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                     override_plan_readiness=override_plan_readiness, plan_answers=_plan_answers)
                 if refusal:
                     return refusal
-            if authority.access == "readonly" or authority.investigation:  # a folderless Project's staged inputs
-                from ouroboros.delegate_readonly_inputs import prepare_folderless_inputs
-                try:
-                    readonly_root, input_instruction = prepare_folderless_inputs(ctx, invocation_id)
-                except (OSError, ValueError) as exc:
-                    return _fail("delegate_start", "readonly_inputs_unavailable", str(exc), definitely_unrun=True)
-                if readonly_root:
-                    root = readonly_root
-                    instructions += input_instruction
+            inputs, refusal = start_inputs(ctx, authority, invocation_id, input_files, _prepared_inputs,  # read-only runs
+                                           thread_turn=bool(continuation.request.get("_thread_id")))
+            if refusal:
+                return refusal
+            readonly_root, root, instructions = inputs.scope_root, inputs.scope_root or root, instructions + inputs.instruction
             preparation, run_binding = (ceiling_authority if authority.mode == "plan" else authority), ""
             if preparation.access in SESSION_ACCESS_PROFILES or continuation.snapshot:
                 target_root = record_auth["target_root"]
@@ -573,7 +571,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                 binding_fingerprint = execution_binding_fingerprint("", target_root, "directory_copy")
                 run_binding = directory_copy_binding_instruction(target_root, binding_fingerprint, investigation=authority.investigation)
             instructions += run_binding  # and the same text in a continuation's prompt, which a resumed session reads (#2513)
-            continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root)
+            continuation = with_run_binding(continuation, authority, run_binding, execution_root or scope_root, inputs.selection_note)
             project_id, owned_project_id, project_persistent, ephemeral = resolve_registration(
                 gateway, scope_root, execution_root, authority.access, minted=bool(readonly_root) or registered_checkout(scope_root))
             if directory_options or is_in_place_run({"resource_ref": resource_ref}):
@@ -612,7 +610,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             # Recovery proves the original actor and compiled brief before adoption.
             **actor_facts,
             processing=processing_info,
-            prompt_cache_ttl=ttl_info, **documents.custody,
+            prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody,
         )
         if not requested and not claim_refusal:
             claim_refusal = {"reason": "start_request_row_unwritable", "detail":
@@ -693,7 +691,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                             continuation=continuation.facts, plan=plan_facts(continuation.custody),
                             max_seconds=seconds, max_seconds_basis=seconds_basis,
                             engine_version=str(getattr(gateway, "engine_version", "") or ""),
-                            snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts,
+                            snapshot_facts=_snapshot_facts(snapshot), documents=documents.facts, input_files=inputs.selected,
                             effort_fact=({} if recovering else actor.get("effort_fact")))
 
 
@@ -702,7 +700,7 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
                      recovering: bool, invocation_id: str, snapshot_id: str, target_root: str,
                      baseline_sha: str, engine_version: str = "", resource_ref=None, processing=None,
                      prompt_cache_ttl=None, continuation=None, max_seconds: int = 0, max_seconds_basis: str = "",
-                     snapshot_facts=None, effort_fact=None, plan=None, documents=None) -> ToolResult:
+                     snapshot_facts=None, effort_fact=None, plan=None, documents=None, input_files=None) -> ToolResult:
     """The one author of delegate_start's started result (note + payload).
 
     The AUTHORITY guidance and the CUSTODY warning are independent facts about the same
@@ -766,8 +764,9 @@ def _started_payload(handle: Dict[str, Any], run_id: str, route: Any, access: st
     # Optional receipts expose the captured processing, continuation and snapshot
     # facts; copy the continuation binding before publishing it to the nanny.
     for key, value in (("processing", processing), ("prompt_cache_ttl", prompt_cache_ttl),
-                       ("continuation", dict(continuation or {})), ("snapshot", snapshot_facts), ("documents", documents)):
-        if value:
+                       ("continuation", dict(continuation or {})), ("snapshot", snapshot_facts), ("documents", documents),
+                       ("input_files", input_files)):  # one row per selected entry; explicit [] shown; prepared is not read
+        if value or (key == "input_files" and value is not None):
             payload[key] = value
     if snapshot_id:
         # The C1 binding, stated where the nanny can read it: the run edits the
@@ -1410,6 +1409,7 @@ def get_tools() -> List[ToolEntry]:
                     "With continue_from: auto (default) reuses the session where possible; packet starts a new "
                     "session with retained evidence when the old session has gone astray. Omit for plan threads."},
                 **attachment_parameters("Until a scheduled child's first run starts, omitted attachment_paths keep its parent's selection. A continuation or replacement inherits none: pass them again. Omit both with retry_of."),
+                **input_files_parameter("continue_from retains its own new selection; nothing is inherited. Omit with retry_of: its result returns the original receipt."),
                 "retry_of": {"type": "string", "description":
                     "pending_invocation_id from an unknown start outcome (transport failure/lost response). "
                     "Replays that invocation's recorded request byte-identically under its original key to retrieve "
