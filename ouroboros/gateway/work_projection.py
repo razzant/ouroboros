@@ -470,7 +470,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         # Stop ends the whole work: a retry's logical original carries its tree too (never an earlier attempt).
         logical = [current_root] if current_root and current_root != current_id else []
         ended = [] if current_state is not None else [current_id]
-        controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier)
+        controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier,
+                                   presence_turn=bool((raw.get(current_id) or {}).get("_presence_turn")))
         if current_state is None and members and any(m["activity"] in {"working", "queued", "waiting"} for m in members):
             controls.insert(0, {"action": "pause", "target": current_id})
         if current_state is None:

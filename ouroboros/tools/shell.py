@@ -418,7 +418,7 @@ def _run_shell(
     _command_start_epoch = time.time()
     _command_start_ts = time.monotonic()
     res = None
-    stop = turn_stop_reader(ctx)  # an in-process turn's Stop now; a pooled worker's Stop is its kill
+    stop = turn_stop_reader(ctx)
     try:
         if output_context is not None or _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
             res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec, stop=stop,

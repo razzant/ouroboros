@@ -76,13 +76,15 @@ def _locate_root_locked(q: Any, task_id: str) -> Tuple[Optional[Dict[str, Any]],
 
 
 def _presence_pause_refusal(drive_root: Any, task_id: str, row: Optional[Dict[str, Any]]) -> str:
-    """Why Pause cannot take a turn an inline Presence runner holds, else "": nothing saves that stack yet (#2566), so
-    Pause changes nothing and says what it knows, witnessed live or liveness unknown, never "not live". ``row`` is the
-    stored row, {} while a starting turn has none, None when unreadable. A settled or other row reads no census."""
+    """Why Pause cannot take a turn a Presence runner holds, else "". Only a turn the owner moved to a Project, carried
+    as text, saves its stack (``presence_carrier.moved_text_turn``, #2566); for any other the Pause changes nothing and
+    says what it knows, witnessed live or liveness unknown, never "not live". ``row`` is the stored row, {} while a
+    starting turn has none, None when unreadable. A settled or other row reads no census."""
+    from ouroboros.presence_carrier import moved_text_turn
     from ouroboros.presence_runner import presence_execution_witness
     from supervisor.cancel_publication import live_presence_row
 
-    if row and not live_presence_row(row):
+    if row and (not live_presence_row(row) or moved_text_turn(drive_root, task_id, row.get("metadata"))):
         return ""
     witness = presence_execution_witness(task_id, drive_root=drive_root)
     if witness:
@@ -209,6 +211,13 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
     from supervisor import queue as q
     task_id = str(task_id or "").strip()
     late_row, late_review, presence_refusal = _late_work(q, task_id)  # durable reads stay outside the queue lock
+    from ouroboros.presence_carrier import moved_text_turn
+    from ouroboros.task_results import load_task_result
+
+    try:  # a moved text turn takes its Project's ordinary Pause (#2566); every other Presence turn keeps its refusal
+        moved = moved_text_turn(q.DRIVE_ROOT, task_id, (load_task_result(q.DRIVE_ROOT, task_id) or {}).get("metadata"))
+    except Exception:
+        moved = False
     with acquisition_budget(0), q._queue_lock:
         from supervisor.workers import get_direct_chat_agent
 
@@ -218,7 +227,7 @@ def request_owner_pause(task_id: str, *, request_id: str, by: Optional[Dict[str,
         if getattr(actor, "_realtime_turn", None) is not None:
             return {"ok": False, "error": "realtime_pause_unsupported"}
         task, lane = _locate_root_locked(q, task_id)
-        if task is not None and execution_kind(task) == "presence":  # its lane row: nothing saves that stack (#2566)
+        if task is not None and execution_kind(task) == "presence" and not moved:  # an unmoved turn's stack is unsaved
             return {"ok": False, "error": "presence_pause_unsupported"}
         if task is None and late_row is not None:
             task, lane = late_row, "late"

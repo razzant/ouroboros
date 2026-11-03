@@ -521,6 +521,14 @@ def test_a_live_inline_turn_is_seen_moved_addressed_and_stopped_in_the_real_spa(
                            f"2: Restart cannot read the census while the turn is live: {warning}")
             problems.check(bool(warning) and RESTART_INLINE in warning["body"] and not stage["2-restart-identical-to-no-work"],
                            f"2: Restart does not warn about the live inline turn: {warning}")
+            # The owner's Pause, over the real route, is refused for a turn not moved; nothing changes for it.
+            pause = _http(c.server.port, "POST", f"/api/tasks/{tid}/pause", {"request_id": "pause-live-author", "actor": "owner"})
+            stage["2-pause"] = {"status": pause["status"], "body": pause["body"]}
+            problems.check((pause["status"], pause["body"].get("reason_code")) == (409, "presence_pause_unsupported"),
+                           f"2: the owner's Pause of an unmoved live inline author did not refuse it as unsupported: {pause}")
+            state = c.state()
+            problems.check((_row(state, tid) or {}).get("phase") == "working" and _actions(_work(state, tid)) == ["stop"],
+                           "2: a refused Pause changed the author's census row or its controls")
             # The mind's own view (an ordinary Main head asks nothing of the author): unmoved, known to every mind
             # as live place work, never an addressable root.
             c.say("#chat-input", MIND_ONE, feed="#chat-messages")
@@ -538,7 +546,7 @@ def test_a_live_inline_turn_is_seen_moved_addressed_and_stopped_in_the_real_spa(
             row, work = _row(state, tid), _work(state, tid)
             problems.check(row is not None and (row.get("chat_id"), row.get("project_id")) == (project_chat, PROJECT),
                            f"3: after the move the census row says {row and (row.get('chat_id'), row.get('project_id'))}")
-            problems.check(work is not None and work.get("room") == project_chat and _actions(work) == ["stop"],
+            problems.check(work is not None and work.get("room") == project_chat and _actions(work) == ["pause", "stop"],
                            f"3: after the move its work says room {work and work.get('room')}, controls {_actions(work)}")
             homes = [str(w.get("room")) for w in state.get("works") or [] if (w.get("episode") or {}).get("task_id") == tid]
             problems.check(homes == [str(project_chat)], f"3: the work is listed in rooms {homes}")
@@ -559,7 +567,7 @@ def test_a_live_inline_turn_is_seen_moved_addressed_and_stopped_in_the_real_spa(
             if mine and mine["more"]:
                 menu = c.row_menu("project", tid)
                 stage["3-project-menu"] = menu
-                problems.check(menu == ["Stop now"], f"3: the Project's task actions offer {menu}, expected Stop now alone")
+                problems.check(set(menu) == {"Pause", "Stop now"}, f"3: the Project's task actions offer {menu}, expected Pause and Stop now")
                 c.shot("3-project-work-menu")
                 c.close_menu()
             else:
@@ -580,14 +588,7 @@ def test_a_live_inline_turn_is_seen_moved_addressed_and_stopped_in_the_real_spa(
             finally:
                 page.set_viewport_size(VIEWPORT)
                 page.evaluate(_SETTLE)
-            # The owner's Pause, over the real route, is refused for a turn that is still live; nothing changes for it.
-            pause = _http(c.server.port, "POST", f"/api/tasks/{tid}/pause", {"request_id": "pause-live-author", "actor": "owner"})
-            stage["3-pause"] = {"status": pause["status"], "body": pause["body"]}
-            problems.check((pause["status"], pause["body"].get("reason_code")) == (409, "presence_pause_unsupported"),
-                           f"3: the owner's Pause of a live inline author did not refuse it as unsupported: {pause}")
-            state = c.state()
-            problems.check((_row(state, tid) or {}).get("phase") == "working" and _actions(_work(state, tid)) == ["stop"],
-                           "3: a refused Pause changed the author's census row or its controls")
+            # Its Pause is pressed in its own scenario (``test_a_moved_turn_pauses_from_its_project_...``): here it runs on.
             c.close_project()
             c.go("chat")
             main = c.open_list("main")
@@ -602,8 +603,8 @@ def test_a_live_inline_turn_is_seen_moved_addressed_and_stopped_in_the_real_spa(
             stage["3-restart-identical-to-no-work"] = bool(warning) and warning["body"] == quiet_restart["body"]
             problems.check(bool(warning) and "Pause status could not be read" not in warning["body"],
                            f"3: Restart cannot read the census while the moved turn is live: {warning}")
-            problems.check(bool(warning) and RESTART_INLINE in warning["body"] and not stage["3-restart-identical-to-no-work"],
-                           f"3: Restart does not warn about the moved live inline turn: {warning}")
+            problems.check(bool(warning) and RESTART_INLINE not in warning["body"],
+                           f"3: Restart still says the moved text turn is interrupted, though a restart saves it: {warning}")
             c.open_project(OTHER)
             quiet = c.room("project")
             problems.check(not quiet["rows"] and quiet["badge"] != "Working", f"3: the other Project shows {quiet['badge']!r} {quiet['rows']}")
@@ -642,7 +643,7 @@ def test_a_live_inline_turn_is_seen_moved_addressed_and_stopped_in_the_real_spa(
             problems.check((_row(c.states["5-before-stop"], tid) or {}).get("kind") == "presence", "5: the author is not live in its second round")
             if (_row(c.states["5-before-stop"], tid) or {}).get("kind") == "presence":
                 c.open_list("project")
-                problems.check(c.row_menu("project", tid) == ["Stop now"], "5: the Project's task actions changed")
+                problems.check(set(c.row_menu("project", tid)) == {"Pause", "Stop now"}, "5: the Project's task actions changed")
                 calls = len(c.stub.calls)
                 answers = c.stop_pending(tid)
                 problems.check(c.stop_recorded(tid), "5: Stop was not durably recorded")
@@ -952,8 +953,10 @@ def test_an_unreadable_author_census_is_disclosed_and_never_hides_a_local_author
             warning = c.restart_dialog("2-restart-gap")
             stage["gap-restart"] = warning
             problems.check("could not be read" in (warning or {}).get("body", ""), f"Restart does not say the census is unread: {warning}")
-            problems.check(RESTART_INLINE in (warning or {}).get("body", ""),
-                           f"Restart forgets the local live inline turn it still sees through the gap: {warning}")
+            # The turn it still sees through the gap is moved as text: saved work a restart returns (#2566 S2), as in
+            # the walk above, so the gap never makes Restart call it interrupted.
+            problems.check(RESTART_INLINE not in (warning or {}).get("body", ""),
+                           f"Restart says the moved text turn it sees through the gap is interrupted, though a restart saves it: {warning}")
             # The mind's context names the gap rather than a quiet list.
             c.say("#chat-input", MIND_ONE, feed="#chat-messages")
             wait_until(lambda: MIND_ONE in c.bodies or None, 60)

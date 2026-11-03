@@ -148,7 +148,7 @@ _PENDING_FIELDS = (
     '_attempt', 'review_reason', 'review_source_task_id', '_budget_pause',
     'budget_resumed_at', '_terminalization_retry', '_cancel_intent_authority_hold', '_owner_wait_resume',
     '_budget_pause_resume', '_budget_pause_hold', '_resume_selection', '_continuation_prepared', '_admission_owner_token',
-    '_is_direct_chat', 'detached_at', 'detached_by',
+    '_is_direct_chat', '_presence_turn', 'source', 'detached_at', 'detached_by',
     '_conversation_prepare',  # a turn saved across Restart still owes its first step in the worker that runs it
 )
 
@@ -209,7 +209,7 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
             continue
         try:
             stored = load_task_result(_queue().DRIVE_ROOT, task_id, strict=True) or {}
-            if presence_turn(row.get("task")) or presence_turn(stored):
+            if presence_turn(row.get("task"), _queue().DRIVE_ROOT) or presence_turn(stored, _queue().DRIVE_ROOT):
                 continue  # a correspondent's turn: its place's recovery settles it (the Presence sweep), not a fence
             if not stored:
                 # Admission writes the durable scheduled row (task_admission.py
@@ -520,6 +520,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     _record_refused_returns(_queue().DRIVE_ROOT, {
         str(task["id"]): "planned_handoff_not_retained" for task in snapshot_pending
         if task.get("id") in set(transaction.get("task_ids") or []) and task["id"] not in kept_ids}, stop_door)
+    from ouroboros.presence_carrier import adopt_saved_records
+
+    adopt_saved_records(retained, _queue().DRIVE_ROOT)  # a returned moved Presence turn: its record, never its seed (#2566)
     return retained, unseen, consumed, prior_roots
 
 

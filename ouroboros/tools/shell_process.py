@@ -92,13 +92,15 @@ def unfinished_command_result(ctx: Any, ended: subprocess.SubprocessError, timeo
 
 
 def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
-    """The command wait's Stop-now reader for an in-process turn (``owner_stop.in_process_stop_now``), or
-    ``None`` for a pooled worker, whose Stop is the worker kill, and for no turn at all."""
+    """The Stop-now reader for a runner-owned turn, including pooled Presence. Ordinary pooled work
+    keeps the worker kill; no turn has no reader (``owner_stop.in_process_stop_now``)."""
     waiter = getattr(ctx, "model_wait_context", None)
-    if waiter is None or getattr(waiter, "worker_slot_held", True):
+    if waiter is None:
         return None
-    from supervisor.owner_stop import in_process_stop_now
+    from supervisor.owner_stop import in_process_stop_now, runner_reads_stop
 
+    if getattr(waiter, "worker_slot_held", True) and not runner_reads_stop(waiter):
+        return None
     return lambda: in_process_stop_now(ctx)
 
 

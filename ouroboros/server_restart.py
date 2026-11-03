@@ -290,7 +290,7 @@ def _owned_live_task_ids(ctx: Any) -> list:
     from supervisor.active_activity import get_direct_activity_registry
 
     task_ids = [tid for tid, meta in dict(ctx.RUNNING or {}).items()
-                if not presence_turn(meta.get("task") if isinstance(meta, dict) else None)]
+                if not presence_turn(meta.get("task") if isinstance(meta, dict) else None, DATA_DIR)]
     task_ids.extend(str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()
                     if row.get("kind") != "presence")
     root = str(pathlib.Path(DATA_DIR).resolve(strict=False))
@@ -524,7 +524,7 @@ def _live_running_task_ids(ctx: Any) -> list:
     now = time.time()
     live = []
     for tid, meta in dict(ctx.RUNNING or {}).items():
-        if not isinstance(meta, dict) or presence_turn(meta.get("task")):
+        if not isinstance(meta, dict) or presence_turn(meta.get("task"), DATA_DIR):
             continue
         try:
             hb = float(meta.get("last_heartbeat_at") or 0.0)

@@ -138,4 +138,12 @@ test('Restart counts live inline Presence turns as interrupted, promising no ret
     assert.match(mixed, /Pause status could not be read/);
     assert.match(mixed, /1 task is still pausing/);
     assert.match(mixed, /1 place conversation is mid-turn/);
+    // A turn moved to a Project as text is saved and returned by the restart: no interruption warning for it,
+    // while an unmoved one beside it is still counted.
+    assert.equal(restartConfirmBody([{ phase: 'working', kind: 'presence', presence_pause: true }]), quiet);
+    const beside = restartConfirmBody([{ phase: 'working', kind: 'presence', presence_pause: true },
+        { phase: 'working', kind: 'presence' }]);
+    assert.match(beside, /^1 place conversation is mid-turn/m);
+    // Paused warm it stays that same work: its saved pause survives the restart, and no interruption is claimed.
+    assert.equal(restartConfirmBody([{ phase: 'budget_paused', kind: 'presence', presence_pause: true }]), quiet);
 });

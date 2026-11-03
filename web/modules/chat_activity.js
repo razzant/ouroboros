@@ -409,8 +409,10 @@ const PAUSING_PHASES = new Set(['budget_pausing', 'pausing']);
  * live census; ``null`` means it could not be read, and the body says so
  * instead of promising there is nothing still pausing. A live inline Presence
  * turn (`kind` presence) has no saved return: the restart ends its stack;
- * a new event in its place can start another (architecture §12).
- * @param {Array<{phase?: string, kind?: string}>|null} activities
+ * a new event in its place can start another (architecture §12). One moved
+ * to a Project as text (`presence_pause`, never a live call) is the
+ * exception: the restart saves and returns it.
+ * @param {Array<{phase?: string, kind?: string, presence_pause?: boolean}>|null} activities
  * @returns {string}
  */
 export function restartConfirmBody(activities) {
@@ -428,7 +430,7 @@ export function restartConfirmBody(activities) {
         lines.push(`${pausing} task${pausing === 1 ? ' is' : 's are'} still pausing: a pause not saved when the restart `
             + 'stops it is interrupted instead of staying paused.');
     }
-    const inline = activities.filter((row) => row?.kind === 'presence').length;
+    const inline = activities.filter((row) => row?.kind === 'presence' && row.presence_pause !== true).length;
     if (inline) {
         lines.push(`${inline === 1 ? '1 place conversation is' : `${inline} place conversations are`} mid-turn: the restart `
             + `interrupts ${inline === 1 ? 'it and it does not resume by itself' : 'them and they do not resume by themselves'}; `

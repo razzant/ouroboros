@@ -103,18 +103,22 @@ def _active_direct_roots(ctx: Any) -> list:
 
 
 def _moved_presence_readers(ctx: Any) -> list:
-    """This process's live inline Presence authors a move bound to a Project, while their loop takes mail
-    (``author_intake_open``): addressable there like a direct turn. An unmoved author reads no room, and another
-    process's unreadable facts never hide a local reader; a local reader's own are the snapshot's gap."""
-    from ouroboros.conversation_lease import author_intake_open, resolved_presence_turns
+    """Live inline Presence authors a move bound to a Project, while their loop takes mail: addressable there like a
+    direct turn. One in this process answers under its admission lock (``author_intake_open``); one its conversation
+    lane carries in another process by its durable intake fact (``author_intake_accepting``), which the delivery
+    re-checks under the mail lock. An unmoved author reads no room, and a closed intake or another author's
+    unreadable facts never hide a reader; a reader's own unreadable facts are the snapshot's gap."""
+    from ouroboros.conversation_lease import author_intake_accepting, author_intake_open, resolved_presence_turns
     from ouroboros.projects_registry import project_id_for_task
     from ouroboros.room_reader import is_reading
 
     roots = []
     for fact in resolved_presence_turns(ctx.DRIVE_ROOT)["roots"]:
         task_id, row = fact["task_id"], fact["row"]
-        project_id = project_id_for_task(ctx.DRIVE_ROOT, task_id, strict=True) if fact["local"] else ""
-        if not project_id or not author_intake_open(ctx.DRIVE_ROOT, task_id):
+        reading = (author_intake_open(ctx.DRIVE_ROOT, task_id) if fact["local"]
+                   else author_intake_accepting(ctx.DRIVE_ROOT, task_id))
+        project_id = project_id_for_task(ctx.DRIVE_ROOT, task_id, strict=True) if reading else ""
+        if not project_id:
             continue
         if fact["state"] == "unreadable":
             raise OSError(f"live author {task_id}: {fact['error']}")
@@ -136,8 +140,8 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
     new owner or peer message, so it is never suggested as steerable. The running roots'
     owner-Pause fences are read in one statement per store and handed to each reader check.
     A carried Presence turn's lane row is its place's conversation, never a steerable root (#2604):
-    a moved local author is addressed as ``_moved_presence_readers`` says, and an author in
-    another process has no endpoint here (``steer_task``'s ``presence_author_elsewhere``).
+    a moved author, in this process or the lane carrier's, is addressed as ``_moved_presence_readers``
+    says (``steer_task`` still offers another process's author nothing: ``presence_author_elsewhere``).
     """
     try:
         from ouroboros.room_reader import is_reading
