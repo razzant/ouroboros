@@ -555,7 +555,7 @@ ouroboros/ — agent core and shared runtime (§6)
     scope_window.py — Scope window sizing and evidence provenance; fallbacks stay disclosed, never review authority
     scope_review_contract.py — Pure parser of the `coupling` answer (`normalize_scope_items`), also consumed by scripts/validate_scope_receipt.py
     scope_required_sources.py — Change-relative protected/prompt/contract sources, derived families and twins; the final manifest hash and policy version bind review replay
-    services.py — Service mini-manager with process-group cleanup
+    services.py — Service mini-manager
     skill_exec.py — list_skills/skill_review/toggle_skill/skill_owner_action/skill_exec over a fixed interpreter allowlist; gated by enablement, fresh review and hash
     skill_publish.py, skill_source_tools.py — PR-receipt-gated publish; source/search/install/update tools
     skill_preflight.py — Read-only syntax/schema preflight; widget entries keep classic grammar unless explicitly ESM (§3)
@@ -572,11 +572,11 @@ ouroboros/ — agent core and shared runtime (§6)
   delegate_start_claims.py — Serializes custody recheck and `START_REQUESTED`; transport/run waits are outside locks. Unsent retries may hold actor/payload locks, never root/store locks
   process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop; unconfirmed cleanup blocks; not a quota (DEVELOPMENT §9)
   process_scope.py, process_census.py — work scopes (membership, records, task-end/Panic reap, engine index); kernel-state readers (§9)
-  process_custody.py — `spawn_supervised`, process_ledger.jsonl, `retained_purposes`; ledgered stops need measured identity and confirmed exit (Runtime topology below; §9)
+  process_custody.py, launch_custody.py — `spawn_supervised`, ledger, `retained_purposes`; stops need measured identity and confirmed exit (§1, §9)
   obligations.py — Atomic current sets (incl. `owner_questions`); owning transitions publish before work and retire after discharge
   startup_migrations.py, startup_task_files.py — Explicit inherited-state import/repair and addressed file recovery
   delegate_custody_current.py — Custody on the store: run rows, pending invocations, outbox, importer's fold
-  owned_shutdown.py — the ownership set `state/owned_processes.json`, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
+  owned_shutdown.py — the ownership set, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
   platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, process_identity.py — OS process/lock helpers, descendant seam, private Win32/Darwin ABI, birth tokens (Platform substrate below)
   verified_download.py — Shared exact-size/digest verification and atomic cached byte delivery
   node_runtime.py — Execution-probed Node runtime health (`node_runtime_health`; a missing binary is never cached), `select_skill_node_runtime`, `skill_node_emergency_path_dir`
@@ -621,7 +621,7 @@ Admission: every server entry (`server.main`, an imported app's lifespan) holds 
 
 Same-install reaper (`launcher_server_reaper.py`): under the PID lock, each generation first reaps strays proven by three live facts (the exact `<REPO_DIR>/server.py` argv token, `OUROBOROS_DATA_DIR`, `OUROBOROS_MANAGED_BY_LAUNCHER=1`) read byte-exact from /proc; `ps -E` mixes argv into the environment and authorizes no kill, so non-/proc hosts stay report-only. A missing custody row is the defect being repaired, not a reason to skip; never on panic or window close.
 
-Durable process custody (`ouroboros/process_custody.py`): `spawn_supervised()` ledgers each long-lived child in `data/state/process_ledger.jsonl` (scope `task|session|daemon`), and the reaper (startup, `server_maintenance` sweep) kills only entries whose generation or task owner died, by strict `(pid, start_time, cmd_sha256)` fingerprint, never command-line class, so dev and packaged installs coexist; daemon rows stay, skill companions are reaped on owner uninstall or foreign generation (log-only default: `process_would_reap`), and worker tree-kills (`worker_pool_lifecycle.kill_worker_tree`) spare retained daemon subtrees. `start_parent_lifeline()` group-suicides a Python entrypoint on spawner death; multiprocessing children await the parent sentinel; ppid 1 at start is live only for a spawn/fork child of PID 1 or a plain child still under its `OUROBOROS_PARENT_PID`.
+Durable process custody (`process_custody.py`): `spawn_supervised()` ledgers long-lived children in `process_ledger.jsonl` (scope `task|session|daemon`), and the reaper (startup, sweep) kills only entries whose generation or task owner died, by strict `(pid, start_time, cmd_sha256)` fingerprint or launch identity (§9), never command-line class, so dev and packaged installs coexist; daemon rows stay, skill companions are reaped on owner uninstall or foreign generation (log-only default: `process_would_reap`), and worker tree-kills (`kill_worker_tree`) spare retained daemon subtrees. `start_parent_lifeline()` group-suicides a Python entrypoint on spawner death; multiprocessing children await the parent sentinel; ppid 1 at start is live only for a spawn/fork child of PID 1 or under `OUROBOROS_PARENT_PID`.
 
 Launcher lifecycle: each generation resolves its predecessor, re-checks the automatic Panic gate and starts the server; ready is the endpoint this child published, proven against its handle, answering health. `RESTART_EXIT_CODE` requests a managed restart that refreshes bundle metadata and dependencies (§2); `MAX_CRASH_RESTARTS` crashes within `CRASH_WINDOW_SEC` stop automatic restart; a panic exit cleans up and ends the outer process. Presentation: the Linux browser fallback checks `DISPLAY`/`WAYLAND_DISPLAY` before touching pywebview; GTK needs a live default display, Qt is trusted on env alone: probing it constructs a `QGuiApplication` that can itself abort. On probe failure the same launcher supervises the same server, prints the authoritative URL and opens the system browser best-effort (the browser is the owner's application, outside process custody).
 

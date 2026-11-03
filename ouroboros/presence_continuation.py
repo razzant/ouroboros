@@ -296,20 +296,16 @@ def _custody_blockers(root: Path, task_id: str) -> list[dict]:
     The existing readers Pause and cold sleep use; promoted independent work is not the
     author's custody and stays pollable. Unreadable custody is a blocker, never "none".
     """
-    from ouroboros import process_custody as pc
-    from ouroboros.platform_layer import pid_is_alive
+    from ouroboros.launch_custody import unsettled_rows
     from ouroboros.task_results import load_task_result
     from ouroboros.tool_custody import retained_tool_custody, task_process_blockers
 
     try:
         row = load_task_result(root, task_id, strict=True) or {}
         blockers = retained_tool_custody(root, task_id, row) + task_process_blockers(root, {task_id})
-        complete, processes = pc._read_ledger_strict(root)
-        if not complete:
-            raise OSError("process_custody_unreadable")
-        blockers += [{"kind": "owned_process", "detail": str(record.get("pid"))} for record in processes
-                     if str(record.get("owner_task") or "") == task_id
-                     and (pid_is_alive(int(record.get("pid") or 0)) or pc._service_group_survives_leader(record))]
+        blockers += [{"kind": "owned_process", "detail": str(record.get("pid"))} if state == "live" else
+                     {"kind": "custody_unreadable", "detail": f"launch of process {record.get('pid')} unobserved"}
+                     for record, state in unsettled_rows(root, {task_id})]
         return blockers
     except Exception as exc:
         return [{"kind": "custody_unreadable", "detail": str(exc)[:200]}]

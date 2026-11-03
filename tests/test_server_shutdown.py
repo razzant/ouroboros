@@ -28,8 +28,8 @@ def test_owned_stop_runs_every_in_memory_owner_and_reads_records_from_the_set(mo
     monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", shell_failure)
     monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground",
                         lambda *_a, **_kw: pytest.fail("the stop settles durable records itself"))
-    monkeypatch.setattr("ouroboros.tools.services.kill_all_services",
-                        lambda root, **kw: order.append(("services", root, kw)))
+    monkeypatch.setattr("ouroboros.tools.services.kill_all_services",  # its list contract: nothing left unconfirmed
+                        lambda root, **kw: order.append(("services", root, kw)) or [])
     monkeypatch.setattr(os, "walk", lambda *_a, **_kw: pytest.fail("the exit never walks data/state"))
     outcome = owned_shutdown.stop_owned_work(tmp_path)
     assert outcome["state"] == "unconfirmed" and outcome["targets"] == 0 and outcome["unconfirmed"] == []

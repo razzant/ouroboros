@@ -25,6 +25,7 @@ port sweeps, Windows Job Objects all stay).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -139,8 +140,12 @@ def record_process(
     scope: str,
     owner_task_id: str = "",
     reap_process_group: bool = True,
+    scope_marker: str = "",
 ) -> Dict[str, Any]:
-    """Append a custody record for an already-spawned process."""
+    """Append a custody record for an already-spawned process.
+
+    A launch with its own ``scope_marker`` (a service) also records it and the leader's census
+    birth (``scope_birth``): the identity its owned stop ends by, wherever the leader went."""
     if scope not in _VALID_SCOPES:
         raise ValueError(f"process custody scope must be one of {_VALID_SCOPES}, got {scope!r}")
     from ouroboros.install_identity import require_owned_root
@@ -160,6 +165,10 @@ def record_process(
         "owner_task": str(owner_task_id or ""),
         "session_id": _SESSION_ID,
     }
+    if scope_marker:
+        from ouroboros.process_census import birth_text
+
+        entry.update(scope_marker=str(scope_marker), scope_birth=birth_text(pid))
     if not append_jsonl(ledger_path(drive_root), entry):
         raise OSError("process custody record could not be written")
     from ouroboros.owned_shutdown import record_ledgered_process
@@ -179,6 +188,7 @@ def spawn_supervised(
     owner_task_id: str = "",
     new_process_group: bool = True,
     on_spawn: Any = None,
+    scope_marker: str = "",
     **popen_kwargs: Any,
 ) -> subprocess.Popen:
     """Popen + durable custody record (the single supervised chokepoint).
@@ -220,6 +230,7 @@ def spawn_supervised(
             purpose=purpose,
             scope=scope,
             owner_task_id=owner_task_id,
+            scope_marker=scope_marker,
         )
     except Exception as exc:
         log.warning("process custody record failed for pid %s (%s)", proc.pid, purpose, exc_info=True)
@@ -380,7 +391,7 @@ def record_not_ours(drive_root: Any, entry: Dict[str, Any], evidence: Dict[str, 
     return append_jsonl(pathlib.Path(drive_root) / "logs" / "supervisor.jsonl", {
         "ts": utc_now_iso(), "type": "process_not_ours", "outcome": "not_ours",
         "pid": entry.get("pid"), "pgid": entry.get("pgid"), "purpose": entry.get("purpose"),
-        "record_id": entry.get("record_id") or f"pid-{entry.get('pid')}", **evidence,
+        "record_id": entry.get("record_id") or custody_record_id(entry), **evidence,
     }, lock_timeout_sec=lock_timeout_sec)
 
 
@@ -398,10 +409,29 @@ def _service_group_survives_leader(entry: Dict[str, Any]) -> bool:
     )
 
 
+def custody_key(entry: Dict[str, Any]) -> tuple:
+    """The one key both custody stores keep a ledger row under: a launch's own marker
+    (``record_process(scope_marker=...)``), else the row's PID. A launch's obligation lasts until
+    its own stop settles it, so a later process given its leader's PID is another key and neither
+    replaces nor settles it; an unmarked row keeps the PID key it always had. Storage and reach
+    only: measured pid and birth still decide every signal."""
+    from ouroboros.process_census import LAUNCH_SCOPE_PREFIX, is_launch_marker
+
+    pid = int(entry.get("pid") or 0)
+    marker = str(entry.get("scope_marker") or "")
+    return ("launch", marker[len(LAUNCH_SCOPE_PREFIX):]) if pid > 0 and is_launch_marker(marker) else ("pid", pid)
+
+
+def custody_record_id(entry: Dict[str, Any]) -> str:
+    """The ownership set's id of a ledger row: ``launch-<hex>``, or ``pid-<pid>`` for an unmarked row."""
+    kind, value = custody_key(entry)
+    return f"{kind}-{value}"
+
+
 def _read_ledger_records(
     drive_root: pathlib.Path, *, strict: bool
 ) -> tuple[bool, List[Dict[str, Any]], bytes]:
-    """Return the latest-per-PID view and the exact bytes that produced it."""
+    """Return the latest row per custody key (``custody_key``) and the exact bytes that produced it."""
     path = ledger_path(drive_root)
     try:
         path.stat()
@@ -414,8 +444,6 @@ def _read_ledger_records(
     entries: List[Dict[str, Any]] = []
     snapshot = b""
     try:
-        import json
-
         snapshot = path.read_bytes()
         # Match the compactor's physical JSONL boundaries. Unicode separators
         # inside JSON strings are payload bytes, not new ledger records.
@@ -436,17 +464,18 @@ def _read_ledger_records(
             entries.append(obj)
     except (OSError, UnicodeError):
         return False, [], snapshot
-    # Last record per pid wins (a pid may be re-registered by a newer spawn).
-    by_pid: Dict[int, Dict[str, Any]] = {}
+    # Last record per key wins: a launch's later row (what its stop still owes) replaces its own
+    # older one; an unmarked PID re-registered by a newer spawn replaces the older spawn's.
+    by_key: Dict[tuple, Dict[str, Any]] = {}
     for entry in entries:
         try:
-            by_pid[int(entry.get("pid") or 0)] = entry
+            by_key[custody_key(entry)] = entry
         except (TypeError, ValueError):
             if strict:
                 return False, [], snapshot
             continue
-    by_pid.pop(0, None)
-    return True, list(by_pid.values()), snapshot
+    by_key.pop(("pid", 0), None)
+    return True, list(by_key.values()), snapshot
 
 
 def _read_ledger_strict(drive_root: pathlib.Path) -> tuple[bool, List[Dict[str, Any]]]:
@@ -459,7 +488,7 @@ def _read_ledger(drive_root: pathlib.Path) -> List[Dict[str, Any]]:
 
 def _rewrite_ledger(
     drive_root: pathlib.Path, entries: List[Dict[str, Any]], *,
-    previous: Optional[bytes] = None,
+    previous: Optional[bytes] = None, settled: Any = (),
 ) -> None:
     """Compact only the observed prefix, preserving concurrent and opaque bytes.
 
@@ -467,12 +496,15 @@ def _rewrite_ledger(
     Lifecycle callers pass their raw read snapshot, not the deduplicated view.
     If another rewrite changed that prefix, defer to a fresh sweep. Signals and
     waits stay outside this short transaction so new spawns can enter custody.
-    PIDs whose rows it drops leave the ownership set once the lock is released.
+    A key whose rows it drops leaves the ownership set once the lock is released, only
+    while the set still holds one of those exact rows: a row appended for the key in
+    between (a launch's late owed identities) keeps its record. ``settled``: the rows
+    this sweep's confirmed passes left (``settle_launch``); what such a pass appended
+    goes with its launch while the launch's last row is still that row, and so does a
+    launch only the set named, which has no line to drop.
     """
-    import json
-
     path = ledger_path(drive_root)
-    dropped: set = set()
+    dropped: List[Dict[str, Any]] = []
     try:
         from ouroboros.utils import jsonl_append_lock_path, replace_atomic
         from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -483,45 +515,61 @@ def _rewrite_ledger(
             log.warning("process ledger rewrite skipped: append lock unavailable")
             return
         try:
-            seen, named = set(), set()
+            observed: Dict[tuple, List[Dict[str, Any]]] = {}
+            named: set = set()
             if previous is None:
                 payload = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries).encode("utf-8")
             else:
-                current = path.read_bytes()
+                current = path.read_bytes() if path.exists() else b""
                 if not current.startswith(previous):
                     return
-                survivors = {int(entry.get("pid") or 0): entry for entry in entries}
+                survivors = {custody_key(entry): entry for entry in entries}
                 kept = []
                 for line in reversed(previous.splitlines(keepends=True)):
-                    try:
-                        row = json.loads(line)
-                        pid = int(row.get("pid") or 0) if isinstance(row, dict) else 0
-                    except (TypeError, ValueError, UnicodeError):
-                        pid = 0
-                    seen.add(pid)
-                    # Only the last observed row can survive for this PID.
-                    # Unparseable rows remain literal bytes, never deletion authority.
-                    if not pid or survivors.pop(pid, None) == row:
-                        kept.append(line)
-                        named.add(pid)
-                for line in current[len(previous):].splitlines():
-                    try:
-                        named.add(int(json.loads(line).get("pid") or 0))
-                    except Exception:
+                    row, key = _ledger_line(line)
+                    if key is None:
+                        kept.append(line)  # unparseable rows remain literal bytes, never deletion authority
                         continue
-                payload = b"".join(reversed(kept)) + current[len(previous):]
-            tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
-            tmp.write_bytes(payload)
-            replace_atomic(tmp, path)
-            dropped = seen - named - {0}
+                    observed.setdefault(key, []).append(row)
+                    if survivors.pop(key, None) == row:  # only the last observed row of a key can survive
+                        kept.append(line)
+                        named.add(key)
+                tail = [(line, *_ledger_line(line)) for line in current[len(previous):].splitlines(keepends=True)]
+                last = {key: row for _line, row, key in tail if key}
+                ended = {custody_key(row) for row in settled if last.get(custody_key(row)) == row}
+                for _line, row, key in tail:
+                    if key in ended:
+                        observed.setdefault(key, []).append(row)
+                named.update(last.keys() - ended)
+                payload = b"".join(reversed(kept)) + b"".join(line for line, _row, key in tail if key not in ended)
+                for row in settled:
+                    if row and custody_key(row) not in named:
+                        observed.setdefault(custody_key(row), []).append(row)
+                if payload == current:
+                    payload = None  # nothing to compact: an absent ledger stays absent
+            if payload is not None:
+                tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+                tmp.write_bytes(payload)
+                replace_atomic(tmp, path)
+            dropped = [row for key, rows in observed.items() if key not in named for row in rows]
         finally:
             release_exclusive_file_lock(lock_path, lock_fd)
     except Exception:
         log.debug("process ledger rewrite failed", exc_info=True)
     if dropped:
-        from ouroboros.owned_shutdown import forget_ledgered_pids
+        from ouroboros.owned_shutdown import forget_ledgered_rows
 
-        forget_ledgered_pids(drive_root, dropped)  # the ledger's close path is the set's too
+        forget_ledgered_rows(drive_root, dropped)  # the ledger's close path is the set's too
+
+
+def _ledger_line(line: bytes) -> tuple:
+    """One ledger line's row and custody key; ``(None, None)`` for bytes that name no row."""
+    try:
+        row = json.loads(line)
+        key = custody_key(row) if isinstance(row, dict) and row.get("pid") else None
+    except (TypeError, ValueError, UnicodeError):
+        return None, None
+    return (row, key) if key and key != ("pid", 0) else (None, None)
 
 
 # A spawner names itself to the Python entrypoints it launches, in the child's
@@ -734,6 +782,307 @@ def live_daemon_root_pids(
     return pids
 
 
+def spared_daemon_roots(drive_root: Any) -> "Optional[set[int]]":
+    """Live installation-daemon roots an owned stop never reaches through a parent chain.
+
+    The installation of ``drive_root`` (a child drive maps to its parent), read strictly:
+    ``None`` when its ledger is missing or cannot be read, so the caller holds what only a
+    parent chain reaches instead of guessing that no daemon root is among it."""
+    try:
+        from ouroboros.claudexor_daemon import CUSTODY_PURPOSE
+        from ouroboros.owned_shutdown import installation_root
+
+        root = installation_root(drive_root)
+        if not ledger_path(root).exists():
+            return None
+        return live_daemon_root_pids(root, retained_purposes={CUSTODY_PURPOSE}, strict=True)
+    except Exception:
+        return None
+
+
+def _owned_service_row(entry: Dict[str, Any]) -> bool:
+    """A service launch that recorded its own identity (``record_process(scope_marker=...)``): its stop
+    ends by that identity (``process_scope.end_owned_processes``). Older rows keep their group stop. The
+    marker alone makes a launch: a leader birth the registration could not read only withholds the
+    leader's own signal authority (``process_scope._unmeasured_leaders``), never its marker's reach."""
+    from ouroboros.process_census import is_launch_marker
+
+    return (not IS_WINDOWS and str(entry.get("purpose") or "").startswith(("service:", "workspace_service:"))
+            and is_launch_marker(str(entry.get("scope_marker") or "")))
+
+
+def _launch_target(entry: Dict[str, Any], copy: Any = ()) -> Dict[str, Any]:
+    """``copy``: what the launch's ownership copy names, folded in like a pending copy: held unless the row names it."""
+    pid, birth = int(entry.get("pid") or 0), str(entry.get("scope_birth") or "")
+    if not birth and pid > 0 and "start_time" in (measured_identity_mismatch(entry).get("mismatches") or ()):
+        # A measured BIRTH that differs refutes the leader: that pid is another process, no leader left to
+        # judge (the marker reach still applies). A command-only change after an ``exec`` keeps the same pid
+        # and birth: it stays the unmeasured leader, held unknown and unsignalled, never proven ended.
+        pid = 0
+    known = [item for item in entry.get("known_members") or [] if isinstance(item, dict)]
+    return {"key": id(entry), "pid": pid, "birth": birth, "markers": [str(entry.get("scope_marker") or "")],
+            "known": owed_after(known, (), copy, stale=True) if copy else known}
+
+
+def _owned_copies(drive_root: Any, entries: List[Dict[str, Any]]) -> Optional[Dict[int, Dict[str, Any]]]:
+    """The ownership set's copy of each launch row asked about, ``{id(entry): its row}``. The set merges the pending
+    copies a stop writes when it cannot take the ledger lock, so each judge of a launch reads that stop's answer with
+    the row. One strict set read, no census, only these launches' pending files. ``None`` when it failed: unknown,
+    never "owes nothing". A launch's id is its own across every drive of the installation."""
+    wanted = {custody_record_id(entry): entry for entry in entries if custody_key(entry)[0] == "launch"}
+    if not wanted:
+        return {}
+    try:
+        from ouroboros.owned_shutdown import owned_records
+
+        copies = {record["record_id"]: record["ledger_entry"]
+                  for record in owned_records(drive_root, strict=True, only=set(wanted))
+                  if isinstance(record.get("ledger_entry"), dict)}
+    except Exception as exc:
+        log.warning("ownership copies of %s could not be read: %s", drive_root, exc)
+        return None
+    return {id(entry): copies[rid] for rid, entry in wanted.items() if rid in copies}
+
+
+def _copy_names(copy: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [item for item in (copy or {}).get("known_members") or [] if isinstance(item, dict)]
+
+
+def end_service_rows(drive_root: Any, entries: List[Dict[str, Any]], *, retained: Any = (),
+                     drives: Optional[Dict[int, Any]] = None) -> Dict[int, Dict[str, Any]]:
+    """End the recorded reach of several launch rows in one pass, the identities each still owes included (its
+    ownership copy's too), sparing ``retained`` and the installation's daemon roots (unknown roots hold what only
+    a parent chain reaches); ``{id(entry): outcome}``, each already reconciled into its custody (``settle_launch``).
+    ``drives``: the drive of a row whose ledger is not ``drive_root``'s."""
+    from ouroboros.process_scope import end_owned_processes
+
+    if not entries:
+        return {}
+    roots, copies = spared_daemon_roots(drive_root), _owned_copies(drive_root, entries) or {}
+    return end_owned_processes([{**_launch_target(entry, _copy_names(copies.get(id(entry)))),
+                                 "custody": ((drives or {}).get(id(entry), drive_root), entry)} for entry in entries],
+                               spared=None if roots is None else roots | set(retained), graceful=False)
+
+
+def _launch_row_of(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The launch row an ownership-set stop target names: its ledger row, or the row of a local executor record's marker."""
+    if entry.get("kind") == "service":
+        from ouroboros import workspace_executor as executor
+
+        path = pathlib.Path(entry["record_path"])
+        record = executor._load_process_record(path)
+        return (executor._launch_row(record) if record is not None and executor._recorded_launch(record)
+                and executor._valid_process_record(path, record, check_identity=False) else None)
+    row = entry.get("ledger_entry")
+    return row if entry.get("kind") == "supervised" and isinstance(row, dict) and _owned_service_row(row) else None
+
+
+def launch_stop_pass(root: Any, entries: List[Dict[str, Any]], retained: Any) -> Optional[Dict[str, Any]]:
+    """One pass (one census, one wait) for every launch of an exit's stop targets, one target per launch whichever of
+    its records it names; each record's step reads that launch's one outcome (``launch_pass_outcome``), already
+    reconciled with the launch's custody, instead of deciding on its own."""
+    import threading
+
+    from ouroboros.owned_shutdown import _require_owned_entry
+
+    rows: Dict[tuple, Dict[str, Any]] = {}
+    drives: Dict[int, Any] = {}
+    ledgers: Dict[str, Dict[tuple, Dict[str, Any]]] = {}
+    for entry in entries:
+        try:
+            row = _launch_row_of(entry)
+            if row is None:
+                continue
+            _require_owned_entry(root, entry)
+        except Exception:
+            continue  # its own step refuses it too
+        drive = entry.get("drive_root") or root
+        row = latest_launch_row(drive, row, ledgers)  # the record's copy may lag what the ledger names
+        row = rows.setdefault(custody_key(row), row)
+        drives[id(row)] = drive
+    if not rows:
+        return None
+    shared: Dict[str, Any] = {"rows": rows, "done": threading.Event(), "ended": {}}
+
+    def run() -> None:
+        try:
+            shared["ended"].update(end_service_rows(root, list(rows.values()), retained=retained, drives=drives))
+        finally:
+            shared["done"].set()
+
+    shared["run"] = run
+    return shared
+
+
+def launch_pass_outcome(root: Any, entry: Dict[str, Any], row: Dict[str, Any], deadline: float, retained: Any,
+                        shared: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The one outcome of ``row``'s launch from a stop's pass (one of its own when it has none); ``None``: unfinished."""
+    if shared is None:
+        shared = launch_stop_pass(root, [entry], retained)
+        if shared is None:
+            return None
+        shared["run"]()
+    shared["done"].wait(max(0.0, deadline - time.monotonic()))
+    named = shared["rows"].get(custody_key(row))
+    return None if named is None else shared["ended"].get(id(named))
+
+
+def owed_after(current: Any, judged: Any, observed: Any, *, stale: bool = False) -> List[Dict[str, Any]]:
+    """What a launch still owes once one stop's answer ``observed`` meets the identities ``current`` names (what
+    other stops of that launch recorded meanwhile). Only a stop that judged an identity can discharge it: one in
+    ``judged`` (the exact identities that stop measured) and left out of its answer. Every other identity stays,
+    and one either side holds stays held. ``stale``: ``observed`` may be older than ``current`` (a contended
+    copy), so one only it names comes back held, without signal authority until a stop judges its chain."""
+    from ouroboros.process_census import canonical_birth
+
+    def name(item: Dict[str, Any]) -> tuple:
+        return int(item.get("pid") or 0), canonical_birth(item.get("birth"))
+
+    current = [item for item in current or [] if isinstance(item, dict)]
+    named, held = {name(item) for item in current}, {name(item) for item in current if item.get("held")}
+    judged = {name(item) for item in judged or () if isinstance(item, dict)}
+    answer = [{**item, "held": True}
+              if not item.get("held") and (name(item) in held or stale and name(item) not in named) else item
+              for item in observed or [] if isinstance(item, dict)]
+    answered = {name(item) for item in answer}
+    return answer + [item for item in current if name(item) not in answered and name(item) not in judged]
+
+
+def _lock_wait() -> float:
+    """A stop's wait for the ledger lock: 2 s, or what is left of a running shutdown's one grace
+    (``owned_shutdown.stop_deadline``), so one wait per service never adds up beyond it."""
+    from ouroboros.owned_shutdown import stop_deadline
+
+    deadline = stop_deadline()
+    return 2.0 if deadline is None else max(0.0, min(2.0, deadline - time.monotonic()))
+
+
+def custody_lock_budget() -> Any:
+    """One pass's wait for the ledger lock, shared by all its publications, so a held lock costs it one ``_lock_wait``
+    however many launches it publishes: returns what is left of it."""
+    until = time.monotonic() + _lock_wait()
+    return lambda: max(0.0, until - time.monotonic())
+
+
+def latest_launch_row(drive_root: Any, fallback: Dict[str, Any], ledgers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The ledger's latest row of ``fallback``'s launch, else ``fallback``. ``ledgers``: one read per drive for a batch."""
+    ledgers = {} if ledgers is None else ledgers
+    drive = str(drive_root)
+    if drive not in ledgers:
+        ledgers[drive] = {custody_key(row): row for row in _read_ledger(pathlib.Path(drive))}
+    return ledgers[drive].get(custody_key(fallback), fallback)
+
+
+def _publish_owed(drive_root: Any, entry: Dict[str, Any], known: List[Dict[str, Any]], judged: Any,
+                  lock_timeout_sec: Optional[float]) -> tuple:
+    """``_reconcile_owed``, whose failure is one launch's alone: ``(None, False)``, never the batch's signals."""
+    try:
+        return _reconcile_owed(drive_root, entry, known, judged, lock_timeout_sec)
+    except Exception:
+        log.warning("owed identities of process %s could not be published", entry.get("pid"), exc_info=True)
+        return None, False
+
+
+def _owed_names(items: Any) -> set:
+    from ouroboros.process_census import canonical_birth
+
+    return {(int(item.get("pid") or 0), canonical_birth(item.get("birth")), bool(item.get("held")))
+            for item in items or [] if isinstance(item, dict)}
+
+
+def _reconcile_owed(drive_root: Any, entry: Dict[str, Any], known: List[Dict[str, Any]], judged: Any,
+                    lock_timeout_sec: Optional[float]) -> tuple:
+    """One stop's answer ``known`` into its launch's custody, UNDER the ledger's append lock: one locked read of the
+    launch's latest row (by its marker, so a stop still registering needs no row of its own) and of its ownership
+    copy (``_owned_copies``), ``owed_after`` with ``judged``, and, only when the ledger does not already name exactly
+    that, one appended row and the set's copy. A row the ledger no longer holds covers nothing. The lock spans read and
+    append so a parallel stop's member cannot be erased by a stale append. Returns ``(row, durable)``. ``row``: the
+    launch's row as now persisted (the latest itself when nothing changed); ``None`` when it could not be reconciled:
+    the ledger or the copy could not be read, the lock was unavailable or the append failed. ``durable``: a later judge
+    reads ``known``. Without the lock or a readable ledger nothing is discharged, and the answer, added to what the
+    launch already owed, lands as a pending ownership copy (the existing lock-free channel, which only adds: an
+    identity only it names is held) unless the ledger read already names all of it. A launch no store names and whose
+    row is unknown takes nothing: ``(entry, True)`` when it owes nothing, else ``(None, False)``."""
+    from ouroboros.owned_shutdown import record_ledgered_process
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+    from ouroboros.utils import jsonl_append_lock_path
+
+    path = ledger_path(drive_root)
+    lock_path = jsonl_append_lock_path(path)
+    wait = _lock_wait() if lock_timeout_sec is None else lock_timeout_sec
+    lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=wait, stale_sec=10.0, owner_aware_stale=True)
+    try:
+        readable, rows, _ = _read_ledger_records(pathlib.Path(drive_root), strict=False)
+        stored = next((row for row in rows if custody_key(row) == custody_key(entry)), None)
+        copies = _owned_copies(drive_root, [entry])
+        copy = (copies or {}).get(id(entry))
+        latest = stored or copy or (entry if entry.get("purpose") else None)
+        if latest is None:
+            return (entry, True) if not known else (None, False)
+        current = owed_after(latest.get("known_members"), (), _copy_names(copy), stale=True)
+        settled = lock_fd is not None and readable
+        owed = owed_after(current, judged, known) if settled else owed_after(current, (), known, stale=True)
+        row = {"ts": utc_now_iso(), **{key: value for key, value in latest.items() if key != "ts"},
+               "known_members": owed}
+        changed = _owed_names((stored or {}).get("known_members")) != _owed_names(owed)
+        written = settled and (not changed or append_jsonl(
+            path, row, ensure_record_boundary=True, lock_held=True, lock_timeout_sec=0.0))
+    finally:
+        if lock_fd is not None:
+            release_exclusive_file_lock(lock_path, lock_fd)
+    durable = written or (readable and stored is not None and not changed)
+    try:
+        if not durable:
+            log.warning("owed identities of process %s are not reconciled in the ledger: kept as a pending "
+                        "ownership copy", entry.get("pid"))
+            durable = record_ledgered_process(drive_root, row, contended=True)
+            if not durable:
+                log.critical("owed identities of process %s were not recorded anywhere", entry.get("pid"))
+        elif written and changed:
+            record_ledgered_process(drive_root, row, judged=judged, timeout_sec=wait)
+    except Exception:
+        log.warning("owed identities of process %s are not in the ownership set", entry.get("pid"), exc_info=True)
+    return ((row if changed else latest) if written and copies is not None else None), durable
+
+
+def note_owed(drive_root: Any, entry: Dict[str, Any], known: List[Dict[str, Any]], *, judged: Any = (),
+              lock_timeout_sec: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Reconcile a stop's answer into its launch's custody (``_publish_owed``): the launch's row as now persisted, or
+    ``None`` when the caller must keep the launch unconfirmed."""
+    return _publish_owed(drive_root, entry, known, judged, lock_timeout_sec)[0]
+
+
+def write_ahead(custody: tuple, members: List[Dict[str, Any]], lock_timeout_sec: Optional[float] = None) -> bool:
+    """Make what could outlive a stop's signal durable before that signal (``process_scope._write_ahead``); it
+    discharges nothing and appends nothing the ledger already names. False when nothing a later judge reads names it."""
+    return _publish_owed(*custody, members, (), lock_timeout_sec)[1]
+
+
+def settle_launch(custody: tuple, outcome: Dict[str, Any], judged: List[Dict[str, Any]], lock_wait: Any) -> None:
+    """Finish one pass over a launch (``process_scope.end_owned_processes``): its answer meets the launch's custody, and
+    ``outcome`` then says what is really left, for every record of the launch alike. An identity another stop recorded
+    outside what this pass ``judged`` is read once more: provably gone it is discharged, otherwise it stays owed and
+    the launch stays unconfirmed, so nothing retires around it; custody that cannot be reconciled confirms nothing."""
+    from ouroboros.process_scope import gone_identities
+
+    drive_root, entry = custody
+    known = outcome["known_members"]
+    row = note_owed(drive_root, entry, known, judged=judged, lock_timeout_sec=lock_wait())
+    answered = {(int(item["pid"]), str(item.get("birth"))) for item in known}
+    others = [item for item in (row or {}).get("known_members") or []
+              if isinstance(item, dict) and (int(item["pid"]), str(item.get("birth"))) not in answered]
+    gone = gone_identities(others) if others else []
+    if gone:
+        row = note_owed(drive_root, entry, known, judged=[*judged, *gone], lock_timeout_sec=lock_wait())
+    if row is None:
+        outcome.update(exit_confirmed=False, custody="unavailable")
+        return
+    owed = [item for item in row.get("known_members") or [] if isinstance(item, dict)]
+    outcome.update(known_members=owed, row=row)
+    if owed and outcome["exit_confirmed"]:
+        outcome.update(exit_confirmed=False, custody="owed")
+
+
 def pending_process_stops(drive_root: pathlib.Path, purposes: "set[str]") -> List[str]:
     """Read unresolved custody for stop diagnostics, never as signal authority."""
     readable, entries = _read_ledger_strict(drive_root)
@@ -835,23 +1184,36 @@ def stop_ledgered_processes(
 def quiesce_custodied_services(
     drive_root: pathlib.Path, *, timeout_sec: float = 5.0
 ) -> tuple[bool, List[str]]:
-    """Kill and verify every ledgered task/session service before repo replacement."""
+    """Kill and verify every ledgered task/session service before repo replacement.
+
+    A row that recorded its launch identity (``_owned_service_row``) ends in ONE pass with the
+    others by that identity: group, descendants in any group and processes that kept its launch
+    marker, even after its leader died or its pid was reused, never an installation daemon root.
+    A measured stranger on that pid is recorded (``process_not_ours``) only once the launch's end
+    is confirmed: it refutes the leader, never the launch. Older rows keep their group or tree
+    kill. A target stays in custody and blocks the replacement until its end and the row's own
+    liveness both confirm; so does a store that cannot be read (``launch_custody.read_custody``)."""
+    from ouroboros.launch_custody import read_custody
+
     drive_root = pathlib.Path(drive_root)
-    readable, entries, previous = _read_ledger_records(drive_root, strict=True)
-    if not readable:
+    custody = read_custody(drive_root)
+    entries, previous = custody.rows, custody.previous
+    if not custody.readable:
         return False, ["custody_ledger:unreadable"]
+    if custody.blind:  # it may name a live process: no replacement over what cannot be read
+        return False, [f"custody_ownership:unknown: {custody.blind}"]
     targets: List[Dict[str, Any]] = []
     survivors: List[Dict[str, Any]] = []
     blockers: List[str] = []
     for entry in entries:
         purpose = str(entry.get("purpose") or "")
         is_service = purpose.startswith(("service:", "workspace_service:")) or purpose == "maintenance"
+        in_scope = is_service and str(entry.get("scope") or "") in {"task", "session"}
+        if in_scope and _owned_service_row(entry):
+            targets.append(entry)  # whatever its leader pid names now: its own reach is read below
+            continue
         leader_matches = _fingerprint_matches(entry)
-        if (
-            is_service
-            and str(entry.get("scope") or "") in {"task", "session"}
-            and (leader_matches or _service_group_survives_leader(entry))
-        ):
+        if in_scope and (leader_matches or _service_group_survives_leader(entry)):
             targets.append(entry)
         elif leader_matches:
             survivors.append(entry)
@@ -863,13 +1225,17 @@ def quiesce_custodied_services(
 
     from ouroboros.platform_layer import kill_pid_tree
 
+    measured = [entry for entry in targets if _owned_service_row(entry)]
     for entry in targets:
-        pid = int(entry.get("pid") or 0)
-        pgid = int(entry.get("pgid") or 0)
-        if pgid > 0:
-            kill_process_group_id(pgid)
-        else:
-            kill_pid_tree(pid)
+        if not _owned_service_row(entry):
+            pid = int(entry.get("pid") or 0)
+            pgid = int(entry.get("pgid") or 0)
+            if pgid > 0:
+                kill_process_group_id(pgid)
+            else:
+                kill_pid_tree(pid)
+    ended = end_service_rows(drive_root, measured, retained=live_daemon_root_pids(drive_root)) if measured else {}
+    settled: List[Dict[str, Any]] = []
     deadline = time.monotonic() + max(0.0, float(timeout_sec))
     while targets and time.monotonic() < deadline:
         if not any(
@@ -879,10 +1245,20 @@ def quiesce_custodied_services(
             break
         time.sleep(0.05)
     for entry in targets:
-        if _fingerprint_matches(entry) or _service_group_survives_leader(entry):
+        outcome = ended.get(id(entry))  # a launch row's answer; an older row's end is its liveness below
+        if ((outcome is not None and not outcome["exit_confirmed"])
+                or _fingerprint_matches(entry) or _service_group_survives_leader(entry)):
             survivors.append(entry)
             blockers.append(f"custody_service:{int(entry.get('pid') or 0)}")
-        else:
+            continue
+        mismatch = measured_identity_mismatch(entry) if outcome is not None else {}
+        if mismatch and not record_not_ours(drive_root, entry, mismatch):
+            survivors.append(entry)  # its end is confirmed; the stranger on its pid is not recorded yet
+            blockers.append(f"custody_identity_unrecorded:{int(entry.get('pid') or 0)}")
+            continue
+        if outcome is not None:
+            settled.append(outcome.get("row") or {})
+        if outcome is None or outcome["ended"]:  # a launch with nothing left is only forgotten
             append_jsonl(drive_root / "logs" / "supervisor.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "process_reaped_for_update",
@@ -890,7 +1266,7 @@ def quiesce_custodied_services(
                 "pgid": int(entry.get("pgid") or 0),
                 "purpose": entry.get("purpose"),
             })
-    _rewrite_ledger(drive_root, survivors, previous=previous)
+    _rewrite_ledger(drive_root, survivors, previous=previous, settled=settled)
     return not blockers, blockers
 
 
@@ -914,6 +1290,10 @@ def reap_orphaned_processes(
         EXCEPT task-scoped entries whose owner task is no longer running;
       - previous generations: task/session scopes → kill group + reap event;
         daemon scope → keep (installation-owned lifecycles).
+      - a service launch's row (``_owned_service_row``, from the one selection, so a launch only
+        an ownership copy names too: ``launch_custody.read_custody``) follows the same owners, but no dead or
+        reused leader pid prunes it: its stop ends by launch identity in ONE pass, and only a
+        confirmed end retires the row; a reaped pid and event name what that stop actually ended.
       - ``retained_purposes`` lets the lifecycle owner preserve legacy records
         of its installation-owned process, only after fingerprint identity
         matches. The ledger's drive root and exact recorded process remain the
@@ -943,8 +1323,11 @@ def reap_orphaned_processes(
     # companion mass-reap by handing in an empty set.
     if live_owner_skills is not None and not live_owner_skills:
         live_owner_skills = None
-    _, entries, previous = _read_ledger_records(drive_root, strict=False)
-    if not entries:
+    from ouroboros.launch_custody import read_custody
+
+    custody = read_custody(drive_root, strict=False)
+    entries, previous = custody.rows, custody.previous
+    if not custody.readable or not entries:
         return []
     # CANDIDATES FIRST, LIVENESS SECOND. A candidate exists ⇒ its owner was registered
     # earlier (admission takes ``_queue_lock`` before any spawn), so an owner absent
@@ -960,6 +1343,7 @@ def reap_orphaned_processes(
     }
     reaped: List[int] = []
     survivors: List[Dict[str, Any]] = []
+    measured: List[Dict[str, Any]] = []
     for entry in entries:
         pid = int(entry.get("pid") or 0)
         scope = str(entry.get("scope") or "task")
@@ -993,7 +1377,8 @@ def reap_orphaned_processes(
             continue
         leader_matches = _fingerprint_matches(entry)
         group_survives = not leader_matches and _service_group_survives_leader(entry)
-        if not leader_matches and not group_survives:
+        launch = _owned_service_row(entry)  # custody of its marker outlives its leader and that leader's pid
+        if not leader_matches and not group_survives and not launch:
             mismatch = measured_identity_mismatch(entry)
             if mismatch and not record_not_ours(drive_root, entry, mismatch):
                 survivors.append(entry)
@@ -1049,6 +1434,9 @@ def reap_orphaned_processes(
         elif scope == "daemon" or (same_session and not task_owner_gone):
             survivors.append(entry)
             continue
+        if launch:
+            measured.append(entry)  # ended below, with the others, in one pass
+            continue
         try:
             pgid = int(entry.get("pgid") or 0)
             if pgid > 0:
@@ -1071,5 +1459,22 @@ def reap_orphaned_processes(
         except Exception:
             log.warning("Failed to reap ledgered process %s", pid, exc_info=True)
             survivors.append(entry)
-    _rewrite_ledger(drive_root, survivors, previous=previous)
+    ended = end_service_rows(drive_root, measured, retained=retained_roots)
+    settled: List[Dict[str, Any]] = []
+    for entry in measured:
+        outcome = ended[id(entry)]
+        mismatch = measured_identity_mismatch(entry) if outcome["exit_confirmed"] else {}
+        if not outcome["exit_confirmed"] or (mismatch and not record_not_ours(drive_root, entry, mismatch)):
+            survivors.append(entry)  # owed: the next sweep ends what is left, what the pass recorded included
+            continue
+        settled.append(outcome.get("row") or {})
+        if outcome["ended"]:  # a launch with nothing left is only forgotten: no end to claim
+            reaped.extend(outcome["ended"])
+            append_jsonl(drive_root / "logs" / "supervisor.jsonl", {
+                "ts": utc_now_iso(), "type": "process_reaped", "pid": int(entry.get("pid") or 0),
+                "pgid": int(entry.get("pgid") or 0), "purpose": entry.get("purpose"),
+                "scope": str(entry.get("scope") or "task"), "owner_task": str(entry.get("owner_task") or ""),
+                "stale_session": str(entry.get("session_id") or ""), "reach": "launch identity",
+                "ended": outcome["ended"]})
+    _rewrite_ledger(drive_root, survivors, previous=previous, settled=settled)
     return reaped
