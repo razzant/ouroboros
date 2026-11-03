@@ -98,14 +98,6 @@ jobs:
         if: always() && matrix.os == 'macos-latest' && env.HAS_APPLE_SIGNING == 'true'
 ```
 
-```yaml
-# ❌ WRONG — workflow fails to parse
-- name: Bad
-  if: secrets.BUILD_CERTIFICATE_BASE64 != ''   # parse error
-  env:   # not visible to this step's if:
-    P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-```
-
 `tests/test_build_scripts.py::TestMacOSSigning::test_ci_uses_env_context_for_condition` enforces this for `ci.yml` only.
 
 ### Apple signing & notarization (macOS Build job)

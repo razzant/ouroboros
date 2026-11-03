@@ -38,6 +38,8 @@ The operation runs no tests. The contributor lane first runs the proposal's herm
 
 A pull request into `ouroboros` keeps version carriers byte-identical to its target (`release_sync.VERSION_CARRIER_SPANS`; ARCHITECTURE §10, invariant 2). Ordinary serving commits, including documentation, require a numbered release; prepared body candidates may be neutral. Committing paths use candidate/update authority; review-only paths admit neutral contributions. Managed integration keeps the official version. `preflight_review(deterministic_only=True, source="worktree" | "index")` gives free release diagnostics and worktree book balance, no freshness. Separate source failures from findings; check staging and unchanged files/index/state (`tests/test_release_metadata_diagnostics.py`; contracts: ARCHITECTURE §6 "Commit preflight"). At integration `release_sync.sync_release_metadata()` projects the chosen version; `release_metadata_findings()` checks carriers, the current README row and the P9 limits, without autofix; changelog prose and trimming stay deliberate (a milestone's row opens `**Short title** — **type: heading.**`). Packaging: ARCHITECTURE §8 "Build scripts".
 
+The maintainers' cycle between releases, marker to promotion (BIBLE P9): CONTRIBUTING "Maintainer Boundary"; `tests/test_development_cycle.py`.
+
 Hermetic preflight isolation: §14 "The tiered commit and CI gates". A test rebinds every imported process-global root and fails closed on the live data root; setting `OUROBOROS_DATA_DIR` alone is not isolation. Enforced by `tests/conftest.py`. A reviewed local commit is the durability boundary of self-modification; an `origin` push and CI are follow-up signals, not prerequisites for its survival (ARCHITECTURE §8).
 
 ---

@@ -747,7 +747,12 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
     "resolve" it). Returns ``(ok, note, error)``; ok=False means the projection
     could not be completed and the caller must NOT freeze the half-projected
     tree as a merge commit or an M0 baseline (typed failure over silent drift).
-    A target without a VERSION blob mandates nothing (ok=True, empty note)."""
+    A target without a VERSION blob mandates nothing (ok=True, empty note).
+
+    A development-marker target's download links are its README's, written back here:
+    the running body owns this projection, so a body older than the marker rule projects
+    the marker onto them and commits unpublished URLs into its local merge, and only this
+    next projection repairs that. Official refs and fast-forwards never carry it."""
     workdir = str(cwd or _g.REPO_DIR)
     rc_tv, target_blob, _tve = _git_run(["git", "rev-parse", f"{target_sha}:VERSION"], cwd=workdir)
     if rc_tv != 0 or not target_blob:
@@ -766,9 +771,12 @@ def project_version_carriers(target_sha: str, *, cwd: Optional[str] = None) -> T
         return False, note, f"conflict inventory unreadable: {u_error}"
     unmerged = {ln.strip() for ln in unmerged_out.splitlines() if ln.strip()}
     try:
-        from ouroboros.tools.release_sync import sync_release_metadata
+        from ouroboros.tools.release_sync import published_download_version, sync_release_metadata
 
-        changed_carriers = list(sync_release_metadata(workdir) or [])
+        # A marker target's links are not derived from VERSION: they stay its published release.
+        rc_r, target_readme, _re = _git_run(["git", "show", f"{target_sha}:README.md"], cwd=workdir)
+        changed_carriers = list(sync_release_metadata(
+            workdir, published_version=published_download_version(target_readme) if rc_r == 0 else "") or [])
     except Exception as exc:
         return False, note, f"carrier token sync failed: {type(exc).__name__}: {exc}"
     addable = [p for p in changed_carriers if p not in unmerged]

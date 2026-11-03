@@ -13,6 +13,8 @@ import yaml
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
     DESKTOP_DOWNLOAD_IDS,
+    is_development_marker,
+    published_download_version,
     release_asset_download_url,
 )
 
@@ -230,8 +232,10 @@ def test_install_page_has_version_bound_direct_downloads_before_advanced_setup()
             "</div>", 1
         )[0]
         assert "/releases/latest" not in downloads
+        # A development marker's links stay on the release they name; a release names itself.
+        published = published_download_version(html) if is_development_marker(version) else version
         for proof_id in DESKTOP_DOWNLOAD_IDS:
-            expected = release_asset_download_url(proof_id, version)
+            expected = release_asset_download_url(proof_id, published)
             assert f'data-release-download="{proof_id}"' in html
             assert expected in html
         assert html.index("platform-downloads") < html.index(
