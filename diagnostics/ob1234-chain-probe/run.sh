@@ -49,6 +49,22 @@ prepare() {
   disk > "$W/out/facts/disk-prepare.txt"
   { uname -a; cat /etc/os-release; nproc; free -b; echo "core_pattern=$(cat /proc/sys/kernel/core_pattern)"
     podman version; python3 -V; sudo aa-status --enabled && echo apparmor=enabled; } > "$W/out/facts/host.txt" 2>&1 || true
+  # Check the exact registry object before spending time/space on payload downloads.
+  local image_ref; image_ref=$(awk '$1 == "FROM" {print $2}' "$PROBE/Containerfile")
+  skopeo inspect --raw "docker://$image_ref" > "$W/out/facts/userspace-manifest.json" 2> "$W/out/facts/registry-check.log"
+  # Ubuntu's CNI plugins are an optional network-stack provider. The earlier warning
+  # did not establish which backend was active; prepare its standard binaries, not a
+  # new backend or a relaxed network policy, and retain the resulting backend facts.
+  {
+    dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' podman netavark containernetworking-plugins iptables || true
+    if [ ! -x /usr/lib/cni/bridge ] || [ ! -x /usr/lib/cni/portmap ] || [ ! -x /usr/lib/cni/firewall ] || [ ! -x /usr/lib/cni/tuning ]; then
+      sudo apt-get update
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends containernetworking-plugins
+    fi
+    test -x /usr/lib/cni/bridge -a -x /usr/lib/cni/portmap -a -x /usr/lib/cni/firewall -a -x /usr/lib/cni/tuning
+    dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' podman netavark containernetworking-plugins iptables || true
+  } > "$W/out/facts/network-dependencies.log" 2>&1
+  podman_ info > "$W/out/facts/podman-info.txt" 2>&1 || true
   # One payload at a time: download, verify against the pinned digest AND the release
   # SHA256SUMS, extract, then delete the verified tarball (disposable runner, no duplicate copy).
   local arm url sha name p

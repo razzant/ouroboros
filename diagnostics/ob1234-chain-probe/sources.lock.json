@@ -52,11 +52,17 @@
   "comparison_scope": "A vs B swaps the whole payload (launcher, wrapper, bundled libraries, Python 3.10.19 vs 3.10.22, managed source). It is a comparison of two published artifacts, not a one-variable causal proof.",
   "userspace": {
     "image": "quay.io/fedora/fedora-silverblue:43-x86_64",
-    "digest": "sha256:e66e70e7b592a7b92c39f4a4effbb0dcc7e25f07106ffff38a8ea56522e2670d",
-    "multiarch_tag_43_digest": "sha256:63e79ebb957fa1d0ad248c490f4b9e065d208ab6b64c72f3f5bf546b990aaadb",
-    "annotations": {"org.opencontainers.image.version": "43.20261101.0", "ostree.commit": "e7559f649df69a0631e0c2cf9581f3103ff9cdc04296964d637f3f7b365d354a", "ostree.linux": "7.2.13-100.fc43.x86_64", "containers.bootc": "1"},
-    "compressed_size_bytes": 2529169638,
-    "note": "Official Fedora releng bootc/ostree image of Silverblue 43 userspace, run as an ordinary container. It is NOT native Silverblue: the runner's kernel is used, the image is not booted by ostree, no SELinux policy is enforced. No dated September 2026 tag exists on quay; this is the 2026-11-01 compose."
+    "digest": "sha256:fa844d941753eab745fced0e059519e969551339b2138e05da5154a55d2389f2",
+    "observed_at": "2026-11-03T11:36Z",
+    "verified_by": "HTTP 200 on the exact registry v2 manifest; Docker-Content-Digest and SHA-256 of its 34021 response bytes both match; no layers downloaded locally",
+    "previous_digest": "sha256:e66e70e7b592a7b92c39f4a4effbb0dcc7e25f07106ffff38a8ea56522e2670d",
+    "previous_run": "41627217051: manifest unknown before either browser arm; retained unchanged",
+    "network_preparation": "Ubuntu noble containernetworking-plugins if its four CNI executables are absent; records package and podman info observations without selecting a backend",
+    "network_package_source": "https://packages.ubuntu.com/noble/amd64/containernetworking-plugins/filelist",
+    "historical_multiarch_tag_43_digest_20261101": "sha256:63e79ebb957fa1d0ad248c490f4b9e065d208ab6b64c72f3f5bf546b990aaadb",
+    "annotations": {"org.opencontainers.image.version": "43.20261103.0", "ostree.commit": "bfc0a023c722b3694fa033fbad620723d07db6243f945e474b573075080635a7", "ostree.linux": "7.2.15-100.fc43.x86_64", "containers.bootc": "1"},
+    "compressed_size_bytes": 2529370850,
+    "note": "Official Fedora releng bootc/ostree image of Silverblue 43 userspace, run as an ordinary container. It is NOT native Silverblue: the runner's kernel is used, the image is not booted by ostree, no SELinux policy is enforced. No dated September 2026 tag exists on quay; this is the 2026-11-03 compose."
   },
   "runner": {
     "label": "ubuntu-24.04 (GitHub-hosted standard public runner, x86_64)",

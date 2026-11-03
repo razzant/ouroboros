@@ -1,7 +1,7 @@
 # OB#1234 chain probe userspace: stock Silverblue 43 + the minimum the published
 # launchers need to start headless. Every addition is recorded; nothing else changes.
 # multi-user.target: gdm/graphical units cannot work without a seat; D-Bus stays.
-FROM quay.io/fedora/fedora-silverblue:43-x86_64@sha256:e66e70e7b592a7b92c39f4a4effbb0dcc7e25f07106ffff38a8ea56522e2670d
+FROM quay.io/fedora/fedora-silverblue@sha256:fa844d941753eab745fced0e059519e969551339b2138e05da5154a55d2389f2
 RUN set -eux; \
     rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /usr/share/ob1234-rpm-before.txt; \
     need=''; \
