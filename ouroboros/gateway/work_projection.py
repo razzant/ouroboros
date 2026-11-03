@@ -138,6 +138,18 @@ class _Observations:
             self.models[root_id] = tree_model_handoffs(drive_root or self.drive_root, root_id)
         return self.models[root_id]
 
+    def resume_attempt(self, task_id: str, drive_root: Any = None) -> dict:
+        """The task's latest Resume attempt (``work_stop.ATTEMPT_KEY``) from the census's own body facts
+        (``gateway.state._task_activity_facts``: its body is read again only once its row moves). An unreadable
+        one is a disclosed gap, never an absent attempt."""
+        from ouroboros.gateway.state import _task_activity_facts
+
+        facts = _task_activity_facts(drive_root or self.drive_root, task_id)
+        if facts.get("unavailable"):
+            self.gaps.append({"reason": "resume_attempt_unavailable", "task_id": task_id})
+        attempt = facts.get("resume_attempt")
+        return attempt if isinstance(attempt, dict) else {}
+
     def stop_unknown(self, task_id: str, drive_root: Any = None, owner: Optional[Mapping[str, Any]] = None
                      ) -> frozenset:
         if task_id not in self.stops:
@@ -288,6 +300,7 @@ def _member_raw(row: Mapping[str, Any], raw: Mapping[str, Any], obs: _Observatio
         facts["fences"] = {"owner": fence}
         facts["model_handoffs"] = obs.model_handoffs(root_id, raw.get("budget_drive_root"))
         facts["parked"] = [str(task) for task in fence.get("parked_members") or () if task]
+        facts["resume_attempt"] = obs.resume_attempt(str(row.get("activity_id") or ""), raw.get("budget_drive_root"))
     return facts
 
 

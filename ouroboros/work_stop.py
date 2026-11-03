@@ -4,12 +4,18 @@ reading of a queue row's current control that the census and the mind's task rea
 The queue owns publication; exact grants keep their existing single-use CAS.
 A selection survives consumption, but carries no reason from the released stop.
 Technical refusals and writer waits are classified separately from decisions.
+The Resume door's latest answer is kept on the task's own record, bound to the control it
+answered about (``resume_asked``): dated history, never a stop, a refusal point or a door.
 """
 
 import hashlib
 import json
+import logging
 import pathlib
+from datetime import datetime, timezone
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 SELECTION_KEY = "_resume_selection"
 SELECTION_BINDING = (
@@ -114,7 +120,8 @@ def current_stop(task: dict | None, fences: dict | None = None) -> dict:
     budget = (fences.get("budget") or {}).get(root_id) or {}
     tree = {}
     if owner.get("awaiting_selection"):
-        member = member or {**reason_policy("root_fence_member_pending_selection"), "scope": "member"}
+        member = member or {**reason_policy("root_fence_member_pending_selection"), "scope": "member",
+                            **({"fence_id": owner["fence_id"]} if owner.get("fence_id") else {})}
     elif owner.get("state") in {"requested", "paused"}:
         tree = {**owner, **reason_policy("owner"), "scope": "tree"}
     elif budget.get("status") in {"active", "paused"}:
@@ -318,9 +325,12 @@ def queue_control(drive_root: Any, row: dict, fences: dict, *, running: bool = F
     return {"phase": phase, "view": view, "owner_resumed": interrupted is True}
 
 
-# What makes a stop the same stop: its own records, never a time, an amount or a result.
+# What makes a stop the same stop: its own records, never an amount, a result or a time read now. A stop declared anew
+# records its occurrence, so two restarts with a release between them are two stops in the same words: a fence or pause
+# its id, a saved or restart hold ``held_at`` (the door matrix keeps a standing hold's, ``declare_stop``), and a member's
+# money marker, with neither, ``paused_at`` (``_identity_facts``; a settling fence restamps its own, so only there).
 _IDENTITY_KEYS = ("cause", "scope", "ui_code", "reason", "release", "fence_id", "pause_id", "pause_generation",
-                  "grant_id", "root_grant_id", "root_resume_generation")
+                  "grant_id", "root_grant_id", "root_resume_generation", "held_at")
 
 
 def _tree_basis(drive_root: Any, task: dict) -> dict | None:
@@ -339,17 +349,22 @@ def _tree_basis(drive_root: Any, task: dict) -> dict | None:
         return None
 
 
+def _identity_facts(record: Any) -> dict:
+    record = record if isinstance(record, dict) else {}
+    facts = {key: record[key] for key in _IDENTITY_KEYS if record.get(key) not in (None, "")}
+    if record.get("paused_at") and not facts.keys() & {"fence_id", "pause_id", "held_at"}:
+        facts["paused_at"] = record["paused_at"]
+    return facts
+
+
 def _stop_identity(task: dict, stop: dict, tree: dict | None) -> str:
     """Changes with the attempt, the stop's records and the tree root's resume basis: a root resumed after a
     newer money Pause or owner Pause asks again for each child it selects (``hold_root_resume_descendants``).
     An unreadable basis is one stable ``unreadable`` token, said beside the stop (``resume_basis``): a
     deliberate wait on it stays, and the real basis, once read again, is new."""
-    def facts(record: Any) -> dict:
-        record = record if isinstance(record, dict) else {}
-        return {key: record[key] for key in _IDENTITY_KEYS if record.get(key) not in (None, "")}
-
     shape = {"task": str(task.get("id") or ""), "attempt": int(task.get("_attempt") or 1),
-             "tree": tree if tree is not None else "unreadable", **facts(stop), "member": facts(stop.get("member_stop"))}
+             "tree": tree if tree is not None else "unreadable", **_identity_facts(stop),
+             "member": _identity_facts(stop.get("member_stop"))}
     return hashlib.sha256(json.dumps(shape, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
@@ -653,3 +668,154 @@ def resume_outcome(outcome: dict) -> dict:
     accept = acceptable_unknown(outcome.get("blockers"))
     return {**outcome, **({"acceptable_unknown": accept} if accept else {}), "message": "Resume refused: " + (
         "; ".join(dict.fromkeys(words)) if words else phrases.get(error, error.replace("_", " ")))}
+
+
+# --- The task's latest Resume attempt: one dated answer on its own record (#2380, #2411) -------------------
+
+ATTEMPT_KEY = "resume_attempt"
+_REFUSED = "Resume refused: "
+# Who asked, as the door bound it: the owner's own door (``control_actor.owner_door``), a mind's control call, or
+# neither (the host's own release of a Continue's writer wait, ``continuation_admission.release_settled_continuations``,
+# whose ``host_control`` unbinds both wherever a door's call reaches it).
+ATTEMPT_ACTORS = ("owner", "ouroboros", "host")
+
+
+def control_identity(view: Any, hold: Any = None) -> dict:
+    """What makes the control holding a task the same one for every reader: the own records (``_IDENTITY_KEYS``, its
+    occurrence among them) of its outermost current stop (``stop_presentation``'s ``view``), else of the wait or refusal
+    its row keeps. Never an amount, a result or a time read now; ``{}`` names no control."""
+    view = view if isinstance(view, dict) else {}
+    stop = view.get("stop") if isinstance(view.get("stop"), dict) else {}
+    if stop:
+        return _identity_facts(stop)
+    for record in (hold, view.get("refusal")):
+        if isinstance(record, dict) and record:
+            return _identity_facts({**record, **record_policy(record)})
+    return {}
+
+
+def _instant(value: Any) -> float | None:
+    """Epoch seconds of an ISO instant (UTC when it names no zone) or of epoch seconds; None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)) or value == "":
+        return None
+    if not isinstance(value, str):
+        return float(value)
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def attempt_record(outcome: dict, *, at: str, answered_at: str, by: dict, control: dict, selected_by: str = "") -> dict:
+    """One Resume attempt as a dated fact: when it was asked (``at``, its order) and answered, who asked, the control it
+    answered about (``control_identity`` when it was asked) and the door's whole answer (``answer``) except the held
+    calls an owner may go on past (``acceptable_unknown``, derived from its blockers): no later reader accepts them
+    from history. It grants, refuses, holds and re-arms nothing."""
+    return {"at": at, "answered_at": answered_at, "by": dict(by), "control": dict(control),
+            "ok": bool(outcome.get("ok")), **({"selected_by": str(selected_by)} if selected_by else {}),
+            "answer": {key: value for key, value in outcome.items() if key != "acceptable_unknown"}}
+
+
+def resume_asked(q: Any, task_id: str, *, selected_by: str = ""):
+    """Before the Resume door acts: when it was asked and the control it answers about, read as the census reads the
+    task (``queue_control`` over a copy of its queue row, else the tree's own Pause over its id). Returns the keeper
+    of its answer: ``answered(outcome)`` keeps it as the task's latest attempt (``ATTEMPT_KEY``) and returns it unchanged,
+    whatever happens.
+
+    A newer stop landing while the door works is another control, so this answer is never said beside it. ``at``
+    orders the attempts: an answer landing after a newer one's never replaces it. Who asked is what the call bound:
+    a mind's ``mind_control``, else the owner's own door (``owner_door_bound``), else the host. Only an existing record
+    changes, at the result root the door's own write uses, so an unknown id creates nothing; the host's re-check
+    writes only a new refusal or the start that ends one. A failed write is logged, never retried and never a
+    refusal. The owner's answer, and each the host keeps, also go whole to events.jsonl, as each mind door keeps its
+    own there."""
+    import copy
+
+    from ouroboros.control_actor import control_actor, owner_door_bound
+    from ouroboros.utils import utc_now_iso
+
+    actor, at, task_id = control_actor(), utc_now_iso(), str(task_id or "")
+    by = ({"actor": "ouroboros", "task_id": str(actor.get("task_id") or "")} if actor.get("actor") == "ouroboros"
+          else {"actor": "owner"} if owner_door_bound() else {"actor": "host"})
+    row, control = None, {}  # an unread control names none, so this answer is said beside none
+    try:
+        with q._queue_lock:
+            row = next((dict(item) for item in q.PENDING if str(item.get("id") or "") == task_id), None)
+            meta = q.RUNNING.get(task_id) if row is None else None
+            if meta is not None:
+                row = {**(meta.get("task") or {}), "_attempt": int(meta.get("attempt") or 1)}
+            row, fences = copy.deepcopy(row), copy.deepcopy(dict(q.BUDGET_ROOT_FENCES))
+        # Off the queue lock, exactly as the census reads its copies.
+        view = (queue_control(q.DRIVE_ROOT, row, fences, running=meta is not None)["view"] if row is not None
+                else parked_stop_view(q.DRIVE_ROOT, {"id": task_id}, task_id, fences.get(task_id) or {}))
+        control = control_identity(view, (row or {}).get("_budget_pause_hold"))
+    except Exception:
+        log.debug("The control a Resume of %s answers about was not read", task_id, exc_info=True)
+    root = pathlib.Path((row or {}).get("budget_drive_root") or q.DRIVE_ROOT)
+
+    def answered(outcome: dict) -> dict:
+        record = attempt_record(outcome, at=at, answered_at=utc_now_iso(), by=by, control=control,
+                                selected_by=selected_by)
+        written = _keep_attempt(root, task_id, record)
+        if by["actor"] == "owner" or written and by["actor"] == "host":
+            from ouroboros.utils import append_jsonl
+
+            try:
+                append_jsonl(pathlib.Path(q.DRIVE_ROOT) / "logs" / "events.jsonl",
+                             {"ts": record["answered_at"], "type": "task_resume_outcome", "task_id": task_id,
+                              "actor": by["actor"], "attempt_at": at, "control": control,
+                              **({"selected_by": selected_by} if selected_by else {}), "outcome": outcome})
+            except Exception:
+                log.warning("The Resume answer for %s was not logged", task_id, exc_info=True)
+        return outcome
+
+    return answered
+
+
+def _keep_attempt(root: pathlib.Path, task_id: str, record: dict) -> bool:
+    """Whether ``record`` was offered to the task's own record (a write that fails is logged and keeps nothing)."""
+    from ouroboros.task_results import require_writable_task_result_schema, validate_task_id
+    from ouroboros.task_store import patch_document
+
+    order, offered = _instant(record["at"]), []
+
+    def keep(current: dict):
+        if not current:
+            return None
+        require_writable_task_result_schema(current)
+        prior = current.get(ATTEMPT_KEY) if isinstance(current.get(ATTEMPT_KEY), dict) else {}
+        prior_order = _instant(prior.get("at"))
+        if order is None or (prior_order is not None and prior_order > order):
+            return None
+        if record["by"]["actor"] == "host" and (  # the host's re-check changes nothing the record says
+                all(prior.get(key) == record.get(key) for key in ("by", "control", "ok", "selected_by", "answer"))
+                or record["ok"] and (prior.get("by") or {}).get("actor") != "host"):
+            return None
+        offered.append(True)
+        return {**current, ATTEMPT_KEY: record}
+
+    try:
+        patch_document(root, validate_task_id(task_id), keep)
+    except Exception:
+        log.warning("The Resume attempt of %s was not kept on its record", task_id, exc_info=True)
+        return False
+    return bool(offered)
+
+
+def last_resume(attempt: Any, control: dict) -> dict:
+    """A held task's stored latest Resume attempt while it answered about the control holding the task now (the same
+    records, ``control_identity``): refused, its door's own words, when it was asked and who asked. History beside the
+    reason, never a door or proof that a blocker still exists; an accepted attempt, one about another control (an
+    older stop, or a newer one landing while the door worked) and a malformed record say nothing."""
+    if (not isinstance(attempt, dict) or attempt.get("ok") is not False or not control
+            or attempt.get("control") != control or _instant(attempt.get("at")) is None):
+        return {}
+    answer = attempt.get("answer") if isinstance(attempt.get("answer"), dict) else {}
+    message = str(answer.get("message") or "")
+    actor = str((attempt.get("by") if isinstance(attempt.get("by"), dict) else {}).get("actor") or "")
+    if actor not in ATTEMPT_ACTORS:
+        return {}
+    return {"at": attempt["at"], "by": {"actor": actor},
+            "error": str(answer.get("error") or ""),
+            "text": message[len(_REFUSED):] if message.startswith(_REFUSED) else message}

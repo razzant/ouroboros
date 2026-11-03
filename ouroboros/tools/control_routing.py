@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ouroboros.dialogue_provenance import presence_root_carrier
+from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
 from ouroboros.tools.control_events import (
     _emit_and_wait_for_routing,
     _promotion_pool_disabled_from_snapshot,
@@ -365,6 +365,10 @@ def _start_task(
             # focus keeps ordinary workspace admission and its return carrier.
             evt.update({key: "" for key in ("project_id", "project_name", "workspace_root", "workspace", "source")})
             repo_root_note = ""
+    else:
+        # The owner's own work related to a place (#2482): an ordinary owner start
+        # with its own contract; only the relation the place reads it by rides along.
+        evt.update(presence_root_relation(metadata))
     # A promote from a consciousness turn/tree mints a consciousness root: the
     # origin label, ledger category and level ride the event by value; the
     # supervisor stamps them on the new root (worker_promotion) — no presence-style

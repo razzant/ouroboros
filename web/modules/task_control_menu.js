@@ -299,8 +299,11 @@ export async function resumeTaskAction(taskId, { resume = resumeTask, toast = sh
         if (ack === KEPT_PAUSED) return;
         if (ack?.ok !== true) throw new Error('Resume acknowledgement is unknown; retry this action.');
         pauseRequestIds.delete(id);
-        // An answered root's late work (D10) continues in place; its answer stays delivered.
-        toast(ack.tree_only ? 'Resumed. Ouroboros or you choose which helpers continue.'
+        // An answered root's late work (D10) continues in place; its answer stays delivered. A Continue whose earlier
+        // attempt's work still runs waits for it, as its Continue did: it starts by itself once that work settles.
+        toast(ack.held ? `Resume accepted; it starts by itself when the earlier attempt's work finishes: ${
+            heldWorkFacts(ack.blockers) || 'earlier work is not proven settled'}.`
+            : ack.tree_only ? 'Resumed. Ouroboros or you choose which helpers continue.'
             : ack.late_phase ? 'Resuming: the work left after the delivered answer continues.'
             : 'Resuming: the task returns to the queue.', 'info');
         announceMembershipGap(ack.membership_gaps, 'resume', toast);  // read from the Pause's current record

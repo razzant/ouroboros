@@ -140,11 +140,12 @@ def _own_work_section(drive_root: Path, value: Mapping[str, Any], task_id: str) 
 
 
 def _own_promises_section(drive_root: Path, value: Mapping[str, Any], binding: str) -> str:
-    """Follow-ups this binding scheduled that may still run (#1589), filtered before the page.
+    """Follow-ups related to this binding that may still run (#1589), filtered before the page.
 
     ``queue_schedules.presence_promise`` is the one ownership rule the scoped
     ``manage_schedules`` read and its withdrawal also apply. An unreadable table is said, never empty.
     """
+    from ouroboros.dialogue_provenance import presence_relation_metadata
     from supervisor.followup_policy import observed_store
     from supervisor.queue_schedules import load_schedule_store, presence_promise_store, schedule_tool_projection
     from supervisor.schedule_view import schedule_lifecycle_status
@@ -154,7 +155,7 @@ def _own_promises_section(drive_root: Path, value: Mapping[str, Any], binding: s
         "manage_schedules(action=\"get\", schedule_id=…) reads one in full and action=\"delete\" withdraws its "
         "future runs. To change one from here, withdraw it and schedule it anew: action=\"update\" is refused in a "
         "Presence conversation. Work a promise already started keeps running until cancel_task stops it.")
-    title = "## Promises this place scheduled (host-authored facts)\n\n"
+    title = "## Follow-ups related to this place (host-authored facts)\n\n"
     try:  # building a turn must not fail on its listing: unknown is said, never shown as empty
         own = observed_store(drive_root, presence_promise_store(load_schedule_store(drive_root), binding))
     except Exception as exc:
@@ -166,7 +167,8 @@ def _own_promises_section(drive_root: Path, value: Mapping[str, Any], binding: s
     page = schedule_tool_projection({"tasks": pending}, limit=_OWN_WORK_PAGE)
     lines = []
     for raw, row in zip(pending, page["tasks"]):
-        carrier = ((raw.get("task") or {}).get("metadata") or {}).get("presence") or {}
+        metadata = (raw.get("task") or {}).get("metadata") or {}
+        carrier = metadata.get("presence") or {}
         key = str((carrier.get("event") or {}).get("conversation_key") or "") if isinstance(carrier, Mapping) else ""
         trigger = row.get("trigger") or {}
         when = (f"once at {trigger.get('run_at')}" if trigger.get("type") == "once"
@@ -174,7 +176,9 @@ def _own_promises_section(drive_root: Path, value: Mapping[str, Any], binding: s
         waiting = row.get("waiting") or {}
         state = f"waiting: {waiting.get('reason')} since {waiting.get('since')}" if waiting.get("reason") else row["status"]
         lines.append(f"- {row['id']} [{state}; {when}" + (f"; next {row['next_run_at']}" if row.get("next_run_at") else "")
-                     + "] from " + ("this conversation" if key and key == here else f"conversation {key}" if key
+                     + "] from " + ("the owner's work begun by answering one of this place's questions"
+                                    if presence_relation_metadata(metadata)
+                                    else "this conversation" if key and key == here else f"conversation {key}" if key
                                     else "a conversation this row does not name")
                      + ": " + json.dumps(" ".join(str(row.get("objective_preview") or "").split()), ensure_ascii=False))
     if len(pending) > len(lines):
@@ -212,6 +216,9 @@ def _started_work_section(drive_root: Path, value: Mapping[str, Any], task_id: s
     if unread:
         lines.append("(some results are unreadable now: " + "; ".join(unread)
                      + "; this place's work may be among them)")
+    if gap.get("settled_kind_unclassified"):
+        lines.append(f"({gap['settled_kind_unclassified']} settled records have no recorded role; older Continue work "
+                     "may be absent from this list. A known task id remains readable through get_task_result.)")
     if page.get("error"):
         lines.append(f"(listing unavailable now: {page['error'].get('code')}; page again with recent_tasks)")
     elif page.get("remaining") and focused:
@@ -230,12 +237,12 @@ def _started_work_section(drive_root: Path, value: Mapping[str, Any], task_id: s
         )
     return (
         "## Work started from this place (host-authored facts)\n\n"
-        "Independent work this place started, from this or another of its conversations, "
-        "newest first (queued work without a result row leads). Being listed says nothing about whether "
-        "its result reached anyone. Where your tools include them, get_task_result(task_id, "
-        "presence_scope=\"own_binding\") reads one exactly, tell_task gives it new facts as this "
-        "task's own message, and presence_cancel_work requests its cancellation. Work of other "
-        "places and the owner's own tasks are not addressable from here.\n\n"
+        "Independent work this place started, from this or another of its conversations, and the "
+        "owner's own work begun by answering one of its questions, newest first (queued work without a "
+        "result row leads). Being listed says nothing about whether its result reached anyone. Where your "
+        "tools include them, get_task_result(task_id, presence_scope=\"own_binding\") reads one exactly, "
+        "tell_task gives it new facts as this task's own message, and presence_cancel_work requests its "
+        "cancellation. Work of other places and the owner's other tasks are not addressable from here.\n\n"
         + "\n".join(lines)
     )
 

@@ -19,7 +19,7 @@ import uuid
 from typing import Any, Callable, Dict, List
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
-from ouroboros.dialogue_provenance import presence_metadata_binding
+from ouroboros.dialogue_provenance import presence_metadata_binding, presence_metadata_relation
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS
 from ouroboros.utils import atomic_write_json, in_worker_process, read_json_dict, utc_now_iso
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -373,14 +373,15 @@ def presence_promise(binding: Any, row: Any) -> bool:
 
     The one ownership predicate behind a Presence caller's schedule reads, its context
     listing and its withdrawal: the binding carrier ``tools/followup.py`` copies by value
-    onto the row's task template. An owner or skill row, a note, another binding and an
-    empty or malformed carrier never match; objective text, room or writer kind decide nothing.
+    onto the row's task template, the relation of the owner's related work included. An
+    owner or skill row, a note, another binding and an empty or malformed carrier never
+    match; objective text, room or writer kind decide nothing.
     """
     wanted = str(binding or "").strip()
     template = row.get("task") if isinstance(row, dict) else None
     return bool(wanted and isinstance(template, dict) and row.get("source") == "task_followup"
                 and row.get("kind") not in {"notify", "note"}
-                and presence_metadata_binding(template.get("metadata")) == wanted)
+                and presence_metadata_relation(template.get("metadata")) == wanted)
 
 
 def presence_promise_store(data: Dict[str, Any], binding: Any) -> Dict[str, Any]:
@@ -770,6 +771,7 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
         if at is not None and at.timestamp() < cutoff:
             receipt_rows.append(row)
     reads = occurrences.prepare_receipts(receipt_rows, drive_root=root)
+    relations = occurrences.prepare_relations(receipt_rows, reads)
     claims: List[Dict[str, Any]] = []
     due_notes: List[Dict[str, Any]] = []
     with schedule_transaction(root):
@@ -807,7 +809,7 @@ def check_scheduled_tasks(*, stop: Callable[[], bool] | None = None) -> None:
                 continue
             try:
                 with control_guard(root, record):
-                    occurrences.repair_followup_binding(record, reads=reads)
+                    occurrences.repair_followup_binding(record, reads=reads, relations=relations)
                     view = refresh_policy(root, data, record, observed=view)
             except Exception as exc:
                 if not isinstance(exc, occurrences.ReceiptChanged) and not occurrences.contention(exc):

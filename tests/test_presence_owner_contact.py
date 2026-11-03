@@ -336,11 +336,126 @@ def _exercise_late_owner(r, task, monkeypatch):
         bridge=None, append_jsonl=lambda *_a, **_kw: None, persist_queue_snapshot=lambda **_kw: True,
         enqueue_task=lambda child: pending.append(child) or child, load_state=lambda: {"owner_chat_id": 1})
     ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_promote_chat_to_task(event, host))
-    assert _start_task(ctx, "Investigate the source", title="Source research").startswith("OK: task")
+    assert _start_task(ctx, "Investigate the source", title="Source research",
+                       context_requires_self_body_docs=True).startswith("OK: task")
     [child] = pending
     assert presence_related_work(r.admission.binding_id, child)
     assert "presence" not in child["metadata"]
     assert presence_caller_binding(ctx) is None, "starting related work cannot narrow its owner"
+    _exercise_related_root(r, ctx, child, host, monkeypatch)
+
+
+def _pooled_metadata(row):
+    """What the pooled agent hands its tools (``agent.py``): queued metadata, lineage and the door's own stamp."""
+    carried = ("parent_task_id", "root_task_id", "delegation_role", "budget_drive_root",
+               "origin_message_ref", "origin_message_text", "objective_author", "owner_corpus")
+    return {**row["metadata"], **{key: row[key] for key in carried if row.get(key) not in (None, "")}}
+
+
+def _exercise_related_root(r, owner, root, host, monkeypatch):
+    """#2482: the root the owner's private late answer started is the owner's ordinary work.
+
+    It writes to Main, may ask the owner for a secret, answers a relay, keeps its own words, publishes
+    focus, sees and tells its peers and reads the owner's schedules; its children and the roots it starts are ordinary. Only
+    the relation stays: the original place reads and stops it, another place does not, and nothing
+    of the place's external voice reaches it.
+    """
+    from ouroboros.dialogue_provenance import (
+        is_presence_task,
+        presence_binding_authority_metadata,
+        presence_caller_binding,
+        presence_related_work,
+    )
+    from ouroboros.gateway.history import _assemble_history_response
+    from ouroboros.owner_relay import held_owner_messages
+    from ouroboros.peer_roster import maybe_append_roster_note
+    from ouroboros.place_reply import reply_carrier
+    from ouroboros.tools.control import _tell_task
+    from ouroboros.tools.control_routing import _start_task
+    from ouroboros.tools.followup import _manage_schedules
+    from ouroboros.tools.presence import _cancel_presence_work
+    from ouroboros.tools.project_journal import _scope_authority
+    from ouroboros.tools.recent_tasks import _restricted_actor
+    from ouroboros.tools.secret_hitl import _unavailable as secret_refusal
+    from ouroboros.utils import atomic_write_json
+    from supervisor.events import _handle_promote_chat_to_task, _handle_steer_task
+    from tests.test_presence_own_work import OTHER, _registry, _supervisor
+
+    binding, source_task = r.admission.binding_id, owner.task_metadata["late_answer"]["task_id"]
+    # Admitted as the owner's start: its own contract, never the answering turn's, and no Presence authority.
+    assert "presence_binding_authority" not in root["metadata"] and not is_presence_task(root)
+    assert root["task_contract"]["context_requires_self_body_docs"] is True
+    assert root["task_contract"]["objective"] == "Investigate the source"
+    peer = {"id": "owner-peer-work", "delegation_role": "root", "chat_id": 1}
+    write_task_result(r.root, peer["id"], "running", delegation_role="root", chat_id=1)
+    write_task_result(r.root, root["id"], "running", metadata=root["metadata"], chat_id=root["chat_id"],
+                      delegation_role="root", root_task_id=root["id"])
+    atomic_write_json(r.root / "state" / "queue_snapshot.json", {"worker_total": 1, "pending": [], "running": [
+        {"id": task["id"], "task": task} for task in (root, peer)]})
+    pool = _supervisor(r.root, running=[root, peer])
+
+    def live(event):
+        r.bus.put(event)
+        r.pump()
+
+    ctx = ToolContext(repo_dir=r.root, drive_root=r.root, budget_drive_root=r.root, task_id=root["id"],
+                      current_chat_id=root["chat_id"], task_metadata=_pooled_metadata(root),
+                      task_contract=root["task_contract"], is_direct_chat=False,
+                      event_queue=SimpleNamespace(put_nowait=live))
+    ctx.messages = []
+    tools = ToolRegistry(repo_dir=r.root, drive_root=r.root)
+    tools.set_context(ctx)
+    assert presence_caller_binding(ctx) is None and not _restricted_actor(ctx)
+    assert _scope_authority(ctx)[0] == "root" and reply_carrier(ctx.task_metadata) == {}
+    with monkeypatch.context() as waiting:  # with its live continuation owner it may ask the owner for a secret
+        waiting.setattr(ctx, "owner_wait_callback", lambda *_a, **_k: None, raising=False)
+        assert secret_refusal(ctx) == ""
+
+    # Main: the reported MAIN_NOTICE_BLOCKED. One owner-visible row, and the words stay this work's own.
+    sent = tools.execute("send_user_message", {"text": "The source research found the cause.", "destination": "main"})
+    assert sent.startswith("OK: notice"), sent
+    main = json.loads(_assemble_history_response(r.root, 1, 50, 0))["messages"]
+    [notice] = [m for m in main if m.get("system_type") == "main_notice" and m.get("task_id") == root["id"]]
+    assert notice["text"] == "The source research found the cause." and not notice.get("presence_contact")
+    assert pending_owner_dialogue(ctx), "the work's own outward words stay in its context"
+
+    # Relay: the owner hands this work a retained owner message; the reported refusal was here.
+    owner.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_steer_task(event, pool))
+    [handle] = list(held_owner_messages(owner))[:1]
+    assert "Message written to" in _tell_task(owner, root["id"], "Reply to the owner directly", quote=[handle])
+    _drain_incoming_messages([], queue.Queue(), r.root, root["id"], None, set(), owner_ctx=ctx)
+    [relay_id] = list(ctx._open_relays)
+    answered = tools.execute("send_user_message", {"text": "Answered where you asked.", "reply_to_relay": relay_id})
+    assert answered.startswith("OK: answer to relay"), answered
+
+    # Focus, peers, the owner's schedule table and tells to the owner's other work.
+    focused = tools.execute("update_focus", {"text": "Reading the source conversation",
+                                             "source_ref": {"reader": "get_task_result", "task_id": source_task}})
+    assert focused.startswith("OK: focus["), focused
+    notes = []
+    assert maybe_append_roster_note(ctx, notes, r.root) and peer["id"] in str(notes)
+    assert json.loads(tools.execute("live_roots", {})).get("ok") is not False
+    listed = json.loads(_manage_schedules(ctx, "list"))
+    assert listed["total"] == len(task_queue.list_scheduled_tasks(r.root)["tasks"]) == 2, listed
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_steer_task(event, pool))
+    assert "Message written to" in _tell_task(ctx, peer["id"], "Coordinate on the source")
+
+    # Its delegated children inherit nothing of the place; a root it starts keeps only the relation.
+    assert presence_binding_authority_metadata(ctx.task_metadata, task_contract=ctx.task_contract) == {}
+    host.PENDING.clear()
+    ctx.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_promote_chat_to_task(event, host))
+    assert _start_task(ctx, "Follow the lead", title="Lead").startswith("OK: task")
+    [started] = host.PENDING
+    assert presence_related_work(binding, started) and "presence_binding_authority" not in started["metadata"]
+
+    # The original place still reads and stops this work; another place reaches neither.
+    place, place_ctx = _registry(r.root, binding=binding)
+    stranger, _stranger = _registry(r.root, binding=OTHER)
+    assert "PRESENCE_CAPABILITY_BLOCKED" not in place.execute("get_task_result", {"task_id": root["id"]})
+    assert "PRESENCE_CAPABILITY_BLOCKED" in stranger.execute("get_task_result", {"task_id": root["id"]})
+    assert root["id"] in [row["task_id"] for row in json.loads(place.execute("recent_tasks", {"limit": 50}))["tasks"]]
+    assert "PRESENCE_WORK_NOT_CORRELATED" in _cancel_presence_work(_stranger, root["id"])
+    assert "Cancel requested" in _cancel_presence_work(place_ctx, root["id"])
 
 
 @pytest.mark.parametrize("required", [False, True])

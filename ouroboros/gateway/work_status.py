@@ -38,7 +38,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 ACTIVITY_ORDER = ("working", "queued", "waiting", "paused", "unknown")
 TRANSITIONS = ("none", "finalizing", "pausing")
 
-from ouroboros.work_stop import STOP_TEXT, activity_stop_view, door_holders
+from ouroboros.work_stop import STOP_TEXT, activity_stop_view, control_identity, door_holders, last_resume
 
 # One owner sentence per reason code (the TASK_CAUSE_PHRASES discipline): keyed on the code
 # only, a code with no sentence stays raw, and the raw code stays typed beside it.
@@ -49,6 +49,8 @@ REASON_TEXT = {
                                   "Continue starts when {count} helpers of the earlier attempt finish"),
     "earlier_runs_finishing": ("Continue starts when the external run of the earlier attempt finishes",
                                "Continue starts when {count} external runs of the earlier attempt finish"),
+    # Its earlier attempt's work settled, and the host's own start was refused for another reason (``last_resume``).
+    "start_refused": "Continue tries to start again by itself",
     "helpers_running": ("1 helper still working", "{count} helpers still working"),
     "delegated_running": ("1 external run still working", "{count} external runs still working"),
     "owner_answer": "Waiting for your answer",
@@ -152,10 +154,13 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     ``raw`` carries the queue row's hold and pause records, the declared author of the tree's Pause
     (``pause_by``, ``control_actor.pause_author``), the members that Pause already parked and the task's
     own identity facts (see ``work_projection``), ``running`` when the queue runs it, its current worker ``owner_wait``,
-    ``sent_review`` while a review it sent from a warm park still runs, and ``cancel_pending`` while a live inline
-    turn's recorded Stop waits for its next stop check. Returns the member's
-    own state only; ``live`` says whether the member itself executes now: under a settling Pause only a running
-    member the Pause has not parked does, never a queued one or one that already saved its place."""
+    ``sent_review`` while a review it sent from a warm park still runs, ``cancel_pending`` while a live inline
+    turn's recorded Stop waits for its next stop check, and the latest Resume attempt its record keeps
+    (``resume_attempt``). Returns the member's own state only; ``live`` says whether the member itself executes now:
+    under a settling Pause only a running member the Pause has not parked does, never a queued one or one that
+    already saved its place. A held member's refused attempt about the control holding it now is ``last_resume``:
+    dated history beside the reason, never one, except the host's own start of a Continue whose earlier work
+    settled: that refusal, not the wait, is then why it has not started."""
     raw = raw or {}
     task_id = str(row.get("activity_id") or "")
     phase = str(row.get("phase") or "unknown")
@@ -169,6 +174,10 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
         state["stop"], state["refusal"] = view["stop"], view["refusal"]
         state["reasons"].append(view["reason"])
         state["resumable"] = view["resumable"]
+        if attempt := last_resume(raw.get("resume_attempt"), control_identity(view, raw.get("hold"))):
+            state["last_resume"] = attempt
+            if view["waiting"] and attempt["by"]["actor"] == "host":
+                state["reasons"] = [reason("start_refused", since=attempt["at"])]
         state["activity"] = "waiting" if view["waiting"] else "paused"
         if view["waiting"] and isinstance(raw.get("_budget_pause"), Mapping):
             state["waits_on"] = _waits_on(raw["_budget_pause"].get("sleep"))
@@ -442,6 +451,7 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
     turn = [item for member in members for item in member["turn"]]
     held = current is not None and any(entry.get("code") == "earlier_work_unconfirmed" for entry in current["reasons"])
     named = set()  # tails a held Continue already names in its own sentence
+    speaker = current  # the member whose reason the work says carries its dated Resume attempt beside it
     if current is not None and held and (helper_ids or live_runs):
         # A Continue held for its earlier attempt says what it waits for: those helpers or runs (owner's 17.10 words).
         sentence = (reason("earlier_attempt_finishing", count=len(helper_ids), ids=helper_ids) if helper_ids
@@ -462,7 +472,7 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
         calls = {member["call"] for member in working_helpers if member["call"]}
         call = calls.pop() if len(calls) == 1 and not live_runs else ""
     elif members:
-        lead = min(members, key=lambda member: _rank(member["activity"]))
+        lead = speaker = min(members, key=lambda member: _rank(member["activity"]))
         reasons = list(lead["reasons"])
         activity, transition, call, release = lead["activity"], lead["transition"], lead["call"], lead["release"]
     else:
@@ -480,10 +490,12 @@ def roll_up_work(work_id: str, members: List[Dict[str, Any]], *, episode: Mappin
         "activity": activity, "transition": transition, "call": call,
         "because": reasons, "tails": tails, "live": live, "turn": turn, "release": release,
         **({"stop": current.get("stop", {}), "refusal": current.get("refusal", {})} if current else {}),
+        **({"last_resume": speaker["last_resume"]} if speaker is not None and speaker.get("last_resume") else {}),
         "members": {"ids": [member["task_id"] for member in members], "states": {
             member["task_id"]: {**{key: member[key] for key in (
                 "activity", "transition", "call", "live", "release", "confirmed", "turn")},
-                "because": member["reasons"], "tails": model_tails(member.get("model_handoffs") or ())}
+                "because": member["reasons"], "tails": model_tails(member.get("model_handoffs") or ()),
+                **({"last_resume": member["last_resume"]} if member.get("last_resume") else {})}
             for member in members}},
         "confirmed": all(member["confirmed"] for member in members) and not gaps,
     }

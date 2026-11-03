@@ -46,20 +46,36 @@ def card_input_frame(record: Dict[str, Any], label: str, values: Optional[Dict[s
     return text
 
 
-def card_press_model_text(root: Any, ref: Any, owner_words: str) -> str:
-    """What a head reads for a press on a finished author's card: the frame rebuilt from the stored press;
-    an unreadable one keeps the owner's words with that author named."""
+def _stored_press(root: Any, ref: Any) -> Tuple[Optional[Dict[str, str]], Dict[str, Any], Dict[str, Any]]:
+    """``(press, card, stored press)`` for typed late-press provenance; empty rows when it cannot be read."""
     from ouroboros.card_store import find_submission, late_press_ref, load_card
 
     press = late_press_ref(ref)
     if press is None:
-        return owner_words
+        return None, {}, {}
     record = load_card(root, press["card_id"]) or {}
-    row = find_submission(record, press["request_id"]) or {}
+    return press, record, find_submission(record, press["request_id"]) or {}
+
+
+def card_press_model_text(root: Any, ref: Any, owner_words: str) -> str:
+    """What a head reads for a press on a finished author's card: the frame rebuilt from the stored press;
+    an unreadable one keeps the owner's words with that author named."""
+    press, record, row = _stored_press(root, ref)
+    if press is None:
+        return owner_words
     if not row:
         return f"[Card input] On a card of task {press['task_id']} that can no longer be read, the owner pressed:\n{owner_words}"
     return card_input_frame({**record, "title": row.get("title", record.get("title"))},
                             str(row.get("label") or row.get("action_id") or ""), row.get("values"), author=press["task_id"])
+
+
+def card_press_name(root: Any, ref: Any) -> Optional[str]:
+    """What names the head such a press starts: the card's title as that stored press recorded it (the frame's
+    card), ``""`` when the press can no longer be read, ``None`` without valid provenance."""
+    press, record, row = _stored_press(root, ref)
+    if press is None:
+        return None
+    return str(row.get("title", record.get("title")) or "") if row else ""
 
 
 def owner_press_text(label: str, values: Optional[Dict[str, Any]]) -> str:
@@ -238,4 +254,4 @@ async def answer_card_decision(drive_root: pathlib.Path, body: Dict[str, Any], *
     return 200, {**payload, "reason_code": reason} if reason else payload
 
 
-__all__ = ["answer_card_decision", "card_input_frame", "card_press_model_text", "owner_press_text"]
+__all__ = ["answer_card_decision", "card_input_frame", "card_press_model_text", "card_press_name", "owner_press_text"]

@@ -1334,6 +1334,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
                         if remainder.get("state") == "known" and type(count) is int and count > 0 else "")
     line = _join_cause_clauses([clause, *warning_clauses, _cause_phrase(review_cause, undescribed),
                                 _author_stop_rationale(decision, completion), remainder_clause,
+                                str((execution.get("evolution_cleanup") or {}).get("line") or ""),
                                 *_incident_cause_clauses(decision, reason),
                                 *_terminal_limitations(result, event, reason, held=held, stopped=author_stop),
                                 TASK_CAUSE_PHRASES.get(custody, custody) if custody else ""])

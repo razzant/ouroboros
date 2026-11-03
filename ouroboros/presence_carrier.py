@@ -533,9 +533,9 @@ def owner_resume_decision(task: Mapping[str, Any], drive_root: Any) -> dict[str,
 
 
 def owner_resume_lift(task: dict[str, Any], drive_root: Any) -> dict[str, Any]:
-    """That decision kept at the point past which its door can no longer refuse: the durable row every Stop, Continue,
-    member and restart reads takes it first, then the queue row (a snapshot older than the decision:
-    ``adopt_saved_records``). A store that refuses moves nothing and returns the door's refusal; otherwise ``{}``."""
+    """That decision kept before its release, when only that publication can still refuse and take it back
+    (``budget_resume.take_back_owner_resume_lift``): the durable row every Stop, Continue, member and restart reads
+    takes it first, then the queue row. A store that refuses moves nothing and returns the door's refusal; else ``{}``."""
     from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
     from ouroboros.task_store import patch_document
 

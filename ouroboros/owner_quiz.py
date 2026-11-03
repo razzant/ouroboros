@@ -927,3 +927,15 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
         f"[Host note] This owner message answers quiz {ref['quiz_id']}; that card "
         "could not be read, so only the owner's own words are shown."
     )
+
+
+def late_answer_name(late_answer: Any) -> Optional[str]:
+    """What names the head a LATE answer starts: the question it answers, as the accepted
+    message's host-written snapshot holds it (never the frame above, whose first line is host
+    wording around a task id). ``""`` for a message an older intake accepted without that
+    snapshot: the name is never re-read from the block. ``None`` without valid provenance."""
+    ref = late_answer_ref(late_answer)
+    if ref is None:
+        return None
+    snapshot = ref.get("answer_snapshot")
+    return str(snapshot["quiz"].get("question") or "") if isinstance(snapshot, dict) else ""

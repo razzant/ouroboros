@@ -18,6 +18,13 @@
  * @property {*} at  // the press time
  */
 /**
+ * @typedef {Object} LastResume
+ * @property {*} at  // when it was asked
+ * @property {{actor: string}} by  // owner | ouroboros | host (a Continue's own start), as its door bound it
+ * @property {string} error  // the door's typed refusal
+ * @property {string} text  // the door's own words after "Resume refused: "
+ */
+/**
  * @typedef {Object} WorkTail
  * @property {string} kind  // helper | run | review | model
  * @property {string} state  // live | unknown | held (a helper a sleeping episode chose, paused until its Resume)
@@ -78,6 +85,7 @@
  * @property {string} mark  // moving | still | pause | ring | none (docs/DESIGN.md "Status marks")
  * @property {Object=} stop  // current stop and any independent member stop
  * @property {Object=} refusal  // the continuation's last refusal, rechecked by Resume
+ * @property {LastResume=} last_resume  // the latest refused Resume about its current control (also a member's)
  * @property {string=} outcome
  * @property {WorkFocus=} focus
  * @property {Array<Object>=} gaps

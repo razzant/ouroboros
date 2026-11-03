@@ -7,6 +7,7 @@ import asyncio
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.dialogue_provenance import PRESENCE_BINDING_RELATION_KEY
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, cron_error, schedule_id_error, timezone_error
 
@@ -71,7 +72,8 @@ async def api_schedules_upsert(request: Request) -> JSONResponse:
         if "metadata" in task and not isinstance(task.get("metadata"), dict):
             return json_error("scheduled task template metadata must be an object", 400)
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        if RESERVED_TEMPLATE_FIELDS & set(metadata):
+        # The relation is this door's refusal, not a reserved template field: the host's own follow-ups keep it.
+        if (RESERVED_TEMPLATE_FIELDS | {PRESENCE_BINDING_RELATION_KEY}) & set(metadata):
             return json_error("scheduled task template metadata cannot include reserved lineage/workspace fields", 400)
         if str(task.get("type") or "task") != "task":
             return json_error("scheduled task templates must use type='task'", 400)

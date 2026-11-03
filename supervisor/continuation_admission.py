@@ -24,10 +24,12 @@
    (``continuation_writer_unsettled``): no diagnostic successor, no second
    writer, no timeout release. The owner's existing conversation and controls
    diagnose; the hold releases only when a fresh check finds the writers
-   settled (the owner's Resume, a reconciliation at a tree member's terminal,
-   or the body cadence's re-check while the hold stands) and no newer
-   Stop/Pause/Restart hold has replaced it. A damaged old record no link ties
-   to the tree is no writer: the admission and its answer name it
+   settled (an explicit Resume, a reconciliation at a tree member's terminal, or
+   the body cadence's re-check while the hold stands) and no newer
+   Stop/Pause/Restart hold has replaced it. An explicit Resume of the Continue a
+   later stop holds returns it to this hold while all its writers observably run;
+   an unknown outcome still refuses (``events_budget.resume_into_writer_wait``).
+   A damaged old record no link ties to the tree is no writer: the admission and its answer name it
    (``membership_gaps``).
 
 A request that times out on the client is never "not admitted": the client
@@ -262,8 +264,8 @@ def _recorded_work_limits(result: Dict[str, Any], metadata: Dict[str, Any], cont
     return carried
 
 
-# The successor row's own copy of what its Continue and its restore read back (the queue row holds it too).
-_SUCCESSOR_ROW_KEYS = ("deadline_at", "reasoning_effort", "workspace_root", "workspace_mode",
+# The successor row's own copy of what its Continue, restore and place read/stop read back (the queue row too).
+_SUCCESSOR_ROW_KEYS = ("deadline_at", "reasoning_effort", "workspace_root", "workspace_mode", "delegation_role",
                        "memory_mode", "drive_root", "child_drive_root", "budget_drive_root", "depth")
 _GROUP_FIELDS = ("billing_group_id", "billing_group_limit_usd", "billing_group_limit_source",
                  "billing_group_limit_revision")  # the whole-work group a chain keeps (``_billing_group``)
@@ -374,7 +376,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
                     verdict: Dict[str, Any], sources: Dict[str, Any], admission: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.owner_continue import owner_corpus_rows, recorded_system_checkout, work_order_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
-    from ouroboros.dialogue_provenance import presence_binding_authority_metadata
+    from ouroboros.dialogue_provenance import presence_binding_authority_metadata, presence_relation_metadata
     from ouroboros.task_pacing import recorded_producer_ceiling
 
     authority_source: Dict[str, Any] = {}
@@ -443,8 +445,8 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             # a wake's own row names itself as the successor's origin wake.
             **consciousness_origin_metadata({**metadata, "task_id": predecessor, **(
                 {"origin_message_ref": origin_ref} if isinstance(origin_ref, dict) and origin_ref else {})}),
-            # A place-bound predecessor's binding only: never its speaker carrier, turn or lease.
-            **presence_binding_authority_metadata(metadata, task_contract=contract),
+            # A place-bound predecessor's binding, or related owner work's relation; never its speaker, turn or lease.
+            **presence_binding_authority_metadata(metadata, task_contract=contract), **presence_relation_metadata(metadata),
             **({"project_id": binding["project_id"]} if binding.get("project_id") else {}),
             **({"model_role": model_role} if model_role else {}),
             **({"resource_intent": dict(intent)} if isinstance(intent, dict) and intent.get("kind") else {}),
@@ -480,6 +482,12 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     if authority_source:
         task["predecessor_task_id"] = predecessor
         task["predecessor_authority_source"] = authority_source
+    # A follow-up accepted before the relation existed: what already ran keeps what it ran with, and this NEW work
+    # reads the origin its receipt names (carried by value across Continues), as a new occurrence does.
+    from supervisor.schedule_occurrence import _adopt_relation, _origin_relation
+
+    _adopt_relation(task, _origin_relation({"metadata": metadata, "task_contract": contract},
+                                           {"followup_origin": (sources.get("schedule") or {}).get("origin")}))
     return task
 
 
@@ -646,12 +654,9 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
                  "held": bool(blockers), **({"membership_gaps": gap_fact(gaps)} if gaps else {})}
     task = _successor_task(q, predecessor, result, binding, verdict, sources, admission)
     if blockers:
-        from supervisor.events_budget import hold_budget_row
+        from supervisor.events_budget import hold_continuation_writers
 
-        hold_budget_row(task, reason=HOLD_CONTINUATION_WRITER,
-                        detail="the interrupted task's own work is not proven settled; this Continue waits",
-                        extra={"predecessor_task_id": predecessor, "blockers": blockers,
-                               "root_task_id": successor})
+        hold_continuation_writers(task, predecessor, blockers)
     project_basis = None
     if task.get("project_id"):
         try:
@@ -741,8 +746,18 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     tree reaches its terminal and by ``recheck_held_continuations``. Only a row
     still under ITS OWN continuation hold is released (a newer
     Restart/Pause/Stop hold is never overridden), and the release is the
-    ordinary selection, which re-checks the writers itself.
+    ordinary selection, which re-checks the writers itself. Once its writers
+    are observed settled, the selection's answer is the row's latest Resume
+    attempt (``work_stop.resume_asked``): a refusal for any other reason is
+    said in its own words in place of the wait's, dated, while the wait and
+    this re-check go on; the release that follows replaces it. This is the
+    host's own act wherever it runs, a door's Resume of the predecessor
+    included (``budget_resume.resume_late_phase``): that door asked about
+    another task, so nothing here is its author, lifts an allowance for it or
+    goes on past a held call it named (``control_actor.host_control``).
     """
+    from ouroboros.control_actor import host_control
+    from ouroboros.work_stop import resume_asked, resume_outcome
     from supervisor.events_budget import budget_hold_fact, observe_held_budget_selection, select_held_budget_row
 
     from supervisor import queue as q
@@ -750,16 +765,21 @@ def release_settled_continuations(tree_root: str) -> List[str]:
     with q._queue_lock:
         task_ids = [str(task.get("id") or "") for task in q.PENDING
                     if held_continuation_predecessors([task]) == [tree_root]]
-    for task_id in task_ids:
-        observation = observe_held_budget_selection(q, task_id)
-        with q._queue_lock:
-            task = next((row for row in q.PENDING if str(row.get("id") or "") == task_id), None)
-            hold = budget_hold_fact(task)
-            if task is None or not writer_wait(task):
-                continue
-            outcome = select_held_budget_row(q, task, hold, selected_by="reconciliation", observation=observation)
+    with host_control():
+        for task_id in task_ids:
+            observation = observe_held_budget_selection(q, task_id)
+            settled = not observation.get("error") and not observation.get("blockers")
+            answered = resume_asked(q, task_id, selected_by="reconciliation") if settled else None
+            with q._queue_lock:
+                task = next((row for row in q.PENDING if str(row.get("id") or "") == task_id), None)
+                hold = budget_hold_fact(task)
+                if task is None or not writer_wait(task):
+                    continue
+                outcome = select_held_budget_row(q, task, hold, selected_by="reconciliation", observation=observation)
             if outcome.get("ok"):
                 released.append(task_id)
+            if answered is not None:  # its writers settled: why it starts, or why it does not
+                answered(resume_outcome(outcome))
     return released
 
 

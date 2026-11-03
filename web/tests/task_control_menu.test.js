@@ -386,6 +386,14 @@ test('a refused Resume of a held Continue toasts its facts, with wait-or-stop on
     ]);
 });
 
+test('a Resume over earlier work that still runs is accepted into its wait and says what it waits for', async () => {
+    const toasts = [];
+    await resumeTaskAction('succ-w', { resume: async () => ({ ok: true, task_id: 'succ-w', held: true, blockers: [RUNNING] }),
+        toast: (text, kind) => toasts.push([text, kind]) });
+    assert.deepEqual(toasts, [["Resume accepted; it starts by itself when the earlier attempt's work finishes: "
+        + 'delegated run run-leaf is running.', 'info']]);
+});
+
 test('a Resume held only by calls of unknown outcome asks once, then resumes naming them', async () => {
     const held = { kind: 'tool_handoff', task_id: '96ac2f7c981b4f54', tool: 'run_command',
         reason: 'local_completion_unknown', operation_id: 'op-1' };

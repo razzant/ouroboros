@@ -272,7 +272,7 @@ def _deadline(queue, task, meta):
 
 def _admit(queue, task_id, task, meta, fact) -> None:
     from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract
-    from ouroboros.dialogue_provenance import presence_binding_authority_metadata
+    from ouroboros.dialogue_provenance import presence_binding_authority_metadata, presence_record_metadata
     from ouroboros.model_wait import execution_elapsed_seconds
     from ouroboros.runtime_limits import resolve_task_execution_timeout_sec
     from ouroboros.task_results import load_task_result, write_task_result
@@ -320,7 +320,7 @@ def _admit(queue, task_id, task, meta, fact) -> None:
         contract["delegation_budget"] = parent_budget
     max_depth = admitted_depth_cap(contract, delegation._events().get_max_subagent_depth())
     metadata = {"work_diagnostic": reference, "billing_group": {k: v for k, v in billing.items() if k.startswith("billing_group_")},
-                **presence_binding_authority_metadata(task.get("metadata"), task_contract=contract),
+                **presence_binding_authority_metadata(presence_record_metadata(task), task_contract=contract),
                 **{k: v for k, v in (task.get("metadata") or {}).items()
                    if k in {"work_kind", "initiator", "consciousness_autonomy", "runtime_mode_cap"}}}
     origin = task.get("metadata") or {}

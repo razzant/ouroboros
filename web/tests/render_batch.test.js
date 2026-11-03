@@ -361,7 +361,10 @@ test('chat.js wires the replay flag around the replay and keeps live callsites i
     // spent its timer on a window fetched before the arm) keeps the deadline alive.
     // It is gated on !destroyed: a joined sync that settles after teardown must not
     // install a fresh timer on a dead instance (the disposer invariant).
-    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 3);
+    // The fourth is a live terminal receipt landing on a card that already settled (an
+    // evolution cleanup a later campaign Stop ran): the card's stored line changed after
+    // its terminal, and a row replayed from history never asks.
+    assert.equal((chatSource.match(/scheduleHistorySync\(\);/g) || []).length, 4);
     assert.match(
         chatSource,
         /if \(!destroyed && lastHistorySyncSucceeded && liveCardBound\.isArmed\(\)\) scheduleHistorySync\(\);/,
