@@ -141,6 +141,13 @@ function reviewRunningNow(skill, reviewing) {
     return status === 'running' || status === 'queued';
 }
 
+/** The newest Skills-page review of these bytes whose stopped reviewers can continue (the server lists only the page's own). */
+export function continuableReview(skill) {
+    const history = Array.isArray(skill?.skill_review?.history) ? skill.skill_review.history : [];
+    return [...history].reverse().find((row) => row?.record_id && row.content_hash === skill.content_hash
+        && Array.isArray(row.continuable_seats) && row.continuable_seats.length) || null;
+}
+
 /** The last review job for the current bytes ended without a verdict (failed, timed out, interrupted). */
 function reviewDidNotFinish(skill) {
     const job = reviewJob(skill);
@@ -199,6 +206,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const conflict = skillConflictReason(skill);
     const reviewRunning = reviewRunningNow(skill, reviewing);
     const didNotFinish = reviewDidNotFinish(skill);
+    // Continuing saved work is its own choice beside a new review, never folded into Try again.
+    const resume = continuableReview(skill) ? smallButton('Continue review', name, 'continue_review') : '';
+    const resumeNote = resume ? 'A reviewer stopped with work it can continue from where it stopped.' : '';
     const trays = [];
     let chip = skill.enabled ? chipHtml('On', 'ok') : chipHtml('Off', 'neutral');
     let needs = false;
@@ -266,8 +276,8 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     } else if (didNotFinish) {
         if (!skill.lifecycle_pending) chip = chipHtml('Review didn’t finish', 'warn');
         needs = true;
-        trays.push(trayHtml({ sentence: `The review didn’t finish: ${escapeHtml(boundedText(didNotFinish, 240))}`,
-            actions: `${smallButton('Try again', name, 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
+        trays.push(trayHtml({ sentence: `The review didn’t finish: ${escapeHtml(boundedText(didNotFinish, 240))}`, note: resumeNote,
+            actions: `${resume}${smallButton('Try again', name, 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
         lockReason = 'Can’t turn on until a review passes.';
     } else if (!reviewReady(skill)) {
         if (!skill.lifecycle_pending) chip = chipHtml('Not reviewed yet', 'warn');
@@ -282,7 +292,8 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         } else if (skill.review_stale) {
             sentence = 'Its files changed since the last review. Review it again before it runs, or skip the review.';
         }
-        trays.push(trayHtml({ sentence, actions: `${smallButton('Review', name, skill.review_stale ? 'rereview' : 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
+        trays.push(trayHtml({ sentence, note: resumeNote,
+            actions: `${resume}${smallButton('Review', name, skill.review_stale ? 'rereview' : 'review')}${ownerMayAttest(skill) ? skipButton(name) : ''}` }));
         lockReason = 'Can’t turn on until it is reviewed.';
     } else if (!grantReady(skill)) {
         if (!skill.lifecycle_pending) chip = chipHtml('Needs access', 'warn');

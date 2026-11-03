@@ -174,7 +174,10 @@ def test_usage_a_review_spends_after_its_request_still_reaches_the_supervisor(do
         monkeypatch.setattr(extensions, "_request_repo_dir", lambda _request: door.repo)
 
         async def cancelled_client():
-            request = asyncio.create_task(extensions.api_skill_review(SimpleNamespace(path_params={"skill": "alpha"})))
+            async def no_body():
+                return b""
+
+            request = asyncio.create_task(extensions.api_skill_review(SimpleNamespace(path_params={"skill": "alpha"}, body=no_body)))
             while not transport.entered.is_set():
                 await asyncio.sleep(0.01)
             request.cancel()

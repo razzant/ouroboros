@@ -22,7 +22,7 @@ test('the official hub row carries the Official glyph; the folder row says Folde
     t.mock.timers.enable({ apis: ['Date'], now: FIXTURE_NOW });
     const official = renderSourceRow(source('ouroboros'), { items: items('ouroboros'), health: health('ouroboros') });
     assert.match(official, /<strong>Ouroboros<\/strong><button type="button" class="skills-mark"/);
-    assert.match(text(official), /github\.com\/razzant\/OuroborosHub · 4 skills · read 12 min ago/);
+    assert.match(text(official), /github\.com\/razzant\/OuroborosHub at main · 4 skills · read 12 min ago/);
     assert.match(text(official), /The Ouroboros project’s own skills, marked Official by its maintainer\./);
     const community = renderSourceRow(source('ouroboros-community'), { items: items('ouroboros-community'), health: health('ouroboros-community') });
     assert.doesNotMatch(community, /data-official-mark/);
@@ -30,6 +30,24 @@ test('the official hub row carries the Official glyph; the folder row says Folde
     const folder = renderSourceRow(source('my-folder'), { items: items('my-folder'), health: health('my-folder') });
     assert.match(folder, /data-tone="neutral">Folder</);
     assert.match(text(folder), /~\/ouroboros-skills · 1 skill/);
+});
+
+test('a repository row says the revision it follows or the commit it stays at, and its folder', () => {
+    const row = { id: 'team', name: 'Team', kind: 'git', trust: 'review', confirmed: true, url: 'ssh://git@git.example.org/team/skills.git' };
+    assert.match(text(renderSourceRow(row)), /ssh:\/\/git@git\.example\.org\/team\/skills\.git · not read yet$/);
+    assert.match(text(renderSourceRow({ ...row, ref: 'v1.2', path: 'skills/team' })), /team\/skills\.git at v1\.2 · folder skills\/team · not read yet$/);
+    assert.match(text(renderSourceRow({ ...row, commit: 'ab'.repeat(20) })), /team\/skills\.git at commit abababa · not read yet$/);
+    const folder = text(renderSourceRow(source('my-folder')));
+    assert.match(folder, /~\/ouroboros-skills · /);
+    assert.doesNotMatch(folder, / at |folder ~/, 'a folder on this computer is only its path');
+});
+
+test('what a source could not offer is a warning count that opens to the exact reasons', () => {
+    const problems = ['.agents/skills/alpha: not offered, skills/alpha already offers the name \'alpha\'', 'entries/x.json: entry schema_version must be 2'];
+    const html = renderSourceRow(source('ouroboros-community'), { health: { ...health('ouroboros-community'), problems } });
+    assert.match(html, /<details class="skills-source-problems"><summary><span class="ui-status skills-status" data-tone="warn">/);
+    assert.match(text(html), /2 problems \.agents\/skills\/alpha: not offered, skills\/alpha already offers the name &#39;alpha&#39;\s*entries\/x\.json/);
+    assert.doesNotMatch(renderSourceRow(source('ouroboros-community'), { health: health('ouroboros-community') }), /skills-source-problems/);
 });
 
 test('a row a build supplied says so; it keeps its trust value and ⋮ like any other', () => {

@@ -85,20 +85,22 @@ def _task_deadline_ts(task: Dict[str, Any]) -> float:
         return 0.0
 
 
-def _task_drive_for_task(task: Dict[str, Any], task_id: str) -> pathlib.Path:
+def _task_drive_for_task(task: Dict[str, Any], task_id: str, *, canonical: Any = None) -> pathlib.Path:
     """Active drive of a running task (child drive for forked/workspace tasks,
     canonical otherwise) — where its mailbox and observability actually live.
     Resolution mirrors forward_to_worker: task fields, then the result's typed
-    drive columns (no body is decoded for one field)."""
+    drive columns (no body is decoded for one field). ``canonical``: the data root,
+    for a reader in a process without the queue (a worker's focus)."""
     task = task if isinstance(task, dict) else {}
+    root = pathlib.Path(canonical if canonical is not None else _queue().DRIVE_ROOT)
     child = str(task.get("child_drive_root") or task.get("drive_root") or "").strip()
     if not child:
         try:
             from ouroboros.task_store import task_drive_status
-            child = task_drive_status(pathlib.Path(_queue().DRIVE_ROOT), [str(task_id)]).get(str(task_id), ("", ""))[1]
+            child = task_drive_status(root, [str(task_id)]).get(str(task_id), ("", ""))[1]
         except Exception:
             child = ""
-    return pathlib.Path(child) if child else pathlib.Path(_queue().DRIVE_ROOT)
+    return pathlib.Path(child) if child else root
 
 
 # Memory only, read for one skip: the live membership the last pass finished over and the next

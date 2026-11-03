@@ -64,6 +64,9 @@ test('role-first names and facts never infer delivery or exact wake', () => {
     assert.deepEqual(historyFactWords({role: 'assistant'}), []);
     assert.deepEqual(historyFactWords({place_history: {delivery_state: 'authored'}}), ['Delivery not confirmed']);
     assert.deepEqual(historyFactWords({place_history: {attention: {decision:'focus_started'}}}), ['Focus started']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'current_author'}}}), ['Passed to the current author']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work', recipient:'work-7'}}}), ['Passed to work work-7']);
+    assert.deepEqual(historyFactWords({place_history: {attention: {decision:'heard', reason:'conversation_work'}}}), ['Passed to work in this conversation']);
 });
 
 test('a retained row without new fields renders byte for byte as on e3bd98c20', async (t) => {

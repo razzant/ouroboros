@@ -362,6 +362,8 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "OUTPUT_NOT_UTF8": (False, "ok"),
     # Staging was refused before any effect; the producer must publish that refusal, not a successful warning.
     "GIT_INDEX_OUTSIDE_SELECTION_BLOCKED": (True, "blocked"),
+    # The new retained-review selection guard refuses a changed subject before dispatch or Git; no old answer exists.
+    "REVIEW_SELECTION_CHANGED_BLOCKED": (True, "blocked"),
     # tools/tool_discovery.py `enable_tools`: a load none of which fits the route's schema ceiling;
     # the retired pair never saw it. A physical resource refusal: nothing loaded, every tool stays callable.
     "TOOL_SCHEMA_LIMIT": (True, "resource_constraint_blocked"),

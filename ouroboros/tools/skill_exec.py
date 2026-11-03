@@ -33,6 +33,7 @@ from ouroboros.skill_loader import (
     summarize_skills,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
+from ouroboros.review_continuation import CONTINUE_SEATS_SCHEMA
 from ouroboros.skill_review_status import executable_review_requirement, normalize_skill_review_status
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -814,6 +815,7 @@ def _handle_review_skill(
     review_reference: Optional[Dict[str, Any]] = None,
     reviewers: Optional[List[str]] = None, reason: str = "",
     _resolved_binding: ResolvedResourceBinding | None = None,
+    continue_seats: Optional[List[Dict[str, Any]]] = None,
     **_kwargs: Any,
 ) -> str:
     skill_name = str(skill or "").strip()
@@ -855,6 +857,10 @@ def _handle_review_skill(
     from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
 
     def _review_with_optional_rebuttal(review_ctx: ToolContext, review_name: str):
+        if continue_seats is not None:  # the exact recorded review's chosen stopped seats, never today's bytes
+            from ouroboros.skill_review import continue_skill_review
+            return continue_skill_review(review_ctx, review_name, reference=review_reference,
+                                         continue_seats=continue_seats, _resolved_binding=binding)
         return _review_skill_impl(review_ctx, review_name, review_rebuttal=str(review_rebuttal or ""), _resolved_binding=binding)
 
     # The tool's interactive author may leave the wave on an addressed message (owner, 13.10: it waits but
@@ -883,6 +889,9 @@ def _handle_review_skill(
         if payload.get("record_id"):
             reference["record_id"] = payload["record_id"]
         markdown += "\n\nReview reference: " + json.dumps(reference, sort_keys=True)
+        if payload.get("record_id") and payload.get("continuable_seats"):  # a stopped seat continues only by this choice
+            markdown += ("\n\nContinuable stopped seats (skill_review(skill, review_reference=that reference, continue_seats="
+                         "[{seat_id, operation_id}])): " + json.dumps(payload["continuable_seats"], sort_keys=True))
     if refusal_code := payload.get("dispatch_refusal_code"):
         return _skill_review_refusal(ctx, refusal_code, markdown)
     return markdown
@@ -1396,8 +1405,10 @@ _REVIEW_SCHEMA = {
             "review_reference": {
                 "type": "object", "properties": {"job_id": {"type": "string"}, "record_id": {"type": "string"}, "content_hash": {"type": "string"}},
                 "required": ["content_hash"],
-                "description": "For a review that formed no verdict (quorum failed, nothing dispatched): the exact reference returned by that skill review (its job_id or record_id with the content_hash). A review still running is not unavailable.",
+                "description": "For a review that formed no verdict (quorum failed, nothing dispatched): the exact reference returned by that skill review (its job_id or record_id with the content_hash). A review still running is not unavailable. With continue_seats (record_id and content_hash) it continues that review's stopped seats on its recorded bytes instead.",
             },
+            "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference naming its record_id and content_hash: "
+                               + CONTINUE_SEATS_SCHEMA["description"] + " The record's own bytes are collected; changed bytes gain nothing."},
             "author_rationale": {
                 "type": "string",
                 "description": "Required when author_disposition is supplied; explain why the author accepts, rejects, partially accepts, or defers the raw findings.",

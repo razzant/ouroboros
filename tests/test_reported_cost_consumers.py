@@ -209,8 +209,9 @@ def test_raw_usage_events_do_not_turn_malformed_into_known_money(tmp_path, raw, 
 
 @pytest.mark.parametrize("last_cost", [0, 3.0, None, True], ids=["zero", "positive", "unknown", "invalid"])
 def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_path, monkeypatch, fake_route, last_cost):
+    """A legacy chain (an older host's automatic successor, now only joined) folds each run's own cash once."""
     from ouroboros.delegate_custody_usage import observe_session_usage
-    from tests.test_review_session_continuation import _engine, _run
+    from tests.test_review_session_continuation import _engine, _run, legacy_successor
 
     _engine(monkeypatch)
     original = FakeGateway.get_run
@@ -226,8 +227,9 @@ def test_review_continuation_uses_each_runs_typed_cash_and_collects_once(tmp_pat
         return value
 
     monkeypatch.setattr(FakeGateway, "get_run", detail)
-    checkpoints, stamps = [], []
-    facts = _run(tmp_path, {}, checkpoints, stamps)
+    checkpoints = []
+    legacy_successor(tmp_path, checkpoints)
+    facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     rows = ledger_rows(tmp_path)
     expected = 2.0 + (last_cost if type(last_cost) in (int, float) else 0)
     partial = last_cost is None or last_cost is True
@@ -288,7 +290,7 @@ def test_review_actor_reports_the_typed_cash_the_collector_settled(tmp_path, fak
 
 def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_path, monkeypatch, fake_route):
     from ouroboros import review_execution
-    from tests.test_review_session_continuation import _engine, _run
+    from tests.test_review_session_continuation import _engine, _run, legacy_successor
 
     _engine(monkeypatch)
     original_detail = FakeGateway.get_run
@@ -308,8 +310,10 @@ def test_review_failed_successor_keeps_prior_evidence_on_its_original_run(tmp_pa
         return poll(gateway, custody, drive, entry, run_id, seconds)
 
     monkeypatch.setattr(review_execution, "_poll_session_terminal", fail_successor)
+    checkpoints = []
+    legacy_successor(tmp_path, checkpoints)
     with pytest.raises(OSError) as error:
-        _run(tmp_path, {}, [], [])
+        _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, [], [], reconcile=True)
     usage = error.value.delegated_usage
     first, last = usage["session_usage_events"]
     assert first["delegated_run_id"] == "run-1" and first["attempt_execution"] == attempts

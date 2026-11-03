@@ -115,16 +115,38 @@ def fetch_repository(ctx: ToolContext, owner: str, repo: str) -> Dict[str, Any]:
     return {"default_branch": branch, "can_push": permissions.get("push") is True}
 
 
+def _is_tag(owner: str, repo: str, name: str) -> bool:
+    """Whether the destination has the tag ``name`` (GitHub lists the refs that only start with it)."""
+    try:
+        found = request("GET", f"/repos/{owner}/{repo}/git/refs/tags/{urllib.parse.quote(name)}", timeout=30)
+    except GitHubError:
+        return False
+    if isinstance(found, dict):
+        return isinstance(found.get("object"), dict)
+    return isinstance(found, list) and any(isinstance(row, dict) and row.get("ref") == f"refs/tags/{name}"
+                                           for row in found)
+
+
 def fetch_branch_head(ctx: ToolContext, owner: str, repo: str, branch: str) -> Tuple[str, str]:
-    """``(head commit, branch)`` of the destination; an empty branch is the repository's default."""
+    """``(head commit, branch)`` of the destination; an empty branch is the repository's default. A missing branch
+    whose name is a tag there is refused by name (``destination_tag``): a source reading a tag never reads a
+    publication, and no other branch is chosen for it."""
     if not branch:
         branch = fetch_repository(ctx, owner, repo)["default_branch"]
-    ref = _json_object(
-        ctx,
-        "GET", f"/repos/{owner}/{repo}/git/refs/heads/{urllib.parse.quote(branch)}",
-        reason_code="upstream_read_failed",
-        operation="git/refs", repository=f"{owner}/{repo}", branch=branch,
-    )
+    try:
+        ref = _json_object(
+            ctx,
+            "GET", f"/repos/{owner}/{repo}/git/refs/heads/{urllib.parse.quote(branch)}",
+            reason_code="upstream_read_failed",
+            operation="git/refs", repository=f"{owner}/{repo}", branch=branch,
+        )
+    except SkillPublishGitHubError as exc:
+        if exc.http_status == 404 and _is_tag(owner, repo, branch):
+            raise SkillPublishGitHubError(
+                "destination_tag", f"{branch} is a tag of {owner}/{repo}, not a branch: a source reading it never "
+                "reads a publication. Choose a source that follows a branch.", status="blocked",
+                detail=exc.detail, http_status=404, operation="git/refs") from exc
+        raise
     ref_object = ref.get("object")
     base_sha = str((ref_object.get("sha") if isinstance(ref_object, dict) else "") or "")
     if not _HEX_OID_RE.fullmatch(base_sha):

@@ -54,5 +54,6 @@
     }
   ],
   "materialized": true,
-  "problem": ""
+  "problem": "",
+  "suggestions": []
 }

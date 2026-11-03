@@ -16,8 +16,11 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 class SkillSourceRow(TypedDict, total=False):
     """One source with its read state. ``kind``: builtin | hub | git | local | registry; ``trust``:
     trusted (installs without review) | review (reviews each skill); ``part`` names the half of a hub
-    one row shows (official | community). ``state``: ready | reading | error | search. ``managed``: a
-    build's settings supplied the row (shown as set by the organization; it stays editable)."""
+    one row shows (official | community). A repository row reads ``ref`` (a branch or tag) or a pinned
+    ``commit`` (neither: the default branch) from its folder ``path``; a local row's ``path`` is the folder.
+    ``state``: ready | reading | error | search; ``problems`` names what its last read could not offer
+    and why. ``managed``: a build's settings supplied the row (shown as set by the organization; it
+    stays editable)."""
 
     id: Required[str]
     name: Required[str]
@@ -32,44 +35,69 @@ class SkillSourceRow(TypedDict, total=False):
     state: str
     last_read_at: str
     error: str
+    problems: List[str]
     refreshing: bool
     managed: bool
 
 
+class SkillSourceSuggestion(TypedDict, total=False):
+    """A repository the build suggests (``OUROBOROS_SKILL_SOURCE_SUGGESTIONS``): Add source can check it;
+    nothing is connected and no trust is chosen until the owner adds it. ``connected``: a row reads it."""
+
+    name: Required[str]
+    url: Required[str]
+    ref: str
+    commit: str
+    path: str
+    about: str
+    connected: Required[bool]
+
+
 class SkillSourcesResponse(TypedDict):
     """``GET /api/skill-sources``. ``materialized`` is false while the list is derived from the older
-    settings; ``problem`` explains a saved list that does not validate (the derived one is in use)."""
+    settings; ``problem`` explains a saved list that does not validate (the derived one is in use);
+    ``suggestions`` is empty unless the build offers some."""
 
     sources: List[SkillSourceRow]
     materialized: bool
     problem: str
+    suggestions: List[SkillSourceSuggestion]
 
 
 class SkillSourceProbeRequest(TypedDict, total=False):
-    """``POST /api/skill-sources/probe``: a repository address or a folder on this computer."""
+    """``POST /api/skill-sources/probe``: a repository address, with an optional ``revision`` (branch,
+    tag or full commit id; absent: the default branch) and ``subfolder``, or a folder on this computer."""
 
     url: str
+    revision: str
+    subfolder: str
     path: str
 
 
 class SkillSourceProbeResponse(TypedDict, total=False):
-    """What the address holds: ``kind`` hub (a ``hub.json`` repository), git (a plain skills repository)
-    or local (a folder); ``found`` names its skills; ``owner`` is the hub's maintainer, else the account
-    the address names (absent for a folder). ``error`` explains an unreadable address;
-    ``warning: not_encrypted`` discloses an accepted plain-HTTP address."""
+    """What the address holds: ``kind`` hub (a ``hub.json`` folder), git (plain skill folders) or local (a
+    folder); ``found`` names its skills, ``problems`` what it could not offer; ``commit`` is the exact
+    commit a repository was read at; ``owner`` is the hub's maintainer, else the account the address
+    names (absent for a folder). ``error`` explains an unreadable address; ``warning: not_encrypted``
+    discloses an accepted plain-HTTP address."""
 
     kind: str
     suggested_name: str
     owner: str
     found: List[str]
+    problems: List[str]
+    commit: str
     warning: str  # not_encrypted
     error: str
 
 
 class SkillSourceAddRequest(TypedDict, total=False):
-    """``POST /api/skill-sources``: an address (``url``) or a folder (``path``), a name and a trust."""
+    """``POST /api/skill-sources``: an address (``url``, optional ``revision`` and ``subfolder``) or a
+    folder (``path``), a name and a trust."""
 
     url: str
+    revision: str
+    subfolder: str
     path: str
     name: Required[str]
     trust: Required[str]
@@ -269,6 +297,7 @@ __all__ = [
     "SkillCatalogResponse", "SkillCatalogSearchResponse", "SkillPublishDestinationChoice",
     "SkillPublishPreflightRequest", "SkillSourceAddRequest", "SkillSourceChangeRequest",
     "SkillSourceChangeResponse", "SkillSourceProbeRequest", "SkillSourceProbeResponse", "SkillSourceRow",
-    "SkillSourcesResponse", "SkillUninstallResponse", "SkillUpdateRequest", "SkillUpdateResponse",
+    "SkillSourceSuggestion", "SkillSourcesResponse", "SkillUninstallResponse", "SkillUpdateRequest",
+    "SkillUpdateResponse",
     "StarterSkillsResponse",
 ]

@@ -1182,21 +1182,36 @@ An exhausted or unknown allowance returns `consciousness_allowance_exhausted`,
 `disposition: retry` and `retry_after` seconds. Physical capacity keeps the existing
 `presence_capacity_full` retry response. A matching event focuses consciousness in
 that room under the owner's autonomy level and allowance, independently of its own
-clock. Before allowance, rate or capacity is consulted, the conversation's current author
-receives later arrivals as typed context-only mail, whether or not they match a wake fact;
+clock. Before allowance, rate or capacity is consulted, the conversation's current author, else its
+sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
+is in an unheld cold sleep, or an author parked for its review or private question, whose wait
+wakes and retakes the conversation before any model call), receives later arrivals as typed
+context-only mail, whether or not they match a wake fact; they never answer its question. An untagged message in the same thread, topic or direct message is a
+wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
+current author as background and a root not at all; they stay readable in the room. Several
+readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
+context lists them all, and it may hand this exact message to one (`tell_task(arrival=true)`, or
+`arrival="<source_event_id>"` for a later message of that conversation delivered to it). So does
+living work that is not reading at that moment (preparing, past its final close): its waking
+message is never only heard. Queued, held, cancelling,
+owner-paused and money-paused work receives nothing and is not resumed. Each arrival has one
+holder, recorded on its room row before any mail is written: a retry after a lost answer goes to
+that holder alone, and one whose effect there cannot be proven goes to a focus that is told so,
+never to another work.
 Paused, Off/Panic and a bot event without a bot wake item stay heard only. The mail carries the
 arrival's text, source event id, exact `message` and `conversation` facts, observed `facts` and
 attachments. An attached `transport_queue` keeps every fact but its `events` there, completeness
 included. The mail's `context_source_ref` then names the arrival's retained exact facts:
 `memory_read(source_ref=…)` returns them, the whole snapshot included, and the arrival's room row
 shows the same reference in `chat_history` and `memory_read` rows. The host
-acknowledges this handoff (`completed`, `silent`) only while that author accepts intake under
+acknowledges this handoff (`completed`, `silent`) only while that recipient accepts intake under
 its final-drain lock, or when a retry finds the arrival already held by it after the earlier
-answer was lost; a closed or ended author leaves the event eligible for ordinary admission. If the
-Host process dies between that handoff and its answer, a retry reaches ordinary admission: the
-handoff is not exactly-once across a Host crash. A
+answer was lost; a closed or ended one leaves the event eligible for ordinary admission. A retry
+after a Host crash or a torn write returns to its recorded holder, but the handoff is not
+exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do.
+arrivals alone never do. An author's own explicit `action="stop"` stands: an arrival drained at
+its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. An answer after any send, file or
@@ -1427,8 +1442,10 @@ status notices stay in the owner task; an empty deferred body sends nothing but
 still requires polling. Cached and late results preserve that empty body rather
 than substituting the task diagnostic. This does not turn failure into success.
 Ordinary implicit replies and genuine authored best-effort answers remain valid.
-A forced final separates the task record from the reply: only an answer the mind
-authored is spoken, so a host-authored record sends nothing new.
+A forced final speaks only the mind's answer; a host-authored record sends nothing
+new. Its committed call closes Presence intake, including inline steering (pooled
+owner routing is unchanged). A no-call terminal or explicit author Stop may
+acknowledge transcript input without another model reading it.
 
 `GET /identity` advertises `presence_delivery_version: 1` on supporting hosts.
 Only then request `delivery_reporting_version: 1` alongside `binding_id` and
@@ -2497,15 +2514,43 @@ every marked reviewer; under Advisory Ouroboros may name `reviewers` (one or mor
 pool rows) and must state why when it narrows the panel; a review the owner starts
 uses the whole pool. Unmarked rows it adds are advisers: heard, never counted.
 
-A git repository is a source in one of two shapes:
+Add source takes any Git address (`https://`, `ssh://`, `git@host:path`,
+`file://`) or a folder on the computer running Ouroboros. A repository is read at
+an optional revision (a branch or tag it follows, or a full commit id it stays at;
+empty follows the default branch) from an optional folder, and installs record that
+view: another branch or folder of the same repository is another source. A folder
+on this computer is read as it is, always as plain skills; a hub is read only from a
+repository. The folder read from a repository is a source in one of two shapes:
 
-- **A plain skills repository**: every folder (or the root) holding a
-  `SKILL.md` or `skill.json` is a skill, described by its manifest.
-- **A hub**: `hub.json` at the root, one `entries/<name>.json` per skill
+- **Plain skills**: every folder (or the folder itself) holding a `SKILL.md` or
+  `skill.json`, up to two levels down, and every skill in `.agents/skills/`. When a
+  name appears twice, the first folder is offered and the other is listed among the
+  source's problems with both paths; choose the other folder to read it instead.
+- **A hub**: `hub.json` in that folder, one `entries/<name>.json` per skill
   (description, one or two categories, owner, version, `source` hosted at
-  `skills/<name>` or pointing at the author's repository at an exact commit,
-  release `digest`, `withdrawn`), the maintainer's `official.json`
-  (endorsements bound to digests) and `categories.json`.
+  `skills/<name>` in the hub's folder or pointing at the author's repository at an
+  exact commit, release `digest`, `withdrawn`), the maintainer's `official.json`
+  (endorsements bound to digests) and `categories.json`. A hub in a repository's
+  folder is read and installed from like any hub, but is not a publication
+  destination.
+
+A connected folder loads its skills in place, those in `.agents/skills/` too, and
+inside it the first folder of a name wins in the same way. A name that another
+location already uses (an installed skill, another connected folder) is a name
+collision like any other: neither copy runs until one is renamed or removed.
+
+A catalog in another format is converted outside the app into such a hub:
+`devtools/skill_hubs/` converts the GitVerse marketplace into pointer entries at the
+commits and digests it observes in the authors' repositories, never running the
+catalog's install commands. Each run writes a new folder, so an earlier hub never
+changes; the operator reviews the report, copies the accepted files into the Git
+repository of the hub, commits them and adds that repository's address (`file://`
+for one on this computer). Its README has the steps. A build (a fork or an
+organization's edition) can offer repositories in Add source with
+`OUROBOROS_SKILL_SOURCE_SUGGESTIONS` (`[{name, url, ref|commit, path, about}]`); a
+suggestion connects nothing and sets no trust, and the open-source build offers none.
+A build that wants a source connected from the start ships it in
+`OUROBOROS_SKILL_SOURCES` instead, marked `managed: true`.
 
 Private github.com HTTPS sources use the configured GitHub token after a read
 without it (this computer's git credentials still apply) is refused for
@@ -2554,10 +2599,17 @@ hub, unless the owner picks another:
   owner changes and Official skills wait for the maintainer. A new entry names
   one or two category ids from the hub's `categories.json`. A hub without
   `hub.json` (an older one) gets its `catalog.json` row instead.
-- **A git source of the owner's**: the skill's folder in that repository. When
+- **A git source of the owner's**: the skill's folder in that repository (one
+  pinned to a commit is not offered: it would never read the publication). When
   the GitHub account may push there, the pull request is merged at once and
   the skill is published; otherwise it waits for that repository's
   maintainers.
+
+A source's branch may be named in full (`refs/heads/main`). A source that reads
+a tag is refused by name (`destination_tag`), even for a skill that came from
+it: a tag never moves, so it would never read the publication, and no other
+branch is chosen instead. The hub chosen by default passes over hubs pinned to a
+commit or a tag, or read from a folder.
 
 **My skills** is optional: `<login>/ouroboros-skills` carries skills between
 your Ouroboros installations. When you choose it, your configured GitHub token

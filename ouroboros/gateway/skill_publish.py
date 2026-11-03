@@ -327,12 +327,15 @@ def build_skill_publish_preflight(
 
             repository = resolve_publish_destination(drive_root, safe_skill, destination).repository
     except SkillPublishDestinationError as exc:
+        explained = str(exc) != exc.reason_code  # a refusal that names its cause (a hub in a folder, a pinned view)
         return _hard_block(
             skill=safe_skill if safe_skill != "_unnamed" else "",
             repository="",
             reason_code=exc.reason_code,
-            summary="The publication destination is not a GitHub repository this install can publish to.",
-            repair_hint="Connect the hub or a GitHub git source in Skills → Sources, then retry.",
+            summary=str(exc) if explained
+            else "The publication destination is not a GitHub repository this install can publish to.",
+            repair_hint="Choose the hub or a GitHub git source in Skills → Sources as the destination, then retry."
+            if explained else "Connect the hub or a GitHub git source in Skills → Sources, then retry.",
             status_code=409,
         )
     if not raw_skill or safe_skill == "_unnamed" or safe_skill != raw_skill:

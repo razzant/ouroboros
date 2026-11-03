@@ -84,10 +84,30 @@ def _web_search_transport_timeout(ctx: Any) -> float:
     )
 
 
+def _web_search_caller_deadline(ctx: Any) -> dict:
+    """The same deadline less reserve as the recovery driver's absolute bound: its preparation,
+    slot wait and every physical send re-check it, so recording time cannot ride into the reserve."""
+    from ouroboros.deadline_utils import caller_deadline_arguments
+    from ouroboros.task_pacing import effective_finalization_reserve_sec
+
+    metadata = getattr(ctx, "task_metadata", {})
+    deadline_at = metadata.get("deadline_at") if isinstance(metadata, dict) else None
+    return caller_deadline_arguments(deadline_at, None, reserve_sec=effective_finalization_reserve_sec(ctx),
+                                     dispatch_only=True)
+
+
 def _web_search_deadline_exhausted(ctx: Any) -> bool:
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
     from ouroboros.task_pacing import effective_finalization_reserve_sec
     return owner_deadline_exhausted_for_context(ctx, reserve_sec=effective_finalization_reserve_sec(ctx))
+
+
+def _own_window_refused(ctx: Any, error: BaseException) -> bool:
+    """An unsent refusal by this leg's own deadline-less-reserve window, which its caller loop then finalizes after
+    as after any exhausted leg; the task's own controls and every possibly sent attempt keep their rails (#572)."""
+    from ouroboros.llm_attempt import refused_by_own_window
+
+    return refused_by_own_window(error, own_window_spent=_web_search_deadline_exhausted(ctx))
 
 
 def _web_search_deadline_result() -> str:
@@ -357,6 +377,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
                 accounting_scope=_accounting_scope(ctx, "web_search.openrouter"),
                 timeout=_web_search_transport_timeout(ctx),
                 processing_preference=processing_preference,
+                **_web_search_caller_deadline(ctx),
             )
         message = response.choices[0].message if getattr(response, "choices", None) else None
         text = str(getattr(message, "content", "") or "").strip()
@@ -386,7 +407,9 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
             "backend": "openrouter_server_tool",
             "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
-    except UsageAccountingError:
+    except UsageAccountingError as exc:
+        if _own_window_refused(ctx, exc):
+            return _web_search_deadline_result()
         raise
     except Exception as exc:
         raise _wrapped_provider_error("OpenRouter", exc) from exc
@@ -415,6 +438,7 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
                 accounting_scope=_accounting_scope(ctx, "web_search.anthropic"),
                 timeout=_web_search_transport_timeout(ctx),
                 processing_preference=processing_preference,
+                **_web_search_caller_deadline(ctx),
             )
         blocks = _obj_to_plain(getattr(response, "content", []) or [])
         text_parts: list[str] = []
@@ -447,7 +471,9 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "",
             "backend": "anthropic_server_tool",
             "model": active_model, "reported_model": getattr(response, "model", None), "ledger_attempt_ids": list(attempt_ids),
         }, ensure_ascii=False, indent=2)
-    except UsageAccountingError:
+    except UsageAccountingError as exc:
+        if _own_window_refused(ctx, exc):
+            return _web_search_deadline_result()
         raise
     except Exception as exc:
         raise _wrapped_provider_error("Anthropic", exc) from exc
@@ -607,6 +633,8 @@ def _web_search_openai(
     manifest = None
     try:
         from ouroboros.config import get_finalization_grace_sec
+        from ouroboros.deadline_utils import physical_dispatch_timeout
+        from ouroboros.llm_attempt import _PhysicalSendNotStarted
         from ouroboros.net_transport import web_search_openai_client
         transport_timeout = _web_search_transport_timeout(ctx)
         # Explicit per-attempt transport bound; the outer ToolEntry covers the
@@ -621,19 +649,25 @@ def _web_search_openai(
             "search_context_size": active_context, "effort": active_effort})
         reservation = reserve_attempt(request)
         attempt_ids.append(reservation.attempt_id)
-        if _web_search_deadline_exhausted(ctx):
-            release_attempt(reservation, "deadline_exhausted_before_dispatch")
+        manifest = before_dispatch(reservation)
+        if _web_search_deadline_exhausted(ctx):  # after recording, which spends the same clock (#572)
+            release_attempt(reservation, "deadline_exhausted_before_dispatch", candidate_manifest_ref=manifest)
             reservation = None
             return _web_search_deadline_result()
-        manifest = before_dispatch(reservation)
         mark_dispatched(reservation, candidate_manifest_ref=manifest)
         dispatched = True
         if _attempt == 0:
             # An attempt, not evidence that a search ran: that is the stream's own web_search_call below.
             _search_progress(ctx, f"🔍 Trying OpenAI web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
+        # At the send, after the claim and its progress row: inherited controls and windows narrow every
+        # socket phase, then this leg's deadline less its reserve admits the bytes. Either refusal is
+        # positively unsent, so the claim is released, never left unknown (#572).
+        timeout = physical_dispatch_timeout(_web_search_transport_timeout(ctx))
+        if _web_search_deadline_exhausted(ctx):
+            raise _PhysicalSendNotStarted("deadline")
         try:
             send_started = True
-            stream = client.responses.create(**candidate)
+            stream = client.responses.create(**candidate, timeout=timeout)
         except Exception as error:
             from ouroboros.llm_attempt import processing_refusal
 
@@ -788,9 +822,13 @@ def _web_search_openai(
             from ouroboros.usage_accounting import _pre_dispatch_failure
 
             failure = _pre_dispatch_failure(reservation, request, e, candidate_manifest_ref=manifest)
+            if _own_window_refused(ctx, failure):
+                return _web_search_deadline_result()
             if isinstance(e, UsageAccountingError) or failure.physical_attempt_capture.state != "released":
                 raise failure from e
         if isinstance(e, UsageAccountingError):
+            if reservation is None and _own_window_refused(ctx, e):  # refused before anything was reserved
+                return _web_search_deadline_result()
             raise
         detail = sanitize_tool_result_for_log(str(e))[:500]
         status = _provider_status_code(e)

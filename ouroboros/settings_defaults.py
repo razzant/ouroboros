@@ -255,6 +255,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # JSON source rows: {id, name, kind, url|path, ref|commit, part, trust, confirmed}; builds may add managed: true.
     # Blank: skill_sources.derived_sources uses the three keys above and OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS.
     "OUROBOROS_SKILL_SOURCES": "",
+    "OUROBOROS_SKILL_SOURCE_SUGGESTIONS": "",  # a build's Add source offers: [{name, url, ref|commit, path, about}]
     # Starter catalog ids install once; absent/"" uses recommended built-in/Official (skill_starter.default_starter_ids).
     # An explicit [] means none; the first-enable choice never overrides an owner's Off.
     "OUROBOROS_STARTER_SKILLS": "",

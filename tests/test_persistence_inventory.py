@@ -903,7 +903,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # name (it may not create it through the gate's helper); the ``presence_turn_gate/*.lock`` row covers it.
 # 447 -> 448 (#2539): a child's raw ``source_handles/test-evidence`` staged per pass in
 # ``state/custody_staging/*-*/*`` before its create-only placement (the custody staging row).
-EXPECTED_SCAN_PATHS = 448
+# 448 -> 447: a source probe reads ``hub.json`` in the folder it was asked for inside its scratch clone, so the
+# fixed ``state/skill_sources/.scratch/*-*/repo/hub.json`` spelling is gone; the ``.scratch/<label>-<id>`` row
+# still covers that clone (base-vs-tree scan diff: that one path).
+EXPECTED_SCAN_PATHS = 447
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

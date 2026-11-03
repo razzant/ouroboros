@@ -122,6 +122,27 @@ def require_physical_dispatch_window() -> Optional[float]:
     return remaining
 
 
+def refused_by_own_window(error: BaseException, *, own_window_spent: bool) -> bool:
+    """Whether a caller's own spent window explains this unsent refusal, so the caller reports its own result.
+
+    Asked at the caller's seam, after its bound's scope closed: nothing of the call was dispatched, its window
+    (its deadline less its reserve) is spent, and nothing beyond the windows callers imposed refuses a send:
+    no Stop, Pause, finalize request, task deadline or ceiling. A tool window is clamped to that same deadline.
+    Anything else, a dispatched or unknown attempt above all, keeps its own rail."""
+    from ouroboros.model_wait import ModelWaitInterrupted, owner_control_reason
+    from ouroboros.transport_custody import outcome_unknown_on_chain
+
+    capture = getattr(error, "physical_attempt_capture", None)
+    if (not own_window_spent or not isinstance(error, (PhysicalDispatchInterrupted, ModelWaitInterrupted))
+            or getattr(error, "control_reason", "") not in {"deadline", "execution_deadline"}
+            or outcome_unknown_on_chain(error) or getattr(capture, "state", "released") != "released"):
+        return False
+    try:
+        return owner_control_reason() is None
+    except Exception:  # an unreadable control is no evidence that none is set
+        return False
+
+
 def preserve_prior_dispatch(error: BaseException, prior: Any) -> None:
     """Raise with paid custody instead of a ladder-wide no-dispatch assertion."""
     if (isinstance(error, PhysicalDispatchInterrupted)
