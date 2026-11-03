@@ -472,7 +472,7 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
     "governing_owner_words", "verification_ledger", "plan_review_state", "acceptance_debt",
     "mutation_evidence", "configured_subagent", "context", "continuation_narrative", "origin_message_text",
     "owner_mailbox", "subagent_availability", "plan_record", "review_status", "schedule_admission",
-    "task_acceptance_review_accounting",
+    "task_acceptance_review_accounting", "review_thread_releases",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
         "configured_subagent", "continuation", "project_routing_manifest", "subagent_envelope", "owner_corpus",
@@ -573,6 +573,21 @@ def task_drive_status(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[str
                            "drive_root) AS drive FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
                            (json.dumps(ids),), ("task_id", "status", "drive"))
     return {str(task_id): (str(status or ""), str(drive or "")) for task_id, status, drive in captured.tuples()}
+
+
+def collection_flags(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[Optional[bool], Optional[bool]]]:
+    """Each stored task's derived ``(review_collection_pending, plan_collection_pending)`` in ONE read, no body
+    decoded: what ``obligations.review_collection_pending`` and ``plan_record.collection_pending`` answered for its
+    stored body, ``None`` while the row is underived. An id the store does not hold is absent from the answer."""
+    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        captured = capture(txn.conn, "SELECT task_id, review_collection_pending, plan_collection_pending FROM tasks "
+                           "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),),
+                           ("task_id", "review_collection_pending", "plan_collection_pending"))
+    return {str(task_id): (None if review is None else bool(review), None if plan is None else bool(plan))
+            for task_id, review, plan in captured.tuples()}
 
 
 def task_ids(root: Any) -> List[str]:

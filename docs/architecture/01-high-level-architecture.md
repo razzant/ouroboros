@@ -242,7 +242,7 @@ ouroboros/ — agent core and shared runtime (§6)
   context_runtime_facts.py — the runtime section's fact builders
   headless.py, history_retention.py — child-drive isolation, answer/file adoption, workspace patches, memory export; typed `sensitive_blocked` exclusions (§6 Headless finalization; §10)
   task_custody.py — the one child-drive deletion owner (`settle_child_drive`) and per-task custody lock (§6 Headless finalization)
-  owner_keep.py — the owner's keep of exactly one task; `gate` around each retirer's effect (§6 Headless finalization)
+  owner_keep.py, review_thread_retention.py — one task's Keep; archived reviewer threads and gated release (§6 Headless finalization)
   headless_status.py — lifecycle vocabulary shared by the headless owners
   workspace_patch_rules.py, workspace_patch_capture.py — patch-exclusion rules (env/cache, junk, lockfiles, credential-shaped names); the patch artifact and its manifest
   workspace_copies.py — git-copy source/baseline identity and own-body policy (§6 Delegated subagents)
@@ -410,7 +410,7 @@ ouroboros/ — agent core and shared runtime (§6)
   gateways/ — Thin outbound transport adapters; no business logic
     claudexor_images.py — requestKind=image upload and whole-result ACK (docs/IMAGE_GENERATION.md)
     image_api.py — Image API routes/credentials; one send, bounded results, cost evidence
-    claudexor.py, claudexor_uploads.py, claudexor_identity.py — Loopback descriptor/handshake/runs/quota/uploads, final-attempt catalog proof; private token, owned daemon; `discover_daemon_at`: daemon/control-api.json (§6)
+    claudexor.py, claudexor_uploads.py, claudexor_threads.py, claudexor_identity.py — Loopback discovery/handshake/runs/quota/uploads, thread/export/retirement transport, final-attempt proof; private token/daemon (`discover_daemon_at`: daemon/control-api.json; §6)
     claudexor_metadata.py — handshake/catalog cache (`storeId`)
     claudexor_run_events.py, claudexor_observation.py — Catalog-negotiated, bounded run-journal SSE frames and durable seq cursors, no polling owner; the run observation adapter (§6 Delegated subagents)
     claudexor_routing.py — Catalog-negotiated passive read of the engine's account/model marks (§3 Agent accounts)

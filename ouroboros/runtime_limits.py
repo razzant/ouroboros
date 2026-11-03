@@ -33,6 +33,9 @@ ARTIFACT_COMPRESSION_TIMEOUT_SEC = 120.0
 # Kill-and-reap bound for one captured local Git read (vcs_read history/identity); it sits
 # inside the default ToolEntry envelope so the reader reports and reaps before the loop abandons.
 GIT_READ_CAPTURE_TIMEOUT_SEC = 300.0
+# Read bound for one Claudexor answer the engine gives only after re-hashing every byte it names (a thread export
+# item, a thread retirement or its abandon); expiry leaves the outcome unknown, never refused.
+CLAUDEXOR_WHOLE_BYTES_READ_SEC = 900.0
 
 
 EXTENSION_STREAM_CHUNK_BYTES = 64 * 1024

@@ -14,7 +14,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 48 | 0 |
 | D06 | Review stack | 96 | 0 |
-| D07 | Delegation, subagents & Claudexor | 104 | 0 |
+| D07 | Delegation, subagents & Claudexor | 106 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 38 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **979** | **0** |
+| **total** | | **981** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -593,6 +593,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateways/claudexor_route_health.py`
 - `ouroboros/gateways/claudexor_routing.py`
 - `ouroboros/gateways/claudexor_run_events.py`
+- `ouroboros/gateways/claudexor_threads.py`
 - `ouroboros/gateways/claudexor_uploads.py`
 - `ouroboros/genesis_project.py`
 - `ouroboros/harness_maintenance.py`
@@ -600,6 +601,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/owner_keep.py`
 - `ouroboros/owner_stop_receipt.py`
 - `ouroboros/private_copy_read.py`
+- `ouroboros/review_thread_retention.py`
 - `ouroboros/subagent_bootstrap.py`
 - `ouroboros/subagent_dispatch_notes.py`
 - `ouroboros/subagent_history.py`

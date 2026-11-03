@@ -695,23 +695,72 @@ def task_artifact_dir_path(drive_root: Union[pathlib.Path, str], task_id: str, *
     return task_artifacts_dir(pathlib.Path(drive_root), validate_task_id(task_id), create=create)
 
 
-def actor_source_reference(*, category: str, source_id: str, data: bytes, extension: str) -> Dict[str, Any]:
-    """Price an exact actor-source address without creating a directory or writing bytes."""
+def actor_source_reference(*, category: str, source_id: str, data: bytes, extension: str,
+                           measured: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Price an exact actor-source address without creating a directory or writing bytes
+    (``measured``: the ``size``/``sha256`` of streamed bytes, which are then not passed)."""
     normalized_category = str(category or "").strip()
     if normalized_category not in _SOURCE_HANDLE_CATEGORIES:
         raise ValueError(f"unsupported source-handle category: {normalized_category}")
     safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(source_id or "source")).strip("._")
     safe_id = safe_id[:160] or "source"
     safe_extension = re.sub(r"[^A-Za-z0-9]+", "", str(extension or "bin"))[:12] or "bin"
-    digest = sha256(data).hexdigest()
+    digest, size = (str(measured["sha256"]), int(measured["size"])) if measured else (sha256(data).hexdigest(), len(data))
     relative = pathlib.PurePosixPath(
         _SOURCE_HANDLES_SUBDIR,
         normalized_category,
         f"{safe_id}-{digest}.{safe_extension}",
     )
     read = {"root": "artifact_store", "path": relative.as_posix(), "start_line": 1, "max_lines": 2000, "start_char": 0}
-    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": len(data),
+    return {"kind": "task_source", "root": "artifact_store", "path": relative.as_posix(), "size": size,
             "sha256": digest, "read": {"tool": "read_file", "arguments": read}}
+
+
+class _HashingSink:
+    """What a producer streams, hashed and counted as it is written."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle, self.digest, self.size = handle, sha256(), 0
+
+    def write(self, chunk: bytes) -> int:
+        self._handle.write(chunk)
+        self.digest.update(chunk)
+        self.size += len(chunk)
+        return len(chunk)
+
+
+def stream_actor_source(drive_root: Union[pathlib.Path, str], task_id: str, *, category: str, source_id: str,
+                        extension: str, fill: Any, expected: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """``store_actor_source_bytes`` for bytes too large to hold: ``fill(sink)`` streams them into a temporary
+    sibling, hashed here, and the file is published write-once under its digest name only when the measured
+    bytes match ``expected`` (``size``/``sha256`` where given); a mismatch or a failed ``fill`` publishes nothing."""
+    folder = task_artifact_dir_path(drive_root, task_id, create=True) / _SOURCE_HANDLES_SUBDIR / str(category)
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = temporary_sibling(folder / f"{validate_task_id(task_id)}.stream")
+    try:
+        with temporary.open("xb") as handle:
+            sink = _HashingSink(handle)
+            fill(sink)
+            handle.flush()
+            os.fsync(handle.fileno())
+        measured = {"size": sink.size, "sha256": sink.digest.hexdigest()}
+        for key in ("size", "sha256"):
+            if (expected or {}).get(key) not in (None, "") and (expected or {})[key] != measured[key]:
+                raise ArtifactIdentityError(f"streamed source failed {key} verification: {source_id}",
+                                            source_path=None, source_stamp=())
+        ref = actor_source_reference(category=category, source_id=source_id, data=b"", extension=extension,
+                                     measured=measured)
+        target = task_artifact_dir_path(drive_root, task_id).joinpath(*pathlib.PurePosixPath(ref["path"]).parts)
+        try:  # write-once by digest: an intact file of these bytes IS this handle; a damaged one is repaired
+            present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=measured))
+        except OSError:
+            present = False
+        if not present:
+            fence_publication()  # a closed publication generation writes no new source
+            temporary.replace(target)  # a new name over the old, never a write into a published inode
+        return ref
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 
@@ -723,8 +772,10 @@ def store_actor_source_bytes(
     source_id: str,
     data: bytes,
     extension: str,
+    fsync: bool = False,
 ) -> Dict[str, Any]:
-    """Persist exact bytes inside this task's existing actor-readable artifact root."""
+    """Persist exact bytes inside this task's existing actor-readable artifact root (``fsync``: flushed to disk
+    before publication, for a caller about to let its only other copy go)."""
 
     ref = actor_source_reference(category=category, source_id=source_id, data=data, extension=extension)
     relative = pathlib.PurePosixPath(ref["path"])
@@ -740,7 +791,7 @@ def store_actor_source_bytes(
         already_stored = handle_info(drive_root, task_id, relative.as_posix()) is not None
     if not already_stored:
         fence_publication()  # a closed publication generation writes no new source
-        write_bytes_atomic(target, bytes(data))
+        write_bytes_atomic(target, bytes(data), fsync=fsync)
     return ref
 
 

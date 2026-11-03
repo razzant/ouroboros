@@ -1480,11 +1480,12 @@
  * @typedef {Object} OwnerKeepResponse
  * @property {string} task_id
  * @property {boolean} keep  // the fact as it now stands
- * @property {('kept'|'released'|'partly_retired'|'already_retired'|'inflight'|'refused')} status
+ * @property {('kept'|'released'|'partly_retired'|'already_retired'|'release_unconfirmed'|'inflight'|'refused')} status
  * @property {string} reason
- * @property {string[]} retained  // material on disk now: paths, and `pins:<snapshot>` for result pins
- * @property {string[]} retired  // material a record names that is gone or accepted for deletion
+ * @property {string[]} retained  // material on disk now: paths, `pins:<snapshot>` for result pins, `review_thread:<id>` no recorded release let go
+ * @property {string[]} retired  // material a record names as gone OR accepted for deletion: acceptance alone is no removal
  * @property {string[]} unknown  // material classes that could not be read: nothing is claimed about them
+ * @property {Object<string, string>} releases  // `review_thread:<id>` -> release_unconfirmed | accepted_pending_removal | removed | purged | not_found | held | refused | abandoned | unrecorded, as last observed
  */
 /**
  * @typedef {Object} LogTailResponse
