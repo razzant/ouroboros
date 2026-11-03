@@ -263,67 +263,41 @@ def review_continuation_descends_from(root: Any, run_id: str, anchor: dict) -> b
     return False
 
 
-def continue_review_run(gateway: Any, root: Any, entry: Any, detail: dict, invocation: Any,
-                        *, remaining: float, seen: set[str]) -> Any:
-    """One idempotent continuation per stopped run, under the same seat anchor.
+def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detail: dict, invocation: Any,
+                                      *, remaining: float, seen: set[str]) -> Any:
+    """Join a successor an older host recorded automatically under this seat's anchor; never create one.
 
-    The original slot token stays valid across crashes before or after POST.
-    A deterministic successor invocation records the exact continuation body
-    before sending; recovery joins its started run or replays that same body.
-    No new paid-wave stamp or generic task-delegation authority is introduced.
+    Continuation is now the author's explicit choice (``review_continuation``): a new operation
+    collected through the existing exact recovery. A legacy successor already recorded under
+    ``("review_continue", invocation, run)`` is joined when started, or its UNKNOWN POST is replayed
+    with the same key and recorded body; a definite refusal or a missing record joins nothing.
     """
     from types import SimpleNamespace
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_continuation import engine_continues
+    from ouroboros.budget_pause import dispatch_fenced
     from ouroboros.delegate_collection import record_terminal_money
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.owner_pause import OwnerPauseRefused, run_operation
     from ouroboros.review_execution import ReviewRouteUnavailable
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     token = custody.idempotency_key("review_continue", entry.invocation_id, entry.run_id)
     record = custody.invocation_record(root, token)
     body = {"continueFrom": entry.run_id}
-    if record:
-        if (record.get("request") != body or record.get("task_id") != entry.task_id
-                or record.get("surface") != invocation.surface or record.get("slot_id") != invocation.slot_id
-                or record.get("operation_id") != invocation.operation_id):
-            raise ReviewRouteUnavailable("Review continuation custody does not match this seat",
-                                         code="review_recovery_request_mismatch")
-        if record["state"] == "failed_definite":
-            return None
-        if record["state"] == "started":
-            run_id, successor = owned_started_review_custody(custody, root, record, entry.task_id)
-            if run_id in seen or successor.continuation_of != entry.run_id:
-                return None
-            return successor
-    else:
-        summary = custody.summary_of(detail)
-        resumable = summary.get("resumable") or detail.get("resumable")
-        if not isinstance(resumable, dict) or not resumable or not engine_continues(gateway):
-            return None
-    from ouroboros.budget_pause import dispatch_fenced
-
+    if not record or record["state"] == "failed_definite":
+        return None
+    if (record.get("request") != body or record.get("task_id") != entry.task_id
+            or record.get("surface") != invocation.surface or record.get("slot_id") != invocation.slot_id
+            or record.get("operation_id") != invocation.operation_id):
+        raise ReviewRouteUnavailable("Review continuation custody does not match this seat",
+                                     code="review_recovery_request_mismatch")
+    if record["state"] == "started":
+        run_id, successor = owned_started_review_custody(custody, root, record, entry.task_id)
+        return None if run_id in seen or successor.continuation_of != entry.run_id else successor
     if remaining <= 0 or dispatch_fenced(entry.task_id):
         return None
-    if not record:
-        requested = custody.record_start_requested(root,
-            run_id="", task_id=entry.task_id, invocation_id=token, idempotency_key=token,
-            operation_id=invocation.operation_id, request=body, continuation_of=entry.run_id,
-            surface=invocation.surface, slot_id=invocation.slot_id, route=entry.route_id,
-            max_seconds=entry.max_seconds, project_id=entry.project_id, project_owned=entry.project_owned,
-            **{key: getattr(entry, key) for key in ("root_task_id", "parent_task_id", "category", "source",
-                "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root",
-                "target_root")})
-        if not requested:
-            raise ReviewRouteUnavailable("Review continuation request could not be recorded; nothing was sent",
-                                         code="start_request_row_unwritable")
-    # Keep the registration/checking copy alive for the successor. The final
-    # seat settlement retires it; this step records only the stopped run's money.
     source = SimpleNamespace(drive_root=root, task_id=entry.task_id, root_task_id=entry.root_task_id)
-    try:
-        # A continuation is an ordinary start naming the stopped run; the engine picks native/moved/packet.
-        handle = run_operation(source, lambda: gateway.start_run({"continueFrom": entry.run_id},
-                                                                 idempotency_key=token))
+    try:  # the recorded legacy POST may have been accepted: replay its exact key and body only
+        handle = run_operation(source, lambda: gateway.start_run(body, idempotency_key=token))
     except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
         if isinstance(exc, OwnerPauseRefused) or 400 <= int(getattr(exc, "status_code", 0) or 0) < 500:
             if not custody.emit(root, custody.START_FAILED, {"invocation_id": token, "task_id": entry.task_id,
@@ -336,7 +310,7 @@ def continue_review_run(gateway: Any, root: Any, entry: Any, detail: dict, invoc
     if not run_id or run_id in seen:
         raise ReviewRouteUnavailable("Review continuation returned no new run handle",
                                      code="invalid_continuation_handle")
-    record_terminal_money(root, entry, detail)
+    record_terminal_money(root, entry, detail)  # the stopped run's money; the final settlement takes the successor's
     successor = custody.RunCustody(run_id=run_id, invocation_id=token, idempotency_key=token,
         continuation_of=entry.run_id, ledger_root=str(root),
         **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
@@ -349,3 +323,96 @@ def continue_review_run(gateway: Any, root: Any, entry: Any, detail: dict, invoc
         raise ReviewRouteUnavailable("Review successor start remains pending in custody",
                                      code="review_continuation_checkpoint_unwritable")
     return successor
+
+
+def continuation_send(invocation: Any) -> bool:
+    """Is this send an explicit continuation's successor (``review_continuation``), whose start its decision recorded?"""
+    from ouroboros.review_continuation import PREFIX
+
+    return str(getattr(invocation, "operation_id", "") or "").startswith(PREFIX)
+
+
+def continuation_generation_end(invocation: Any, record: Optional[Dict[str, Any]], run_id: str) -> Optional[float]:
+    """When an explicit continuation's successor must stop generating, on this process's monotonic clock: the instant
+    its START recorded (``generation_end_at``: the original window narrowed by the owner deadline and task window
+    when the projection read it, ``review_continuation._start_requested``), never rebased on the START's own later
+    timestamp, whatever cap its immutable bytes carry. The executor polls no longer than that and cancels; custody's
+    settlement margin collects receipts only. Past it, a start with no run bound is never POSTed, because that POST
+    could begin new work: its outcome stays unknown (``custody_lost``), its key and bytes kept. ``None`` for any
+    other send, or a start recorded with no window. Read on custody's clock (``review_custody.utc_now``)."""
+    import time
+
+    from ouroboros import review_custody
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    closes = parse_deadline_ts(str((record or {}).get("generation_end_at") or ""))
+    if not continuation_send(invocation) or closes is None:
+        return None
+    end = time.monotonic() + (closes - review_custody.utc_now()).total_seconds()
+    if not run_id:
+        _refuse_past(end)
+    return end
+
+
+def continuation_send_admitted(invocation: Any, end: Optional[float], request: Dict[str, Any], model: str) -> None:
+    """Admit the POST of an explicit continuation's start (``continuation_send``) in the send callback itself, after
+    its gateway, START, checkpoint and launch steps, since any POST of a start with no run bound may begin new paid
+    work: known spend is below every budget fence, as every review wave is admitted (``review_wave_budget_gate``:
+    the global, root and original-group fences, fail-open on an unknown), and its window (``end``,
+    ``continuation_generation_end``) has not closed. A refusal keeps its key and bytes: its outcome stays UNKNOWN,
+    never a definite absence. Every other send, and every known run's collection, passes untouched."""
+    from types import SimpleNamespace
+
+    from ouroboros.review_execution import ReviewRouteUnavailable
+    from ouroboros.review_substrate import review_usage_category
+    from ouroboros.tools.review_helpers import review_wave_binding_fence, review_wave_budget_gate
+
+    if not continuation_send(invocation):
+        return
+    admission = review_wave_budget_gate(
+        SimpleNamespace(task_id=invocation.task_id), surface=invocation.surface, models=[model],
+        prompt_chars=[len(str(request.get("prompt") or ""))], categories=[review_usage_category(invocation.surface)],
+        slot_ids=[invocation.slot_id], extra={"continuation": True, "at_send": True})
+    if admission is not None:
+        fence, remedy = review_wave_binding_fence(admission)
+        raise ReviewRouteUnavailable(f"known spend has reached the {fence}, so this continuation's recorded start was "
+                                     "not POSTed: its outcome stays unknown, its key and bytes kept, and no collection "
+                                     f"re-posts it. To review again, {remedy} first.", code="continuation_budget_insufficient")
+    _refuse_past(end)
+
+
+def _refuse_past(end: Optional[float]) -> None:
+    """Refuse the POST of a continuation start at or after ``end``: UNKNOWN, its key and bytes kept."""
+    import time
+
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    if end is not None and end <= time.monotonic():
+        raise ReviewRouteUnavailable("this continuation's original review window ended before its recorded start was "
+                                     "sent; a POST now could begin new work, so its outcome stays unknown and it is "
+                                     "never re-posted", code="continuation_window_ended")
+
+
+def stopped_review_failure(gateway: Any, run_id: str, detail: Dict[str, Any], summary: Dict[str, Any]) -> Any:
+    """The typed failure of a run that did not succeed, with its stop facts and whole partial output.
+
+    ``failure_details`` keeps the engine's own failure plus ``resumable`` and ``outcomeFacts`` (what an
+    explicit continuation is offered from); ``review_partial_output`` is the run's complete primary
+    output when it is readable: retained evidence, never parsed into a verdict."""
+    from ouroboros.gateways.claudexor import run_failure_error
+    from ouroboros.observability import redact_projection
+
+    run_state = str(summary.get("state") or "")
+    failure = run_failure_error(run_id, run_state, summary.get("failure"))
+    failure.review_run_state = run_state
+    stop = {key: summary.get(key) or detail.get(key) for key in ("resumable", "outcomeFacts")
+            if isinstance(summary.get(key) or detail.get(key), dict)}
+    if stop:
+        failure.failure_details = {**dict(failure.failure_details or {}), **redact_projection(stop).value}
+    try:
+        from ouroboros.review_execution import _full_session_text
+
+        failure.review_partial_output = _full_session_text(gateway, run_id, detail)
+    except Exception as exc:  # an unreadable output is a named gap beside the typed failure
+        failure.review_partial_output_gap = f"{type(exc).__name__}: {exc}"
+    return failure

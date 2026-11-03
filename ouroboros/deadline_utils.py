@@ -18,8 +18,11 @@ log = logging.getLogger(__name__)
 def caller_deadline_scoped(function):
     """Carry caller-owned absolute bounds through preparation and all recovery sends.
 
-    The caller subtracts its finalization reserve once. Relative socket timeouts
-    never create an execution deadline; absent bounds preserve existing defaults.
+    The caller subtracts its finalization reserve once. ``caller_deadline_ts`` also
+    ends the caller's wait, so an accepted operation is cancelled at it;
+    ``caller_dispatch_deadline_ts``, a helper's send window, only refuses new sends
+    and narrows their sockets. Relative socket timeouts never create an execution
+    deadline; absent bounds preserve existing defaults.
     """
     signature = inspect.signature(function)
 
@@ -29,11 +32,11 @@ def caller_deadline_scoped(function):
 
         values = signature.bind(*args, **kwargs).arguments
         with contextlib.ExitStack() as stack:
-            calendar = values.get("caller_deadline_ts")
             execution = values.get("caller_execution_deadline")
-            if calendar is not None:
-                stack.enter_context(calendar_scope(datetime.fromtimestamp(
-                    float(calendar), timezone.utc).isoformat()))
+            for key, dispatch_only in (("caller_deadline_ts", False), ("caller_dispatch_deadline_ts", True)):
+                if values.get(key) is not None:
+                    stack.enter_context(calendar_scope(datetime.fromtimestamp(
+                        float(values[key]), timezone.utc).isoformat(), dispatch_only=dispatch_only))
             if execution is not None:
                 stack.enter_context(execution_deadline_scope(float(execution)))
             yield
@@ -73,12 +76,14 @@ def physical_dispatch_timeout(explicit: Any = None) -> Any:
     return min(llm_transport_timeout_sec(explicit), remaining)
 
 
-def caller_deadline_arguments(deadline_at: Any, execution_deadline: Any, *, reserve_sec: float = 0.0) -> dict:
-    """Project an existing caller's two clocks into the optional LLM arguments."""
+def caller_deadline_arguments(deadline_at: Any, execution_deadline: Any, *, reserve_sec: float = 0.0,
+                              dispatch_only: bool = False) -> dict:
+    """Project an existing caller's two clocks into the optional LLM arguments (a send window if ``dispatch_only``)."""
     deadline = parse_deadline_ts(deadline_at)
     values = {}
     if deadline is not None:
-        values["caller_deadline_ts"] = deadline.timestamp() - reserve_sec
+        values["caller_dispatch_deadline_ts" if dispatch_only else "caller_deadline_ts"] = (
+            deadline.timestamp() - reserve_sec)
     if execution_deadline is not None:
         values["caller_execution_deadline"] = execution_deadline
     return values
@@ -234,6 +239,27 @@ def dispatch_window_remaining_sec(
     except (TypeError, ValueError, OverflowError):
         reserve = 0.0
     return max(0.0, remaining - reserve)
+
+
+def dispatch_window_end_ts(
+    *, deadline_at: Any = None, deadline_ts: Any = None, reserve_sec: Any = 0.0,
+) -> Optional[float]:
+    """Where :func:`dispatch_window_remaining_sec`'s window ends, as an epoch instant read from no clock."""
+    deadline: Optional[float] = None
+    try:
+        if isinstance(deadline_ts, (int, float, str)) and not isinstance(deadline_ts, bool):
+            deadline = float(deadline_ts) if math.isfinite(float(deadline_ts)) else None
+    except (TypeError, ValueError, OverflowError):
+        deadline = None
+    parsed = parse_deadline_ts(deadline_at) if deadline is None else None
+    if parsed is not None:
+        deadline = parsed.timestamp()
+    if deadline is None:
+        return None
+    try:
+        return deadline - max(0.0, float(reserve_sec or 0.0))
+    except (TypeError, ValueError, OverflowError):
+        return deadline
 
 
 def owner_deadline_exhausted(

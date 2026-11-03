@@ -13,7 +13,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D03 | Context assembly, fit & compaction | 33 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 48 | 0 |
-| D06 | Review stack | 95 | 0 |
+| D06 | Review stack | 96 | 0 |
 | D07 | Delegation, subagents & Claudexor | 104 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
@@ -25,10 +25,10 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D15 | Memory, knowledge, consciousness & self-evolution | 34 | 0 |
 | D16 | Observability, usage accounting & cost | 30 | 0 |
 | D17 | Projects, workspaces & task results | 54 | 0 |
-| D18 | Launcher, packaging, platform & shared substrate | 37 | 0 |
+| D18 | Launcher, packaging, platform & shared substrate | 38 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 24 | 0 |
-| **total** | | **977** | **0** |
+| **total** | | **979** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -446,6 +446,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/review_body_fact.py`
 - `ouroboros/review_checking.py`
 - `ouroboros/review_checking_prune.py`
+- `ouroboros/review_continuation.py`
 - `ouroboros/review_custody.py`
 - `ouroboros/review_cycles.py`
 - `ouroboros/review_dispatch.py`
@@ -1166,6 +1167,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/launcher_appearance.py`
 - `ouroboros/launcher_background.py`
 - `ouroboros/launcher_bootstrap.py`
+- `ouroboros/launcher_context_menu.py`
 - `ouroboros/launcher_page_zoom.py`
 - `ouroboros/launcher_readiness.py`
 - `ouroboros/launcher_server_reaper.py`

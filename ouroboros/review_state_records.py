@@ -393,6 +393,23 @@ def _normalize_findings(items: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _continued_rows(existing: Any, incoming: Any) -> List[Any]:
+    """The incoming roster, except per slot: a row an explicit continuation reopened keeps its successor
+    against a stale snapshot naming no operation or one it superseded (``review_continuation``)."""
+    reopened = {str(row.get("slot_id") or ""): row for row in existing or [] if isinstance(row, dict)
+                and row.get("superseded_operation_ids")}
+    return [reopened[str(row.get("slot_id") or "")] if isinstance(row, dict) and str(row.get("slot_id") or "") in reopened
+            and str(row.get("operation_id") or "") in {"", *reopened[str(row.get("slot_id") or "")]["superseded_operation_ids"]}
+            else row for row in incoming or existing or []]
+
+
+def _continued_scope(existing: Any, incoming: Any) -> Dict[str, Any]:
+    merged = dict(incoming or existing or {})
+    if isinstance(merged.get("raw_results"), list) and isinstance((existing or {}).get("raw_results"), list):
+        merged["raw_results"] = _continued_rows(existing["raw_results"], merged["raw_results"])
+    return merged
+
+
 def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord) -> CommitAttemptRecord:
     data = {
         name: getattr(incoming, name) or getattr(existing, name)
@@ -408,8 +425,8 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         updated_ts=incoming.updated_ts or existing.updated_ts or _utc_now(),
         finished_ts=incoming.finished_ts or existing.finished_ts,
         triad_models=list(incoming.triad_models or existing.triad_models),
-        triad_raw_results=list(getattr(incoming, "triad_raw_results", None) or getattr(existing, "triad_raw_results", None) or []),
-        scope_raw_result=dict(getattr(incoming, "scope_raw_result", None) or getattr(existing, "scope_raw_result", None) or {}),
+        triad_raw_results=_continued_rows(getattr(existing, "triad_raw_results", None), getattr(incoming, "triad_raw_results", None)),
+        scope_raw_result=_continued_scope(getattr(existing, "scope_raw_result", None), getattr(incoming, "scope_raw_result", None)),
         author_disposition=dict(incoming.author_disposition or existing.author_disposition),
         review_input=dict(getattr(incoming, "review_input", None) or getattr(existing, "review_input", None) or {}),
         # Once an attempt physically dispatched a paid triad/scope wave the fact is

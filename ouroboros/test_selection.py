@@ -1,7 +1,8 @@
 """Commit/PR test scope: a contract floor, direct imports and authored widening.
 
 Selection is computed from the candidate's files, including dirty and untracked
-inputs. It is a minimum, not a claim about dynamic or indirect consumers.
+inputs. It is a minimum, not a claim about dynamic or indirect consumers. It names
+modules; the runners' lane exclusions still decide which of their tests execute.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ FLOOR_TESTS = {
     "tests/test_safety_policy.py": "every built-in tool has an explicit safety policy",
 }
 
-SELECTION_RULE = "floor + changed tests + direct importers + authored widening"
+SELECTION_RULE = "floor + changed tests + direct importers of changed code and tests + authored widening"
 # Bind the policy this process loaded, even if its source changes later on disk.
 _POLICY_SOURCE = Path(__file__).read_bytes()
 _APPARATUS = frozenset({
@@ -230,7 +231,8 @@ def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
     if full_tests:
         full.append(("*", "author requested full: " + test_reason.strip()))
     selected = set(FLOOR_TESTS)
-    modules = {_module(p) for p in changed if p.endswith(".py") and not p.startswith("tests/")}
+    # A changed test module is imported like product code; other tests/ files are apparatus (full above).
+    modules = {_module(p) for p in changed if p.endswith(".py")}
     for path in files:
         if path in changed:
             selected.add(path)

@@ -121,6 +121,16 @@ class SkillRevisionRequest(TypedDict, total=False):
     expected_content_hash: str
 
 
+class SkillReviewRequest(TypedDict, total=False):
+    """``POST /api/skills/{skill}/review``: no body (or ``{}``) reviews the current bytes. Both fields
+    together continue stopped seats of one earlier Skills-page review on that review's recorded bytes,
+    each ``{seat_id, operation_id}`` exactly as its history row's ``continuable_seats`` names it; any
+    other body answers 400 before a job or a send. A changed payload gains no verdict from it."""
+
+    review_reference: Dict[str, Any]  # {record_id, content_hash} of that review
+    continue_seats: List[Dict[str, str]]
+
+
 class SkillGrantRequest(TypedDict, total=False):
     """``POST /api/skills/{skill}/grants``: the first present of ``items``, ``keys`` or ``granted_keys``;
     each item a key or permission name, or ``{value|key|permission|name}``. Only what the current
@@ -279,6 +289,7 @@ class SkillReviewResponse(TypedDict, total=False):
     paid: bool
     seats: List[Dict[str, Any]]
     governance: Dict[str, Any]
+    continuable_seats: List[Dict[str, Any]]  # this review's stopped seats its own author may continue
     job_id: str
     job_status: str
     group_id: str
@@ -1012,7 +1023,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 __all__ = [
     "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
-    "SkillToggleRequest", "SkillRevisionRequest", "SkillGrantRequest", "SkillDeleteRequest",
+    "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
     "SkillLifecycleQueueResponse",
     "SkillReviewResponse", "SkillReviewHistoryDetailResponse", "SkillReconcileResponse",

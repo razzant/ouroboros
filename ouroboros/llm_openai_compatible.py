@@ -734,6 +734,8 @@ def openrouter_web_search_server_tool(
         }],
     )
     apply_processing_preference(target, payload)
+    if timeout is not None:
+        payload["timeout"] = float(timeout)  # the leg's own bound: each send narrows it, never replaces it (#572)
     scope = replace(accounting_scope or current_usage_scope() or UsageScope(), source="web_search.openrouter")
     with usage_scope(scope):
         return _recovery(client.chat.completions.create, payload, target)

@@ -10,7 +10,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch, skillSourcesApi } from './api_client.js';
 import {
-    fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
+    continuableReview, fillFindingsOnOpen, installedSkillModel, installedSourceLabel, isMadeHere, patchInstalledSkillEnrichment,
     renderInstalledSkillCard,
 } from './skill_card_renderer.js';
 import { createSkillBrowse } from './skill_browse.js';
@@ -572,13 +572,14 @@ export function initSkills(ctx = {}) {
         return toggleSkillEnabled(name, true);
     }
 
-    async function reviewInBackground(name) {
+    /** A new review of the current bytes, or (`body`: `SkillReviewRequest`) the continuation of a stopped one. */
+    async function reviewInBackground(name, body = {}) {
         if (reviewingSkills.has(name)) return null;
         reviewingSkills.add(name);
         paintInstalled();
         try {
-            showToast(`${name}: review started. It can take a while; you can leave this page.`, 'muted');
-            const result = await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/review`, {});
+            showToast(`${name}: review ${body.continue_seats ? 'continuing' : 'started'}. It can take a while; you can leave this page.`, 'muted');
+            const result = await postWithFeedback(`/api/skills/${encodeURIComponent(name)}/review`, body);
             const findings = result.findings?.length ?? 0;
             showToast(`${name}: review ${result.status}${findings ? ` (${plural(findings, 'finding')})` : ''}${result.error ? ` — ${result.error}` : ''}`,
                 reviewTone(result.status, result.error));
@@ -777,6 +778,21 @@ export function initSkills(ctx = {}) {
             });
             if (!ok) return false;
             await reviewInBackground(name);
+            return true;
+        }
+        if (action === 'continue_review') {
+            const saved = continuableReview(await currentSkill(name));
+            if (!saved) { showToast(`${name}: no stopped review of these files is left to continue.`, 'warn'); return false; }
+            const ok = await openConfirmDialog({
+                title: `Continue the review of ${name}?`,
+                body: 'The reviewer that stopped continues its saved work on the files it was reviewing. It uses your review models again and runs in the background.',
+                confirmLabel: 'Continue review',
+            });
+            if (!ok) return false;
+            await reviewInBackground(name, {
+                review_reference: { record_id: saved.record_id, content_hash: saved.content_hash },
+                continue_seats: saved.continuable_seats.map(({ seat_id, operation_id }) => ({ seat_id, operation_id })),
+            });
             return true;
         }
         if (action === 'attest_review') return attest(name);

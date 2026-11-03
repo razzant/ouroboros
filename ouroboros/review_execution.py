@@ -57,8 +57,8 @@ from ouroboros.review_session_custody import (
     checkpoint_pending_invocation,
     owned_started_review_custody,
     recorded_review_shape,
-    review_recovery_facts,
-    continue_review_run,
+    review_recovery_facts, continuation_send_admitted,
+    continuation_generation_end, continuation_send, join_recorded_review_continuation, stopped_review_failure,
 )
 from ouroboros.review_session_preparation import prepare_review_session_request, render_review_session_prompt
 from ouroboros.review_session_usage import (review_event_identity, session_custody_attribution,
@@ -670,7 +670,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
     """
     from ouroboros import delegate_custody as custody
     from ouroboros.claudexor_daemon import ensure_owned_gateway
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable, final_attempt_facts, run_failure_error
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable, final_attempt_facts
     from ouroboros.subagents import delegated_run_shape
     from ouroboros.usage_accounting import current_usage_scope
     from ouroboros.review_checking import bind_checking_thread, session_checking, terminal_seat_evidence
@@ -686,12 +686,12 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
     retry_token = str(state.get("pending_invocation_id") or "")
     unrequested = not (retry_token or invocation.reconcile_only)
     gateway, route = None, session_route
-    recovering, project_id, existing_project = False, "", ""  # also bound on early recovery failures
+    recovering, project_id, existing_project, generation_end = False, "", "", None  # bound on early recovery failures
     observed, summary = {}, {}  # a failure after start still names what it observed
     attempt_execution = None
     delivery_facts = invocation.source_delivery if invocation.source_delivery is not None else {}
     continuations, stopped_details, session_usages = [], [], []
-    start_attempted, start_refused = False, False  # only submit witnesses POST entry
+    start_attempted, start_refused, engine_refused = False, False, False  # only submit witnesses POST entry
     try:
         record = custody.invocation_record(custody_drive, retry_token) if retry_token else None
         if record is not None and record["state"] == "legacy_gap":
@@ -707,6 +707,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             raise ReviewRouteUnavailable("delegated retry token has no durable invocation; refusing a second paid run",
                                          code="review_custody_lost")
         if recovering:
+            generation_end = continuation_generation_end(invocation, record, run_id)
             source_request = record.get("work_order_source_request") or {}
             delivery_facts.update(source_request)
             recovery_prompt = prompt
@@ -810,6 +811,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
 
             def submit():
                 nonlocal start_attempted
+                continuation_send_admitted(invocation, generation_end, run_request, str(route.model or ""))  # the last step
                 start_attempted = True  # Admission and preparation are not a POST.
                 if use_thread:
                     from ouroboros.review_thread_continuity import start_review_thread_turn
@@ -822,6 +824,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 code = getattr(exc, "code", str(exc))
                 status = int(getattr(exc, "status_code", 0) or 0)
                 start_refused = isinstance(exc, OwnerPauseRefused) or 400 <= status < 500
+                engine_refused = bool(status) and start_refused and code != "idempotency_conflict" and continuation_send(invocation)
                 if isinstance(exc, OwnerPauseRefused):
                     raise ReviewRouteUnavailable("New delegated review start is fenced.", code=code) from exc
                 raise
@@ -843,6 +846,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 project_id=project_id, project_owned=bool(project_id) and not existing_project,
                 root_task_id=root_task_id, parent_task_id=parent_task_id, **usage_custody,
                 ledger_root=str(custody_drive), idempotency_key=key, invocation_id=invocation_id or retry_token,
+                continuation_of=str((record or {}).get("continuation_of") or "") if recovering else "",
                 **checking.get("custody", {}))
             # A missing started row leaves the run process-local and unresumable.
             custody_durable = bool(custody.record_started(custody_drive, entry, shape={
@@ -851,7 +855,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 "root": root, "surface": surface, "slot_id": slot_id,
             }))
         # Pending custody remains above throughout polling, including failures.
-        window = float("inf") if timeout_sec is None else float(timeout_sec)  # no window: observe until terminal
+        window = min(float("inf") if timeout_sec is None else float(timeout_sec),  # no window: observe until terminal
+                     float("inf") if generation_end is None else max(0.0, generation_end - time.monotonic()))
         poll_deadline = time.monotonic() + window
         detail = _poll_session_terminal(gateway, custody, custody_drive, entry, run_id, window)
         seen_runs = {run_id}
@@ -860,7 +865,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             attempt_execution = detail.get("attemptExecution")
             if str(summary.get("state") or "") == "succeeded":
                 break
-            successor = continue_review_run(gateway, custody_drive, entry, detail, invocation,
+            successor = join_recorded_review_continuation(gateway, custody_drive, entry, detail, invocation,
                 remaining=poll_deadline - time.monotonic(), seen=seen_runs)
             if successor is None:
                 break
@@ -878,17 +883,15 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             detail = _poll_session_terminal(gateway, custody, custody_drive, entry, run_id,
                                             max(0.0, poll_deadline - time.monotonic()))
         late_success = time.monotonic() >= poll_deadline  # a terminal the deadline read discovered
-        if shape.investigation:  # every terminal turn retains its own named outputs and delta
-            checking["evidence"] = terminal_seat_evidence(
-                custody_drive, task_id, str(invocation.operation_id or ""), detail)
-        settlement = custody.settle_run(custody_drive, gateway, entry, detail)
         run_state = str(summary.get("state") or "")
+        if shape.investigation:  # every terminal turn retains its outputs and delta; a continuable stop keeps its copy
+            checking["evidence"] = terminal_seat_evidence(custody_drive, task_id, str(invocation.operation_id or ""), detail,
+                hold=run_state != "succeeded" and bool(summary.get("resumable") or detail.get("resumable")))
+        settlement = custody.settle_run(custody_drive, gateway, entry, detail)
         if run_state != "succeeded":
             state.pop("pending_invocation_id", None)
             state.pop("delegated_run_id", None)
-            failure = run_failure_error(run_id, run_state, summary.get("failure"))
-            failure.review_run_state = run_state
-            raise failure
+            raise stopped_review_failure(gateway, run_id, detail, summary)
         text = _full_session_text(gateway, run_id, detail)
         spend, estimated, combined_summary = _combined_session_usage(custody, stopped_details, detail)
         thread_receipt: Dict[str, Any] = {}
@@ -923,7 +926,8 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         if unrequested:  # fresh preparation only: no paid stamp or START_REQUESTED write
             exc.delegated_start_unrequested = True
         if gateway is not None and not run_id and (project_id or invocation_id):
-            definite = not recovering and (not start_attempted or start_refused)
+            # An explicit continuation's recorded start is first POSTed here: the engine's refusal of it is definite.
+            definite = not recovering and (not start_attempted or start_refused) or engine_refused
             try:
                 _retire_orphaned_review_registration(
                     custody, gateway, custody_drive, project_id if not existing_project else "",
@@ -1159,11 +1163,7 @@ def _full_session_text(gateway: Any, run_id: str, detail: Dict[str, Any]) -> str
             f"preview the run reported ({(disclosure or {}).get('reason')}); a "
             "verdict is never read from a preview"
         )
-    text = ""
-    if isinstance(primary, dict):
-        text = str(primary.get("text") or "")
-    elif primary is not None:
-        text = str(primary)
+    text = str(primary.get("text") or "") if isinstance(primary, dict) else "" if primary is None else str(primary)
     if not text.strip():
         final_summary = detail.get("finalSummary")
         text = final_summary if isinstance(final_summary, str) else ""

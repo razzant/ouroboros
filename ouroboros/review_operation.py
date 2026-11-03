@@ -946,6 +946,10 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
                     **{key: str(invocation.get(key) or "") for key in REVIEW_ATTRIBUTION_KEYS},
                     "surface": request.surface, "slot_id": slot.slot_id}), usage)
         text = _full_session_text(gateway, run_id, detail) if state == "succeeded" else ""
+        from ouroboros.review_session_custody import stopped_review_failure
+
+        # A stop's engine facts and whole partial output, read while the daemon answers.
+        stopped = stopped_review_failure(gateway, run_id, detail, summary) if state != "succeeded" else None
     except Exception:
         log.debug("attach-only review observation of %s did not complete", run_id, exc_info=True)
         return None
@@ -960,7 +964,8 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
         from ouroboros.review_checking import terminal_seat_evidence
 
         # The receipt is written before the seat's one-shot copy is deleted.
-        evidence = terminal_seat_evidence(root, request.task_id, operation_id, detail)
+        evidence = terminal_seat_evidence(root, request.task_id, operation_id, detail, hold=state != "succeeded" and bool(
+            summary.get("resumable") or detail.get("resumable")))
     except Exception as exc:
         # The paid verdict remains collectible even if retaining its checking
         # artifacts fails; leave the original area in custody and name the gap.
@@ -990,8 +995,12 @@ def _attach_only_run(root: Any, request: Any, slot: Any, operation_id: str, run_
                                   error=f"delegated review run {run_id} ended {state or 'without a state'}",
                                   failure_code="review_run_cancelled" if interrupted else "review_run_failed",
                                   transport_status="interrupted" if interrupted else "provider_transport_error",
+                                  reported_cause=str(getattr(stopped, "reported_cause", "") or ""),
+                                  failure_details=dict(getattr(stopped, "failure_details", None) or {}),
                                   operation_id=operation_id, operation_state="late_settled", recovery_binding=binding)
-        return retain_collected_outcome(root, request, slot, actor)
+        return retain_collected_outcome(root, request, slot, actor,
+                                        transcript=str(getattr(stopped, "review_partial_output", "") or ""),
+                                        transcript_gap=str(getattr(stopped, "review_partial_output_gap", "") or ""))
     shape = request_output_shape(request)
     canonical, method, _unused = canonicalize_session_verdict(
         text, conformance_passed=str(summary.get("outputConformance") or "").lower() == "passed",
