@@ -110,6 +110,13 @@ def quiet_finish(row: Dict[str, Any]) -> bool:
     return row.get("wake_silent") is True and not row.get("owner_message_sent") and not terminal_host_notice_text(row)
 
 
+def work_label(*rows: Any) -> Dict[str, str]:
+    """``{"target_label": name}`` a finished task's notifications say (rows in hand, no read); ``{}``, never a placeholder."""
+    from ouroboros.projects_registry import task_presentation_name
+    name = task_presentation_name(*rows, fallback="")
+    return {"target_label": name} if name else {}
+
+
 def wake_cause_title(metadata: Dict[str, Any]) -> str:
     """The host's admission title; the authored title slot stays empty."""
     from ouroboros.consciousness_authority import wake_cause

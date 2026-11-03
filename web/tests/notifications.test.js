@@ -166,7 +166,7 @@ test('a managed root concludes as a log frame, and both shapes share one key', (
     assert.ok(log, 'a settled terminal is an ending');
     assert.equal(log.category, 'task_done');
     assert.equal(log.key, 'conclusion:t-log', 'the same key a chat-row terminal would produce');
-    assert.equal(log.body, '', 'a log frame carries diagnostics, never owner prose');
+    assert.equal(log.body, 'Done', 'a log frame says the outcome its facts give, never its diagnostics');
 
     // Other log traffic is not an event.
     assert.equal(classifyLiveFrame({ type: 'task_metrics_event', status: 'completed' },
@@ -194,6 +194,28 @@ test('a managed root concludes as a log frame, and both shapes share one key', (
         { kind: 'chat', isMain: true, isRoot: true },
     );
     assert.equal(decideNotification(viaChatRow, ON, seen).reason, 'duplicate');
+});
+
+test('a finished root\'s body is its work\'s name and outcome word on both wire shapes, never the row\'s sentence', () => {
+    const asRoot = { isMain: true, isRoot: true, taskId: 'rel' };
+    const chat = (extra) => classifyLiveFrame({ role: 'system', system_type: 'task_summary', task_id: 'rel',
+        content: 'Failed. Root task rel. A tool this task used failed and nothing recovered it.', ...extra },
+    { kind: 'chat', ...asRoot });
+    const log = (extra) => classifyLiveFrame({ type: 'task_done', chat_id: 1, ...extra }, { kind: 'log', ...asRoot });
+    assert.equal(chat({ outcome_phase: 'error', target_label: 'Publish the release notes' }).body,
+        'Publish the release notes · Failed');
+    assert.equal(log({ status: 'failed', target_label: 'Publish the release notes' }).body,
+        'Publish the release notes · Failed', 'the log-first shape names the same work and outcome');
+    assert.equal(log({ status: 'cancelled', target_label: 'Publish the release notes' }).body,
+        'Publish the release notes · Stopped');
+    // Without a name only the word: no invented "Task", no task id, never the host sentence.
+    for (const candidate of [chat({ outcome_phase: 'warn' }), log({ status: 'completed',
+        outcome_axes: { objective: { status: 'pass', warning: 'receipt_absent', warnings: ['receipt_absent'] } } })]) {
+        assert.equal(candidate.body, 'Done with warnings');
+    }
+    assert.ok(!chat({ outcome_phase: 'error' }).body.includes('Root task'));
+    // Both shapes stay one event.
+    assert.equal(chat({ outcome_phase: 'done' }).key, log({ status: 'completed' }).key);
 });
 
 test('only a ROOT terminal notifies; a child escalates instead', () => {
@@ -520,7 +542,8 @@ test('a current app takes the alert text, asked without its sound; the oldest on
         documentRef: fakeDocument(),
         hostApi,
     });
-    const frame = (id) => ({ role: 'system', system_type: 'task_summary', task_id: id, content: 'Report ready' });
+    const frame = (id) => ({ role: 'system', system_type: 'task_summary', task_id: id, content: `Done. Root task ${id}.`,
+        outcome_phase: 'done', target_label: 'Report ready' });
     const newer = make(host, { ...ON, show_text: true });
     newer.handleFrame(frame('text-1'), { kind: 'chat', isMain: true });
     await settle();
@@ -528,7 +551,7 @@ test('a current app takes the alert text, asked without its sound; the oldest on
     assert.equal(calls[0][0], 'notify_owner');
     assert.equal(calls[0][1], false, 'never the launcher\'s own sound (macOS Glass, a Windows beep)');
     assert.equal(typeof calls[0][2], 'string');
-    assert.equal(calls[0][3], 'Report ready');
+    assert.equal(calls[0][3], 'Report ready · Done');
     newer.destroy();
 
     calls.length = 0;

@@ -2797,6 +2797,10 @@ notification shown), the click opens the window as it was left, no navigation.
 
 **Content is private by default.** Only the kind of event is shown until the
 owner turns message text on, because a banner can appear on a shared screen.
+With it on, a finished task says its work's name and outcome word (`Release notes
+· Done with warnings`) on either wire shape, the word alone when the task has no
+name, never the row's host sentence with its task id; Telegram's completion line
+names the work the same way, its short id only when it has no name.
 
 **Deliberately absent.** No numeric badge, repeated reminder, inline reply,
 Telegram escalation or attention after quitting. A current desktop launcher may

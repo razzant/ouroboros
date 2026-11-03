@@ -54,7 +54,7 @@
    in-app toast and says so in Settings. */
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
-import { getLogTaskGroupId } from './log_events.js';
+import { getLogTaskGroupId, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { shellBridgeApi } from './ui_helpers.js';
 import { tr } from './i18n.js';
 
@@ -156,6 +156,15 @@ function trimBody(value) {
     return `${body.slice(0, BODY_CHARS - 1)}…`;
 }
 
+/* A finished root's body, on both of its wire shapes: the work's name (the row's or
+   event's `target_label`) and its outcome word, else the word alone. Never the row's
+   host sentence: its task id is for Ouroboros, and the row keeps it (DESIGN §9). */
+function conclusionBody(frame) {
+    const word = taskPresentation(text(frame.outcome_phase) || taskTerminalPhase(frame)).headline;
+    const name = text(frame.target_label).trim();
+    return trimBody(name ? `${name} · ${word}` : word);
+}
+
 /* A reminder (a note Ouroboros wrote earlier, shown now by the host) and a
    granted skill's notice are System rows whose first line is the host's
    signature; the banner names the author from `source` and shows only the words
@@ -228,8 +237,8 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
     }
 
     if (kind === 'log') {
-        // Log frames carry runtime diagnostics, not owner-facing prose, so this
-        // one stays title-only even when message text is switched on.
+        // Log frames carry runtime diagnostics, not owner-facing prose: the body
+        // is only the work's name and outcome word the event carries as facts.
         if (text(frame.type || frame.event) !== 'task_done') return null;
         if (frame.quiet_effective === true) return null;
         if (!rootEligible(taskId)) return null;
@@ -250,7 +259,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
             category: 'task_done',
             key: `conclusion:${taskId}`,
             title: notifyTitle('task_done'),
-            body: '',
+            body: conclusionBody(frame),
             target: { chatId: frame.chat_id, taskId },
         };
     }
@@ -304,7 +313,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
             category: 'task_done',
             key: `conclusion:${taskId}`,
             title: notifyTitle('task_done'),
-            body: trimBody(frame.content),
+            body: conclusionBody(frame),
             target: { chatId: frame.chat_id, taskId },
         };
     }
