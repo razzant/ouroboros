@@ -35,7 +35,9 @@ own finalization after the stop (the store switch's door owner, ``exit_finalizat
 starters stop their late publications. What an in-memory owner leaves unconfirmed (a live handle,
 a start still in flight, an owner unfinished or failed at the deadline) is reported as
 ``memory_unconfirmed`` beside the durable ids and keeps the outcome unconfirmed: no record names
-it, so no next start retries it. The next start's ``finish_unconfirmed_stops`` retries every
+it, so no next start retries it. Debt only the canonical ledger names that no store took into the set
+at the exit, or a selection the exit could not read, is ``ledger_unconfirmed`` and keeps it unconfirmed
+too; the next start's sweep reads that ledger. The next start's ``finish_unconfirmed_stops`` retries every
 stamped record under the same bound before admission and before any extension or replacement
 process starts; what it cannot confirm stays recorded and counted. Records an older release left
 on disk are indexed once by ``start_inherited_import`` on a background thread, so no start waits
@@ -728,7 +730,9 @@ def _run_stop(root: pathlib.Path, deadline: float) -> Dict[str, Any]:
 
     started = time.monotonic()
     wait = max(0.0, min(2.0, deadline - started))
-    name_ledger_debt(root, wait)  # debt only the canonical ledger names is a target like any other
+    # Debt only the canonical ledger names is a target like any other; what this exit cannot count (no store took
+    # its copy, or the selection could not be read) is reported, and every other owner still stops.
+    ledger = name_ledger_debt(root, wait)
     targets = _stamp(root, "stop_requested_at", _is_stop_target, timeout_sec=wait)  # persisted before any wait
     from ouroboros.workspace_executor import _services_snapshot
 
@@ -737,18 +741,19 @@ def _run_stop(root: pathlib.Path, deadline: float) -> Dict[str, Any]:
     memory: Dict[str, Any] = {}
     remaining = _stop_records(root, targets, deadline, owners=_memory_owners(root, deadline), skip_paths=held,
                               memory=memory)
-    if remaining or memory:
+    if remaining or memory or ledger:
         log.critical("Owned-work stop left %d record(s) unconfirmed at the deadline (the next start retries "
-                     "them) and in-memory owners %s unconfirmed (no record names them)", len(remaining), memory)
+                     "them), in-memory owners %s unconfirmed (no record names them) and ledger debt %s it could "
+                     "not count (the next start's sweep reads that ledger)", len(remaining), memory, ledger)
         try:
             append_jsonl(root / "logs" / "supervisor.jsonl", {
-                "ts": utc_now_iso(), "type": "owned_stop_unconfirmed", "records": remaining, "memory": memory},
-                lock_timeout_sec=max(0.0, min(2.0, deadline - time.monotonic())))
+                "ts": utc_now_iso(), "type": "owned_stop_unconfirmed", "records": remaining, "memory": memory,
+                "ledger": ledger}, lock_timeout_sec=max(0.0, min(2.0, deadline - time.monotonic())))
         except Exception:
             log.debug("Failed to record the unconfirmed owned stop", exc_info=True)
-    return {"state": "unconfirmed" if remaining or memory else "completed", "targets": len(targets),
+    return {"state": "unconfirmed" if remaining or memory or ledger else "completed", "targets": len(targets),
             "confirmed": len(targets) - len(remaining), "unconfirmed": remaining, "memory_unconfirmed": memory,
-            "elapsed_sec": round(time.monotonic() - started, 3)}
+            "ledger_unconfirmed": ledger, "elapsed_sec": round(time.monotonic() - started, 3)}
 
 
 def _generation_record() -> Dict[str, Any]:

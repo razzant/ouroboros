@@ -118,17 +118,24 @@ def unsettled_selection(drive_root: Any, entries: List[Dict[str, Any]], custody:
     return found
 
 
-def name_ledger_debt(root: Any, timeout_sec: float) -> None:
+def name_ledger_debt(root: Any, timeout_sec: float) -> Dict[str, Any]:
     """Debt only the canonical ledger names (its ownership writes failed, or its row landed after its record retired)
-    joins the set, so an exit's one stop ends it and its report counts it. One read; normally nothing to add."""
+    joins the set, so an exit's one stop ends it and its report counts it. One read; normally nothing to add. Returns
+    what the exit cannot count, empty otherwise: ``records``, launches whose copy no store took either (their ledger
+    rows keep them for the next start's sweep), and ``error``, why the selection could not be read whole."""
     from ouroboros.owned_shutdown import record_ledgered_process
 
+    unwritten: List[str] = []
     try:
-        custody = read_custody(root, strict=False)
+        custody = read_custody(root)
         named = {record.get("record_id") for record in custody.records}
         for row in [] if custody.blind else custody.rows:
             if row.get("known_members") and pc._owned_service_row(row) and pc.custody_record_id(row) not in named:
-                record_ledgered_process(root, row, timeout_sec=timeout_sec)
+                if not record_ledgered_process(root, row, timeout_sec=timeout_sec):
+                    unwritten.append(pc.custody_record_id(row))
                 timeout_sec = 0.0  # one wait for the lock per exit: the rest go straight to their pending copy
-    except Exception:
+        error = custody.blind or ("" if custody.readable else "the canonical process ledger cannot be read")
+    except Exception as exc:
         log.warning("Debt only the ledger names was not read at this exit; the next start's sweep ends it", exc_info=True)
+        error = f"{type(exc).__name__}: {exc}"[:200]
+    return {key: value for key, value in (("records", unwritten), ("error", error)) if value}

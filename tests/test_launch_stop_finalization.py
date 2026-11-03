@@ -17,6 +17,8 @@ import pytest
 from tests._launch_stop_shared import (
     _PATIENCE,
     _answers,
+    _executor_ctx,
+    _executor_start,
     _payload,
     _runner_cmd,
     _same_process_alive,
@@ -24,7 +26,7 @@ from tests._launch_stop_shared import (
     _settle,
     write_scripts,
 )
-from tests.test_launch_stop_contract import BACKENDS
+from tests.test_launch_stop_contract import BACKENDS, _host
 
 pytestmark = [pytest.mark.serial,
               pytest.mark.skipif(os.name == "nt", reason="the measured stop is POSIX; Windows keeps its native kill")]
@@ -133,6 +135,68 @@ def test_a_late_stop_of_the_old_object_leaves_the_newer_service_alone(tmp_path, 
         for item in list(registry.values()):
             _settle(_proc(item))
         _settle(_proc(record), identities=[(pid, birth), *([new_identity[1:]] if new_identity else [])])
+
+
+def test_a_late_host_stop_never_turns_to_an_executor_service_that_took_its_name(tmp_path, monkeypatch, scripts):
+    """The same A/B/late-A order across backends. A selects host launch L and pauses after its process pass; B ends L,
+    finalizes it and frees the name; the same task starts that name again on the local executor, as the start path
+    allows. A resumes and finds L retired: the call stays bound to the launch it selected, so it answers that nothing is
+    left to stop and the replacement receives no stop. A stop that selected no host record still stops the executor's."""
+    from ouroboros import process_scope
+    from ouroboros import workspace_executor as executor
+    from ouroboros.tools import services
+
+    ctx, record, registry, log, _leader, (_port, pid, birth) = _host(tmp_path, monkeypatch, scripts, task="swap-task")
+    real_end, a_ended, go_a = process_scope.end_held_processes, threading.Event(), threading.Event()
+    executor_stops, real_executor_stop = [], services.executor_stop_service
+
+    def end(*args, **kwargs):
+        answers = real_end(*args, **kwargs)
+        if threading.current_thread().name == "late-a":  # A measured the end; everything after is its decision
+            a_ended.set()
+            assert go_a.wait(_PATIENCE)
+        return answers
+
+    def executor_stop(*args, **kwargs):
+        executor_stops.append(threading.current_thread().name)
+        return real_executor_stop(*args, **kwargs)
+
+    monkeypatch.setattr(process_scope, "end_held_processes", end)
+    monkeypatch.setattr(services, "executor_stop_service", executor_stop)
+    results: dict = {}
+    late_a = threading.Thread(target=lambda: results.update(a=services._stop_service(ctx, name="a")), name="late-a")
+    late_a.start()
+    replacement = new_identity = None
+    try:
+        assert a_ended.wait(_PATIENCE), "A never measured the end"
+        won = _payload(services._stop_service(ctx, name="a"))
+        assert won["process_cleanup"]["exit_confirmed"] is True and "stop_failed" not in won, won
+        assert record.service_id not in registry and not log.exists()
+
+        executor_ctx, workspace = _executor_ctx(tmp_path, task_id="swap-task")
+        started = _executor_start(executor_ctx, workspace, scripts, tmp_path / "new.port", "a", mode="same")
+        replacement = executor._SERVICES[record.service_id]  # the same task and name, now the executor's
+        new_identity = _server(tmp_path / "new.port")
+        assert started["state"] == "running" and _answers(new_identity[0]), started
+
+        go_a.set()
+        late_a.join(_PATIENCE)
+        assert not late_a.is_alive()
+
+        assert executor._SERVICES.get(record.service_id) is replacement, "the late host stop removed the replacement"
+        assert replacement.local_proc.poll() is None and _answers(new_identity[0]), "the late host stop ended it"
+        assert "late-a" not in executor_stops, f"the late host stop turned to the executor: {executor_stops}"
+        assert results["a"] == "⚠️ SERVICE_NOT_FOUND: a", results["a"]
+
+        stopped = _payload(services._stop_service(executor_ctx, name="a"))  # no host record: the executor's own stop
+        assert stopped["process_cleanup"]["exit_confirmed"] is True, stopped
+        assert record.service_id not in executor._SERVICES and not _answers(new_identity[0])
+    finally:
+        go_a.set()
+        late_a.join(_PATIENCE)
+        if replacement is not None:
+            _settle(replacement.local_proc)
+        _settle(record.proc, identities=[(pid, birth), *([new_identity[1:]] if new_identity else [])])
 
 
 @pytest.mark.parametrize("consumer", ["stop_service", "shutdown"])

@@ -643,3 +643,71 @@ def test_the_exit_adds_debt_only_the_ledger_names_to_its_one_stop(tmp_path, monk
     assert _CHILD not in rows, outcome
     assert outcome["state"] == "completed" and outcome["targets"] == 1, outcome
     assert owned_shutdown.owned_records(tmp_path, strict=True) == []
+
+
+@pytest.mark.parametrize("case", ["owed, copies refused", "owed, copy written", "nothing owed, copies refused",
+                                  "ledger unreadable", "ledger malformed", "set unreadable"])
+def test_the_exit_never_reports_completion_over_ledger_debt_it_could_not_count(tmp_path, monkeypatch, case):
+    """Debt only the ledger names reaches the exit's stop through its ownership copy. When neither the document nor the
+    pending channel takes that copy for the whole exit, or the ledger or the set cannot be read, the exit cannot count
+    that debt: its answer is unconfirmed with the launch's key or the reason, the other stop owners still run, and a
+    later door's join keeps that answer after the writes recover; the ledger keeps C for the next start's sweep. A copy
+    that is written lets the one stop end C, and with nothing owed a refused write changes nothing."""
+    from ouroboros import owned_shutdown, process_census, process_custody
+    from ouroboros.utils import append_jsonl
+
+    rows = {_CHILD: process_census._Row(_CHILD, 1, _CHILD, _OLD_BIRTH, 123.0, "alive", set())}
+    _controlled(tmp_path, monkeypatch, rows)
+    monkeypatch.setattr(owned_shutdown, "_stop_budget_sec", lambda: _PATIENCE)
+    monkeypatch.setattr(owned_shutdown, "_GENERATION_STOP", owned_shutdown._Stop())
+    ran, real_owners = [], owned_shutdown._memory_owners
+    monkeypatch.setattr(owned_shutdown, "_memory_owners", lambda root, deadline: [
+        *real_owners(root, deadline), ("probe", lambda: ran.append("probe"))])
+    ledger = process_custody.ledger_path(tmp_path)
+    assert append_jsonl(ledger, _launch_row("t-b", marker=_MARK_B, purpose="service:b", pid=_OTHER))
+    if case != "nothing owed, copies refused":
+        assert append_jsonl(ledger, {**_launch_row("t-a", purpose="service:a"),
+                                     "known_members": [{"pid": _CHILD, "birth": _OLD_BIRTH}]})
+    writes = _ownership_writes_fail(monkeypatch)
+    writes["failing"] = "refused" in case
+    aside = ledger.with_name("ledger-aside")
+    if case == "ledger unreadable":
+        ledger.rename(aside)
+        ledger.mkdir()  # a read of the ledger now fails with the OS's own error
+    elif case == "ledger malformed":
+        ledger.rename(aside)
+        ledger.write_bytes(b"{torn\n")
+    elif case == "set unreadable":
+        owned_shutdown.owned_processes_path(tmp_path).write_bytes(b"{torn")
+
+    outcome = owned_shutdown.stop_owned_work(tmp_path)
+
+    assert ran == ["probe"], "every other stop owner still ran"
+    if case in ("owed, copy written", "nothing owed, copies refused"):
+        assert outcome["state"] == "completed" and not outcome.get("ledger_unconfirmed"), outcome
+        assert outcome["targets"] == (1 if case == "owed, copy written" else 0), outcome
+        assert (_CHILD in rows) is (case == "nothing owed, copies refused"), rows
+        return
+    assert outcome["state"] == "unconfirmed", f"the exit claimed completion over debt it could not count: {outcome}"
+    assert _CHILD in rows, "this exit does not stop what it could not count"
+    if case == "owed, copies refused":
+        assert outcome["ledger_unconfirmed"] == {"records": [f"launch-{_HEX_A}"]}, outcome
+        logged = [json.loads(line) for line in (tmp_path / "logs" / "supervisor.jsonl").read_text(
+            encoding="utf-8").splitlines() if '"owned_stop_unconfirmed"' in line]
+        assert logged[-1]["ledger"] == outcome["ledger_unconfirmed"], logged
+    else:  # the reason, in either report field
+        assert "cannot be read" in json.dumps(outcome) or "ownership_set_unreadable" in outcome["unconfirmed"], outcome
+    writes["failing"] = False
+    if case == "ledger unreadable":
+        ledger.rmdir()
+        aside.rename(ledger)
+    elif case == "ledger malformed":
+        ledger.unlink()
+        aside.rename(ledger)
+    elif case == "set unreadable":
+        owned_shutdown.owned_processes_path(tmp_path).unlink()
+    joined = owned_shutdown.stop_owned_work(tmp_path)  # a later door: the stores answer again, the exit did not change
+    assert joined["state"] == "unconfirmed" and joined.get("ledger_unconfirmed") == outcome.get("ledger_unconfirmed")
+    assert _owed(tmp_path, _PID)[0] == [_CHILD], "the ledger still names C"
+    process_custody.reap_orphaned_processes(tmp_path, running_task_ids=set())  # the next start's sweep
+    assert _CHILD not in rows, "the next start's sweep ends what the exit could not"

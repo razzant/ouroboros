@@ -881,6 +881,8 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     with _LOCK:
         record = _SERVICES.get(key)
     payload, confirmed = _stop_host_record(record) if record else (None, False)
+    if record is not None and payload is None:  # another stop retired the launch this call selected: nothing is left
+        return f"⚠️ SERVICE_NOT_FOUND: {name}"  # for it, and whatever took its name since (an executor too) is not it
     if payload is not None and not confirmed:
         return ("⚠️ SERVICE_STOP_ERROR (stop_service): not every process of this service is confirmed ended; "
                 "its record, log and declared outputs are kept, and stop_service retries the identities still owed.\n\n"
