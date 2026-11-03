@@ -57,7 +57,8 @@ after the page paints. On GTK that colour reaches nothing seen: pywebview 5.4's 
 showed no effect, so the window keeps its theme's colour, and from the first load the web view's own
 surface, opaque white by default, covers it on every host until a page paints (hosted run on GTK 3.24.33
 and WebKitGTK 2.50.4; a head-blocked ``html=`` document still showed the theme's colour). ``paint_room``
-gives that surface the room of the palette the theme resolved instead; no frames have shown it yet.
+gives that surface the room of the palette the theme resolved; a subsequent hosted run observed it
+before the held URL's page painted.
 """
 
 from __future__ import annotations
