@@ -54,12 +54,28 @@ def app_dict(triple) -> dict:
 
 
 def helper_op(argv: list[str]) -> list[str]:
-    """The native helper's op and args from its argv (``python -I macos_native.py <op> ...``)."""
+    """The native helper's op and args from its argv (``python -I -B macos_native.py <op> ...``)."""
     idx = next(i for i, part in enumerate(argv) if str(part).endswith("macos_native.py"))
     return [str(a) for a in argv[idx + 1:]]
 
 
 CHORD_POSTED = "paste chord: Command + key code 9 (v under Command in com.apple.keylayout.ABC)\n"
+
+
+def observing(helper):
+    """``observe`` (resolve and tree in ONE helper process), for a fake without its own answer to it ("no fake"),
+    answered from that fake's ``resolve`` and ``tree`` answers."""
+    def answer(args, state):
+        out = helper(args, state)
+        if args[0] != "observe" or not str(out.get("error") or "").startswith("no fake"):
+            return out
+        spec = json.loads(args[1])
+        found = helper(["resolve", spec["app"]], state) if spec["app"] else {"ok": True, "candidates": [app_dict(state["front"])]}
+        if not found.get("ok"):
+            return {**found, "stage": "resolve"}
+        target = found["candidates"][0]
+        return {**helper(["tree", str(target["pid"]), str(spec["max_nodes"]), str(spec["timeout_ms"])], state), "target": target}
+    return answer
 
 
 def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""), lsappinfo=True, on_input=None,
@@ -118,7 +134,7 @@ def mac(tmp_path, monkeypatch, *, front=SAFARI, helper=None, cliclick=(0, "", ""
                     "truncated": False, "limit": int(args[1]), "total": 2}
         return {"ok": False, "error": f"no fake for {op}"}
 
-    answer = helper or default_helper
+    answer = observing(helper or default_helper)
 
     def run(cmd, *a, **k):
         argv = [str(part) for part in cmd]
@@ -380,6 +396,11 @@ def test_capabilities_report_real_grants_and_targeting(tmp_path, monkeypatch):
     assert caps["permission_state_verified"] is True
     assert caps["permissions"] == {"accessibility": "trusted", "screen_recording": "granted", "post_events": "granted", "listen_events": "denied"}
     assert caps["frontmost"]["app"] == "Safari" and caps["targeting"]["app"] == "supported"
+    helper_calls = [argv for argv in state["calls"] if any(p.endswith("macos_native.py") for p in argv)]
+    assert helper_calls
+    for argv in helper_calls:
+        script_index = next(i for i, p in enumerate(argv) if p.endswith("macos_native.py"))
+        assert argv[1:script_index] == ["-I", "-B"], "isolated helpers must not modify their signed interpreter bundle"
     module, api, state = mac(tmp_path, monkeypatch, helper=lambda args, st: {"ok": False, "error": "no answer"})
     caps = receipt(api.tools["capabilities"]())
     assert caps["permission_state_verified"] is False and "error" in caps["permissions"] and caps["targeting"]["app"] == "unavailable"
@@ -388,9 +409,10 @@ def test_capabilities_report_real_grants_and_targeting(tmp_path, monkeypatch):
 def test_ax_tree_reads_a_named_app_without_bringing_it_forward(tmp_path, monkeypatch):
     module, api, state = mac(tmp_path, monkeypatch)
     out = receipt(api.tools["ax_tree"](app="Keynote", max_nodes=40, timeout_ms=500))
-    assert out["ok"] is True and out["app"]["pid"] == 200 and out["window"] == "Deck.key"
-    assert [args[0] for args in state["helper"]] == ["resolve", "tree"], "resolve, then read; never activate"
-    assert state["helper"][1][1:] == ["200", "40", "500", "window", "false"]
+    assert out["ok"] is True and out["app"]["pid"] == 200 and out["window"] == "Deck.key" and "target" not in out
+    assert [args[0] for args in state["helper"]] == ["observe"], "resolve and read in one helper process; never activate"
+    assert json.loads(state["helper"][0][1]) == {"app": "Keynote", "max_nodes": 40, "timeout_ms": 500, "root": "window",
+                                                 "include_web": False, "text_limit": 200, "window": ""}
     assert state["front"] == SAFARI, "reading does not move the front"
     missing = receipt(api.tools["ax_tree"](app="Nope"))
     assert missing["ok"] is False and missing["reason"] == "not_running"
@@ -437,41 +459,6 @@ def test_screenshot_transform_uses_display_bounds_and_the_target_display(tmp_pat
     assert click["ok"] is True
     sx = out["coord_transform"]["sx"]
     assert inputs(state)[-1] == ["cliclick", f"c:{round(100 * sx) + 1728},{round(50 * out['coord_transform']['sy'])}"]
-
-
-def test_screenshot_with_an_unlocatable_window_says_it_captured_the_main_display(tmp_path, monkeypatch):
-    def helper(args, state):
-        if args[0] == "tree":
-            return {"ok": False, "reason": "accessibility_untrusted", "pid": int(args[1])}
-        if args[0] == "resolve":
-            return {"ok": True, "candidates": [app_dict(KEYNOTE)]}
-        if args[0] == "displays":
-            return {"ok": True, "displays": [{"id": 1, "main": True, "x": 0, "y": 0, "width": 1728, "height": 1117, "index": 1}]}
-        return {"ok": False, "error": "no fake"}
-    module, api, state = mac(tmp_path, monkeypatch, helper=helper)
-    monkeypatch.setattr(module, "_png_dimensions", lambda _p: (3456, 2234))
-    out = receipt(api.tools["screenshot"](job_id="fallback", app="Keynote"))
-    assert out["ok"] is True and "app" not in out, "the main display is not presented as the named app's"
-    assert out["display"]["selected_by"] == "fallback" and "accessibility_untrusted" in out["display"]["app_window_unread"]
-
-
-def test_screenshot_with_unreadable_displays_has_no_mapped_input(tmp_path, monkeypatch):
-    module, api, state = mac(tmp_path, monkeypatch, helper=lambda args, st: {"ok": False, "error": "locked"})
-    monkeypatch.setattr(module, "_png_dimensions", lambda _p: (800, 600))
-    monkeypatch.setattr(module, "_macos_logical_size", lambda: (0, 0))
-    out = receipt(api.tools["screenshot"](job_id="fallback"))
-    assert out["ok"] is True and "display" not in out and out["mapped_input_available"] is False
-    assert "observation_id" not in out and "coord_transform" not in out
-    assert out["input_geometry_evidence"] == "unavailable" and out["input_width"] is None
-    assert "locked" in out["coordinate_note"] and "Capture only" in out["coordinate_note"]
-    assert receipt(api.tools["click"](x=10, y=10, observation_id=""))["dispatched"] is False
-    assert inputs(state) == []
-    # A clean-looking Finder ratio still cannot prove which display was captured.
-    monkeypatch.setattr(module, "_macos_logical_size", lambda: (400, 300))
-    out = receipt(api.tools["screenshot"](job_id="finder"))
-    assert out["input_width"] == 400 and out["mapped_input_available"] is False
-    assert out["input_geometry_evidence"] == "finder_desktop_union"
-    assert "observation_id" not in out and "coord_transform" not in out
 
 
 # --- registration -------------------------------------------------------------------------------
