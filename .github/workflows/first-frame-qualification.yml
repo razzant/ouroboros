@@ -1,0 +1,219 @@
+# Qualification equipment, not product: #1111's native first frame on one WinForms/WebView2 runner and one GTK/Xvfb
+# runner, and on that Linux runner #1524's card-aimed wheel guard in real Playwright Chromium and WebKit.
+# The branch is the frozen candidate commit plus ONE equipment commit that adds devtools/first_frame_qualification/
+# and this file; inputs.json binds the candidate's sha and tree, and `bind` refuses anything else. Pushing
+# qualification/first-frame-* starts it: a dispatch-only file absent from the default branch cannot be dispatched.
+# No pull_request trigger, a read-only token never persisted, no secret, no input; values reach shells through the
+# environment. github.sha is the equipment commit; the tested identity is identity.json in the evidence.
+# Every step has a ceiling and each job's ceilings sum below its budget, so however many cases hang (seven minutes each
+# at most) the report and the upload keep their minutes. A ceiling ends a process and answers no question: the matrix
+# rewrites verdict.json after each run, so the report reads `unknown`, or `failed` if a run already contradicted.
+name: first-frame-qualification
+
+on:
+  push:
+    branches: ['qualification/first-frame-*']
+
+permissions:
+  contents: read
+
+# A second push waits behind a running one; it cancels nothing.
+concurrency:
+  group: first-frame-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-webview2:
+    runs-on: windows-2025  # build 26100: the caption attribute is documented from 22000
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      FF_PROBE: equipment-src\devtools\first_frame_qualification\probe_first_frame.py
+      FF_REQUIREMENTS: equipment-src\devtools\first_frame_qualification\probe-requirements.txt
+    steps:
+      - name: Equipment commit (its full history holds the candidate, its one parent)
+        timeout-minutes: 6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: equipment-src
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        timeout-minutes: 2
+        with:
+          python-version: '3.11'
+      - name: Bind the candidate before anything runs
+        timeout-minutes: 3
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'ff'
+          "FF_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          New-Item -ItemType Directory -Force -Path (Join-Path $root 'evidence') | Out-Null
+          python -I -B $env:FF_PROBE bind --equipment-repo equipment-src --candidate (Join-Path $root 'candidate') `
+            --evidence (Join-Path $root 'evidence')
+          exit $LASTEXITCODE
+      - name: Provision pywebview and Pillow from the lock, and a signed WebView2 runtime if this image has none
+        timeout-minutes: 12
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path $env:FF_ROOT 'evidence'
+          $python = Join-Path $env:FF_ROOT 'venv\Scripts\python.exe'
+          python -m venv (Join-Path $env:FF_ROOT 'venv')
+          & $python -m pip install --require-hashes -r $env:FF_REQUIREMENTS
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m pip freeze | Out-File -FilePath (Join-Path $evidence 'pip-freeze.txt') -Encoding utf8
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $before = (Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).pv
+          $installer = $null
+          if (-not $before -or $before -eq '0.0.0.0') {
+            $setup = Join-Path $env:FF_ROOT 'MicrosoftEdgeWebview2Setup.exe'
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup
+            $signature = Get-AuthenticodeSignature -LiteralPath $setup
+            $installer = @{ sha256 = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash
+                            status = "$($signature.Status)"; signer = "$($signature.SignerCertificate.Subject)" }
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+              throw "The WebView2 bootstrapper is not validly signed by Microsoft: $($installer | ConvertTo-Json -Compress)"
+            }
+            $process = Start-Process -FilePath $setup -ArgumentList '/silent', '/install' -Wait -PassThru
+            $installer.exit = $process.ExitCode
+          }
+          Add-Type -AssemblyName System.Windows.Forms
+          @{ webview2_before = "$before"; webview2_after = "$((Get-ItemProperty -Path $key -ErrorAction SilentlyContinue).pv)"
+             installer = $installer; user_interactive = [Environment]::UserInteractive
+             session = (Get-Process -Id $PID).SessionId; user = $env:USERNAME
+             screen = "$([System.Windows.Forms.Screen]::PrimaryScreen.Bounds)"
+             image = "$env:ImageOS $env:ImageVersion" } |
+            ConvertTo-Json | Out-File -FilePath (Join-Path $evidence 'runner.json') -Encoding utf8
+          Get-Content -LiteralPath (Join-Path $evidence 'runner.json')
+      - name: Native matrix (0 mechanical match, 1 failed, 3 unknown)
+        id: matrix
+        timeout-minutes: 43
+        run: |
+          & (Join-Path $env:FF_ROOT 'venv\Scripts\python.exe') -I -B $env:FF_PROBE matrix `
+            --source (Join-Path $env:FF_ROOT 'candidate') --out (Join-Path $env:FF_ROOT 'evidence\windows') 2>&1 |
+            Tee-Object -FilePath (Join-Path $env:FF_ROOT 'evidence\matrix.log')
+          exit $LASTEXITCODE
+      - name: Report failed or unknown exactly
+        if: ${{ always() }}
+        timeout-minutes: 2
+        env:
+          FF_OUTCOME: ${{ steps.matrix.outcome }}
+        run: python -I -B $env:FF_PROBE summarize --out (Join-Path $env:RUNNER_TEMP 'ff\evidence\windows') --name windows --outcome $env:FF_OUTCOME
+      - name: Retain evidence on every outcome
+        if: ${{ always() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: first-frame-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ff/evidence/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+
+  linux-gtk-xvfb:
+    runs-on: ubuntu-22.04  # Jammy's GTK 3 and WebKitGTK from apt, the base the AppImage is built on
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      FF_PROBE: equipment-src/devtools/first_frame_qualification/probe_first_frame.py
+      FF_REQUIREMENTS: equipment-src/devtools/first_frame_qualification/probe-requirements.txt
+    steps:
+      - name: Equipment commit (its full history holds the candidate, its one parent)
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: equipment-src
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind the candidate before anything runs
+        id: bind
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/ff"
+          echo "FF_ROOT=$root" >> "$GITHUB_ENV"
+          mkdir -p "$root/evidence"
+          /usr/bin/python3 -I -B "$FF_PROBE" bind --equipment-repo equipment-src --candidate "$root/candidate" \
+            --evidence "$root/evidence"
+      - name: Provision GTK and WebKitGTK from the Jammy archive, pywebview and Pillow from the lock
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb openbox dbus-x11 fonts-dejavu-core \
+            libgl1-mesa-dri libgl1 libegl1 libgles2 libgbm1 python3-venv python3-gi python3-gi-cairo \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+          dpkg-query -W libgtk-3-0 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 python3-gi | tee "$FF_ROOT/evidence/packages.tsv"
+          # Sees apt's gi and nothing else of the host's Python.
+          /usr/bin/python3 -m venv --system-site-packages "$FF_ROOT/venv"
+          "$FF_ROOT/venv/bin/python" -m pip install --require-hashes -r "$FF_REQUIREMENTS"
+          "$FF_ROOT/venv/bin/python" -m pip freeze > "$FF_ROOT/evidence/pip-freeze.txt"
+      - name: Native matrix on X11 (0 observed, 3 unknown)
+        id: matrix
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          # A step's ceiling signals only this shell here (the runner's ProcessInvoker), and a matrix left alive would
+          # run beside the steps below. `timeout` ends its whole process group first; Xvfb's end takes a case's window.
+          # Arguments, not interpolation, reach the inner shell.
+          timeout --kill-after=30s 28m dbus-run-session -- xvfb-run -a -s "-screen 0 1280x900x24" bash -c \
+            'openbox > "$4/openbox.log" 2>&1 & sleep 1; exec "$0" -I -B "$1" matrix --source "$2" --out "$3"' \
+            "$FF_ROOT/venv/bin/python" "$FF_PROBE" "$FF_ROOT/candidate" "$FF_ROOT/evidence/linux" "$FF_ROOT/evidence" 2>&1 |
+            tee "$FF_ROOT/evidence/matrix.log"
+      - name: Report the first frame exactly
+        if: ${{ always() }}
+        timeout-minutes: 2
+        env:
+          FF_OUTCOME: ${{ steps.matrix.outcome }}
+        run: /usr/bin/python3 -I -B "$FF_PROBE" summarize --out "$RUNNER_TEMP/ff/evidence/linux" --name linux --outcome "$FF_OUTCOME"
+      # #1524, after the first frame so its packages cannot touch the probe's GTK; its result is its own step's.
+      - name: Python for the candidate's test environment
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+      - name: uv as the candidate pins it
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.1'
+          enable-cache: false
+      - name: Candidate test environment, Playwright Chromium and WebKit
+        id: wheel_setup
+        if: ${{ !cancelled() && steps.bind.outcome == 'success' }}
+        timeout-minutes: 10
+        working-directory: ${{ runner.temp }}/ff/candidate
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ff/browsers
+        run: |
+          set -euo pipefail
+          uv sync --locked --extra browser --group dev --no-install-project
+          .venv/bin/python -m playwright install --with-deps chromium webkit
+      - name: Card-aimed wheel guard in real Chromium and WebKit (#1524)
+        if: ${{ !cancelled() && steps.wheel_setup.outcome == 'success' }}
+        timeout-minutes: 19
+        working-directory: ${{ runner.temp }}/ff/candidate
+        env:
+          OUROBOROS_RUN_UI_SMOKE: '1'
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ff/browsers
+        # Inside the step's ceiling so safe_test reaps and keeps the evidence itself; two engines fit its deadline.
+        run: >-
+          python -I -S scripts/safe_test.py --evidence-dir "$RUNNER_TEMP/ff/evidence/card-wheel" --timeout 1020 --
+          .venv/bin/python -m pytest tests/test_history_continuity_browser.py -m ui_browser -k wheel_aimed
+          -p no:cacheprovider -vv --tb=short --timeout=480
+      - name: Retain evidence on every outcome
+        if: ${{ always() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: first-frame-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ff/evidence/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
