@@ -20,6 +20,7 @@ from ouroboros.tools.release_sync import RELEASE_ASSET_TEMPLATES, release_asset_
 from scripts import promote_stable as promotion
 from scripts import release_proof
 from scripts import sync_legacy_mirrors as mirrors
+from tests.test_release_sync import _download_page
 
 ROOT = Path(__file__).resolve().parents[1]
 PAYLOAD = b"notarized dmg bytes"
@@ -186,7 +187,8 @@ def _digest(tag):
 
 
 class Official:
-    """origin (bare) on today's shape: main and ouroboros-stable are the raw v7.8.0 tag commit."""
+    """origin (bare) on today's shape: main and ouroboros-stable are the raw v7.8.0 tag commit,
+    and each release leaves ouroboros on its next development marker (BIBLE P9)."""
 
     def __init__(self, tmp_path):
         self.origin, self.work, self.publisher = tmp_path / "origin.git", tmp_path / "work", tmp_path / "publisher"
@@ -195,7 +197,7 @@ class Official:
         self.tags = {"v7.8.0": self._tag("7.8.0")}
         first = self.tags["v7.8.0"]
         self.push(f"{first}:refs/heads/main", f"{first}:refs/heads/ouroboros-stable",
-                  f"{first}:refs/heads/ouroboros", "refs/tags/v7.8.0")
+                  f"{self.develop('7.8.1-alpha.0')}:refs/heads/ouroboros", "refs/tags/v7.8.0")
         _git(self.origin, "symbolic-ref", "HEAD", "refs/heads/main")
         _git(tmp_path, "clone", "-q", str(self.origin), str(self.publisher))
 
@@ -206,6 +208,10 @@ class Official:
              "tag", "-a", f"v{version}", "-m", f"v{version}")
         return sha
 
+    def develop(self, version):
+        """One commit that moves VERSION on the checked-out development tip."""
+        return _commit(self.work, {"VERSION": f"{version}\n"}, f"development at {version}")
+
     def push(self, *refspecs):
         _git(self.work, "push", "-q", str(self.origin), *refspecs)
 
@@ -214,7 +220,9 @@ class Official:
         _git(self.work, "fetch", "-q", str(self.origin), "ouroboros")
         _git(self.work, "checkout", "-q", "FETCH_HEAD")
         self.tags[f"v{version}"] = self._tag(version)
-        self.push(f"{self.tags[f'v{version}']}:refs/heads/ouroboros", f"refs/tags/v{version}")
+        major, minor, patch = version.split(".")
+        next_cycle = self.develop(f"{major}.{minor}.{int(patch) + 1}-alpha.0")
+        self.push(f"{next_cycle}:refs/heads/ouroboros", f"refs/tags/v{version}")
         return self.tags[f"v{version}"]
 
     def refs(self):
@@ -357,3 +365,120 @@ def test_a_plan_and_an_unproven_release_write_nothing(official, capsys):
     with pytest.raises(ValueError, match="plain vX.Y.Z"):
         official.promote("v7.8.1-rc.1", push=True)
     assert official.refs() == before
+
+
+# --------------------------------------------------------------------------- the next development cycle
+
+def _links(version):
+    return "".join(f"[download-{proof_id}]: {release_asset_download_url(proof_id, version)}\n"
+                   for proof_id in RELEASE_ASSET_TEMPLATES)
+
+
+def _development_at(official, files):
+    """ouroboros gets one more commit on its own tip; its links are what *files* write into README.md."""
+    _git(official.work, "fetch", "-q", str(official.origin), "ouroboros")
+    _git(official.work, "checkout", "-q", "FETCH_HEAD")
+    official.push(f"{_commit(official.work, files, 'development moves')}:refs/heads/ouroboros")
+
+
+@pytest.mark.parametrize("development,problem", [
+    ("7.8.1\n", "7.8.1 is not a development marker"),  # the release cut, and the cycle never reopened
+    ("7.8.1-alpha.0\n", "does not sort above the release 7.8.1"),  # the same base, a different string
+    ("7.8.0-alpha.0\n", "does not sort above the release 7.8.1"),
+    ("7.8.1-rc.1\n", "is not a development marker"),
+    ("7.8.2\n", "7.8.2 is not a development marker"),
+])
+def test_promotion_refuses_a_development_line_that_has_not_opened_a_greater_cycle(official, development, problem):
+    official.release("7.8.1")
+    _development_at(official, {"VERSION": development})
+    before = official.refs()
+    for push in (False, True):  # the printed plan refuses too, before anyone reaches for --push
+        with pytest.raises(ValueError, match=problem):
+            official.promote("v7.8.1", push=push)
+    assert official.refs() == before
+    _development_at(official, {"VERSION": "7.9.0-alpha.0\n"})  # any numerically greater base opens it
+    assert official.promote("v7.8.1", push=True) == 0
+    _exact_public_main(official, "v7.8.1")
+    assert _git(official.origin, "show", "refs/heads/ouroboros:VERSION") == "7.9.0-alpha.0"
+
+
+def test_promotion_compares_the_marker_numerically(official):
+    official.release("7.9.0")
+    _development_at(official, {"VERSION": "7.10.0-alpha.0\n"})  # as text "7.10.0" sorts below "7.9.0"
+    assert official.promote("v7.9.0", push=True) == 0
+    assert promotion.next_cycle_refusal("v7.11.0", official.tags["v7.9.0"], official.refs()["ouroboros"],
+                                        official.publisher).endswith(
+        "7.10.0-alpha.0 does not sort above the release 7.11.0")
+
+
+def test_promotion_refuses_a_release_development_does_not_contain(official):
+    official.release("7.8.1")
+    _git(official.work, "checkout", "-q", official.tags["v7.8.1"])
+    side = _commit(official.work, {"VERSION": "7.8.2\n"}, "a release cut beside development")
+    _git(official.work, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "tag", "-a", "v7.8.2", "-m", "v7.8.2")
+    official.tags["v7.8.2"] = side
+    official.push("refs/tags/v7.8.2")
+    _development_at(official, {"VERSION": "7.9.0-alpha.0\n"})
+    before = official.refs()
+    with pytest.raises(ValueError, match="does not contain v7.8.2"):
+        official.promote("v7.8.2", push=True)
+    assert official.refs() == before
+    _git(official.work, "fetch", "-q", str(official.origin), "ouroboros")
+    _git(official.work, "checkout", "-q", "FETCH_HEAD")
+    _git(official.work, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q",
+         "-s", "ours", "-m", "bring the release onto development", side)
+    official.push("HEAD:refs/heads/ouroboros")
+    assert official.promote("v7.8.2", push=True) == 0
+    _exact_public_main(official, "v7.8.2")
+
+
+def test_promotion_refuses_development_links_still_on_an_older_release(official):
+    """A marker never moves the links, so nothing but this explicit update would ever reach them."""
+    official.release("7.8.1")
+    _development_at(official, {"VERSION": "7.9.0-alpha.0\n", "README.md": _links("7.8.0")})
+    before = official.refs()
+    with pytest.raises(ValueError, match="download links still name 7.8.0: move them to the published v7.8.1"):
+        official.promote("v7.8.1", push=True)
+    assert official.refs() == before
+    _development_at(official, {"README.md": _links("7.8.1")})
+    assert official.promote("v7.8.1", push=True) == 0
+
+
+def test_a_finished_promotion_stays_finished_whatever_development_does_next(official, capsys):
+    official.release("7.8.1")
+    assert official.promote("v7.8.1", push=True) == 0
+    promoted = official.refs()["main"]
+    _development_at(official, {"VERSION": "7.9.0\n"})  # the next release is being cut
+    assert official.promote("v7.8.1", push=True) == 0
+    assert "already Stable" in capsys.readouterr().out
+    assert official.refs()["main"] == promoted
+
+
+def test_a_marker_tag_is_never_a_stable_candidate(official):
+    official.release("7.8.1")
+    assert official.promote("v7.8.1", push=True) == 0
+    _git(official.work, "fetch", "-q", str(official.origin), "ouroboros")
+    _git(official.work, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "tag", "-a", "v7.8.2-alpha.0", "-m", "an accident", "FETCH_HEAD")
+    official.push("refs/tags/v7.8.2-alpha.0")
+    before = official.refs()
+    promotion.fetch_official("origin", official.publisher)
+    with pytest.raises(ValueError, match="plain vX.Y.Z"):
+        official.promote("v7.8.2-alpha.0", push=True)
+    assert official.refs() == before and official.stable() == "v7.8.1"
+
+
+@pytest.mark.parametrize("files", [
+    {"README.md": _links("7.8.1").replace("/v7.8.1/", "/v7.8.0/", 1)},  # one link left behind
+    {"README.md": _links("7.8.1-rc.1")},  # a prerelease is not a published release the links keep
+    {"README.md": _links("7.8.1"), "site/install/index.html": _download_page("7.8.0")},  # a page left behind
+], ids=["mixed", "prerelease", "page-behind"])
+def test_promotion_refuses_development_links_that_name_no_one_published_release(official, files):
+    official.release("7.8.1")
+    _development_at(official, {"VERSION": "7.9.0-alpha.0\n", **files})
+    before = official.refs()
+    with pytest.raises(ValueError, match="do not all name one published plain release: move them to the published v7.8.1"):
+        official.promote("v7.8.1", push=True)
+    assert official.refs() == before
+    _development_at(official, {"README.md": _links("7.8.1"), "site/install/index.html": _download_page("7.8.1")})
+    assert official.promote("v7.8.1", push=True) == 0

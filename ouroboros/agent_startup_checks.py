@@ -388,7 +388,9 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
             _shields_escape,
             extract_architecture_header_version,
             extract_readme_badge_version,
+            is_development_marker,
             is_release_version,
+            next_cycle_problem,
         )
         version_file = read_text(env.repo_path("VERSION")).strip()
         issue_count = 0
@@ -447,7 +449,13 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
         else:
             latest_tag = result.stdout.strip().lstrip('v')
             result_data["latest_tag"] = latest_tag
-            if _is_release_tag(latest_tag) and version_file != latest_tag:
+            if is_development_marker(version_file):
+                # A cycle's marker is never tagged; only a release it has not outgrown disagrees with it.
+                result_data["tag_sync"] = "development_marker"
+                if next_cycle_problem(latest_tag, version_file):
+                    result_data["status"] = "warning"
+                    issue_count += 1
+            elif _is_release_tag(latest_tag) and version_file != latest_tag:
                 result_data["status"] = "warning"
                 issue_count += 1
             elif not _is_release_tag(latest_tag):

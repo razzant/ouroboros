@@ -151,7 +151,8 @@ def carrier_guidance(conflicts: List[str]) -> str:
         "already synced mechanically, and carrier conflicts confined to declared version spans "
         "were already resolved to the target's side. A carrier still in your list degraded to "
         "manual resolution (a broken or duplicate span anchor, or a conflict outside the spans): "
-        "make its version tokens match VERSION exactly. In the README Version History table keep "
+        "make its version tokens match VERSION exactly (under a development marker the download "
+        "links keep the target's published release instead). In the README Version History table keep "
         "BOTH sides' rows (never delete this fork's local history rows); resolve prose conflicts "
         "on their merits."
     )

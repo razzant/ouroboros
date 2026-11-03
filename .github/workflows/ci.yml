@@ -1847,7 +1847,7 @@ jobs:
           import os
           import pathlib
           import re
-          from ouroboros.tools.release_sync import is_release_version
+          from ouroboros.tools.release_sync import is_development_marker, is_release_version
 
           version = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
           tag = os.environ["GITHUB_REF_NAME"].strip()
@@ -1861,6 +1861,10 @@ jobs:
               with output.open("a", encoding="utf-8") as fh:
                   fh.write("tag_valid=false\nis_prerelease=false\n")
               raise SystemExit(f"VERSION is not a supported release version: {version!r}")
+          if is_development_marker(version):
+              with output.open("a", encoding="utf-8") as fh:
+                  fh.write("tag_valid=false\nis_prerelease=false\n")
+              raise SystemExit(f"VERSION {version} is a development-cycle marker, never a release: cut a plain X.Y.Z")
           is_prerelease = bool(re.search(r'(?:rc|alpha|beta|a|b)\.?\d+$', version, re.IGNORECASE))
           with output.open("a", encoding="utf-8") as fh:
               fh.write(f"is_prerelease={'true' if is_prerelease else 'false'}\n")

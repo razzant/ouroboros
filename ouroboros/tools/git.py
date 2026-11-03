@@ -59,6 +59,7 @@ from ouroboros.tools.commit_gate import (
     resolve_root_task_id,
 )
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, emit_review_cycles_exhausted
+from ouroboros.tools.release_sync import is_development_marker
 from ouroboros.tools.review_revalidation import handle_revalidation_failure  # noqa: F401
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd  # noqa: F401
 from ouroboros.tools.parallel_review import (
@@ -579,7 +580,6 @@ def _auto_tag_on_version_bump(
             if not tag_name:
                 return ""
         else:
-            tag_name = ""
             changed = run_cmd(
                 ["git", "diff-tree", "-m", "--no-commit-id", "--name-only", "-r", commit_sha],
                 cwd=repo_dir,
@@ -587,7 +587,7 @@ def _auto_tag_on_version_bump(
             if "VERSION" not in changed:
                 return ""
             version = run_cmd(["git", "show", f"{commit_sha}:VERSION"], cwd=repo_dir).strip()
-            if not version:
+            if not version or is_development_marker(version):
                 return ""
             tag_name = f"v{version}"
         tag_msg = f"{tag_name}: {commit_message}"

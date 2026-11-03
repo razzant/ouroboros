@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import re
+import runpy
 import subprocess
 from urllib.parse import urlsplit, urlunsplit
 
@@ -20,6 +21,8 @@ DEFAULT_LOCAL_STABLE_BRANCH = "ouroboros-stable"
 DEFAULT_REMOTE_STABLE_BRANCH = "ouroboros-stable"
 _PRE_SUFFIX = r'(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?'
 _VERSION_RE = re.compile(r'^\d+\.\d+\.\d+' + _PRE_SUFFIX + r'$', re.IGNORECASE)
+# Loaded by path like release_proof.py: release jobs install only Python, not the package.
+_RELEASE_SYNC = runpy.run_path(str(pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "tools" / "release_sync.py"))
 
 
 def _run(cmd: list[str], *, cwd: pathlib.Path, capture_output: bool = False) -> subprocess.CompletedProcess:
@@ -44,6 +47,8 @@ def _read_version(repo_root: pathlib.Path) -> str:
     version = version_path.read_text(encoding="utf-8").strip()
     if not _VERSION_RE.match(version):
         raise SystemExit(f"VERSION {version!r} is not a supported release version.")
+    if _RELEASE_SYNC["is_development_marker"](version):
+        raise SystemExit(f"VERSION {version} is a development-cycle marker, never packaged; cut a plain release first.")
     return version
 
 
