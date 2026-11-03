@@ -874,6 +874,24 @@ def restore_pending_from_snapshot(
         _RESTORING.pop(key, None)
 
 
+def _direct_roots_caught(direct_roots: dict, snapshot_pending: list, running_rows: list) -> list:
+    """Direct-chat roots the stop caught: not live here, not restored as pending, not a RUNNING row.
+
+    An in-process supervisor revival re-runs queue init while direct turns of THIS process are
+    alive: the roster then names live work, not what a stop caught. A conversation-lane turn owns a
+    RUNNING row (#2654): the stop that caught it published that row and recovery takes it from there.
+    Queue init's orphan sweep can name the same id again (its durable result still says running once
+    the published row is older than the observation window), and a second successor of one id closes
+    recovery for both ("Another queue owner holds this task id").
+    """
+    from supervisor.active_activity import get_direct_activity_registry
+    live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
+    pending_ids = {str(task.get("id") or "") for task in snapshot_pending}
+    running_ids = {str(row.get("id") or "") for row in running_rows if isinstance(row, dict)}
+    return [task_id for task_id in direct_roots.get("task_ids") or []
+            if task_id not in live_direct and task_id not in pending_ids and task_id not in running_ids]
+
+
 def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -> int:
     try:
         from ouroboros.queue_observation import load_queue_document, queue_stamp
@@ -915,18 +933,7 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
         # one fence call gives them the one cancel-intent path custody settles — except a direct root
         # whose exact budget pause was complete on disk, parked under its own id like a paused RUNNING row (#1196).
         direct_roots = dict(_queue().PRIOR_DIRECT_ROOTS)
-        # An in-process supervisor revival re-runs queue init while direct turns of THIS process are
-        # alive: the roster then names live work, not what a stop caught.
-        from supervisor.active_activity import get_direct_activity_registry
-        live_direct = {str(row.get("activity_id") or "") for row in get_direct_activity_registry().snapshot()}
-        pending_ids = {str(task.get("id") or "") for task in snapshot_pending}
-        # A conversation-lane turn owns a RUNNING row (#2654): the stop that caught it published that row and
-        # recovery takes it from there. Queue init's orphan sweep can name the same id again (its durable result
-        # still says running once the published row is older than the observation window), and a second
-        # successor of one id closes recovery for both ("Another queue owner holds this task id").
-        running_ids = {str(row.get("id") or "") for row in running_rows if isinstance(row, dict)}
-        direct_caught = [task_id for task_id in direct_roots.get("task_ids") or []
-                         if task_id not in live_direct and task_id not in pending_ids and task_id not in running_ids]
+        direct_caught = _direct_roots_caught(direct_roots, snapshot_pending, running_rows)
         if unread and not direct_caught:
             return 0
         snapshot_pending, unseen_pauses, consumed_rows, prior_roots = _retain_snapshot_pending(  # #1183 handoffs
