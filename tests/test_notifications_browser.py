@@ -288,12 +288,15 @@ def test_choices_survive_reload_and_reload_itself_never_notifies(subscription_ui
     assert pref(page, 'enabled').is_checked() is True, 'the choice is client-local and persisted'
     assert pref(page, 'show_text').is_checked() is True
 
-    # With text shown, the body carries the message.
+    # With text shown, a finished task's body is its work's name, outcome word and the cause its row
+    # records (DESIGN §9), never the row's host sentence with its task id.
     deliver(page, {'type': 'chat', 'role': 'system', 'system_type': 'task_summary',
-                   'task_id': 't-after-reload', 'chat_id': MAIN, 'content': 'The report is ready.'})
+                   'task_id': 't-after-reload', 'chat_id': MAIN, 'outcome_phase': 'error',
+                   'target_label': 'Alpha', 'reason_detail': 'The report could not be written.',
+                   'content': 'Failed. Root task t-after-reload. The report could not be written.'})
     notes = recorded(page)
     assert len(notes) == 1
-    assert notes[0]['options']['body'] == 'The report is ready.'
+    assert notes[0]['options']['body'] == 'Alpha · Failed: The report could not be written.'
     capture(page, 'notifications-after-reload')
 
 

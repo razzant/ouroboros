@@ -157,12 +157,14 @@ function trimBody(value) {
 }
 
 /* A finished root's body, on both of its wire shapes: the work's name (the row's or
-   event's `target_label`) and its outcome word, else the word alone. Never the row's
+   event's `target_label`) and its outcome word, else the word alone; the chat row adds
+   the cause it records (`reason_detail`; a `task_done` event has none). Never the row's
    host sentence: its task id is for Ouroboros, and the row keeps it (DESIGN §9). */
-function conclusionBody(frame) {
+function conclusionBody(frame, { cause = false } = {}) {
     const word = taskPresentation(text(frame.outcome_phase) || taskTerminalPhase(frame)).headline;
     const name = text(frame.target_label).trim();
-    return trimBody(name ? `${name} · ${word}` : word);
+    const reason = cause ? text(frame.reason_detail).trim() : '';
+    return trimBody(`${name ? `${name} · ${word}` : word}${reason ? `: ${reason}` : ''}`);
 }
 
 /* A reminder (a note Ouroboros wrote earlier, shown now by the host) and a
@@ -313,7 +315,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
             category: 'task_done',
             key: `conclusion:${taskId}`,
             title: notifyTitle('task_done'),
-            body: conclusionBody(frame),
+            body: conclusionBody(frame, { cause: true }),
             target: { chatId: frame.chat_id, taskId },
         };
     }

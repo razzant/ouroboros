@@ -218,6 +218,26 @@ test('a finished root\'s body is its work\'s name and outcome word on both wire 
     assert.equal(chat({ outcome_phase: 'done' }).key, log({ status: 'completed' }).key);
 });
 
+test('a finished root\'s chat row adds the cause it records; the log shape keeps the name and the word', () => {
+    const asRoot = { isMain: true, isRoot: true, taskId: 'rel' };
+    const cause = 'A tool this task used failed and nothing recovered it.';
+    const chat = (extra) => classifyLiveFrame({ role: 'system', system_type: 'task_summary', task_id: 'rel',
+        outcome_phase: 'error', content: `Failed. Root task rel. ${cause}`, ...extra }, { kind: 'chat', ...asRoot });
+    const log = (extra) => classifyLiveFrame({ type: 'task_done', chat_id: 1, status: 'failed', ...extra },
+        { kind: 'log', ...asRoot });
+    assert.equal(chat({ target_label: 'Alpha', reason_detail: cause }).body, `Alpha · Failed: ${cause}`);
+    assert.equal(chat({ reason_detail: cause }).body, `Failed: ${cause}`, 'without a name: the word and its cause');
+    for (const absent of [{}, { reason_detail: '' }, { reason_detail: '   ' }, { reason_detail: null }]) {
+        assert.equal(chat({ target_label: 'Alpha', ...absent }).body, 'Alpha · Failed', 'no cause: as before');
+    }
+    // A task_done event carries no cause; one riding along is not read: the name and the word only.
+    assert.equal(log({ target_label: 'Alpha', reason_detail: cause }).body, 'Alpha · Failed');
+    // The one trim, after the cause joined: a long cause ends in an ellipsis at the body's length.
+    const long = chat({ target_label: 'Alpha', reason_detail: `${'x'.repeat(200)} tail` }).body;
+    assert.equal(long.length, 140);
+    assert.ok(long.startsWith('Alpha · Failed: xxx') && long.endsWith('…') && !long.includes('tail'));
+});
+
 test('only a ROOT terminal notifies; a child escalates instead', () => {
     const root = classifyLiveFrame(
         { role: 'system', system_type: 'task_summary', task_id: 't3', content: 'Done.' },

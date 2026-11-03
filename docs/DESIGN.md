@@ -2733,12 +2733,12 @@ one arriving over an external transport, is treated as the owner's exactly as
 the Main thread itself treats it.
 
 **A terminal is not always an ending.** An update or restart teardown reports a
-task as interrupted and then requeues it; that is not a finished task and does
-not notify, so the task's real completion still can.
+task as interrupted and then requeues it: no finished task, no notification, so
+its real completion still can.
 
 **One ending, one notification.** An ordinary reply and the terminal of the same
-task are one event, not two: whichever arrives first rings, and the other is
-collapsed. The same holds for the several wire shapes a finished task has.
+task are one event, as are a finished task's several wire shapes: whichever
+arrives first rings, and the others collapse.
 
 **System notifications first.** Where the desktop app offers them, an alert is
 handed to the operating system's own notifications: sent even while the window
@@ -2801,12 +2801,13 @@ Windows' list included, opens the newest balloon's source; when that is the
 fallback banner the indicator shows for a hidden window (no system
 notification shown), the click opens the window as it was left, no navigation.
 
-**Content is private by default.** Only the kind of event is shown until the
-owner turns message text on, because a banner can appear on a shared screen.
-With it on, a finished task says its work's name and outcome word (`Release notes
-· Done with warnings`) on either wire shape, the word alone when the task has no
-name, never the row's host sentence with its task id; Telegram's completion line
-names the work the same way, its short id only when it has no name.
+**Content is private by default.** Only the kind of event shows until the
+owner turns message text on: a banner can appear on a shared screen. With it on,
+a finished task says its work's name and outcome word (`Release notes · Done
+with warnings`) on either wire shape, the word alone without a name, then the
+cause its chat row records (`Failed: <cause>`; a log event has none), never the
+host sentence with its task id; Telegram's completion line names the work
+alike, its short id only when it has no name.
 
 **Deliberately absent.** No numeric badge, repeated reminder, inline reply,
 Telegram escalation or attention after quitting. A current desktop launcher may
