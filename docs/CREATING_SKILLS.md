@@ -1241,8 +1241,11 @@ identical contact needs a new key. Questions use the normal canonical quiz and
 answer ingress. An answer reaches a live inline author through its mailbox and
 final-drain admission lock. After that author ends, normal late-answer intake
 starts an unrestricted Main owner turn with the source snapshot, current child
-work and exact owner words. Roots that turn starts inherit the source binding
-as related work, without an automatic external-final route. Inline `wait_for_answer=true`
+work and exact owner words. Roots that turn starts, and their Continue, are the
+owner's ordinary work related to the source binding: they keep the owner's tools and
+admission, and the place lists, reads, tells and cancels them. A place's `tell_task`
+arrives as a task's words, context the work judges, never an owner directive; nothing
+gives this work an automatic external-final route. Inline `wait_for_answer=true`
 uses the narrow Presence continuation park: idle custody lends conversation and
 active slot, then reacquires both before reentry; otherwise it waits holding
 custody. Pooled roots retain their normal owner wait. Stop/deadlines still apply;
@@ -1256,8 +1259,9 @@ carrier and ordinary resource/control semantics. A scheduled root explicitly
 uses connector tools to deliver later; it is not discovered by polling the old
 event, its finish reaches no one by itself, and it reads the conversation's
 current previous turn rather than the copy taken when it was scheduled. Any turn
-of the place lists, reads and withdraws the follow-ups that place scheduled
-(`manage_schedules` `list`/`get`/`delete`); withdrawal stops future runs only, and
+of the place lists, reads and withdraws the follow-ups related to it, its own and
+those of the owner's work a late answer began (`manage_schedules`
+`list`/`get`/`delete`); withdrawal stops future runs only, and
 `cancel_task` stops work one already started. `notify=true` and the owner-wide
 schedule table remain separate capabilities.
 

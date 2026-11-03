@@ -437,14 +437,14 @@ def pending_member_replay_safe(q: Any, member: Dict[str, Any]) -> Tuple[bool, st
 def resume_budget_paused_task(task_id: str, *, selected_by: str = "") -> Dict[str, Any]:
     from ouroboros.owner_pause import paused_gap
     from ouroboros.pause_notices import gap_fact
-    from ouroboros.work_stop import resume_outcome
+    from ouroboros.work_stop import resume_asked, resume_outcome
 
     gap = paused_gap(_queue_module().DRIVE_ROOT, task_id)  # read before this Resume ends that Pause
+    answered = resume_asked(_queue_module(), task_id, selected_by=selected_by)  # and the control it answers about
     seen: List[Dict[str, str]] = []  # what this Resume's own census found; the Pause's record keeps its own
     outcome = _resume_budget_paused_task(task_id, selected_by=selected_by, gaps=seen)
-    if seen:
-        gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))}
-    return resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome)
+    gap = {"membership_gaps": gap_fact(seen, gap.get("membership_gaps"))} if seen else gap
+    return answered(resume_outcome({**outcome, **gap} if outcome.get("ok") else outcome))
 
 
 def _resume_budget_paused_task(task_id: str, *, selected_by: str = "",

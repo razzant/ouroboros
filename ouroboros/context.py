@@ -237,15 +237,13 @@ def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]
 def _scheduled_tasks_digest(env: Any, task: Optional[Dict[str, Any]] = None, *, limit: int = 8) -> Optional[Dict[str, Any]]:
     """The schedule digest; a Presence caller's (the tool's own caller rule) holds only its own follow-ups (#1589)."""
     from datetime import datetime, timezone
-    from types import SimpleNamespace
-    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.dialogue_provenance import presence_task_binding
     from supervisor.queue_schedules import presence_promise_store
     from supervisor.schedule_view import digest
     data = schedule_store_fact(env)
     if "unavailable" in data:
         return data
-    binding = presence_caller_binding(SimpleNamespace(task_metadata=(task or {}).get("metadata"),
-                                                      task_contract=(task or {}).get("task_contract")))
+    binding = presence_task_binding(task or {})
     return digest((data if binding is None else presence_promise_store(data, binding))["tasks"],
                   datetime.now(timezone.utc), limit=limit)
 

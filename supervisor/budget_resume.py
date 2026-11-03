@@ -389,6 +389,30 @@ def _unlifted_record(row: Dict[str, Any], lift: Dict[str, Any]) -> Dict[str, Any
     return record
 
 
+def take_back_owner_resume_lift(task: Dict[str, Any], before: Dict[str, Any], result_root: Any) -> None:
+    """A grantless release that did not land decided nothing (``presence_carrier.owner_resume_lift``): the durable row
+    takes its number back; the queue row is its caller's to restore. ``before`` is that row as the lift found it: a
+    decision it already kept stays. A store that refuses keeps the owner's decision on that record, nothing released,
+    until the row's next release reads it; the door still refuses, and the failure is logged."""
+    from ouroboros.presence_carrier import kept_allowance_lift
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.task_store import patch_document
+
+    lift = kept_allowance_lift(task)
+    if not lift or kept_allowance_lift(before):
+        return
+
+    def undo(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        require_writable_task_result_schema(row)
+        return stamp_task_result_schema(_unlifted_record(row, lift)) if row else None
+
+    try:
+        patch_document(pathlib.Path(result_root), str(task.get("id") or ""), undo)
+    except Exception:
+        log.warning("The owner's decision on %s stays on its record: its release did not land", task.get("id"),
+                    exc_info=True)
+
+
 def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected_by: str = "",
                         external: Optional[Dict[str, Any]] = None,
                         sleep_wake: bool = False) -> Dict[str, Any]:

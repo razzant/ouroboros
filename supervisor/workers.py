@@ -602,11 +602,12 @@ def _apply_presence_promotion_authority(
     descendant's carries only the binding it acts for, so its root is that
     binding's related work under the same ceiling and never a speaker.
     """
-    from ouroboros.dialogue_provenance import presence_root_carrier
+    from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
 
     contract = evt.get("task_contract") if isinstance(evt.get("task_contract"), dict) else {}
     carrier = presence_root_carrier(evt, task_contract=contract)
-    if not carrier:
+    if not carrier:  # The owner's work related to a place keeps ordinary admission, recording only the relation.
+        task.setdefault("metadata", {}).update(presence_root_relation(evt))
         return []
     if "presence" in carrier:
         task["_presence_origin"] = True

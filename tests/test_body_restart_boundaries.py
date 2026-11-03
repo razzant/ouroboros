@@ -51,11 +51,11 @@ def test_cold_switch_replaces_directory_with_historical_cache_only(tmp_path, mon
 
 
 def test_evolution_cleanup_only_abandons_its_own_authorization(tmp_path, monkeypatch):
-    from supervisor import evolution_lifecycle
+    from supervisor import evolution_lifecycle, queue
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
-    monkeypatch.setattr(evolution_lifecycle, '_evolution_campaign_path', lambda: data / 'state/evolution_campaign.json')
+    monkeypatch.setattr(queue, 'DRIVE_ROOT', data)  # the data root the campaign file and the cleanup both read
     root = make_ctx(serving, data, 'root')
     evolution = make_ctx(serving, data, 'evolution')
     body_candidate.prepare(root)

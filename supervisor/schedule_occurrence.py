@@ -297,15 +297,18 @@ def deletion_settled(record: Dict[str, Any], *, drive_root: Optional[pathlib.Pat
     return relation_kind(record) == "independent" or work_settled(record, drive_root=drive_root, reads=reads)
 
 
-def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwnershipRead] = None) -> bool:
+def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwnershipRead] = None,
+                            relations: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
     """Supervisor-only convergence of a resolved, already fired, unrun occurrence.
 
     The canonical frozen receipt commits before the live row and
     snapshot. Unqueued work is rebound by prepare and its admission write instead.
     A partial publication stays non-dispatchable at bound_task; another
     tick completes the SAME identity. No missing/possible receipt buys a rebind.
-    The caller holds queue/table and origin control locks.
+    The caller holds queue/table and origin control locks; ``relations`` is what
+    ``prepare_relations`` proved before them, never read here.
     """
+    from ouroboros.dialogue_provenance import presence_relation_metadata
     from supervisor.followup_policy import bind_task, relation_kind
 
     q = _queue()
@@ -333,6 +336,7 @@ def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwner
             return False
         rebound = copy.deepcopy(frozen)
         bind_task(q.DRIVE_ROOT, rebound, record)
+        _adopt_relation(rebound, (relations or {}).get(tid) or {})
         if rebound != frozen or any((stored.get(key) or {}) != (rebound.get(key) or {}) for key in ("metadata", "deadline_at", "task_contract")):
             item = {"task": rebound, "occurrence": {"token": token, "task_id": tid,
                     "due_at": receipt.get("due_at")}, "schedule_id": record["id"]}
@@ -341,6 +345,7 @@ def repair_followup_binding(record: Dict[str, Any], *, reads: Optional[TaskOwner
         if live is not None:
             before = copy.deepcopy(live)
             bind_task(q.DRIVE_ROOT, live, record)
+            _adopt_relation(live, presence_relation_metadata(rebound["metadata"]))  # follows its committed receipt
             if live != before and q.publish_queue_snapshot(reason="followup_binding_repaired") is not True:
                 live.clear()
                 live.update(before)
@@ -448,6 +453,7 @@ def _prepare(claimed: Dict[str, Any]) -> Dict[str, Any]:
             bind_task(_queue().DRIVE_ROOT, task, claimed["record"])
         except ValueError as exc:
             return {**claimed, "task": task, "hold": ("followup_binding_unavailable", str(exc))}
+        _adopt_relation(task, _origin_relation(task, claimed["record"]))
         return {**claimed, "task": task, "project_admission": task.get("_project_admission")}
     from supervisor.queue_schedules import _task_from_schedule
 
@@ -478,9 +484,72 @@ def _prepare(claimed: Dict[str, Any]) -> Dict[str, Any]:
         hold, basis = resolve_resource(task, record)
     except Exception as exc:
         hold, basis = ("resource_resolution_failed", f"{type(exc).__name__}: {exc}"), None
+    _adopt_relation(task, _origin_relation(task, record))  # after the resource decision its saved row recorded
     return {**claimed, "task": task, "hold": hold, "binding_basis": basis,
             "project_admission": task.get("_project_admission")}
 
+
+def _handed_relation(task_id: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """The effective record of ``task_id`` (a forked root's door stamp lies on its child drive until copy-back) and the
+    relation it would hand work it starts, in the order a producer decides it: a carrier of its own first, then that."""
+    from ouroboros.dialogue_provenance import presence_record_metadata, presence_root_carrier, presence_root_relation
+    from ouroboros.task_status import load_effective_task_result
+
+    result = load_effective_task_result(_queue().DRIVE_ROOT, task_id, materialize_artifacts=False)
+    source = presence_record_metadata(result)
+    return result, {} if presence_root_carrier(source, task_contract=result.get("task_contract")) else presence_root_relation(source)
+
+
+def _origin_relation(task: Dict[str, Any], record: Dict[str, Any]) -> Dict[str, Any]:
+    """The relation new work of a follow-up recorded before it existed (#2482) proves, else ``{}``. Off Q.
+
+    Its template, and a receipt accepted then, keep the binding authority the scheduling work held. An occurrence, or a
+    new Continue of one that already ran (``continuation_admission``), is the owner's related work only when the record
+    the host-written ``followup_origin`` names would hand the same binding's relation to work it starts. That source may
+    itself be an old run still holding the carrier: a root of this binding with no ceiling or speaker of its own. Then
+    the origin its own host facts retained is read next, under the same checks (``recorded_origin``), until a record hands
+    the relation or stops the proof: missing, unreadable, foreign, a child, a speaker, under a ceiling, with no host
+    source, or an id already read (a corrupt cycle ends there, unread). The binding alone proves nothing, and a queued
+    occurrence reads again.
+
+    Cost, off Q and no O(1): one effective-record read per unresolved generation. What proves carries the relation by
+    value, so its later generations read one record or none. A chain that never proves, like a place's own acting
+    follow-ups, is read to its end by each new occurrence, and again on each pass while that occurrence stays queued.
+    """
+    from ouroboros.dialogue_provenance import (
+        PRESENCE_BINDING_AUTHORITY_KEY,
+        presence_metadata_relation,
+        presence_related_work,
+    )
+    from ouroboros.schedule_continuation import recorded_origin
+
+    meta, contract = task.get("metadata") or {}, task.get("task_contract") or {}
+    origin, binding = str((record.get("followup_origin") or {}).get("task_id") or ""), presence_metadata_relation(meta)
+    if (not origin or not binding or "presence" in meta or PRESENCE_BINDING_AUTHORITY_KEY not in meta
+            or "capability_ceiling" in contract):
+        return {}
+    seen: set = set()
+    try:
+        while origin and origin not in seen:
+            seen.add(origin)
+            result, relation = _handed_relation(origin)
+            if relation:
+                return relation if presence_metadata_relation(relation) == binding else {}
+            stops = ("presence" in (result.get("metadata") or {}) or "capability_ceiling" in (result.get("task_contract") or {})
+                     or not presence_related_work(binding, result))
+            origin = "" if stops else recorded_origin(result)
+    except Exception:
+        pass  # unread proves nothing either way
+    return {}
+
+
+def _adopt_relation(task: Dict[str, Any], relation: Dict[str, Any]) -> None:
+    """Only the carrier moves: resources, custody and the saved row stay as recorded."""
+    from ouroboros.dialogue_provenance import PRESENCE_BINDING_AUTHORITY_KEY
+
+    if relation:
+        task["metadata"].pop(PRESENCE_BINDING_AUTHORITY_KEY, None)
+        task["metadata"].update(relation)
 
 
 def _window(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -892,6 +961,26 @@ def prepare_receipts(records: List[Dict[str, Any]], *, drive_root: pathlib.Path)
         except Exception:
             pass  # TaskOwnershipRead retains the exact failure, never an absent row.
     return reads
+
+
+def prepare_relations(records: List[Dict[str, Any]], reads: TaskOwnershipRead) -> Dict[str, Dict[str, Any]]:
+    """Beside the receipts and off Q: what the origin of each accepted, unstarted occurrence proves (``_origin_relation``).
+
+    Binding repair consumes this under Q. Only a receipt still keeping the old carrier costs reads (the walk that proof
+    describes, each pass while it stays queued), and contention proves nothing: the next pass reads it again."""
+    from ouroboros.store import acquisition_budget
+
+    relations: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        tid = str((record.get("occurrence") or {}).get("task_id") or record.get("last_task_id") or "")
+        stored = reads.rows.get(tid) or {}
+        receipt = stored.get("schedule_admission") or {}
+        if stored.get("status") == "scheduled" and receipt.get("dispatch") == "none" and isinstance(receipt.get("task"), dict):
+            with acquisition_budget(0):
+                relation = _origin_relation(receipt["task"], record)
+            if relation:
+                relations[tid] = relation
+    return relations
 
 
 def _read_back(task_id: str, *, drive_root: Optional[pathlib.Path] = None,

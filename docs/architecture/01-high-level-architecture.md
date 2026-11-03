@@ -72,7 +72,7 @@ supervisor/ — background thread inside server.py (§5)
   schedule_time.py, schedule_occurrence.py — cron/timezone parsing; a due occurrence admits at most one root
   schedule_notes.py — a due `kind:"notify"` row becomes a signed `reminder` System row; no model, no retry
   schedule_view.py — pure schedule facts and digest
-  evolution_lifecycle.py — evolution campaign state and cycle lifecycle (§6 Background consciousness)
+  evolution_lifecycle.py, evolution_cleanup.py — campaign state, cycle lifecycle, Git cleanup (§6)
   events.py, event_observation.py — worker→supervisor dispatch and the pending idle-input index; `main_llm_call_state` binds the active attempt/round/call
   subagent_task_truth.py — delegation-truth enrichment of the subagent `task_done` frame (§11.1)
   card_delivery.py — a card's chat row, `card`/`card_state` frames, `chat.card` and the `chat.outbound` fallback text

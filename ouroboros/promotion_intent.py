@@ -38,13 +38,15 @@ def promotion_intent_notice(task_id: str, result: dict) -> str:
 
 def prepare_promotion_intent(root: Any, event: dict) -> dict:
     """Commit the complete replayable event before any emission; fail closed."""
-    from ouroboros.dialogue_provenance import presence_root_carrier
+    from ouroboros.dialogue_provenance import presence_root_carrier, presence_root_relation
 
     intent = json.loads(json.dumps(event, ensure_ascii=False, allow_nan=False))
     tid, token = str(intent.get("task_id") or ""), str(intent.get("routing_token") or "")
     if not tid or not token:
         raise ValueError("New work requires a task id and routing token")
     carrier = presence_root_carrier(intent, task_contract=intent.get("task_contract"))
+    # The owner's related work is readable by its place while pending, as Presence work is.
+    relation = {} if carrier else presence_root_relation(intent)
     stored = write_task_result(
         root, tid, "requested", create_only=True, strict_existing_dict=True,
         project_id=str(intent.get("project_id") or ""), description=str(intent.get("objective") or ""),
@@ -53,7 +55,7 @@ def prepare_promotion_intent(root: Any, event: dict) -> dict:
         promotion_admission={"status": "emitted", "phase": "prepared", "routing_token": token,
                              "prepared_at": utc_now_iso()},
         **({"metadata": carrier, "source": "presence_promote", "delegation_role": "root", "root_task_id": tid}
-           if carrier else {}),
+           if carrier else {"metadata": relation, "delegation_role": "root", "root_task_id": tid} if relation else {}),
     )
     saved = stored.get("promotion_intent") if isinstance(stored, dict) else None
     if (not isinstance(saved, dict) or {k: v for k, v in saved.items() if k != "ts"}

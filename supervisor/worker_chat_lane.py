@@ -270,8 +270,8 @@ def _client_message_id(task_metadata: Optional[dict]) -> str:
 def _seed_task(
     chat_id: int, text: str, image_data: Any, task_constraint: Optional[dict], task_metadata: Optional[dict],
 ) -> Dict[str, Any]:
-    """The admitted seed: identity, address, the owner's words and origin facts, the inline image as a
-    durable source. Everything else is the carrier's first step (``prepare_conversation_task``)."""
+    """The admitted seed: identity, address, the owner's words and origin facts, the inline image as a durable source,
+    the name of a late input's head. Everything else is the carrier's first step (``prepare_conversation_task``)."""
     task: Dict[str, Any] = {
         "id": uuid.uuid4().hex[:8],
         "type": "task",
@@ -307,6 +307,9 @@ def _seed_task(
             task["image_caption"] = image_data[2]
             if not task["text"]:
                 task["text"] = image_data[2]
+    naming = _late_input_naming(_pool().DRIVE_ROOT, task)  # a late input's head is admitted named by what it answers
+    if naming and naming[0]:
+        task["suggested_name"] = naming[0]
     return task
 
 
@@ -320,6 +323,20 @@ def _store_inline_image(task: Dict[str, Any], image_data: Any) -> None:
         extension="image", data=base64.b64decode(str(image_data[0] or ""), validate=True))
     task["image_mime"] = str(image_data[1] or "image/jpeg")
     task["drive_root"] = str(_pool().DRIVE_ROOT)
+
+
+def _late_input_naming(root: Any, task: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """``project_naming.late_input_names`` of a late answer's or a press's head: what it answers (the accepted
+    question, the card's title as the stored press recorded it) and the owner's words (its text before the
+    first step); None without that provenance. Read at admission and by the carrier's namer, never the frame."""
+    from ouroboros.gateway.card_decision import card_press_name
+    from ouroboros.owner_quiz import late_answer_name
+    from ouroboros.project_naming import late_input_names
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    answered = (late_answer_name(metadata["late_answer"]) if metadata.get("late_answer") is not None
+                else card_press_name(root, metadata.get("card_press")))
+    return None if answered is None else late_input_names(metadata, answered, str(task.get("text") or ""))
 
 
 def admit_owner_turn(
@@ -467,8 +484,8 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     attachments (a fully rejected set refuses the turn: ``ConversationRefusal``),
     the Project binding under the room basis the turn then carries like queued
     work (#2547), consciousness authority, the task contract, the frozen tool
-    profile and a wake's cause as its title. Mutates and returns ``task``; the
-    first-step facts leave it (``PREPARE_KEY``).
+    profile and a wake's cause (a late input's head: its admission name) as its title.
+    Mutates and returns ``task``; the first-step facts leave it (``PREPARE_KEY``).
     """
     from ouroboros.consciousness_authority import apply_consciousness_authority
     from ouroboros.contracts.task_contract import attach_task_contract
@@ -595,6 +612,8 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     freeze_tool_profile(task)
     if wake_cause(task.get("metadata")):
         name_wake_on_admission(root, task, broadcast)
+    elif task.get("suggested_name") and broadcast is not None:  # admitted named (a late input's head): born named
+        broadcast({"type": "task_named", "task_id": str(task["id"]), "suggested_name": task["suggested_name"]})
     task.pop(PREPARE_KEY, None)
     return task
 
@@ -717,9 +736,12 @@ class CarrierTurn:
         if not task.get("project_id") and not wake_cause(metadata) and not task.get("_presence_turn"):
             from ouroboros.project_naming import spawn_turn_namer
 
-            self._namer = lambda: spawn_turn_namer(  # noqa: E731
-                drive_root, self.task_id, str(task.get("text") or ""), broadcast=lambda msg: out_q.put(dict(msg)),
-            )
+            naming = _late_input_naming(drive_root, task)  # a late input's head: what it answers, never its frame
+            if naming is None or naming[1]:  # an authored title needs no namer; Light's failure keeps a standing name
+                self._namer = lambda: spawn_turn_namer(  # noqa: E731
+                    drive_root, self.task_id, naming[1] if naming else str(task.get("text") or ""),
+                    broadcast=lambda msg: out_q.put(dict(msg)), fallback_candidates=(task.get("suggested_name") or "",),
+                )
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
         if kind == "task_heartbeat":  # this carrier's own size rides its turn's beat (the lane's vitals)

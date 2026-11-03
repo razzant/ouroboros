@@ -3664,6 +3664,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     color: inherit;
     font-size: var(--type-body);
 }
+/* A code span is literal: a path or a command keeps its exact spacing on screen and when copied. */
+.inline-code { white-space: pre-wrap; }
 .chat-bubble .message del {
     opacity: 0.5;
     text-decoration: line-through;

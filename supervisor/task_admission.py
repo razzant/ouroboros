@@ -407,6 +407,7 @@ def enqueue_with_admission_receipt(task: Dict[str, Any], *, receipt_required: bo
             write_task_result(queue.DRIVE_ROOT, tid, STATUS_SCHEDULED, strict_existing_dict=True, create_only=True,
                               chat_id=admitted.get("chat_id"), root_task_id=admitted.get("root_task_id") or tid,
                               metadata=admitted.get("metadata") if isinstance(admitted.get("metadata"), dict) else {},
+                              **{key: admitted[key] for key in ("suggested_name",) if admitted.get(key)},
                               host_admission={"token": token, "status": "accepted"},
                               result="Task accepted and scheduled.")
         except Exception:
