@@ -133,7 +133,7 @@ def _task_attempt(row: dict) -> int:
 
 
 def restart_request_fact(settled_rows: list) -> dict:
-    """The restart request the task's newest attempt holds and the newest answer about it; a refusal keeps its typed code.
+    """Infer the request in the newest restart-bearing attempt and its newest answer; a refusal keeps its typed code.
 
     ``control_runtime._request_restart`` sends one request per task attempt: the first call the host answers with
     acceptance or a receipt (``RESTART_<STATUS>: request <id>``) sent it, and every later call of that attempt only reads
