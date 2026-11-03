@@ -123,6 +123,9 @@ def test_actual_adapter_produces_non_task_review(data_root, monkeypatch, door):
         monkeypatch.setattr(skill_review_runner, "run_skill_review_lifecycle", lifecycle)
         monkeypatch.setattr(extensions, "_request_drive_root", lambda request: data_root)
         monkeypatch.setattr(extensions, "_request_repo_dir", lambda request: data_root.parent / "repo")
-        response = asyncio.run(extensions.api_skill_review(SimpleNamespace(path_params={"skill": "one"})))
+        async def no_body():
+            return b""
+
+        response = asyncio.run(extensions.api_skill_review(SimpleNamespace(path_params={"skill": "one"}, body=no_body)))
         assert response.status_code == 200
     assert len(seen) == 1

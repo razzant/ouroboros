@@ -629,9 +629,12 @@ class ReviewCoordinator:
             )
             finalize_review_actor(actor, operation_id=call_id)
             self._finalize_outcome(request, slot, actor)
+            # A stopped session's whole output is retained evidence (``session_transcript``), never a verdict.
+            partial = {key: value for key, value in (("session_transcript", getattr(exc, "review_partial_output", "")),
+                       ("session_transcript_gap", getattr(exc, "review_partial_output_gap", ""))) if value}
             actor.response_ref = self._persist_producer_outcome(
                 request, actor, call_id, base_call_type,
-                {"error_type": type(exc).__name__, "error": actor.error})
+                {"error_type": type(exc).__name__, "error": actor.error, **({"message": {"content": "", **partial}} if partial else {})})
             return actor
 
     def _finalize_outcome(self, request, slot, actor):

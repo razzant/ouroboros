@@ -266,13 +266,13 @@ def test_capture_exception_does_not_hide_the_paid_verdict_or_release_the_copy(
     _started(root, run_id=RUN)
     captures = []
 
-    def failed_capture(data, task, operation):
-        captures.append((data, task, operation))
+    def failed_capture(data, task, operation, *, hold=False):
+        captures.append((data, task, operation, hold))
         raise OSError("capture unavailable")
 
     monkeypatch.setattr(checking, "capture_seat_evidence", failed_capture)
     actor, fact = _collect(root, run)
-    assert captures == [(root, TASK, OPERATION)]
+    assert captures == [(root, TASK, OPERATION, False)]  # a succeeded run keeps no copy for a successor
     assert _verdict(actor) == "PASS"
     assert fact == "collected"
     assert actor["usage"]["checking_evidence"]["status"] == "capture_failed"
