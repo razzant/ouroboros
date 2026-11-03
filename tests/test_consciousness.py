@@ -603,11 +603,12 @@ def _spent_window(resets_at, settled=20.4):
     return window
 
 
-def test_a_changed_daily_limit_rechecks_a_money_skip_at_once(clock, monkeypatch):
+def test_a_changed_daily_limit_retries_a_money_skip_after_min(clock, monkeypatch):
     """A46 (R2_fable_arch §1 №20): an exhausted allowance waits for its window to free, a time chosen under
     the limit it met; raising the limit in Settings left the clock asleep until that reset. A changed limit
-    re-checks the same window at once: it admits, or skips again under the new limit. The same limit stays
-    not due, and a not-due tick reads only the setting (no ledger, no window)."""
+    turns that wait into any skip's retry: the same window is re-checked no sooner than MIN after the skip,
+    and admits or skips again under the new limit. The same limit stays not due, and a not-due tick reads
+    only the settings (no ledger, no window)."""
     from ouroboros.deadline_utils import parse_deadline_ts
 
     resets_at = "2027-02-01T00:00:00+00:00"
@@ -619,16 +620,19 @@ def test_a_changed_daily_limit_rechecks_a_money_skip_at_once(clock, monkeypatch)
     assert clock.clock.next_wake_at == parse_deadline_ts(resets_at).timestamp()
     assert clock.clock.tick(now + 60) == "not_due" and len(window.reads) == 1
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "19")  # lowered: still spent, skipped again under it
-    assert clock.clock.tick(now + 120) == "skipped:allowance_exhausted"
+    assert clock.clock.tick(now + FLOOR - 1) == "not_due" and len(window.reads) == 1
+    assert clock.clock.tick(now + FLOOR) == "skipped:allowance_exhausted"
     assert clock.store[LAST_SKIP_STATE_KEY]["allowance"]["limit_usd"] == 19.0
-    assert clock.clock.tick(now + 180) == "not_due" and len(window.reads) == 2
-    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "50")  # raised: the wake starts now, not at the reset
-    assert clock.clock.tick(now + 240) == "launched"
+    assert clock.clock.tick(now + FLOOR + 60) == "not_due" and len(window.reads) == 2
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "50")  # raised: MIN after the repeated skip, not the reset
+    assert clock.clock.tick(now + 2 * FLOOR - 1) == "not_due" and len(window.reads) == 2
+    assert clock.clock.tick(now + 2 * FLOOR) == "launched"
     assert clock.launches[-1]["metadata"]["root_cost_ceiling_usd"] == pytest.approx(29.6)
 
 
 def test_a_money_skip_is_rechecked_after_a_restart_from_its_key(clock, monkeypatch):
-    """The skip's limit is restored from ``consciousness_last_skip`` when that skip still sets the next wake."""
+    """The skip's time and limit are restored from ``consciousness_last_skip`` when that skip still sets the
+    next wake; a limit changed while the app was off still waits for MIN after boot (the boot floor)."""
     resets_at = "2027-02-01T00:00:00+00:00"
     monkeypatch.setattr(clock_module, "allowance_window", _spent_window(resets_at))
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "20")
@@ -636,18 +640,26 @@ def test_a_money_skip_is_rechecked_after_a_restart_from_its_key(clock, monkeypat
     assert clock.clock.tick(now) == "skipped:allowance_exhausted"
     restarted = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: clock.store.get("owner_chat_id"),
                                         now=now + 10)
-    assert restarted.tick(now + 20 + FLOOR) == "not_due"
-    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "50")
-    assert restarted.tick(now + 30 + FLOOR) == "launched"
+    assert restarted.tick(now + 20 + FLOOR) == "not_due"  # the same limit waits for the reset
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_DAILY_USD", "50")  # changed while the app is off
+    booted = now + 30 + FLOOR
+    rebooted = BackgroundConsciousness(clock.root, clock.root / "repo", lambda: clock.store.get("owner_chat_id"),
+                                       now=booted)
+    assert rebooted.tick(booted + 1) == "not_due"
+    assert rebooted.tick(booted + FLOOR - 1) == "not_due"
+    assert rebooted.tick(booted + FLOOR) == "launched"
 
 
 @pytest.mark.parametrize("stored", [
     "not a record", {"reason": "allowance_unknown", "next_wake_at": "2027-02-01T00:00:00+00:00"},
     {"reason": "allowance_exhausted", "next_wake_at": "2027-02-01T00:00:00+00:00", "allowance": {"limit_usd": None}},
     {"reason": "allowance_exhausted", "next_wake_at": "2027-01-31T00:00:00+00:00", "allowance": {"limit_usd": 20.0}},
+    {"reason": "allowance_exhausted", "next_wake_at": "2027-02-01T00:00:00+00:00", "allowance": {"limit_usd": 20.0}},
+    {"at": "yesterday", "reason": "allowance_exhausted", "next_wake_at": "2027-02-01T00:00:00+00:00",
+     "allowance": {"limit_usd": 20.0}},
 ])
 def test_a_restart_restores_no_recheck_from_any_other_record(clock, monkeypatch, stored):
-    """Only an exhausted-allowance skip with a known limit that set the stored next wake is restored."""
+    """Only an exhausted-allowance skip with a known time and limit that set the stored next wake is restored."""
     from ouroboros.deadline_utils import parse_deadline_ts
 
     clock.store.update({NEXT_WAKE_STATE_KEY: parse_deadline_ts("2027-02-01T00:00:00+00:00").timestamp(),
