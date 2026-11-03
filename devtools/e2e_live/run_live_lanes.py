@@ -206,7 +206,9 @@ def write_settings(path: pathlib.Path, cfg: dict) -> str:
     """0600-before-content write; returns the sha256 of the exact bytes on disk."""
     raw = _settings_json_bytes(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Byte-exact: a Windows descriptor is text mode without O_BINARY and would write each LF as CRLF, so the digest
+    # returned here (the one a strict server checks) would name bytes that are not on disk.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, 0o600)   # O_CREAT's mode applies on creation only

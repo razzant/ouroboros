@@ -46,7 +46,7 @@ def test_e1_no_server_side_module_starts_cognition_outside_the_named_carriers():
     offenders = []
     pattern = re.compile(r"(\.handle_task\(|\bmake_agent\()")
     for path in _server_side_modules():
-        rel = str(path.relative_to(REPO))
+        rel = path.relative_to(REPO).as_posix()  # the carriers are spelled with "/" on every OS
         if rel in COGNITION_STARTERS:
             continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
@@ -57,8 +57,9 @@ def test_e1_no_server_side_module_starts_cognition_outside_the_named_carriers():
                 offenders.append(f"{rel}:{number}: {stripped[:100]}")
     assert offenders == [], "cognition started in a server-side module:\n" + "\n".join(offenders)
     # The inline executors' actor is borrowed only by the inline carrier.
-    callers = [str(p.relative_to(REPO)) for p in _server_side_modules()
-               if "_get_chat_agent()" in p.read_text(encoding="utf-8") and str(p.relative_to(REPO)) != "supervisor/workers.py"]
+    callers = [p.relative_to(REPO).as_posix() for p in _server_side_modules()
+               if "_get_chat_agent()" in p.read_text(encoding="utf-8")
+               and p.relative_to(REPO).as_posix() != "supervisor/workers.py"]
     assert callers == ["supervisor/inline_carrier.py"], callers
 
 

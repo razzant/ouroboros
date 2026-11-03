@@ -393,9 +393,10 @@ def test_an_acknowledged_owner_row_with_line_separators_keeps_its_inputs_through
 
 @pytest.mark.parametrize("count", [2, 30])
 def test_an_unreadable_owner_history_row_fails_input_promotion_closed_until_repaired(tmp_path, count):
-    """R1: a torn append followed by the next row leaves ONE unreadable line that swallowed an owner
-    row with inputs. Its kind cannot be proven, so the input history read fails closed: the
-    promotion keeps a pending ref (retry evidence), the drive stays, and a repair converges."""
+    """R1: a torn append leaves ONE unreadable line in the owner history. The writer's record boundary
+    keeps the next row (here one with inputs) whole on its own line, never glued onto the torn bytes,
+    but the torn row's own kind and inputs cannot be proven, so the input history read fails closed:
+    the promotion keeps a pending ref (retry evidence), the drive stays, and a repair converges."""
     from ouroboros import observability
 
     data = tmp_path / "data"
@@ -403,21 +404,26 @@ def test_an_unreadable_owner_history_row_fails_input_promotion_closed_until_repa
     write_task_result(data, TASK, "running", headless_child_drive_root=str(drive))
     mailbox = owner_mailbox._mailbox_path(drive, TASK)
     mailbox.parent.mkdir(parents=True, exist_ok=True)
-    mailbox.write_text('{"msg_id": "torn", "kind": "owner_text", "te', encoding="utf-8")  # a crashed append
-    manifest = _staged(tmp_path, drive, count, "swallowed")
+    torn = '{"msg_id": "torn", "kind": "owner_text", "te'  # a crashed append
+    mailbox.write_text(torn, encoding="utf-8")
+    manifest = _staged(tmp_path, drive, count, "followed")
     assert owner_mailbox.write_owner_message(drive, "see the files", TASK, msg_id="m1", attachment_manifest=manifest)
-    assert len(mailbox.read_text(encoding="utf-8").split("\n")) == 2  # one unreadable line, one terminator
+    held = mailbox.read_text(encoding="utf-8").split("\n")
+    assert held[0] == torn, "the torn bytes stay exactly as they landed"
+    assert json.loads(held[1])["msg_id"] == "m1" and held[2:] == [""], "the next row is whole, on its own line"
     write_task_result(drive, TASK, "completed", result="done")
 
     copied = headless.copy_child_task_result(data, {"id": TASK, "drive_root": str(drive)})
     assert copied["child_ref_promotion"]["status"] == "incomplete"
     assert any(ref.get("path") == str(mailbox) for ref in copied["child_ref_promotion"]["pending_refs"])
+    held_mail = copied["unread_mailbox"]  # the whole row is already kept; the torn line forbids calling the capture complete
+    assert _msg_ids(held_mail) == ["m1"] and held_mail["read_complete"] is False
     later = 4_000_000_000
     assert not headless.prune_headless_task_drives(data, retention_days=1, now=later, live=lambda _t: False)["pruned"]
     assert drive.is_dir()
 
     content = mailbox.read_text(encoding="utf-8")
-    mailbox.write_text(content[content.index("{", 1):], encoding="utf-8")  # the torn prefix repaired away
+    mailbox.write_text(content[content.index("{", 1):], encoding="utf-8")  # the torn row repaired away
     assert observability.retry_pending_child_ref_promotions(data)["completed"] == [TASK]
     report = headless.prune_headless_task_drives(data, retention_days=1, now=later, live=lambda _task: False)
     assert [row["task_id"] for row in report["pruned"]] == [TASK]

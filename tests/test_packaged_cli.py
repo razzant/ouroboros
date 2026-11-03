@@ -588,9 +588,14 @@ def test_installer_under_an_appimage_points_at_its_cli_instead_of_linking_into_t
     monkeypatch.delenv("APPIMAGE")
     assert plan_posix_install(root, target_dir=tmp_path / "bin").action == "create"
 
+
+_MOUNTED_APP = pathlib.Path("/Volumes/Disk/Ouroboros.app/Contents/Resources")
+
+
 def test_installer_rejects_macos_dmg_or_translocation_paths(tmp_path, monkeypatch):
-    """Measured, not guessed from a folder name: a read-only mount or a translocated copy is refused,
-    an ordinary writable disk under /Volumes is accepted (the old rule refused every /Volumes path)."""
+    """Measured, not guessed from a folder name: a translocated copy is refused (a path-component fact, the same on
+    every OS), an ordinary writable disk under /Volumes is accepted (the old rule refused every /Volumes path).
+    The read-only mount, the DMG itself, is measured natively: the next test."""
     import types
 
     from ouroboros.packaged_cli import PackagedCLIError
@@ -598,12 +603,34 @@ def test_installer_rejects_macos_dmg_or_translocation_paths(tmp_path, monkeypatc
 
     with pytest.raises(PackagedCLIError, match="refusing to install CLI from a DMG"):
         reject_unstable_macos_path(pathlib.Path("/private/var/AppTranslocation/Ouroboros.app/Contents/Resources"))
-    volume = pathlib.Path("/Volumes/Disk/Ouroboros.app/Contents/Resources")
     monkeypatch.setattr(os, "statvfs", lambda _path: types.SimpleNamespace(f_flag=0), raising=False)
-    reject_unstable_macos_path(volume)
-    monkeypatch.setattr(os, "statvfs", lambda _path: types.SimpleNamespace(f_flag=getattr(os, "ST_RDONLY", 1)), raising=False)
+    reject_unstable_macos_path(_MOUNTED_APP)
+
+
+@pytest.mark.skipif(not hasattr(os, "ST_RDONLY"),
+                    reason="a mount is measured by statvfs' ST_RDONLY, which Windows lacks")
+def test_installer_rejects_an_app_on_a_read_only_mount(monkeypatch):
+    """The DMG case, on the platforms that can measure it (macOS, Linux)."""
+    import types
+
+    from ouroboros.packaged_cli import PackagedCLIError
+    from ouroboros.packaged_cli_install import reject_unstable_macos_path
+
+    monkeypatch.setattr(os, "statvfs", lambda _path: types.SimpleNamespace(f_flag=os.ST_RDONLY), raising=False)
     with pytest.raises(PackagedCLIError, match="refusing to install CLI from a DMG"):
-        reject_unstable_macos_path(volume)
+        reject_unstable_macos_path(_MOUNTED_APP)
+
+
+def test_a_platform_that_cannot_measure_a_mount_refuses_none_by_it(monkeypatch):
+    """Windows has no ``ST_RDONLY`` (and its installer never asks): an unmeasurable mount gets no label. Every OS runs
+    this by taking the constant away."""
+    import types
+
+    from ouroboros.packaged_cli_install import reject_unstable_macos_path
+
+    monkeypatch.delattr(os, "ST_RDONLY", raising=False)
+    monkeypatch.setattr(os, "statvfs", lambda _path: types.SimpleNamespace(f_flag=1), raising=False)
+    reject_unstable_macos_path(_MOUNTED_APP)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell wrapper test")

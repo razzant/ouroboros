@@ -66,9 +66,10 @@ class TestSendFile:
         assert "no active chat" in result.lower()
         assert ctx.pending_events == []
 
-    def test_file_not_found(self):
+    def test_file_not_found(self, tmp_path):
         ctx = _make_ctx()
-        result = _send_file(ctx, file_path="/nonexistent/report.pdf")
+        # Absolute on every OS: a drive-less "/nonexistent/..." is workspace-relative on Windows.
+        result = _send_file(ctx, file_path=str(tmp_path / "nonexistent" / "report.pdf"))
         assert "not found" in result.lower()
 
     def test_directory_is_rejected(self, tmp_path):

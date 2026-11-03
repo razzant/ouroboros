@@ -104,7 +104,8 @@ def test_the_converted_catalog_installs_and_updates_through_the_ordinary_lifecyc
     assert (lone["source"]["path"], lone["source"]["commit"]) == ("", market["single_commit"])
     reviewer = json.loads((out / "entries" / "reviewer.json").read_text(encoding="utf-8"))
     assert reviewer["source"]["path"] == "skills/reviewer", "no path in skill_link: the documented skills/<name>"
-    assert json.loads((out / "hub.json").read_text())["converted_from"] == {}, "a folder input claims no origin"
+    hub = json.loads((out / "hub.json").read_text(encoding="utf-8"))
+    assert hub["converted_from"] == {}, "a folder input claims no origin"
 
     url = _hub_repo(tmp_path, out, "converted")
     probe = catalog.probe_source(drive, url=url)
@@ -171,8 +172,8 @@ def test_the_cli_writes_a_new_folder_and_never_changes_an_earlier_hub(market, tm
     writer = json.loads((out / "entries" / "writer.json").read_text(encoding="utf-8"))
     assert (writer["description"], writer["category"]) == ("Пишет тексты", ["писательство"]), \
         "the chosen language's metadata names the entry's description and category"
-    assert {c["id"]: c["label"] for c in json.loads((out / "categories.json").read_text())["categories"]}[
-        "писательство"] == "Писательство"
+    categories = json.loads((out / "categories.json").read_text(encoding="utf-8"))["categories"]
+    assert {c["id"]: c["label"] for c in categories}["писательство"] == "Писательство"
     assert json.loads(report_file.read_text(encoding="utf-8"))["written"] == ["lone-skill", "reviewer", "writer"]
     # An earlier hub, with the operator's own files, is refused before anything is read or written; a run that
     # reads less (here: no author repository at all) could otherwise have removed its entries.
