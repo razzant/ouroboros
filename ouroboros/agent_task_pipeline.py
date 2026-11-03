@@ -868,8 +868,7 @@ def emit_task_results(
     verification_receipts = task_verification_receipts(ctx, receipt_root, task)
     # Apply FR3 once so events and the durable result share the same flagged outcome.
     apply_receipt_absent_flag(
-        loop_outcome, llm_trace, receipt_root, str(task.get("id") or ""),
-        expected_output=str(task.get("expected_output") or ""), receipts=verification_receipts,
+        loop_outcome, llm_trace, receipt_root, str(task.get("id") or ""), receipts=verification_receipts,
     )
     outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
     loop_rounds = (loop_outcome.get("usage") or {}).get("total_rounds")
@@ -1233,7 +1232,6 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             # Apply FR3 before normalization so the persisted axes and ledger agree.
             apply_receipt_absent_flag(
                 loop_outcome, llm_trace, env.drive_root, str(task.get("id") or ""),
-                expected_output=str(task.get("expected_output") or ""),
                 receipts=task_verification_receipts(None, env.drive_root, task),
             )
         outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})

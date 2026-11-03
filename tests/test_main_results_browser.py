@@ -135,7 +135,7 @@ def test_main_partial_final_has_one_compact_limitation_with_project_closed(
                             expect(limitation).to_be_visible()
                             text = limitation.inner_text()
                             assert text.count(rationale) == 1, text
-                            assert "no review approval" in text.lower(), text
+                            assert "the reviewers had not signed it off" in text.lower(), text
                             assert len(text) < 320, "the summary should be a short limitation, not full review detail"
                             assert row.inner_text().count(rationale) == 1
                             assert page.locator("#project-panel.open").count() == 0

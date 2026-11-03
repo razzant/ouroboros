@@ -561,7 +561,7 @@ def _planned_root(tmp_path, monkeypatch, enforcement, *, owner_marked=True, unre
     return loop, registry, limit_ctx, trace, record, candidate
 
 
-STOPPED = "Ouroboros stopped with unfinished work; no review approval was granted"
+STOPPED = "Ouroboros stopped with unfinished work; the reviewers had not signed it off"
 STILL_OPEN = "The plan review was still open when this answer was delivered"
 UNKNOWN = "The plan record could not be read, so the state of the plan review is unknown."
 

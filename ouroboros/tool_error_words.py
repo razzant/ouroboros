@@ -65,4 +65,4 @@ def residual_tool_errors_phrase(execution: Any) -> str:
     capped = len(unresolved) >= _LISTED or len(cosmetic) >= _LISTED
     tail = (", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
             else f", plus {more} more tool errors" if more else "")
-    return f"{subject}{tail}; the result has not been evaluated."
+    return f"{subject}{tail}; no review checked the result."

@@ -150,21 +150,20 @@ def test_receipt_absent_never_on_best_effort():
     assert "warning" not in d["outcome_axes"]["objective"]
 
 
-def test_m2_zero_grounding_flag():
+def test_a_turn_without_effects_carries_no_tool_count_warning():
+    """The retired M2 check warned when a declared deliverable came with no tool calls and no
+    FINAL ANSWER marker; plain prose can itself be the deliverable (#1748), so how many tools
+    an answer used is no judgment of it. FR3 still flags real effects without grounding."""
     from ouroboros import outcomes as O
 
-    # declared expected_output, no tool work, no structured answer -> M2
-    a = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-    O.apply_receipt_absent_flag(a, {"tool_calls": []}, tempfile.mkdtemp(), "m1", expected_output="report.html")
-    assert a["outcome_axes"]["objective"].get("warning") == "expected_output_ungrounded"
-    # a text-answer task (FINAL ANSWER present) is never M2-flagged
-    b = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": "42"}
-    O.apply_receipt_absent_flag(b, {"tool_calls": []}, tempfile.mkdtemp(), "m2", expected_output="the number")
-    assert "warning" not in b["outcome_axes"]["objective"]
-    # no declared expected_output -> never M2
-    c = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-    O.apply_receipt_absent_flag(c, {"tool_calls": []}, tempfile.mkdtemp(), "m3", expected_output="")
-    assert "warning" not in c["outcome_axes"]["objective"]
+    for final_answer in ("", "42"):
+        clean = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
+                 "final_answer": final_answer}
+        O.apply_receipt_absent_flag(clean, {"tool_calls": []}, tempfile.mkdtemp(), "m1")
+        assert clean["outcome_axes"]["objective"] == {"status": "not_evaluated"}
+    effects = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
+    O.apply_receipt_absent_flag(effects, {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}, tempfile.mkdtemp(), "m2")
+    assert effects["outcome_axes"]["objective"]["warnings"] == ["receipt_absent"]
 
 
 def test_nudge_gate_and_auto_equals_required():
@@ -884,10 +883,7 @@ def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
         },
         "final_answer": "host-side result",
     }
-    apply_receipt_absent_flag(
-        loop_outcome, trace, ctx.drive_root, ctx.task_id,
-        expected_output="verified result",
-    )
+    apply_receipt_absent_flag(loop_outcome, trace, ctx.drive_root, ctx.task_id)
     assert "receipt_absent" in loop_outcome["outcome_axes"]["objective"]["warnings"]
 
     ctx._configured_actor_bootstrap["physical_started"] = True
