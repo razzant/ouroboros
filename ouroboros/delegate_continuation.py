@@ -401,7 +401,8 @@ def continuation_prompt(facts: Dict[str, Any], caller_text: str, run_binding: st
     return f"{text}\n\n{note}" if note else text
 
 
-def with_run_binding(start: ContinuationStart, authority: Any, binding: str, workdir: str) -> ContinuationStart:
+def with_run_binding(start: ContinuationStart, authority: Any, binding: str, workdir: str,
+                     inputs: str = "") -> ContinuationStart:
     """Restate THIS run's access and workspace in an ordinary continuation's prompt (#2513).
 
     The engine's ``auto`` carrier may resume a native session that keeps an earlier
@@ -409,14 +410,18 @@ def with_run_binding(start: ContinuationStart, authority: Any, binding: str, wor
     (a fresh snapshot, a lowering, in place after a copy). Every ordinary continuation,
     not only a changed root, so carries the exact text its own instructions got from the
     same renderers after provisioning, or, where none applies, the directory it starts
-    in. A plan-thread turn (no ``workspace`` fact) keeps its own contract.
+    in, plus this run's own selected ``input_files`` note, if any.
+    A plan-thread turn (no ``workspace`` fact) keeps its own contract, plus that note even when the
+    caller's text is empty; a fresh start (``NO_CONTINUATION``, no facts) is unchanged.
     """
     from ouroboros.delegate_start_instructions import access_instruction, no_copy_binding_instruction
 
-    if "workspace" not in start.facts:
+    if not start.facts:
         return start
+    if "workspace" not in start.facts:
+        return start._replace(prompt="\n\n".join(part for part in (start.prompt, inputs) if part)) if inputs else start
     current = (access_instruction(authority.access, investigation=authority.investigation)
-               + (binding or no_copy_binding_instruction(workdir)))
+               + (binding or no_copy_binding_instruction(workdir)) + inputs)
     return start._replace(prompt=continuation_prompt(start.facts, start.note, current))
 
 
