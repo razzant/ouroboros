@@ -452,7 +452,7 @@ def test_the_scripted_author_adopts_exactly_what_the_gate_produced_then_finishes
     landed = f"prompt\nOK: committed to candidate/{TASK}: m [not pushed]\nreview_record_id: {host.record_id}\n"
     assert adopt(landed) == {"tool": "request_restart", "arguments": {"reason": scenarios.SM1_RESTART_REASON, "adopt_commit": host.sha}}
     assert not any(key.startswith("skip_") for step in script if isinstance(step, dict) for key in step.get("arguments", {}))
-    for refused in ("prompt\n⚠️ TESTS_PREFLIGHT_BLOCKED: tests must pass", f"OK: committed to x: m\nreview_record_id: rl-20260101T000000-000000000000\n"):
+    for refused in ("prompt\n⚠️ TESTS_PREFLIGHT_BLOCKED: tests must pass", "OK: committed to x: m\nreview_record_id: rl-20260101T000000-000000000000\n"):
         assert adopt(refused)["final"].startswith(scenarios.SM1_SCRIPT_ERROR)
     swapped = json.loads((host.data / "state" / "private_copies" / f"body_{TASK}.json").read_text(encoding="utf-8"))
     (host.data / "state" / "private_copies" / f"body_{TASK}.json").write_text(json.dumps({**swapped, "reviewed_commits": [OTHER_SHA]}), encoding="utf-8")
