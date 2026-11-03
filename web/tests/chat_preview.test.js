@@ -10,6 +10,7 @@ function fixture(t) {
     const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value),
         removeItem: key => values.delete(key) };
     const make = (room = [1, ''], scope = '') => createChatPreview({ feed: mount, room, scope,
+        labelForRow: row => row.sender_label || (row.role === 'user' ? 'You' : 'Ouroboros'),
         storage: () => storage, mutate: fn => fn() });
     return { mount, values, storage, make };
 }
@@ -50,11 +51,11 @@ test('failed and partial reads keep the previous record; a successful empty read
 
 test('storage failure, corrupt data and unsupported versions leave online chat usable', t => {
     const f = fixture(t);
-    for (const raw of ['{', '{"v":2,"rooms":[]}', 'x'.repeat(200001), '{"v":1,"rooms":[{"key":"bad"}]}']) {
+    for (const raw of ['{', '{"v":3,"rooms":[]}', 'x'.repeat(200001), '{"v":1,"rooms":[{"key":"bad"}]}']) {
         f.values.set(PREVIEW_KEY, raw);
         assert.equal(f.make().show(), false);
     }
-    const preview = createChatPreview({ feed: f.mount, room: 1, mutate: fn => fn(), storage: () => { throw Error('denied'); } });
+    const preview = createChatPreview({ feed: f.mount, room: 1, labelForRow: () => 'Ouroboros', mutate: fn => fn(), storage: () => { throw Error('denied'); } });
     assert.equal(preview.show(), false);
     assert.doesNotThrow(() => preview.save(data()));
     assert.doesNotThrow(() => clearChatPreviews({ removeItem() { throw Error('denied'); } }));
@@ -68,5 +69,26 @@ test('the persistent record is bounded and never cuts text inside a message', t 
     assert.ok(raw.length <= 200000 && saved.rooms.length <= 8);
     assert.ok(saved.rooms.every(room => room.rows.length <= 80 && room.rows.every(row => row.text === text)));
     clearChatPreviews(f.storage);
+    assert.equal(f.make().show(), false);
+});
+
+
+test('canonical speaker labels are plain text, bounded with rows, and legacy unlabeled previews open cold', t => {
+    const f = fixture(t), preview = f.make();
+    const input = data('First line\nSecond line');
+    input.messages[0].sender_label = '<img src=x onerror=alert(1)> Mira';
+    input.messages[0].sender_session_id = 'private-session';
+    preview.save(input); preview.destroy();
+    const fresh = f.make();
+    assert.equal(fresh.show(), true);
+    assert.equal(f.mount.querySelector('.sender').textContent, input.messages[0].sender_label);
+    assert.equal(f.mount.querySelector('.message').textContent, input.messages[0].text);
+    assert.equal(f.mount.querySelectorAll('img').length, 0);
+    const saved = JSON.parse(f.values.get(PREVIEW_KEY));
+    assert.equal(saved.v, 2);
+    assert.doesNotMatch(f.values.get(PREVIEW_KEY), /private-session|sender_session_id/);
+    fresh.destroy();
+    saved.v = 1;
+    f.values.set(PREVIEW_KEY, JSON.stringify(saved));
     assert.equal(f.make().show(), false);
 });

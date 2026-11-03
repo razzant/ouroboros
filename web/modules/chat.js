@@ -3085,6 +3085,10 @@ export function createChatInstance({
     });
 
     const preview = createChatPreview({ feed: messagesDiv, room: [chatId, projectId || ''],
+        labelForRow: row => senderLabel(row.role, false, row.system_type || '', {
+            source: row.source || '', senderLabel: row.sender_label || '',
+            senderSessionId: row.sender_session_id || '', initiator: row.initiator || '',
+        }, chatSessionId),
         scope: document.head?.querySelector('meta[name="ouroboros-appearance-scope"]')?.content || '', mutate: withStableViewport });
 
     function syncLoadOlderControl(snapshot = historyPager.getState()) {

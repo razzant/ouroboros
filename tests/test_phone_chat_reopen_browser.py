@@ -88,11 +88,17 @@ def test_short_phone_composer_fits_and_keeps_assistance(shell_ui, theme, project
     page.close()
 
 
-@pytest.mark.parametrize('mode', ['newest', 'reference', 'selected-empty'])
+@pytest.mark.parametrize('mode', ['newest', 'reference', 'selected-empty', 'authorship'])
 def test_new_document_shows_saved_text_before_history_and_reconciles(shell_ui, mode):
     ui = shell_ui
     page = seed_page(ui, 390, 844, telegram=True)
-    page.route('**/api/chat/history**', lambda route: route.fulfill(json=history(['Saved answer', 'Obsolete preview row'])))
+    initial = history(['Saved answer', 'Obsolete preview row'])
+    if mode == 'authorship':
+        initial = history(['Saved answer\nSecond line', 'Another browser', 'An autonomous thought'])
+        initial['messages'][0].update(role='user', source='telegram', sender_label='Mira')
+        initial['messages'][1].update(role='user', source='web', sender_session_id='another-window-private')
+        initial['messages'][2].update(initiator='consciousness')
+    page.route('**/api/chat/history**', lambda route: route.fulfill(json=initial))
     page.goto(ui['url'])
     page.locator('#chat-messages .chat-bubble').filter(has_text='Saved answer').wait_for()
     page.wait_for_function("localStorage.getItem('ouroboros.chat-preview.v1')?.includes('Saved answer')")
@@ -124,6 +130,28 @@ def test_new_document_shows_saved_text_before_history_and_reconciles(shell_ui, m
     while not pending and monotonic() < until:
         other.wait_for_timeout(20)
     assert pending
+    if mode == 'authorship':
+        expected = ['Mira', 'WebUI (another-)', 'Ouroboros · Consciousness']
+        preview = other.locator('[data-saved-preview]')
+        assert preview.locator('.sender').all_text_contents() == expected
+        text = preview.locator('.message').first
+        assert text.text_content() == 'Saved answer\nSecond line'
+        assert text.evaluate("e => getComputedStyle(e).whiteSpace") == 'pre-wrap'
+        shot(other, f'phone-authors-preview-{ui["engine"]}')
+        pending.pop(0).fulfill(status=500, json={'error': 'Controlled history failure'})
+        other.get_by_role('button', name='Retry loading messages').wait_for()
+        assert preview.locator('.sender').all_text_contents() == expected
+        assert text.text_content() == 'Saved answer\nSecond line'
+        assert other.locator('#chat-input').input_value() == 'Unsent draft'
+        shot(other, f'phone-authors-failed-{ui["engine"]}')
+        other.route('**/api/chat/history**', lambda route: route.fulfill(json=initial))
+        other.get_by_role('button', name='Retry loading messages').click()
+        other.locator('#chat-messages[data-history-hydrated="true"]').wait_for()
+        assert other.locator('[data-saved-preview]').count() == 0
+        assert other.locator('#chat-messages .chat-bubble .sender').all_text_contents() == expected
+        shot(other, f'phone-authors-reconciled-{ui["engine"]}')
+        context.close(); page.close()
+        return
     if mode == 'reference':
         pending.pop(0).fulfill(status=500, json={'error': 'Controlled history failure'})
         other.get_by_role('button', name='Retry loading messages').wait_for()
@@ -139,7 +167,7 @@ def test_new_document_shows_saved_text_before_history_and_reconciles(shell_ui, m
         return
     if mode == 'selected-empty':
         other.evaluate("""() => {
-            const text = document.querySelector('[data-saved-preview] .chat-text');
+            const text = document.querySelector('[data-saved-preview] .message');
             const range = document.createRange(); range.selectNodeContents(text);
             getSelection().removeAllRanges(); getSelection().addRange(range);
         }""")

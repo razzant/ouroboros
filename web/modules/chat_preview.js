@@ -10,7 +10,7 @@ export function clearChatPreviews(storage) {
     try { (storage || globalThis.localStorage)?.removeItem(PREVIEW_KEY); } catch { /* storage unavailable */ }
 }
 
-export function createChatPreview({ feed, room, scope = '', mutate, storage = () => globalThis.localStorage }) {
+export function createChatPreview({ feed, room, scope = '', labelForRow, mutate, storage = () => globalThis.localStorage }) {
     const key = JSON.stringify([scope, room]);
     let root = null, disposed = false;
     const read = () => {
@@ -18,7 +18,7 @@ export function createChatPreview({ feed, room, scope = '', mutate, storage = ()
             const raw = storage()?.getItem(PREVIEW_KEY);
             if (!raw || raw.length > MAX_CHARS) return [];
             const data = JSON.parse(raw);
-            return data?.v === 1 && Array.isArray(data.rooms) ? data.rooms : [];
+            return data?.v === 2 && Array.isArray(data.rooms) ? data.rooms : [];
         } catch { return []; }
     };
     const remove = () => { root?.remove(); root = null; };
@@ -47,7 +47,7 @@ export function createChatPreview({ feed, room, scope = '', mutate, storage = ()
             const rows = read().find(entry => entry?.key === key)?.rows;
             if (!Array.isArray(rows) || rows.length > MAX_ROWS || !rows.length) return false;
             if (rows.some(row => !['user', 'assistant', 'system'].includes(row?.role)
-                || typeof row.text !== 'string' || typeof row.id !== 'string')) return false;
+                || typeof row.text !== 'string' || typeof row.id !== 'string' || typeof row.speaker !== 'string')) return false;
             const doc = feed.ownerDocument;
             root = doc.createElement('div');
             root.className = 'chat-saved-preview';
@@ -63,10 +63,10 @@ export function createChatPreview({ feed, room, scope = '', mutate, storage = ()
                 // delivered/read fact (the preview owns no pager or receipt state).
                 bubble.dataset.previewHistoryId = row.id;
                 const name = doc.createElement('div');
-                name.className = 'chat-sender';
-                name.textContent = row.role === 'user' ? 'You' : row.role === 'assistant' ? 'Ouroboros' : 'System';
+                name.className = 'sender';
+                name.textContent = row.speaker;
                 const text = doc.createElement('div');
-                text.className = 'chat-text';
+                text.className = 'message';
                 text.textContent = row.text;
                 bubble.append(name, text);
                 root.append(bubble);
@@ -80,10 +80,12 @@ export function createChatPreview({ feed, room, scope = '', mutate, storage = ()
             const rows = data.messages.filter(row => row.history_id && typeof row.text === 'string' && row.text
                 && ['user', 'assistant', 'system'].includes(row.role) && !row.is_progress
                 && !['task_evidence', 'task_summary', 'quiz', 'card'].includes(row.system_type))
-                .slice(-MAX_ROWS).map(row => ({ id: row.history_id, role: row.role, text: row.text }));
+                .slice(-MAX_ROWS).map(row => ({ id: row.history_id, role: row.role, text: row.text,
+                    // Freeze the canonical presentation, not its source/session or controls.
+                    speaker: labelForRow(row) }));
             let rooms = [{ key, rows }, ...read().filter(entry => entry?.key !== key)].slice(0, MAX_ROOMS);
             // Drop oldest rooms, then oldest rows: never cut a person's text.
-            const encode = () => JSON.stringify({ v: 1, rooms });
+            const encode = () => JSON.stringify({ v: 2, rooms });
             while (encode().length > MAX_CHARS && rooms.length > 1) rooms.pop();
             while (encode().length > MAX_CHARS && rows.length) rows.shift();
             try { storage()?.setItem(PREVIEW_KEY, encode()); } catch { /* online chat still works */ }
