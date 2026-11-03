@@ -1392,17 +1392,18 @@ Failed red). The word is the current episode's alone; the line says its reason, 
 what still runs beside it (helpers, external runs, review work beside a task that is not
 running, such as the review a Pause lets finish, a run nobody can confirm); a work card's chip says the same word with the same line
 beside it, and the sidebar's name says both. An outcome stays beside `Finalizing…`; `Paused` stays until Resume, its
-line saying who or what paused it (the owner's press with its time, Ouroboros in its
-own sentence, nobody when a press declared no one);
-`Waiting` says what it waits for and goes on by itself when that happens,
-unless a helper its sleep chose is paused: the line then says so and who resumes
+line saying who or what paused it (the owner's press with its time, Ouroboros, nobody when a press declared no one),
+the words the declaring press recorded following its head verbatim whoever declared it (`You paused it: …`);
+`Waiting` says what it waits for and goes on by itself when that happens (a sleep: the helper it chose by its name,
+else how many, its external run, a reviewer, a message, else the time it chose in the viewer's clock; a record
+that saved no choice reads `until it is woken`), unless a helper its sleep chose is paused: the line then says so and who resumes
 that helper (`… until Ouroboros resumes it` only when this episode may ask for it,
 or `until you resume it` after Panic; a Continue's earlier helper is just
 `paused`), with no new control or turn; helpers an earlier attempt left running
 read as `Working`, with their count; an
 access wait is not an answer wait, and unknown stays unknown. Under the state a
 live work shows its own focus line, what Ouroboros says it is doing (stage ·
-done · left, written by it through `update_focus`), quieter and at most two
+done · left, written by it through `update_focus`), led by the time it wrote it, quieter and at most two
 lines; a work without one shows none, and a finished row drops it.
 The name goes to the work's message wherever
 it lies, finished work included: its card or the owner's message when loaded, else
@@ -1493,6 +1494,11 @@ reviews create child tasks or prove execution.
   unrecorded tree or a cut adopted range reads as not recorded, and a commit the
   task's record does not name reads only as committed, which denies no adoption
   (one the task failed to record stays unnamed here).
+- A merge receipt row in its task's card says the merge's outcome, then its review
+  coverage in one sentence of the same family (`The review passed exactly what
+  merged.`, `This review was for earlier code; it does not cover what merged.`, `No
+  review was declared for this merge.`; `this head` while nothing merged); the
+  coverage codes stay in the receipt, the PR body and the merging agent's result.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -1582,7 +1588,10 @@ Anatomy, top to bottom:
    answerability (a late answer arrives as the owner's message); `You answered` uses the recorded-answer word and mark
    roles: owner blue in dark, the existing meta/ok treatment in light; unknown delivery retains its owner-action mark;
    `Replaced by a newer question` and `Question closed` use the disabled dot; an unreadable source
-   reads `Status unavailable`, never an invented invitation. No answer-deadline
+   reads `Status unavailable`, never an invented invitation. While the asking task is a paused member of its work
+   (the browser's work projection), a waiting question adds `· its work is paused; it reads this after Resume` and a
+   saved answer reads `Answer saved · its work is paused; it reads this after Resume`; a queued or held task keeps the
+   plain words, and nothing resumes it for the owner. No answer-deadline
    countdown: task completion closes its mailbox, not the question's answerability.
    Pressing immediately shows `Sending…` and the brand-marked choice, keeping the
    full form and focus, the head's mark neutral until the answer is confirmed; inert controls are faded in light (in

@@ -181,6 +181,54 @@ def test_a_warm_sleep_names_only_the_helpers_it_chose_that_a_stop_holds_and_who_
     assert ws.roll_up_work("root", [selected], episode={"task_id": "root"})["tails"] == []
 
 
+@pytest.mark.parametrize(("sleep", "text", "wake"), [
+    ({"tasks": ["kid"], "senders": ["kid"]}, "Sleeping until Draft the notes finishes", {"kind": "task", "name": "Draft the notes"}),
+    ({"tasks": ["gone"]}, "Sleeping until the task it chose finishes", {"kind": "tasks", "count": 1}),
+    ({"tasks": ["kid", "gone", "x"]}, "Sleeping until one of 3 tasks finishes", {"kind": "tasks", "count": 3}),
+    ({"tasks": ["kid", "x"], "task_wait": {"mode": "all_terminal"}}, "Sleeping until all 2 tasks it chose finish",
+     {"kind": "all_tasks", "count": 2}),
+    ({"runs": ["r1"]}, "Sleeping until its external run finishes", {"kind": "runs", "count": 1}),
+    ({"services": [{"name": "preview"}]}, "Sleeping until a service it started stops", {"kind": "service"}),
+    ({"reviewer_slots": ["s1"], "any_mail": False}, "Sleeping until a reviewer answers", {"kind": "reviewer"}),
+    ({"senders": ["kid"]}, "Sleeping until a message arrives", {"kind": "mail"}),
+    ({"any_mail": True}, "Sleeping until a message arrives", {"kind": "mail"}),
+    ({"wake_at": "2026-11-03T18:05:00+00:00", "any_mail": True}, "Sleeping until 2026-11-03T18:05:00+00:00",
+     {"kind": "time", "at": "2026-11-03T18:05:00+00:00"}),
+    # A chosen source is what it waits for; its time is only the bound beside it.
+    ({"tasks": ["kid"], "wake_at": "2026-11-03T18:05:00+00:00"}, "Sleeping until Draft the notes finishes",
+     {"kind": "task", "name": "Draft the notes"}),
+    ({"mode": "warm"}, "Sleeping until it is woken", None),
+])
+def test_a_sleep_says_what_it_chose_to_wait_for(sleep, text, wake):
+    names = {"kid": "Draft the notes", "x": ""}
+    warm = ws.classify_member(row("root"), {"running": True, "owner_wait": {
+        "state": "waiting", "reason": "sleep", "task_attempt": 1, "sleep": {"mode": "warm", **sleep}}}, names)
+    cold = ws.classify_member(row("root", "budget_paused", pause_cause="sleep"),
+                              {"_budget_pause": {"reason": "sleep", "sleep": {"mode": "cold", **sleep}}}, names)
+    for state in (warm, cold):
+        (said,) = state["reasons"]
+        assert (said["code"], said["text"], said.get("wake")) == ("sleeping", text, wake)
+        assert "gone" not in said["text"] and "kid" not in said["text"], "a task is never named by its id"
+    assert warm["activity"] == cold["activity"] == "waiting"
+
+
+def test_the_projection_names_a_sleeps_helper_from_its_own_census_row():
+    """No stored result is read here (``work_fields`` answers none): the name is the census row's own."""
+    from tests._work_projection_shared import work_fields
+
+    sleep = {"mode": "warm", "tasks": ["kid"], "senders": ["kid"]}
+    owners = [row("root"), row("kid", parent_task_id="root", root_task_id="root")]
+    raw = {"root": {"running": True, "owner_wait": {"state": "waiting", "reason": "sleep", "task_attempt": 1,
+                                                    "sleep": sleep}},
+           "kid": {"running": True, "suggested_name": "Continue: Draft the notes"}}
+    (work,) = work_fields(owners, raw)["works"]
+    assert work["because"] == [{"code": "sleeping", "text": "Sleeping until Draft the notes finishes",
+                                "wake": {"kind": "task", "name": "Draft the notes"}}]
+    # A helper the census does not hold is counted, never named by its id.
+    (work,) = work_fields(owners[:1], {"root": raw["root"]})["works"]
+    assert work["because"][0]["text"] == "Sleeping until the task it chose finishes"
+
+
 def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
     owner = {"pause_by": {"actor": "owner"}}
     member = lambda task_id, **raw: ws.classify_member(  # noqa: E731

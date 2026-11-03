@@ -10,12 +10,20 @@
  * @property {Array<string>=} ids
  * @property {*=} since
  * @property {PauseAuthor=} by  // the declared author of a decided Pause
+ * @property {SleepWake=} wake  // what a `sleeping` reason waits for
  */
 /**
  * @typedef {Object} PauseAuthor
  * @property {string} actor  // owner | ouroboros
- * @property {string} text  // Ouroboros's own sentence; '' for the owner's press
+ * @property {string} text  // the words the press recorded, said verbatim; '' for a press without words
  * @property {*} at  // the press time
+ */
+/**
+ * @typedef {Object} SleepWake
+ * @property {string} kind  // task | tasks | all_tasks | runs | service | reviewer | mail | time
+ * @property {string=} name  // a chosen task's work name, as the census holds it
+ * @property {number=} count
+ * @property {string=} at  // the chosen wake instant, said in the viewer's clock
  */
 /**
  * @typedef {Object} WorkTail

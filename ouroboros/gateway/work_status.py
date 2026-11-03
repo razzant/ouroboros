@@ -76,16 +76,60 @@ _TURN_STEPS = ("admitted", "started", "context_building", "context_built")
 _CALL_STEPS = ("requested", "dispatched")  # its Main call started (supervisor.active_activity.CALL_PHASES)
 
 
-def reason(code: str, *, count: Optional[int] = None, ids: Iterable[str] = (), since: Any = None,
-           raw: str = "") -> Dict[str, Any]:
+# What a sleep waits for, one sentence per kind of its own selection (``model_sleep.selectors``): the first kind it
+# chose in this order, its chosen time only when it chose nothing else; a record that saved no selection keeps
+# STOP_TEXT's "until it is woken". Browser twin: work_status.js SLEEP_TEXT (the web fixture pins both).
+SLEEP_TEXT = {
+    "task": "Sleeping until {name} finishes",
+    "tasks": ("Sleeping until the task it chose finishes", "Sleeping until one of {count} tasks finishes"),
+    "all_tasks": "Sleeping until all {count} tasks it chose finish",
+    "runs": ("Sleeping until its external run finishes", "Sleeping until one of {count} external runs finishes"),
+    "service": "Sleeping until a service it started stops",
+    "reviewer": "Sleeping until a reviewer answers",
+    "mail": "Sleeping until a message arrives",
+    "time": "Sleeping until {time}",
+}
+
+
+def sleep_wake(sleep: Any, names: Mapping[str, str]) -> Optional[Dict[str, Any]]:
+    """The one clause a saved sleep is said by: ``{kind, name|count|at}``, or None when it saved no selection.
+
+    A chosen task is named only by the census row the projection already holds (``names``), never by its id; one
+    it cannot name, or several, read as a count. A sender is mail from that task."""
+    sleep = sleep if isinstance(sleep, Mapping) else {}
+    tasks = [str(task) for task in sleep.get("tasks") or () if task]
+    if len(tasks) > 1 and (sleep.get("task_wait") or {}).get("mode") == "all_terminal":
+        return {"kind": "all_tasks", "count": len(tasks)}
+    if tasks:
+        name = names.get(tasks[0]) if len(tasks) == 1 else ""
+        return {"kind": "task", "name": name} if name else {"kind": "tasks", "count": len(tasks)}
+    for key, kind in (("runs", "runs"), ("services", "service"), ("reviewer_slots", "reviewer"), ("senders", "mail")):
+        if sleep.get(key):
+            return {"kind": kind, "count": len(sleep["runs"])} if kind == "runs" else {"kind": kind}
+    if sleep.get("wake_at"):
+        return {"kind": "time", "at": str(sleep["wake_at"])}
+    return {"kind": "mail"} if sleep.get("any_mail") is True else None
+
+
+def sleep_reason(sleep: Any, names: Mapping[str, str], **base: Any) -> Dict[str, Any]:
+    """The ``sleeping`` reason saying what this sleep waits for (``wake``), its time as the instant it was given."""
+    entry = {**reason("sleeping"), **base}
+    wake = sleep_wake(sleep, names)
+    if wake:
+        phrase = SLEEP_TEXT[wake["kind"]]
+        if isinstance(phrase, tuple):
+            phrase = phrase[0] if wake["count"] == 1 else phrase[1]
+        entry.update(text=phrase.format(name=wake.get("name"), count=wake.get("count"), time=wake.get("at")), wake=wake)
+    return entry
+
+
+def reason(code: str, *, count: Optional[int] = None, ids: Iterable[str] = (), since: Any = None) -> Dict[str, Any]:
     """One typed reason with its English sentence; an unknown code keeps its raw text."""
     phrase = REASON_TEXT.get(code)
     if isinstance(phrase, tuple):
         text = phrase[0] if count == 1 else phrase[1].format(count=count)
     else:
         text = phrase if phrase is not None else code
-    if code == "held" and raw:
-        text = f"Held: {raw}"
     row: Dict[str, Any] = {"code": code, "text": text}
     if count is not None:
         row["count"] = count
@@ -146,17 +190,19 @@ def _call(row: Mapping[str, Any]) -> str:
     return "working"
 
 
-def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = None,
+                    names: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Classify one census row (``decision_owners`` shape) with the raw facts the census drops.
 
     ``raw`` carries the queue row's hold and pause records, the declared author of the tree's Pause
     (``pause_by``, ``control_actor.pause_author``), the members that Pause already parked and the task's
     own identity facts (see ``work_projection``), ``running`` when the queue runs it, its current worker ``owner_wait``,
     ``sent_review`` while a review it sent from a warm park still runs, and ``cancel_pending`` while a live inline
-    turn's recorded Stop waits for its next stop check. Returns the member's
+    turn's recorded Stop waits for its next stop check; ``names`` are the census rows' work names, which a sleep
+    says what it waits for by (``sleep_reason``). Returns the member's
     own state only; ``live`` says whether the member itself executes now: under a settling Pause only a running
     member the Pause has not parked does, never a queued one or one that already saved its place."""
-    raw = raw or {}
+    raw, names = raw or {}, names or {}
     task_id = str(row.get("activity_id") or "")
     phase = str(row.get("phase") or "unknown")
     state: Dict[str, Any] = {"task_id": task_id, "activity": "unknown", "transition": "none", "call": "",
@@ -167,11 +213,13 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
     if phase in {"budget_paused", "budget_pausing"}:
         view = activity_stop_view(dict(row), dict(raw))
         state["stop"], state["refusal"] = view["stop"], view["refusal"]
-        state["reasons"].append(view["reason"])
+        point = raw["_budget_pause"] if view["waiting"] and isinstance(raw.get("_budget_pause"), Mapping) else None
+        state["reasons"].append(sleep_reason((point or {}).get("sleep"), names, **view["reason"])
+                                if view["reason"]["code"] == "sleeping" else view["reason"])
         state["resumable"] = view["resumable"]
         state["activity"] = "waiting" if view["waiting"] else "paused"
-        if view["waiting"] and isinstance(raw.get("_budget_pause"), Mapping):
-            state["waits_on"] = _waits_on(raw["_budget_pause"].get("sleep"))
+        if point is not None:
+            state["waits_on"] = _waits_on(point.get("sleep"))
         # Which episodes may ask for its release (internal: ``awaited_tails`` names no releaser for another).
         state["door_holders"] = sorted(door_holders({"id": task_id, **{key: row.get(key) or raw.get(key)
                                                                       for key in ("root_task_id", "parent_task_id")}}))
@@ -205,7 +253,7 @@ def classify_member(row: Mapping[str, Any], raw: Optional[Mapping[str, Any]] = N
             and waiting.get("task_attempt") == int(row.get("task_attempt") or 1) \
             and isinstance(waiting.get("sleep"), dict) and waiting["sleep"].get("mode") == "warm":
         state["activity"] = "waiting"
-        state["reasons"].append(reason("sleeping"))
+        state["reasons"].append(sleep_reason(waiting["sleep"], names))
         state["waits_on"] = _waits_on(waiting["sleep"])
         return state
     waits = _current_waits(row)

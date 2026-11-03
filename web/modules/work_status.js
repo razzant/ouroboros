@@ -114,6 +114,21 @@ const COUNTED_REASONS = {
         : fmt('{count} helpers it waits for are paused', { count: n, n })),
 };
 
+// What a sleep waits for, by the kind the server named (gateway/work_status.py SLEEP_TEXT; the web fixture pins both):
+// a task's name stays as written, a count stays a parameter and a chosen time reads in the viewer's clock.
+const SLEEP_TEXT = {
+    task: ({ name }) => fmt('Sleeping until {name} finishes', { name }),
+    tasks: ({ count: n }) => (n === 1 ? tr('work.sleep.task', 'Sleeping until the task it chose finishes')
+        : fmt('Sleeping until one of {count} tasks finishes', { count: n, n })),
+    all_tasks: ({ count: n }) => fmt('Sleeping until all {count} tasks it chose finish', { count: n, n }),
+    runs: ({ count: n }) => (n === 1 ? tr('work.sleep.run', 'Sleeping until its external run finishes')
+        : fmt('Sleeping until one of {count} external runs finishes', { count: n, n })),
+    service: () => tr('work.sleep.service', 'Sleeping until a service it started stops'),
+    reviewer: () => tr('work.sleep.reviewer', 'Sleeping until a reviewer answers'),
+    mail: () => tr('work.sleep.mail', 'Sleeping until a message arrives'),
+    time: ({ at }) => (clock(at) ? fmt('Sleeping until {time}', { time: clock(at) }) : ''),
+};
+
 // Helpers and external runs still working side by side are said in one sentence, so the line never says it twice.
 function tailWords(tails) {
     const counted = (code) => tails.find((tail) => tail?.code === code && Number.isInteger(tail.count));
@@ -131,15 +146,17 @@ function tailWords(tails) {
 
 /** One reason in the owner's words: the server's code read through the catalog, its sentence as the English (a
  *  code this client has never seen still reads its sentence). A count stays a parameter of its template; a counted
- *  code this client does not know keeps the server's sentence as it is. An empty sentence (a Pause that declared
- *  nobody) says nothing, and Ouroboros's own sentence is its prose: only the frame around it is translated. */
+ *  code this client does not know keeps the server's sentence as it is; a sleep says what it waits for. An empty
+ *  sentence (a Pause that declared nobody) says nothing, and the words a Pause recorded are its author's, whoever
+ *  declared it: only the frame before them is translated. */
 export function reasonText(reason) {
     if (!reason || typeof reason !== 'object') return '';
     const code = String(reason.code || '');
     const text = typeof reason.text === 'string' ? reason.text : code;
     if (!code || !text) return text;
     if (Number.isInteger(reason.count)) return COUNTED_REASONS[code] ? COUNTED_REASONS[code](reason.count) : text;
-    if (code === 'paused_by_mind' && reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
+    if (reason.by?.text) return `${tr(`work.because.${code}`, text)}: ${String(reason.by.text)}`;
+    if (code === 'sleeping' && Object.hasOwn(SLEEP_TEXT, reason.wake?.kind)) return SLEEP_TEXT[reason.wake.kind](reason.wake) || text;
     return tr(`work.because.${code}`, text);
 }
 
@@ -250,8 +267,10 @@ export function workRowView(work = {}, { stopping = '' } = {}) {
         : !work.confirmed || work.activity === 'unknown' ? 'unknown'
             : work.activity === 'waiting' && asked(work) ? 'wait'
                 : work.activity === 'working' && !pausing ? 'live' : work.activity === 'queued' ? 'queued' : 'held';
-    // The work's own focus line: what its author says it is doing, under the state (update_focus).
-    const focus = String(work.focus?.text || '').trim();
+    // The work's own focus line: what its author says it is doing, under the state (update_focus), led by the time it
+    // wrote it in the viewer's clock (a line without its time says none).
+    const text = String(work.focus?.text || '').trim();
+    const focus = text ? [clock(work.focus.at), text].filter(Boolean).join(' · ') : '';
     return { word, secondary, tone, mark: String(work.mark || 'none'), owner, outcome: outcome?.phase || '', focus };
 }
 
@@ -327,6 +346,14 @@ export function workOfEpisode(data, taskId) {
     const id = String(taskId || '');
     return list(data?.works).find((work) => work?.confirmed !== false && work.episode?.live
         && String(work.episode.task_id || '') === id) || null;
+}
+
+/** Whether the confirmed work holding `taskId` as a member, in any room, has it paused (its own server state): what
+ *  such a task is sent waits for its Resume. */
+export function memberPaused(state, taskId) {
+    const id = String(taskId || '');
+    return [...(state?.episodes?.values?.() || [])].some((work) => work?.confirmed !== false
+        && work.members?.states?.[id]?.activity === 'paused');
 }
 
 /** The server's state for an individual member, without interpreting queue carriers in the browser. */

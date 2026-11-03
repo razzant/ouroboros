@@ -179,6 +179,11 @@ def test_owner_pause_words_name_its_declared_author_and_never_default_to_the_own
     assert text({"reason": "owner", "by": {"actor": "ouroboros", "text": " "}}) == "Ouroboros paused this task." + tail
     assert text({"reason": "owner", "by": {"actor": "ouroboros", "text": "Is the update done?"}}) == (
         "Ouroboros paused this task: Is the update done?" + tail)
+    # An agent's press declared for the owner keeps its head and says the words it recorded, on one line; the owner's
+    # own button records none and reads as before.
+    assert text({"reason": "owner", "by": {"actor": "owner", "text": "Anton asked to stop\n  the export run"}}) == (
+        "You paused this task: Anton asked to stop the export run." + tail)
+    assert "on your behalf" not in text({"reason": "owner", "by": {"actor": "owner", "text": "Anton asked"}}).lower()
     # The budget sentence is unchanged and never borrows an author.
     assert text({"reason": "budget", "by": {"actor": "owner"}}) == (
         "The task paused because of its budget limit. Its work is retained. Use Resume on the task when available.")

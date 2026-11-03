@@ -42,3 +42,21 @@ test('waiting needs positive evidence and a closed bound ends it', () => {
     assert.deepEqual(waitFacts({ owner_wait_state: 'waiting' }), { waiting: true, resumed: false });
     assert.deepEqual(waitFacts({}), { waiting: false, resumed: false });
 });
+
+test('a question whose task is a paused member of its work says that its answer waits for Resume', () => {
+    const waiting = { state: 'open', owner_wait_state: 'waiting' };
+    const saved = { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'awaiting_recipient_read' } };
+    assert.equal(questionPresentation(waiting, { paused: true }).status,
+        'Waiting for your answer · its work is paused; it reads this after Resume');
+    assert.equal(questionPresentation(saved, { paused: true }).status,
+        'Answer saved · its work is paused; it reads this after Resume');
+    // After its Resume (or never paused) the plain words return; a queued or held recipient keeps them too.
+    assert.equal(questionPresentation(waiting).status, 'Waiting for your answer');
+    assert.equal(questionPresentation(saved, { paused: false }).status, 'Answer saved · the task reads it when it continues');
+    // The fact changes no other lifecycle word and never the head's mark.
+    for (const row of [{ state: 'open' }, { quiz_state: 'answered' }, { quiz_state: 'closed' }, { state: 'expired_terminal' },
+        { quiz_state: 'answered', question_delivery: { state: 'owed', reason_code: 'late_answer_delivery_unknown' } }]) {
+        assert.equal(questionPresentation(row, { paused: true }).status, questionPresentation(row).status, JSON.stringify(row));
+    }
+    assert.deepEqual(questionMark(waiting), { shape: 'dot', hue: 'owner' });
+});
