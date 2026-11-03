@@ -325,7 +325,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "main_visible_revision": main_visible_revision,
         "task_bindings": task_bindings,
         "task_bindings_revision": revision if bindings_complete else "",
-        "active_direct_turns": direct_turns,
+        # A carried Presence turn is a census row of its own kind (CLIENT_CONTRACT), never the owner's direct turn.
+        "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,
         "active_chat_activities_complete": activity_availability["complete"],
         **decisions,
@@ -529,8 +530,8 @@ def _raw_work_facts(row: dict) -> dict:
     metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
     continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
     facts = {key: row[key] for key in ("_budget_pause_hold", "_budget_pause", "title", "suggested_name", "focus",
-                                        "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait")
-             if row.get(key)}
+                                        "root_task_id", "parent_task_id", "original_task_id", "budget_drive_root", "owner_wait",
+                                        "_presence_turn") if row.get(key)}
     edges = {key: continuation[key] for key in ("predecessor_task_id", "work_id", "work_name") if continuation.get(key)}
     return {**facts, **({"continuation": edges} if edges else {})}
 
@@ -640,6 +641,36 @@ def _presence_turns_snapshot_safe(drive_root: Any, *, availability=None, listed=
     return rows
 
 
+def _moved_text_pausable(bindings: dict, task_id: Any, *, started: bool, executor: str = "", metadata: Any = None) -> bool:
+    """A moved text Presence turn takes its Project's lifecycle (#2566): started (its stack is what Pause and Restart
+    save), bound to a Project it was not born in, never a live call (its ``inline_call`` carrier or its
+    ``execution_transport``). The work's own fact, through a warm Pause too; ``work_status.controls_for`` gates each action."""
+    from ouroboros.task_carrier import EXECUTOR_INLINE_CALL
+
+    binding = bindings.get(task_id) if isinstance(bindings.get(task_id), dict) else {}
+    transport = metadata.get("execution_transport") if isinstance(metadata, dict) else None
+    return bool(started and binding.get("project_id") and not binding.get("origin_bound")
+                and executor != EXECUTOR_INLINE_CALL and transport is None)
+
+
+def _mark_carried_presence(drive_root: Any, activities: list, bindings: dict, work_facts: Any, owners_only: bool) -> None:
+    """Every Presence activity the conversation lane carries (its lane row among the direct rows): that RUNNING row is
+    the Stop door's target from admission (``cancelable``), its work says a recorded Stop until the Stop takes it
+    (``cancel_pending``), as an in-process author's does, and a moved text turn says so (``presence_pause``)."""
+    from ouroboros.cancel_intents import cancel_pending
+
+    for activity in activities:
+        if activity.get("kind") != "presence":
+            continue
+        task_id = str(activity.get("activity_id") or "")
+        activity["cancelable"] = True
+        if _moved_text_pausable(bindings, task_id, started=activity.get("phase") != "preparing",
+                                executor=str(activity.get("executor") or "")):
+            activity["presence_pause"] = True
+        if work_facts is not None and not owners_only:
+            work_facts[task_id] = {"running": True, "cancel_pending": bool(cancel_pending(drive_root, task_id))}
+
+
 def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_rows, fence_rows,
                               running_rows, late_owners, availability, decision_owners, owners_only,
                               question_details=True, work_facts=None, presence_rows=()) -> list:
@@ -666,6 +697,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                   for row in direct_rows]
     census_ids = {row.get("activity_id") for row in activities}
     bindings = task_bindings if isinstance(task_bindings, dict) else {}
+    _mark_carried_presence(drive_root, activities, bindings, work_facts, owners_only)
     try:
         from ouroboros.task_results import resolve_task_lineage
 
@@ -707,7 +739,8 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                 "chat_id": int(row.get("chat_id") or 0),
                 "project_id": str(row.get("project_id") or ""),
                 "client_message_id": "",
-                "kind": "direct_chat" if row.get("_is_direct_chat") else "managed_task",
+                # A moved Presence turn's saved work is the queue's, never a direct owner chat (its origin flag stays).
+                "kind": "direct_chat" if row.get("_is_direct_chat") and not row.get("_presence_turn") else "managed_task",
                 "phase": phase,
                 # Cancel stops a lineage-resolved root (``ChatOutbound.cancelable``); Resume is the
                 # parked row's own release rule (``work_stop.current_stop``).
@@ -788,9 +821,10 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             if task_id not in census_ids:
                 census_ids.add(task_id)
                 started = bool(row.get("execution_owner"))
+                pausable = _moved_text_pausable(bindings, task_id, started=started, metadata=row.get("metadata"))
                 activities.append({**_activity(task_id, row, "working" if started else "preparing",
                                                _epoch_or_zero(row.get("started_at"))),
-                                   "kind": "presence", "cancelable": started})
+                                   "kind": "presence", "cancelable": started, **({"presence_pause": True} if pausable else {})})
                 if work_facts is not None:
                     from ouroboros.cancel_intents import cancel_pending
 

@@ -254,7 +254,8 @@ _RUNNING_PHASES = {"working", "thinking", "preparing", "finalizing"}
 
 
 def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Mapping[str, Any]], *,
-                 earlier_live: Iterable[str] = (), live_roots: Iterable[str] = ()) -> List[Dict[str, Any]]:
+                 earlier_live: Iterable[str] = (), live_roots: Iterable[str] = (),
+                 presence_turn: bool = False) -> List[Dict[str, Any]]:
     """The actions the work's doors accept for its present state, each on its exact target.
 
     ``current``/``current_row`` are the live current episode's classified state and census row (None when the
@@ -263,16 +264,18 @@ def controls_for(current: Optional[Mapping[str, Any]], current_row: Optional[Map
     earlier = [str(task_id) for task_id in earlier_live if task_id]
     roots = [str(task_id) for task_id in live_roots if task_id]
     controls: List[Dict[str, Any]] = []
-    # A live inline Presence turn's only door is Stop (#2012): Pause, Hurry and Wrap up have none for it yet, and
-    # before its first durable write (``cancelable`` False) Stop has no row to reach: that door refuses the id.
+    # A live inline Presence turn's doors are Stop (#2012) and, once moved to a Project as text (``presence_pause``),
+    # Pause while it works and Resume while it is paused (#2566); Hurry and Wrap up have none for it, nor for its saved
+    # work (``presence_turn``). Before its first durable write (``cancelable`` False) no door has a row to reach.
     presence = current_row is not None and current_row.get("kind") == "presence"
-    if current is not None and current_row is not None and not presence:
+    if current is not None and current_row is not None and (not presence or current_row.get("presence_pause")):
         target = str(current.get("task_id") or "")
         phase = str(current_row.get("phase") or "")
         codes = {entry.get("code") for entry in current.get("reasons") or ()}
         # A live root, managed or a direct turn, and an answered root's upkeep: the hurry, stop and Pause doors
         # take them all; the Pause ends that upkeep at once. A warm sleep keeps both: either control wakes it.
-        if ((current["activity"] == "working" and current.get("transition") in {"none", "finalizing"})
+        if not (presence or presence_turn) and (
+                (current["activity"] == "working" and current.get("transition") in {"none", "finalizing"})
                 or (current["activity"] == "waiting" and "sleeping" in codes)) and phase in _RUNNING_PHASES:
             controls += [{"action": "wrap_up", "target": target}, {"action": "hurry", "target": target}]
         # A Pause still settling keeps its Pause: the door coalesces a repeat, which retries an uncertain reply.

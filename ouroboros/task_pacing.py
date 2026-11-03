@@ -485,9 +485,13 @@ def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
     except Exception:
         log.debug("Usage scope or group cap projection unavailable for cost ceiling resolution", exc_info=True)
     profile = resolve_budget_profile(ctx)
+    # The owner's own Resume moved this Presence turn off its producer allowance (#2566): its live stack's scope
+    # may still carry the number, the record its metadata keeps decides.
+    metadata = getattr(ctx, "task_metadata", None)
+    lifted = isinstance(metadata, dict) and isinstance(metadata.get("producer_allowance_lifted"), dict)
     if profile.get("cost_hard_stop_pct") is not None:
         authority = COST_STOP_EXPLICIT
-    elif _positive(root_ceiling) is None:
+    elif _positive(root_ceiling) is None or lifted:
         authority, root_ceiling = COST_STOP_NONE, None
     elif not non_root_member:
         authority = COST_STOP_PRODUCER
@@ -499,7 +503,7 @@ def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
         elif authority != COST_STOP_UNKNOWN:
             root_ceiling = value
     return {"authority": authority, "profile": profile, "root_cap_usd": root_cap,
-            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling}
+            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling, "producer_allowance_lifted": lifted}
 
 
 def _resolve_from_inputs(inputs: Dict[str, Any], budget_remaining_usd: Optional[float]) -> CostCeiling:
@@ -579,7 +583,9 @@ def restore_cost_ceiling(ctx: Any, saved: Any) -> Optional[CostCeiling]:
     if (restored.state == COST_CEILING_DISABLED and previous is not None
             and previous.state in {COST_CEILING_ACTIVE, COST_CEILING_EXHAUSTED_SOFT_LAND}):
         removed = "soft_land" if previous.ceiling_usd is None else f"${float(previous.ceiling_usd):.2f}"
-        restored = replace(restored, basis=f"{restored.basis}(saved default stop {removed} removed)")
+        what = ("producer allowance {} lifted by the owner's Resume" if inputs.get("producer_allowance_lifted")
+                else "default stop {} removed")
+        restored = replace(restored, basis=f"{restored.basis}(saved {what.format(removed)})")
     return restored
 
 

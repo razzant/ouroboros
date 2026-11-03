@@ -733,6 +733,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     late_work: NotRequired[Dict[str, Any]]  # answered root whose late work remains: title, answered_at; display only
     can_resume: NotRequired[bool]
     cancelable: NotRequired[bool]
+    presence_pause: NotRequired[bool]  # a live Presence turn moved to a Project as text (never a live call): Pause saves it, Restart returns it
 
 class EffortRange(TypedDict):  # helper min ≤ max; primary recommended is independent
     min: str

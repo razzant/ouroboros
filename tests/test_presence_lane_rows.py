@@ -258,6 +258,53 @@ def test_boot_restore_fences_an_unrecovered_owner_row_never_a_presence_turn(root
     assert (task["id"] in active_intents(root, strict=True)) is fenced
 
 
+def test_a_moved_turns_saved_work_takes_every_stop_door_as_its_projects_work(root, monkeypatch):
+    """#2566 S2 beside the two tests above (their negative controls): once the owner moved the turn to a Project as
+    text, its saved stack is that Project's work, so the same doors return, retain, hold, address and wait for it
+    as they do the owner's turn, and the boot fence settles it when nothing returned it. The predicate is read at
+    each door, never at the turn's start: the move happens while it runs."""
+    import copy
+    from types import SimpleNamespace
+
+    from ouroboros import server_restart
+    from ouroboros.cancel_intents import active_intents
+    from ouroboros.queue_observation import load_queue_document
+    from supervisor import workers
+    from supervisor.queue_snapshot import _fence_snapshot_running_rows
+    from supervisor.restart_retention import prepare_restart_returns, recover_saved_running, retain_saved_running
+    from tests.test_presence_project_activity import _move
+
+    monkeypatch.setattr(server_restart, "DATA_DIR", root)
+    seen = {}
+
+    def scenario(author, task):
+        tid = seen["tid"] = task["id"]
+        _admit_lane_row(task)
+        ctx = SimpleNamespace(RUNNING=workers.RUNNING, PENDING=workers.PENDING)
+        _checkpoint(root, tid)
+        seen["before"] = (retain_saved_running(copy.deepcopy(dict(workers.RUNNING)), (), root),
+                          server_restart._owned_live_task_ids(ctx))
+        _move(root, tid, PROJECT)
+        seen["returns"] = prepare_restart_returns(root, dict(workers.RUNNING), [], transaction_id="tx-moved")
+        seen["retained"] = retain_saved_running(copy.deepcopy(dict(workers.RUNNING)), (), root)
+        rows = [copy.deepcopy(next(row for row in load_queue_document(root)["running"] if row["id"] == tid))]
+        seen["auto"] = [t["id"] for t in recover_saved_running(copy.deepcopy(rows), root, cause="owner_restart",
+                                                               transaction={"return_ids": [tid], "task_ids": [tid]})]
+        seen["held"] = [t["id"] for t in recover_saved_running(copy.deepcopy(rows), root, transaction={},
+                                                               cause="app_stop")]
+        seen["owned"] = server_restart._owned_live_task_ids(ctx)
+        seen["drain"] = server_restart._live_running_task_ids(ctx)
+        seen["fenced"] = _fence_snapshot_running_rows(copy.deepcopy(rows), restored_ids=set())
+
+    _live_turn(root, scenario)
+    tid = seen["tid"]
+    assert seen["before"] == ([], [])  # the same turn, unmoved: its place's, at the same doors
+    assert seen["returns"] == {tid} and seen["retained"] == [tid]
+    assert seen["auto"] == [tid] and seen["held"] == [tid]
+    assert tid in seen["owned"] and tid in seen["drain"]
+    assert seen["fenced"] == [tid] and tid in active_intents(root, strict=True)
+
+
 def _hurry_door(root, task_id):
     """The owner's HTTP Hurry door for one id: ``(status, reason_code)``."""
     import asyncio
@@ -278,6 +325,56 @@ def _hurry_door(root, task_id):
                        "app": SimpleNamespace(state=SimpleNamespace(drive_root=root))}, receive)
     response = asyncio.run(api_task_hurry(request))
     return response.status_code, json.loads(response.body).get("reason_code")
+
+
+def test_a_warm_paused_moved_turn_keeps_its_lifecycle_so_activity_offers_resume_and_never_pause(root):
+    """The moved-text lifecycle is the work's, not its working phase's: the warm park's own durable shape leaves the row
+    paused, and each action is gated on its own (Pause only while working, Resume while paused, Stop as before)."""
+    from ouroboros.owner_pause import install_fence, set_fence_state
+    from ouroboros.task_results import write_task_result
+    from tests.test_presence_project_activity import _actions, _row, _state, _work
+
+    found = {}
+
+    def scenario(_author, task):
+        tid = task["id"]
+        _admit_lane_row(task)
+        _move(root, tid, PROJECT)
+        census, works, _complete = _state(root)
+        found["working"] = (_row(census, tid), _work(works, tid))
+        fence, _created = install_fence(root, tid, request_id="warm-ui")
+        set_fence_state(root, tid, fence_id=fence["fence_id"], state="paused")
+        # The durable shape ``checkpoint_owner_wait`` writes for the owner Pause's warm park.
+        write_task_result(root, tid, "running", owner_wait={
+            "state": "waiting", "reason": "owner_pause", "task_attempt": 1,
+            "owner_pause": {"fence_id": fence["fence_id"], "root_task_id": tid}})
+        census, works, complete = _state(root)
+        found["paused"] = (_row(census, tid), _work(works, tid), complete)
+
+    _live_turn(root, scenario)
+    row, work = found["working"]
+    assert row["presence_pause"] is True and _actions(work) == ["pause", "stop"]
+    row, work, complete = found["paused"]
+    assert complete is True and row["phase"] == "budget_paused" and row["presence_pause"] is True
+    assert work["activity"] == "paused" and _actions(work) == ["resume", "stop"]
+    assert all(control["target"] == row["activity_id"] for control in work["controls"])
+
+
+def test_the_moved_lifecycle_flag_needs_a_moved_started_text_turn_whatever_its_phase():
+    from ouroboros.gateway.state import _mark_carried_presence
+    from ouroboros.task_carrier import EXECUTOR_INLINE_CALL
+
+    moved, origin_bound = {"t": {"project_id": "room"}}, {"t": {"project_id": "room", "origin_bound": True}}
+
+    def flagged(phase, bindings=moved, **row):
+        activity = {"activity_id": "t", "kind": "presence", "phase": phase, **row}
+        _mark_carried_presence(None, [activity], bindings, None, True)
+        return activity.get("presence_pause") is True
+
+    assert flagged("working") and flagged("budget_paused")
+    assert not flagged("preparing")  # nothing of it is saved yet: no Pause door and no return through a Restart
+    assert not flagged("budget_paused", origin_bound) and not flagged("working", {})  # never moved
+    assert not flagged("budget_paused", executor=EXECUTOR_INLINE_CALL)  # a live call never takes this lifecycle
 
 
 def test_hurry_of_a_presence_turns_lane_row_refuses_typed_and_seeds_nothing(root, monkeypatch):
@@ -323,3 +420,179 @@ def test_the_owners_running_list_and_count_leave_a_presence_turn_to_its_place(ro
 
     _live_turn(root, scenario)
     assert seen["listed"] == ["owner-turn"] and seen["count"] == 1
+
+
+def test_a_witnessed_carried_authors_stop_is_its_runners_never_a_carrier_kill(root, monkeypatch):
+    """#2012 on the lane (#2654): the Stop of a Presence turn whose author the census witnesses is its runner's,
+    wherever it runs. Custody takes no carrier it holds (``runner_takes_stop``, read before Q), and the author reads
+    that Stop itself though it holds a worker slot (``owner_stop.in_process_stop_now``), so its next stop check ends
+    it; an author the census cannot witness keeps the capture and kill. The custody path end to end (the Stop pending
+    while the held round runs, then the runner's cancelled terminal) is the browser walk's
+    (``test_presence_project_activity_browser``: the unmoved turn and the moved one's step 5)."""
+    from types import SimpleNamespace
+
+    from ouroboros import presence_runner
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import load_task_result
+    from supervisor import cancel_publication, queue as q
+    from supervisor.owner_stop import in_process_stop_now
+
+    seen = {}
+
+    def scenario(author, task):
+        tid = task["id"]
+        _admit_lane_row(task)
+        request_cancel(root, tid, source="http_cascade", requested_stop_policy="immediate")
+        seen["runner_owned"] = cancel_publication.runner_takes_stop(q, tid, load_task_result(root, tid))
+        held = SimpleNamespace(worker_slot_held=True, task_id=tid, canonical_root=root)
+        seen["reads"] = (in_process_stop_now(SimpleNamespace(model_wait_context=SimpleNamespace(
+                             **vars(held), task={"_presence_turn": True}))),
+                         in_process_stop_now(SimpleNamespace(model_wait_context=SimpleNamespace(**vars(held), task={}))))
+        monkeypatch.setattr(presence_runner, "presence_execution_witness", lambda *_a, **_k: None)
+        seen["unwitnessed"] = cancel_publication.runner_takes_stop(q, tid, load_task_result(root, tid))
+
+    _live_turn(root, scenario)
+    assert seen["runner_owned"] is True and seen["unwitnessed"] is False
+    assert seen["reads"] == (True, False)  # a carried author reads its Stop; a pooled worker's Stop stays the kill
+
+
+def test_a_moved_turns_pooled_author_the_census_witnesses_takes_its_stop_on_its_runners_rail(root, monkeypatch):
+    """Review R2 F3 (Grok): a Resume or a restart's return runs a moved text turn's saved work as its author in a
+    pool worker, its row stamped ``pooled``. Once the census witnesses that author, the owner's Stop is its runner's
+    as on the lane (#2012): custody captures and kills no worker and writes nothing, the Stop stays pending
+    (``finish_in_process_turn``) while the author reads it itself, and custody settles it from the author's own
+    terminal. An author not yet witnessed (its carrier has not taken the conversation) and ordinary pooled work keep
+    the capture and kill; a parked turn's saved work keeps the queue's cancel (``test_a_stop_reaches_saved_work_...``
+    in ``test_presence_moved_lifecycle``)."""
+    import os
+    from types import SimpleNamespace
+
+    from ouroboros import presence_runner
+    from ouroboros.cancel_intents import active_intent, request_cancel
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor import cancel_publication, queue as q, task_lifecycle, workers
+    from supervisor.owner_stop import in_process_stop_now, owner_stop_origin
+    from supervisor.worker_assignment import _mirror_assigned_running_status
+    from tests.test_presence_moved_lifecycle import _boot_window_row, _seed_and_built, _slot
+    from tests.test_presence_runner import _event
+
+    captured = []
+    monkeypatch.setattr(task_lifecycle, "_finish_captured_running",
+                        lambda task_id, worker, *_a, **_k: captured.append(task_id) or "cancelled")
+    _seed, built = _seed_and_built(root)
+
+    def running(task_id, wid, task):
+        _mirror_assigned_running_status(task)
+        workers.RUNNING[task_id] = {"task": task, "worker_id": wid, "attempt": 2}
+        request_cancel(root, task_id, source="http_cascade", requested_stop_policy="immediate")
+        return _slot(workers, wid, os.getpid(), task_id, lane="project")
+
+    def continuation(task_id, wid):
+        _boot_window_row(root, task_id, {**built, "id": task_id})
+        return running(task_id, wid, {**built, "id": task_id, "drive_root": str(root), "_attempt": 2,
+                                      "_working_recovery": {"cause": "owner_restart"},
+                                      "metadata": {**built["metadata"], "presence_request_waits": False}})
+
+    # Not witnessed yet: the ordinary capture and kill of its worker.
+    early = built["id"] + "-early"
+    continuation(early, 92)
+    assert cancel_publication.runner_takes_stop(q, early, load_task_result(root, early)) is False
+    task_lifecycle.cancel_task_custody(early)
+    assert captured == [early]
+    # Ordinary pooled work keeps the capture and kill whatever the census says.
+    write_task_result(root, "ordinary-work", "scheduled", result="Task is queued.")  # assignment stamps it pooled
+    running("ordinary-work", 93, {"id": "ordinary-work", "type": "task", "chat_id": 0, "drive_root": str(root),
+                                  "_attempt": 2})
+    with monkeypatch.context() as census:
+        census.setattr(presence_runner, "presence_execution_witness", lambda *_a, **_k: True)
+        ordinary = load_task_result(root, "ordinary-work")
+        assert ordinary["execution_owner"]["kind"] == "pooled"
+        assert cancel_publication.runner_takes_stop(q, "ordinary-work", ordinary) is False
+        task_lifecycle.cancel_task_custody("ordinary-work")
+    assert captured == [early, "ordinary-work"]
+    # The author its carrier bound (``presence_carrier._SavedCarrier.bind``): the census witnesses it.
+    tid = built["id"]
+    slot = continuation(tid, 91)
+    lease, _busy = presence_runner._configured_gate(root).try_admit(_event().conversation_key)
+    lease.bind_author(tid)
+    try:
+        assert cancel_publication.runner_takes_stop(q, tid, load_task_result(root, tid)) is True
+        assert task_lifecycle.cancel_task_custody(tid) == "failed"  # pending, for its runner's next stop check
+        assert captured == [early, "ordinary-work"] and slot.busy_task_id == tid and not slot.reaping
+        assert workers.RUNNING[tid]["worker_id"] == 91 and load_task_result(root, tid)["status"] == "running"
+        intent = active_intent(root, tid)
+        assert intent["state"] == "requested"
+        assert intent["last_error"] == "Presence turn has not reached its next stop check"
+        waiter = SimpleNamespace(worker_slot_held=True, task_id=tid, canonical_root=root, task={"_presence_turn": True})
+        assert in_process_stop_now(SimpleNamespace(model_wait_context=waiter)) is True
+        # Its stop check lands its own cancelled terminal while custody's next pass is under way: that pass settles the
+        # Stop from it (``cancelled`` for this very request), and nothing of custody's is written over it.
+        origin = owner_stop_origin(root, tid)
+        real_read = cancel_publication._load_result_row
+
+        def read_after_terminal(queue_module, task_id):
+            write_task_result(root, tid, "cancelled", result="", cancel_origin=origin)
+            return real_read(queue_module, task_id)
+
+        monkeypatch.setattr(cancel_publication, "_load_result_row", read_after_terminal)
+        assert task_lifecycle.cancel_task_custody(tid) == "cancelled"
+    finally:
+        lease.release()
+    assert captured == [early, "ordinary-work"] and active_intent(root, tid) is None
+    assert load_task_result(root, tid)["cancel_origin"]["request_id"] == origin["request_id"] == intent["request_id"]
+
+
+def test_a_pooled_author_that_leaves_its_census_before_its_terminal_keeps_the_stop_for_the_next_pass(root, monkeypatch):
+    """The race beside the test above: custody read the pooled moved author as witnessed (``runner_takes_stop``), so it
+    captured no worker, and the author left its census before ``finish_in_process_turn`` read it, its row still
+    unsettled (its carrier ended without a terminal). That pass writes nothing and keeps the Stop pending, recorded as
+    what it is, with its claim released; the next pass, the author still absent, takes the ordinary capture and kill."""
+    import os
+
+    from ouroboros import presence_runner
+    from ouroboros.cancel_intents import active_intent, request_cancel
+    from ouroboros.task_results import load_task_result
+    from supervisor import cancel_publication, queue as q, task_lifecycle, workers
+    from supervisor.worker_assignment import _mirror_assigned_running_status
+    from tests.test_presence_moved_lifecycle import _boot_window_row, _seed_and_built, _slot
+    from tests.test_presence_runner import _event
+
+    captured = []
+    monkeypatch.setattr(task_lifecycle, "_finish_captured_running",
+                        lambda task_id, worker, *_a, **_k: captured.append(task_id) or "cancelled")
+    _seed, built = _seed_and_built(root)
+    tid = built["id"]
+    _boot_window_row(root, tid, built)
+    task = {**built, "drive_root": str(root), "_attempt": 2, "_working_recovery": {"cause": "owner_restart"},
+            "metadata": {**built["metadata"], "presence_request_waits": False}}
+    _mirror_assigned_running_status(task)
+    workers.RUNNING[tid] = {"task": task, "worker_id": 91, "attempt": 2}
+    slot = _slot(workers, 91, os.getpid(), tid, lane="project")
+    request_cancel(root, tid, source="http_cascade", requested_stop_policy="immediate")
+    lease, _busy = presence_runner._configured_gate(root).try_admit(_event().conversation_key)
+    lease.bind_author(tid)  # what ``presence_carrier._SavedCarrier.bind`` does once its carrier holds the conversation
+    real_takes_stop = cancel_publication.runner_takes_stop
+    read_before_q = []
+
+    def author_leaves_after_the_read(queue_module, task_id, row):
+        read_before_q.append(real_takes_stop(queue_module, task_id, row))
+        lease.release()  # its carrier ends, no terminal written, before custody's settlement read
+        return read_before_q[-1]
+
+    try:
+        with monkeypatch.context() as race:
+            race.setattr(cancel_publication, "runner_takes_stop", author_leaves_after_the_read)
+            assert task_lifecycle.cancel_task_custody(tid) == "failed"
+    finally:
+        lease.release()
+    assert read_before_q == [True] and captured == [] and not slot.reaping and slot.busy_task_id == tid
+    stored = load_task_result(root, tid)
+    assert stored["status"] == "running" and "cancel_origin" not in stored
+    intent = active_intent(root, tid)
+    assert intent["state"] == "requested" and not intent.get("claim_owner")
+    assert intent["last_error"] == "Presence author no longer witnessed before its terminal"
+    # The next pass, the author still absent: its worker takes the ordinary capture and kill, no Stop stays stuck.
+    assert presence_runner.presence_execution_witness(tid, drive_root=root) is False
+    assert cancel_publication.runner_takes_stop(q, tid, load_task_result(root, tid)) is False
+    task_lifecycle.cancel_task_custody(tid)
+    assert captured == [tid] and slot.reaping

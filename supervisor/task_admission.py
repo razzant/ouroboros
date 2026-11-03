@@ -552,8 +552,8 @@ def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
     New launchers stamp the attempt BEFORE put, including when the RUNNING
     mirror later fails. An old source with no addressed mark proves no such
     protocol; retain it rather than guess. Earlier attempt marks never reset.
-    A direct first launch stores 0 (agent), while its checkpoint names 1
-    (owner_wait). Only that unmarked, owner-bound launch uses the source's 1.
+    A direct or carried Presence first launch stores 0 (agent), while its checkpoint
+    names 1 (owner_wait). Only that unmarked, owner-bound launch uses the source's 1.
     """
     from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED
 
@@ -573,7 +573,7 @@ def _working_attempt_unstarted(task: dict, stored: dict, source: dict) -> bool:
     owner = stored.get("execution_owner")
     if (type(observed) is int and observed == 0 and target == 2 and source.get("task_attempt") == 1
             and "admitted_dispatch_attempt" not in stored and isinstance(owner, dict)
-            and owner.get("kind") == "direct"
+            and owner.get("kind") in {"direct", "presence"}
             and type(owner.get("task_attempt")) is int and owner["task_attempt"] == 0):
         observed = 1
     return ("task_attempt" not in stored

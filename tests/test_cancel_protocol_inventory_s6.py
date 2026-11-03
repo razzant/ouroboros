@@ -114,6 +114,10 @@ TERMINAL_WRITERS = {
     ('ouroboros/mutation_attribution.py::capture_mutation_baseline', 'status'): 'dynamic',
     ('ouroboros/mutation_attribution.py::record_terminal_mutation_candidates', 'status'): 'dynamic',
     ('ouroboros/post_task_checkpoint.py::set_root_post_task_checkpoint', 'str(existing.get("status") or task.get("status") or STATUS_COMPLETED)'): 'terminal',
+    # #2566: a moved Presence turn's saved continuation nothing authorized (a crash retry) ends its attempt before
+    # the attempt leaves RUNNING and its slot: the orphan reconciler's unknown-outcome presence_attempt_lost failure,
+    # and its projector keeps a terminal already there. No answer exists; its task_done follows.
+    ('ouroboros/presence_carrier.py::_end_refused_attempt', 'STATUS_FAILED'): 'terminal',
     # Presence recovery records an observation of an existing unresolved turn.
     # Its field projector preserves CURRENT status, even after a late terminal;
     # the receipt cannot terminalize or regenerate the lost attempt.

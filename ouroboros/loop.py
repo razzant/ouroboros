@@ -476,9 +476,12 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
     pending_no_tool_budget, free_redial)``: a cold owner wait rejoins its tool
     tail; an exact pause, or its Resume handover, its saved budget tail; a
     working checkpoint its tool tail after a batch, else the same logical round
-    (#1563).
+    (#1563). A moved Presence turn's saved work first takes its conversation and slot
+    (``presence_carrier.reenter``), and reads the facts since its park once restored.
     """
-    saved, saved_pause, saved_working = carriers
+    from ouroboros.presence_carrier import reenter
+
+    carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
     if saved:
         resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
     elif saved_pause:
@@ -492,6 +495,8 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
     else:
         resumed = (*route, cost_ceiling, False, False, False)
+    if carried is not None:
+        carried.reentered(tools._ctx, messages)
     from ouroboros.subagent_bootstrap import append_startup_receipt
     append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
     return resumed
@@ -586,8 +591,7 @@ def run_llm_loop(
     )
     _owner_msg_seen: set = set()
     MAX_ROUNDS = _resolve_loop_max_rounds(ctx)
-    round_idx, free_redial = 0, False
-    transport_wait = None
+    round_idx, free_redial, transport_wait = 0, False, None
     limit_ctx: Optional[_RoundLimitContext] = None
     ctx._execution_trace = llm_trace
     try:
@@ -658,6 +662,7 @@ def run_llm_loop(
                 text, accumulated_usage, forced_trace = _early_final
                 _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
+            cost_ceiling = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)  # a warm Resume may lift it (#2566)
 
             if pending_tool_budget:
                 pending_tool_budget = False

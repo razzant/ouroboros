@@ -891,7 +891,8 @@ def _handle_model_wait_control(
     root = ctx.status_drive_root or ctx.drive_root
     intent = active_intent(root, ctx.task_id) if root is not None else None
     hard_stop = isinstance(intent, dict) and stop_policy(intent) == STOP_POLICY_IMMEDIATE
-    if hard_stop and owner is not None and owner.worker_slot_held:
+    from supervisor.owner_stop import runner_reads_stop  # a carried Presence author ends on its own Stop rail (#2012)
+    if hard_stop and owner is not None and owner.worker_slot_held and not runner_reads_stop(owner):
         final = ModelWaitInterrupted("cancelled", role=error.model_role, cause=error)
         final.control_rails_seen = True
         raise final from error

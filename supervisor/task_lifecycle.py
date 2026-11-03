@@ -579,6 +579,8 @@ def cancel_task_custody(
     # landing meanwhile is re-read after the kill (completion wins) or on miss.
     prepared = reads.prepared(task_id)
     settled = settled_status_of(prepared)
+    from supervisor.cancel_publication import runner_takes_stop  # a witnessed Presence author's Stop is its runner's
+    runner_owned = not settled and runner_takes_stop(q, task_id, prepared)
 
     # Read the durable intent BEFORE claiming it. The pre-claim row is what the
     # reaping-takeover gate below judges: a slot already marked ``reaping`` is
@@ -650,7 +652,7 @@ def cancel_task_custody(
                 captured_pending = captured_awaiting["task"] if captured_awaiting else None
         if captured_pending is None:
             for worker in workers.WORKERS.values():
-                if worker.busy_task_id == task_id:
+                if worker.busy_task_id == task_id and not runner_owned:
                     from ouroboros.headless import terminal_task_files_ready
                     bound_task = (q.RUNNING.get(task_id) or {}).get("task") or {"id": task_id}
                     if (settled and not _worker_possibly_alive(worker)
@@ -705,7 +707,8 @@ def cancel_task_custody(
         # stays the answer either way.
         turn = workers.direct_chat_turn(task_id)
         from supervisor.cancel_publication import finish_in_process_turn  # a live inline Presence turn too
-        in_process = finish_in_process_turn(q, task_id, turn, prepared, intent=intent, deliver=deliver)
+        in_process = finish_in_process_turn(q, task_id, turn, prepared, intent=intent, deliver=deliver,
+                                            runner_owned=runner_owned)
         if in_process is not None:
             return in_process
     if settled and captured_worker is None and not captured_was_reaping:

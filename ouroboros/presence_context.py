@@ -62,6 +62,16 @@ def _reaction_actions(actions: Any) -> list[str]:
             for action in actions or [] if isinstance(action, Mapping)]
 
 
+# A moved turn's author whose saved work the queue keeps, or may keep (``presence_continuation.continuation_status``).
+_HELD_AUTHOR = {
+    "saved": ("The queue keeps its saved work (the owner's Pause, or a restart's return): it does not run now, "
+              "continues only when the owner resumes it or the queue returns it, and may then still reply. It is not "
+              "lost; do not redo its work or report it lost."),
+    "custody_unknown": ("Its saved work was handed to the queue, but no current read confirms the queue keeps it: it "
+                        "is neither confirmed lost nor running, and may still continue and reply."),
+}
+
+
 def _previous_turn_line(previous: Mapping[str, Any]) -> str:
     """The conversation's last executed turn; quoted text is correspondent-facing data, not instructions."""
     try:
@@ -104,6 +114,10 @@ def _previous_turn_line(previous: Mapping[str, Any]) -> str:
         return (f"Previous turn in this conversation (task {previous.get('task_id')}, yielded {finished}) left the "
                 f"conversation while its result awaits review, outcome so far {previous.get('outcome')}: {body}.{work} "
                 "It is still the responsible author and may reply again after its review.")
+    if previous.get("author_status") in _HELD_AUTHOR:  # the queue keeps its saved work (``continuation_status``)
+        return (f"Previous turn in this conversation (task {previous.get('task_id')}, yielded {finished}) left the "
+                f"conversation with its work saved, outcome so far {previous.get('outcome')}: {body}.{work} "
+                + _HELD_AUTHOR[previous["author_status"]])
     if previous.get("author_status"):
         return (f"Previous turn in this conversation (task {previous.get('task_id')}, yielded {finished}) left the "
                 f"conversation while its result awaited review, outcome so far {previous.get('outcome')}: {body}.{work} "
@@ -437,8 +451,10 @@ def _continuing_section(value: Mapping[str, Any]) -> str:
     if not continuing:
         return ""
     return ("## Continuing turns in this conversation (host-authored facts)\n\n"
-            "These earlier turns yielded the conversation while their results await review. A running one "
-            "stays responsible for its own result and may still reply; any other status means its author is "
+            "These earlier turns yielded the conversation while their results await review or their saved work "
+            "waits. A running one stays responsible for its own result and may still reply; a saved one is kept by "
+            "the queue and continues only on the owner's Resume or the queue's return, then may still reply "
+            "(custody_unknown: that custody cannot be read now, not lost); any other status means its author is "
             "no longer live and nothing restarts it. get_task_result reads one where your tools include it.\n\n"
             + "\n".join(f"- {row.get('task_id')} [{row.get('status') or 'unknown'}]"
                         for row in continuing if isinstance(row, Mapping)))

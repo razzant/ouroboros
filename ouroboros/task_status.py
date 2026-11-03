@@ -342,11 +342,13 @@ def task_execution_observation(
     snapshot = queue_snapshot if queue_snapshot is not None else _load_queue_snapshot(root)
     queue_seen = queue_snapshot_observation(snapshot)
     queued, _task = _queue_task_status(snapshot, tid)
-    # The queue never owns a Presence turn: its body runs in a conversation-lane carrier (or the
+    # The queue never owns a Presence turn's carried body: it runs in a conversation-lane carrier (or the
     # disclosed degraded executor), whose liveness is observed locally (below) or proven by its
     # controller, never by a snapshot row a dead carrier left published. A pooled or direct row keeps
-    # the queue-ownership reading (restore relies on it to dedup a live direct root's running row).
-    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED} and kind != "presence":
+    # the queue-ownership reading (restore relies on it to dedup a live direct root's running row), and so
+    # does a moved turn's saved work the queue keeps: parked, or continued on a project slot (#2566).
+    carried = queued == STATUS_RUNNING and (_task.get("_execution_owner") or {}).get("lane") == "conversation"
+    if queue_seen["fresh"] and queued in {STATUS_RUNNING, STATUS_SCHEDULED} and (kind != "presence" or not carried):
         return {**observation, **queue_seen, "kind": "pooled", "state": "active",
                 "reason": "queue_ownership", "status": queued}
     try:
@@ -624,6 +626,8 @@ def _is_stale_orphan_running_task(
 
 
 PRESENCE_ATTEMPT_LOST = "presence_attempt_lost"
+PRESENCE_ATTEMPT_LOST_NOTICE = ("PRESENCE_ATTEMPT_LOST: this Presence turn's executor ended without a terminal result; "
+                                "whether its reply or tools took effect is unknown, and it is never re-run.")
 
 
 def _project_lost_attempt(merged: Dict[str, Any], reason: str, prior_status: str, notice: str) -> None:
@@ -1123,7 +1127,8 @@ def effective_task_result(
         # carrier left behind must not read as live ownership and mask the turn's own end fact. Its
         # liveness is the carrier/controller's, decided below exactly as the Host work view decides it.
         _meta = merged.get("metadata") if isinstance(merged.get("metadata"), dict) else {}
-        presence_turn = isinstance(_meta.get("presence"), dict)
+        presence_turn = isinstance(_meta.get("presence"), dict) and queue_status == STATUS_RUNNING and (
+            queue_task.get("_execution_owner") or {}).get("lane") == "conversation"  # a moved turn's saved row reads the queue
         if queue_status and queue_status != "unknown" and not presence_turn:
             merged["status"] = _merge_queue_status(parent_status, queue_status, queue_task)
             from ouroboros.project_admission import project_hold_fact
@@ -1151,9 +1156,7 @@ def effective_task_result(
             if _presence_attempt_lost(pathlib.Path(drive_root), merged, queue_snapshot):
                 # The queue never owns a Presence turn; its own end fact decides, as the work view does.
                 terminal_projection = "presence_attempt_lost"
-                _project_lost_attempt(merged, PRESENCE_ATTEMPT_LOST, parent_status, (
-                    "PRESENCE_ATTEMPT_LOST: this Presence turn's executor ended without a terminal result; "
-                    "whether its reply or tools took effect is unknown, and it is never re-run."))
+                _project_lost_attempt(merged, PRESENCE_ATTEMPT_LOST, parent_status, PRESENCE_ATTEMPT_LOST_NOTICE)
             elif queue_status == "unknown":
                 merged["queue_reconciliation_warning"] = "queue snapshot missing or invalid"
             elif _terminal_failure_from_outcome(merged):
