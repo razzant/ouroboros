@@ -558,6 +558,8 @@
  * @property {string=} connection Named compatible row; omitted uses the built-in pair.
  * @property {string} baseUrl
  * @property {string=} apiKey
+ * @property {('OPENAI_COMPATIBLE_API_KEY'|'OPENAI_API_KEY')=} apiKeySetting Which built-in pair a kept apiKey belongs to;
+ *   omitted uses the saved effective pair.
  */
 
 /**

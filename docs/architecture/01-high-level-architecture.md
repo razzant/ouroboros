@@ -315,7 +315,7 @@ ouroboros/ — agent core and shared runtime (§6)
   launcher_windows_runtime.py — Windows runtime; pre-import legacy GUI handoff (§2)
   launcher_background.py — Desktop close/quit, consent, second-launch activation (§9); `DesktopApi` supplies `MainApi` alerts, shell facts and Panic (§3)
   panic_source.py, platform_peer.py — Diagnostic Panic source (§9)
-  launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, standalone_page.py — Windows caption tint; macOS per-document title bar, appearance; page zoom; theme.js/ui.css inlined into pages before assets (§3)
+  launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, launcher_context_menu.py, standalone_page.py — Windows caption; macOS chrome/appearance; zoom; native menus; pre-asset inline theme.js/ui.css (§3)
   launcher_tray.py, launcher_tray_macos.py — Windows notification-area icon; macOS menu-bar item, Dock reopen, quit marking (§9)
   desktop_media.py — GTK display probe and own-loopback audio permission grant; other shells keep native prompts
   desktop_notifications.py — System notifications, one adapter per platform; submitted/unknown/typed refusal, click token back to the page (§3; DESIGN §9)

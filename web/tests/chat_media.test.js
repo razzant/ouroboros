@@ -364,6 +364,54 @@ test('rejected clipboard writeText falls back to textarea copy', async () => {
     }
 });
 
+test('a write the API settled copies once and never opens the selection fallback', async () => {
+    const fx = fixture();
+    try {
+        const writes = [];
+        let execCalls = 0;
+        globalThis.document.execCommand = () => { execCalls += 1; return true; };
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: { clipboard: { writeText: async (text) => { writes.push(text); } } },
+        });
+        const bubble = new NodeStub('div', fx.tracker);
+        const button = fx.controller.attachCopyControl(bubble, () => 'raw message');
+        await button.click();
+        assert.deepEqual(writes, ['raw message']);
+        assert.equal(execCalls, 0);
+        assert.equal(fx.tracker.created.filter((node) => node.tagName === 'TEXTAREA').length, 0);
+        assert.equal(button.textContent, '✓');
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
+test('a copy refused by the API and by the engine shows the failure, never the check', async () => {
+    const fx = fixture();
+    try {
+        let execCalls = 0;
+        globalThis.document.execCommand = () => { execCalls += 1; return false; };
+        Object.defineProperty(globalThis, 'navigator', {
+            configurable: true,
+            value: { clipboard: { writeText: async () => { throw new Error('denied'); } } },
+        });
+        const bubble = new NodeStub('div', fx.tracker);
+        const button = fx.controller.attachCopyControl(bubble, 'raw message');
+        button.focus();
+        await button.click();
+        assert.equal(execCalls, 1, 'the refused API still got its one selection attempt');
+        assert.equal(button.textContent, '✗');
+        assert.equal(button.title, 'Copy failed');
+        assert.equal(button.attributes.get('aria-label'), 'Copy failed');
+        assert.equal(globalThis.document.activeElement, button, 'a keyboard owner stays on Copy');
+        assert.equal(globalThis.document.body.querySelectorAll('.chat-copy-fallback').length, 0);
+    } finally {
+        fx.controller.destroy();
+        fx.restore();
+    }
+});
+
 test('throwing execCommand reports failure and removes the fallback textarea', async () => {
     const fx = fixture();
     try {

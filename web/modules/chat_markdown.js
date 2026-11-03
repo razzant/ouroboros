@@ -1,6 +1,7 @@
 /** Rich, sanitized markdown rendering for assistant and system chat messages. */
 
 import { safeExternalUrl } from './utils.js';
+import { copyTextToClipboard } from './ui_helpers.js';
 import { tr } from './i18n.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
 
@@ -703,32 +704,6 @@ function renderChartNodes(root, state, onDomWrite) {
     }
 }
 
-async function copyCode(code) {
-    const text = code?.textContent || '';
-    if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
-    }
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.setAttribute('readonly', '');
-    // Inside a modal dialog (the document reader) the rest of the page is inert:
-    // the selection is made within that dialog, and focus returns after.
-    const dialog = code.closest?.('dialog[open]') || null;
-    const focused = document.activeElement;
-    let copied = false;
-    try {
-        (dialog || document.body).appendChild(textarea);
-        if (dialog) textarea.focus({ preventScroll: true });
-        textarea.select();
-        copied = typeof document.execCommand === 'function' && document.execCommand('copy') === true;
-    } finally {
-        textarea.remove();
-        if (dialog && focused?.isConnected) focused.focus({ preventScroll: true });
-    }
-    if (!copied) throw new Error('copy command failed');
-}
-
 /* A table scrolls sideways only when its columns cannot fit even wrapped. Its
    edges follow the actually hidden columns, as `scroll_fade.js` does for the
    vertical scroll bodies, and only while it scrolls is its wrapper a named
@@ -873,7 +848,8 @@ export function enhanceChatMarkdown(rootEl, { onDomWrite = writeDirectly, onThem
         const code = button.closest('.md-code-block')?.querySelector('pre > code');
         if (!code) return;
         try {
-            await copyCode(code);
+            // The code block is the anchor: inside the document reader's modal it names the dialog that owns the selection.
+            await copyTextToClipboard(code.textContent || '', { anchor: code });
             if (state.destroyed) return;
             button.classList.add('is-copied');
             button.textContent = tr('code.copied', 'Copied');

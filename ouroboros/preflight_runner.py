@@ -570,11 +570,11 @@ def _install_worker_probe(temp_root: pathlib.Path) -> str:
     probe = _probe_dir(temp_root)
     probe.mkdir(parents=True, exist_ok=True)
     (probe / "admitted-workers").write_text(str(_preflight_worker_count()), encoding="utf-8")
+    # One pass fills the template's own fields: a root that spells one (a caller's `--evidence-dir`) is not read as one.
+    fields = {"__WORKER_LOG__": repr(str(_worker_log_dir(temp_root))),
+              "__RESULTS_POINTER__": repr(str(_results_pointer(temp_root)))}
     (probe / f"{module}.py").write_text(
-        _WORKER_PROBE_SOURCE.replace("__WORKER_LOG__", repr(str(_worker_log_dir(temp_root))))
-        .replace("__RESULTS_POINTER__", repr(str(_results_pointer(temp_root)))),
-        encoding="utf-8",
-    )
+        re.sub("|".join(fields), lambda match: fields[match[0]], _WORKER_PROBE_SOURCE), encoding="utf-8")
     return module
 
 
@@ -863,9 +863,10 @@ def _execute_pytest_pass(
     """
     from ouroboros.process_containment import ProcessContainer
 
-    from ouroboros.preflight_inventory import note_lane_process
+    from ouroboros.preflight_inventory import launch_args, note_lane_process
     from ouroboros.test_evidence import CapturedPass, FileOutput
 
+    args = launch_args(args)  # a selected scope is carried by its inventory plugin, not by the command line
     container = ProcessContainer(lifeline=True, overload=True)
     output = FileOutput(temp_root, "pytest")
     proc = None

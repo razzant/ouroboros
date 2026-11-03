@@ -22,7 +22,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -40,6 +39,7 @@ from supervisor.update_candidate import (  # noqa: F401
     stash_local_changes_for_update, lookup_update_stash,
     destructive_apply_guard, project_version_carriers,
     quarantine_corrupt_update_tx_marker, StashRestoreResult,
+    RESOLVER_POOL, ensure_assisted_resolver_ready, refuse_unready_boot_resolver, resolver_slot_owed,
 )
 # The planner, the clean-plan commit builder and the live materializer — the
 # carrier engine's three insertion points — live in supervisor.update_merge_plan
@@ -600,76 +600,6 @@ def _finish_rollback(
     return True, message
 
 
-# The whole-pool start an assisted resolver needs (``workers.spawn_workers``): slot 0, the conversation lane's
-# spare, and slot 1, the resolver's own project slot. Inside the marker window no project slot grows
-# (``worker_pool_lifecycle._spawn_worker_slot``), so this start, on an empty pool, is the resolver's only one.
-RESOLVER_POOL = 2
-
-
-def resolver_slot_owed() -> bool:
-    """Whether the whole-pool start owes a resolver its project slot: a resolver-held update is in flight (its
-    durable transaction in an assisted phase), as at a boot whose recovery resumes it; base's one boot worker
-    was that slot. Unknown owes nothing: an unreadable transaction recovers nothing either."""
-    try:
-        return str((active_update_tx() or {}).get("phase") or "") in _ASSISTED_PHASES
-    except Exception:
-        return False
-
-
-def ensure_assisted_resolver_ready(expected_sha: str, timeout_sec: float = 90.0) -> bool:
-    """Prove every child of the resolver's start imported the exact clean tree before conflicts go live.
-
-    The whole-pool start (``RESOLVER_POOL``) is the one start the marker window allows, on an empty pool while
-    this tree is still clean. The project slot's own ``worker_ready`` at the expected sha proves the resolver
-    (assignment gives queued work to project slots alone; the lane's spare proves nothing here), and no marker
-    lands while another child of this start still imports: each live one reported its own row too."""
-    from supervisor import workers
-    from supervisor.queue import _queue_lock
-    from supervisor.worker_pool_lifecycle import _worker_events_since, is_project_slot
-
-    with _queue_lock:
-        if workers.WORKERS:
-            return False  # update quiescence must leave no ambiguous prior generation
-    events_cursor = workers.events_log_cursor()
-    try:
-        if not workers.ensure_worker_pool_started(n=RESOLVER_POOL, allow_disabled_restart=True):
-            return False
-    except Exception:
-        _g.log.warning("assisted resolver worker start failed", exc_info=True)
-        return False
-    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
-    while time.monotonic() < deadline:
-        with _queue_lock:
-            live = {str(worker.proc.pid): is_project_slot(worker) for worker in workers.WORKERS.values()
-                    if worker.proc.pid and worker.proc.is_alive()}
-        if not any(live.values()):
-            return False  # the resolver's project child is gone
-        ready = {str(row.get("pid") or "") for row in _worker_events_since(events_cursor, "worker_ready")
-                 if str(row.get("git_sha") or "") == expected_sha}
-        if set(live) <= ready:  # a stopped child imports nothing more
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def _boot_children_imported(timeout_sec: float = 90.0) -> bool:
-    """Boot recovery's barrier before it re-materializes the markers, as the apply proof is before it materializes
-    them: every live custodied child finished importing (the readiness seam opened it on its own ``worker_ready``)."""
-    from supervisor import workers
-    from supervisor.queue import _queue_lock
-    from supervisor.worker_pool_lifecycle import is_worker_slot, worker_ready
-
-    deadline = time.monotonic() + max(float(timeout_sec), 0.1)
-    while True:
-        with _queue_lock:
-            if not any(is_worker_slot(slot) and slot.proc.is_alive() and not worker_ready(slot)
-                       for slot in workers.WORKERS.values()):
-                return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.05)
-
-
 def enqueue_assisted_resolution_task(tx: Dict[str, Any]) -> str:
     """Enqueue (front) the single authorized resolution task for an assisted merge and start a
     worker for it. Used by both the apply orchestration and boot recovery so the objective +
@@ -1108,11 +1038,9 @@ def _recover_assisted_on_boot(tx: Dict[str, Any], supervisor_ready: bool) -> Dic
                 tx["conflict_paths"] = refreshed_conflicts
         rescue_info: Dict[str, Any] = {}
         if not has_progress:
-            if not _boot_children_imported():  # no child of the boot's start may import the markers below
-                tx["resolution_attempts"] = attempts
-                write_update_tx(tx)  # the tx waits for the next boot, bounded by the attempt cap
-                _log_supervisor({"type": "managed_update_assisted_resume_unadmitted", "reason": "workers_importing"})
-                return {"finalized": False, "resumed": False, "resolution_attempts": attempts}
+            refused = refuse_unready_boot_resolver()  # no child imports the markers below, else unwound for the owner
+            if refused:
+                return refused
             # The server's owner-control path must be resident before the
             # re-materialized conflict markers land in the live tree (#283); it imports
             # the first-party ``ouroboros`` and ``supervisor`` packages.
