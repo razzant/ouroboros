@@ -1,4 +1,5 @@
 import './api_types.js';
+import { clearChatPreviews } from './chat_preview.js';
 
 /**
  * Single browser-side gateway client. Keep backend calls here so UI modules
@@ -93,6 +94,7 @@ export function signInUrl(href = window.location.href) {
 }
 
 export function openSignIn() {
+    clearChatPreviews();
     window.location.replace(signInUrl());
 }
 

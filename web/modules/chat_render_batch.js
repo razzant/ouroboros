@@ -588,7 +588,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
         if (!topNode.dataset?.historyId && !topNode.classList.contains('chat-live-card')) {
             // Media owns a layout wrapper around keyed bubbles. Save the
             // physical child being read, not an unidentifiable wrapper.
-            node = [...topNode.querySelectorAll('[data-history-id]')]
+            node = [...topNode.querySelectorAll('[data-history-id], [data-preview-history-id]')]
                 .find(child => child.getBoundingClientRect().bottom > messagesRect.top) || topNode;
         }
         if (topNode.classList.contains('chat-live-card')) {
@@ -708,7 +708,7 @@ export function createTimelineAnchors({ messagesDiv, liveCardRecords }) {
             // lifecycle key below selects the line inside that page's mixed card.
             historyId: lineItem?.historyId || lineItem?.sourceHistoryId
                 || node.closest?.('[data-history-id]')?.dataset?.historyId
-                || topNode.dataset?.historyId || '',
+                || node.dataset?.previewHistoryId || topNode.dataset?.historyId || '',
             reviewKey: ['reviewAttemptDetail', 'reviewAttempt', 'reviewGroup', 'reviewSection']
                 .find(key => node.dataset?.[key]) || '',
             reviewValue: node.dataset?.reviewAttemptDetail || node.dataset?.reviewAttempt

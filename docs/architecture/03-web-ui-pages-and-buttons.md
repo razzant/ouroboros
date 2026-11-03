@@ -55,7 +55,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 Rows order by time then arrival (DESIGN). Keyed replay keeps nodes, disclosure, focus, selection and child lifecycle; current results outrank history. `LIVE_CARD_CAP` bounds live cards, `chat_history.js` bounds pages; `historyCoverage` proves bytes, not EOF/IDs/time. `chat_reading_position.js` owns anchors; `showLatest({arrive})` and `project_read_state.js` land on newest arrival. `createHistoryControls` keeps read gaps at the feed edge; `toast.js` announces once per document in an exposed room. Floating headers reserve measured height; sidebar selection is instant. Origins adopt by `project_dialogue.project_origin_identity`.
 
-`chat_reply.js` jumps; `chat_history_reveal.js` pages `around=<row_address>` (below). `app.js` preloads via full registry, suppressing newest/ACK arrival. Reading claims cancel stale work; cards reveal exact lines, never portals/context. Task refs mean cards.
+`chat_reply.js` / `chat_history_reveal.js` land at exact rows; task refs mean cards. `chat_preview.js` paints bounded same-origin text before hydration, never controls/coverage/read receipts; canonical pages replace it, failures keep Retry. Storage/origin loss opens cold.
 
 #### Main rows and host-stamped card rows
 

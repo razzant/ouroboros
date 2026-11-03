@@ -7829,6 +7829,17 @@ html[data-layout="stack"] #chat-messages::after {
 }
 
 /* Keyboard-open layout: only #chat-messages scrolls within visual viewport. */
+body.keyboard-open #chat-input-area,
+body.keyboard-open .chat-input-area {
+    --message-field-max-height: var(--chat-viewport-input-cap, 140px);
+}
+
+.chat-saved-preview {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
 html.keyboard-open,
 body.keyboard-open {
     position: fixed;

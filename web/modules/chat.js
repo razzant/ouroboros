@@ -1,4 +1,5 @@
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
+import { createChatPreview, clearChatPreviews } from './chat_preview.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown, renderChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
 import { renderSkillIcon, strokeIcon } from './page_icons.js';
@@ -196,7 +197,6 @@ export {
 const CARD_ROW_PHASES = new Map([['timeline', 'warn'], ['reviews', 'result']]);
 const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'completed', 'completed_warn', 'failed',
     'cancelled', 'rejected', 'interrupted']);  // a helper's narration is `progress`
-const CHAT_STORAGE_KEY = 'ouro_chat';
 // Details and Reviews use the shared control glyph; ::after remains the touch hit area.
 const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
 
@@ -357,7 +357,6 @@ export function createChatInstance({
         }
     }
 
-    const persistedHistory = [];
     const seenMessageKeys = new Set();
     const messageKeyOrder = [];
     const pendingUserBubbles = new Map();
@@ -638,12 +637,6 @@ export function createChatInstance({
         if (!force && state.activePage !== 'chat') return;
         const request = await stateSnapshots.gate(force);
         if (request) await readStateSnapshot(stateSnapshots, request);
-    }
-
-    function persistVisibleHistory() {
-        try {
-            sessionStorage.setItem(storeKey(CHAT_STORAGE_KEY), JSON.stringify(persistedHistory.slice(-200)));
-        } catch {}
     }
 
     const ACTUAL_BOTTOM_TOLERANCE_PX = 6;
@@ -2198,25 +2191,8 @@ export function createChatInstance({
                 rememberMessageKey(messageKey);
                 chatDecision.renderRoutingDecision(prior, opts.chatAnnotation);
                 const changed = syncSavedProjectContext(prior, opts.originProjected);
-                for (const row of persistedHistory) if (opts.originId && row.originId === opts.originId
-                    || clientMessageId && row.clientMessageId === clientMessageId) row.originProjected = false;
                 return changed;
             }
-        }
-
-        if (!isProgress && !ephemeral && !_historyAppending) {
-            persistedHistory.push({
-                text, role, ts, markdown: !!markdown, ...meta, narration: opts.narration,
-                originProjected: !!opts.originProjected, terminalTime: opts.terminalTime || null,
-                completionNotice: opts.completionNotice || null,
-                skillReview: opts.skillReview || null, evidenceRef: opts.evidenceRef || null,
-                presenceContact: opts.presenceContact || null,
-                attachments: attachments.length ? attachments : null,
-                textPlaceholder: opts.textPlaceholder === true,
-            });
-            // Match the persisted-history cap.
-            if (persistedHistory.length > 200) persistedHistory.splice(0, persistedHistory.length - 200);
-            if (!_historyReplayActive) persistVisibleHistory();
         }
 
         const bubble = document.createElement('div');
@@ -2373,6 +2349,7 @@ export function createChatInstance({
         liveCardBound.beginReplay();
         try {
             withStableViewport(() => {
+                preview.retire();
                 replayKeys = { history: new Set(), client: new Set(), origin: new Set(), legacy: new Set() };
                 noteBubbleKeys(messagesDiv);
                 replaySelection = keepSelection(document);
@@ -2585,7 +2562,6 @@ export function createChatInstance({
                 const dirty = [...liveCardRecords.values()].filter(record => record._timelineDirty);
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
-                persistVisibleHistory();
                 return true;
             });
         } finally {
@@ -2643,6 +2619,7 @@ export function createChatInstance({
                 const reader = readingHistory();
                 const rechainRecent = admitted && !reader && !data.reason_code && pagerBeforeRecent.initialized
                     && !pagerBeforeRecent.canNewer && [...oldRecentIds].some(id => !recentHistoryIds.has(id));
+                preview.save(data);
                 const result = historyPager.acceptRecent(data, rechainRecent && { fromReconnect });
                 if (result.status !== 'applied') applyHistoryMessages(messages, { fromReconnect });
                 withStableViewport(() => releaseHistoryIds(!admitted || rechainRecent || reader
@@ -2687,6 +2664,8 @@ export function createChatInstance({
             } catch (err) {
                 if (destroyed) return false;
                 lastHistorySyncSucceeded = false;
+                preview.failed();
+                if (err?.status === 401 || err?.status === 403) { clearChatPreviews(); preview.retire(); }
                 emptyWelcome?.historyRead(false);
                 initialHydrationPromise = null;
                 // Migration keeps a calm note and retries through the existing 700 ms scheduler.
@@ -2741,6 +2720,11 @@ export function createChatInstance({
     });
 
     (async () => {
+        // The synchronous owners below must exist, but a network read must not
+        // stand between reopening and the last saved text on this device.
+        await Promise.resolve();
+        if (destroyed) return;
+        if (preview.show()) { updateMessagesPadding(); reading.reflow(); }
         await loadUiPreferences();
         // Main waits for hydration; Projects pass through. History reads share one flight.
         await waitForHydrationWindow();
@@ -2749,16 +2733,8 @@ export function createChatInstance({
         const reconcileUnsaved = () => !destroyed && unconfirmed.reconcile(({ frame, views, ts }) => addMessage(frame.content,
             'user', false, ts || null, false, { source: 'web', senderSessionId: chatSessionId, clientMessageId: frame.client_message_id, attachments: views }));
         if (await awaitInitialHydration()) return reconcileUnsaved();
-        try {
-            const saved = JSON.parse(sessionStorage.getItem(storeKey(CHAT_STORAGE_KEY)) || '[]');
-            // Replay the persisted addMessage options through the same normalizer.
-            for (const { text, role, markdown, ts, ...restored } of saved) {
-                addMessage(text, role, !!markdown, ts || null, false, restored);
-            }
-        } catch {}
-        historyLoaded = true;
-        // The next successful source read reconciles this offline preview.
-        if (!lastHistorySyncSucceeded) liveCardBound.arm();
+        // A failed first read keeps the labelled preview and Retry. It does not
+        // turn cached text into a hydrated history window or a seen receipt.
         reconcileUnsaved();
     })();
 
@@ -3107,6 +3083,9 @@ export function createChatInstance({
         isPageProtected: isHistoryPageProtected,
         onState: snapshot => syncLoadOlderControl(snapshot),
     });
+
+    const preview = createChatPreview({ feed: messagesDiv, room: [chatId, projectId || ''],
+        scope: document.head?.querySelector('meta[name="ouroboros-appearance-scope"]')?.content || '', mutate: withStableViewport });
 
     function syncLoadOlderControl(snapshot = historyPager.getState()) {
         if (destroyed) return;
@@ -3651,6 +3630,7 @@ export function createChatInstance({
             chatResizeObserver?.disconnect();
             chatResizeObserver = null;
             historyResyncScheduler.cancel();
+            preview.destroy();
             if (headerControlInterval) { clearInterval(headerControlInterval); headerControlInterval = null; }
             for (const id of liveCardRecords.keys()) disposeLiveCard(id);
             explicitCardExpansion.clear();
@@ -3666,7 +3646,6 @@ export function createChatInstance({
             localEchoJournal.clear();
             seenMessageKeys.clear();
             messageKeyOrder.length = 0;
-            persistedHistory.length = 0;
             pageHistoryIds.clear(); recentCoverage = null; historicalTerminals.clear(); pendingHistoryEvictions.clear();
             pendingHistoryUpserts.clear();
             pendingLiveEvictions.clear();
