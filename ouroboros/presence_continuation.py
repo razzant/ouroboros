@@ -577,6 +577,20 @@ def _carried_arrivals(ctx: Any, rows: list) -> None:
                                                         "message": transport.get("message"), "wake": False}}, {})
 
 
+def _arrivals_in_mail(binding: ReviewWaitBinding, ctx: Any) -> set | None:
+    """The place arrivals this author's next drain delivers, by exact message id: a private read that acknowledges
+    nothing. None: an unreadable or incomplete mailbox proves nothing, so the note keeps every row and says so."""
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    status: dict = {}
+    try:
+        mail = drain_owner_entries(binding.drive_root, binding.task_id, set(getattr(ctx, "_loop_mailbox_seen_ids", ()) or ()),
+                                   getattr(ctx, "task_attempt", None) or 1, _read_status=status)
+    except Exception:
+        return None
+    return {entry["msg_id"] for entry in mail if entry.get("provenance") == "place_event"} if status.get("complete") else None
+
+
 def reentry_note(binding: ReviewWaitBinding, ctx: Any) -> str:
     """Host-authored facts since this author yielded: observations, never owner directives."""
     from ouroboros.chat_chain import format_address, row_address
@@ -601,6 +615,10 @@ def reentry_note(binding: ReviewWaitBinding, ctx: Any) -> str:
             offset = page["next_offset"]
         if history.get("status") == "available":
             rows, gaps = inline_rows, inline_gaps
+    # The retained source above stays whole. A message also in mail reaches the model once, there, with its wake and files.
+    mailed = _arrivals_in_mail(binding, ctx)
+    listed = [row for row in rows if f"place-event:{row.get('presence_event_identity')}" not in (mailed or ())]
+    deferred, rows = len(rows) - len(listed), listed
     facts = [_row_fact(binding, row) for row in rows]
     # Older frozen ceilings need not contain either reader. Without an accessible,
     # verified source retain all observed facts inline, including one oversized row.
@@ -614,6 +632,10 @@ def reentry_note(binding: ReviewWaitBinding, ctx: Any) -> str:
     omitted = rows[:len(rows) - len(kept)]
     _carried_arrivals(ctx, rows[len(omitted):])
     lines = list(kept)
+    if deferred:
+        lines.append(f"- {deferred} message(s) of this conversation are not repeated here: they follow as place events")
+    if mailed is None and rows:
+        lines.append("- your mailbox could not be read whole: a message above may also follow as a place event")
     if omitted:
         lines.insert(0, f"({len(omitted)} earlier row(s) of this conversation are not repeated here: "
                         f"{format_address(row_address(omitted[0]))} through {format_address(row_address(omitted[-1]))})")
@@ -624,8 +646,8 @@ def reentry_note(binding: ReviewWaitBinding, ctx: Any) -> str:
     body = "\n".join(lines) or ("- no complete rows fit in this note; read the source below" if omitted
                                else "- nothing new was recorded in this conversation")
     shown = gaps[:_REENTRY_GAPS_SHOWN] if source else gaps
-    coverage = ("\nCoverage: every row of this conversation's canonical log since you yielded is listed."
-                if not gaps and not omitted else "")
+    coverage = ("\nCoverage: every row of this conversation's canonical log since you yielded is listed"
+                + (" or follows as a place event." if deferred else ".") if not gaps and not omitted else "")
     if gaps:
         coverage = ("\nCoverage gaps (rows in these ranges are missing from the list above):\n"
                     + "\n".join(_gap_line(gap) for gap in shown)

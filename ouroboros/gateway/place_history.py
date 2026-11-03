@@ -93,7 +93,8 @@ def annotate_place_history(messages, entries, root, reads):
                     places[place_id], str(entry.get('sender_session_id') or ''), str(transport.get('account_id') or ''))
             attention = heard.get(entry.get('history_position', {}).get('offset'), {})
             if attention.get('decision') == 'heard':
-                facts['attention'] = {'decision': 'heard', 'reason': str(attention.get('reason') or '')}
+                facts['attention'] = {'decision': 'heard', 'reason': str(attention.get('reason') or ''),
+                                      **({'recipient': str(attention['recipient'])} if attention.get('recipient') else {})}
                 if attention.get('facts') is not None:
                     facts['facts'] = attention['facts']
             elif entry.get('type') == 'place_arrival' and entry.get('task_id'):

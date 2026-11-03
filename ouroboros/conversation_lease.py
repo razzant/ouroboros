@@ -415,16 +415,19 @@ def _intake_path(drive_root: Any, task_id: str) -> Path:
     return Path(drive_root) / "memory" / "owner_mailbox" / f"{validate_task_id(task_id)}.intake.json"
 
 
-def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str = "") -> bool:
+def author_intake_accepting(drive_root: Any, task_id: str, conversation_key: str = "", *, attempt: Any = None) -> bool:
     """The author's durable intake fact: True while its loop reads this conversation's mail.
 
-    Read under ``task_custody.task_mail_lock`` by the acceptance transaction below.
+    Read under ``task_custody.task_mail_lock`` by the acceptance transaction below. ``attempt``: the dispatcher's
+    current attempt, which a root's fact must name (a superseded attempt's loop is not this work's reader).
     """
     try:
         row = json.loads(_intake_path(drive_root, task_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
     if not row.get("accepting") or (conversation_key and row.get("conversation_key") != conversation_key):
+        return False
+    if attempt is not None and row.get("attempt") != attempt:
         return False
     # The fact is the writer's: a carrier that died before its release left it standing, and a dead
     # author reads no mail (an arrival appended to it would be swallowed). Its process must be alive.
@@ -444,7 +447,7 @@ def _write_intake(drive_root: Any, task_id: str, row: dict) -> None:
     atomic_write_json(_intake_path(drive_root, task_id), row)
 
 
-def open_author_intake(drive_root: Any, task_id: str, conversation_key: str) -> bool:
+def open_author_intake(drive_root: Any, task_id: str, conversation_key: str, *, attempt: Any = None) -> bool:
     """The author's loop reads this conversation's mail from here on (under the mail lock).
 
     False when the lock could not be taken: nothing is opened, so no arrival is accepted that the lock
@@ -455,29 +458,94 @@ def open_author_intake(drive_root: Any, task_id: str, conversation_key: str) -> 
     with task_mail_lock(drive_root, task_id) as locked:
         if not locked:
             return False
-        _write_intake(drive_root, task_id, {"accepting": True, "conversation_key": conversation_key, "pid": os.getpid()})
+        _write_intake(drive_root, task_id, {"accepting": True, "conversation_key": conversation_key, "pid": os.getpid(),
+                                            **({"attempt": attempt} if attempt is not None else {})})
         return True
 
 
-def close_author_intake(drive_root: Any, task_id: str) -> bool:
+def _own_row(row: Any, attempt: Any) -> bool:
+    """A fact this process wrote for this attempt (a root's carries its attempt; an author's carries none)."""
+    return isinstance(row, dict) and row.get("pid") == os.getpid() and row.get("attempt") == attempt
+
+
+def close_author_intake(drive_root: Any, task_id: str, *, own: bool = False, attempt: Any = None) -> bool:
     """The author's loop stopped reading: an arrival offered from now on is refused (under the mail lock).
 
     The fact is removed even when the lock could not be taken (it must never outlive its reader); False
-    then discloses that an arrival racing the close may have landed unread."""
+    then discloses that an arrival racing the close may have landed unread. A recipient-claim COMMIT
+    delayed beyond this wait can finish after the last admission check; the following append may then
+    miss the final drain. ``own`` removes only this process/attempt's fact, never a successor's."""
     from ouroboros.task_custody import task_mail_lock
 
     with task_mail_lock(drive_root, task_id) as locked:
+        path = _intake_path(drive_root, task_id)
         try:
-            _intake_path(drive_root, task_id).unlink()
-        except OSError:
+            if not own or _own_row(json.loads(path.read_text(encoding="utf-8")), attempt):
+                path.unlink()
+        except (OSError, ValueError):
             pass
         if not locked:
             log.warning("author intake of %s closed without its mail lock; a racing arrival may be unread", task_id)
         return bool(locked)
 
 
+def root_conversation_key(task: Any) -> str:
+    """The conversation whose new text this live root reads, else "".
+
+    A promoted or follow-up ROOT keeps the speaker carrier of the conversation it answers
+    (``presence_root_carrier``, that carrier alone). A turn itself is its conversation's lease author,
+    resumed under its own id too (it keeps its event identity, and its carrier opens intake only once it
+    holds the conversation again); related work holding only a binding, a child and an owner root answer none."""
+    from ouroboros.dialogue_provenance import presence_record_binding, presence_related_work
+
+    metadata = task.get("metadata") if isinstance(task, dict) and isinstance(task.get("metadata"), dict) else {}
+    if (not isinstance(task, dict) or task.get("_presence_turn") or task.get("_presence_run") or task.get("_is_direct_chat")
+            or metadata.get("presence_event_identity") or not presence_related_work(presence_record_binding(task), task)):
+        return ""
+    presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
+    event = presence.get("event") if isinstance(presence.get("event"), dict) else {}
+    return str(event.get("conversation_key") or "")
+
+
+def task_attempt(task: Any) -> int:
+    """The attempt the dispatcher gave this task (the published running row's ``attempt``)."""
+    try:
+        return int((task or {}).get("_attempt") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def open_root_intake(drive_root: Any, task: Any) -> bool:
+    """A root's loop reads its conversation from here on, on its own drive beside its mailbox; never fails the loop."""
+    key = root_conversation_key(task)
+    try:
+        return bool(key) and open_author_intake(drive_root, str(task.get("id") or ""), key, attempt=task_attempt(task))
+    except Exception:
+        log.debug("root intake fact not written", exc_info=True)
+        return False
+
+
+def close_root_intake(drive_root: Any, task: Any) -> None:
+    try:
+        close_author_intake(drive_root, str(task.get("id") or ""), own=True, attempt=task_attempt(task))
+    except Exception:
+        log.debug("root intake of %s not closed", task.get("id"), exc_info=True)
+
+
+@contextmanager
+def root_intake(drive_root: Any, task: Any):
+    """The scope of a root's loop: open before its first drain, removed as the loop ends however it ends;
+    the final drain moves this same fact in between (``follow_loop_admission``)."""
+    opened = open_root_intake(drive_root, task)
+    try:
+        yield
+    finally:
+        if opened:
+            close_root_intake(drive_root, task)
+
+
 def follow_loop_admission(ctx: Any, accepting: bool) -> None:
-    """A carried Presence author's durable intake follows its loop's own admission (the final drain).
+    """A carried Presence author's or root's durable intake follows its loop's own admission (the final drain).
 
     A Host in another process reads only this fact, so it moves with the loop under the mail lock:
     closed BEFORE the final drain reads (an arrival either lands first and is drained, or is refused
@@ -495,7 +563,8 @@ def follow_loop_admission(ctx: Any, accepting: bool) -> None:
             return
         with task_mail_lock(root, task_id) as locked:
             row = json.loads(path.read_text(encoding="utf-8"))
-            if row.get("pid") != os.getpid() or bool(row.get("accepting")) is bool(accepting):
+            attempt = task_attempt({"_attempt": getattr(ctx, "task_attempt", None)}) if "attempt" in row else None
+            if not _own_row(row, attempt) or bool(row.get("accepting")) is bool(accepting):
                 return
             if not locked:
                 if accepting:
@@ -536,6 +605,24 @@ def accept_author_mail(drive_root, author: str, conversation_key: str, append: C
         return bool(append(admit=lambda: author_intake_accepting(drive_root, author, conversation_key)))
     except TypeError:
         return False  # an append that takes no admission check cannot be made one transaction
+
+
+def accept_lent_author_mail(drive_root, author: str, conversation_key: str, append: Callable[..., bool],
+                            qualified: Callable[[], bool]) -> bool:
+    """Accept an arrival for an author parked with its conversation lent: it holds no lease, and its wait reads
+    its mailbox. A local author is asked under its own admission lock (its final closes there); a remote one has only
+    its durable facts. Both run ``qualified`` inside the append's mail lock, so the two mean the same thing."""
+    with _AUTHORS_LOCK:
+        lease = _AUTHORS.get((str(Path(drive_root).resolve()), author))
+    agent = lease.intake_agent if lease is not None else None
+    lock = getattr(agent, "_owner_message_admission_lock", None)
+    if lock is None:
+        return bool(append(admit=qualified))
+    with lock:
+        if (lease._ended or lease.conversation_key != conversation_key or not getattr(agent, "_accepting_owner_messages", False)
+                or not getattr(agent, "_busy", False) or getattr(agent, "_current_task_id", None) != author):
+            return False
+        return bool(append(admit=qualified))
 
 
 def live_presence_roots(drive_root: Any) -> dict:
@@ -603,7 +690,7 @@ def author_intake_open(drive_root: Any, author: str) -> bool:
     """Whether this process's live ``author`` takes owner and peer mail now, read under its admission lock.
 
     A lent author still drains its mailbox (owner mail wakes its wait); place arrivals keep the
-    stricter ``accept_author_mail``. A closing author is live and takes nothing.
+    stricter ``accept_author_mail`` and ``accept_lent_author_mail``. A closing author is live and takes nothing.
     """
     agent = presence_author_agent(drive_root, author)
     lock = getattr(agent, "_owner_message_admission_lock", None)

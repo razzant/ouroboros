@@ -86,7 +86,7 @@ def heard_replay(root, task_id, identity="", continuation_version=0):
                               continuation_version=continuation_version)
 
 
-def record_heard(root, task, event, reason, *, captured_task_id=None):
+def record_heard(root, task, event, reason, *, captured_task_id=None, recipient=''):
     from ouroboros.presence_runner import _stored_turn, presence_result_from_stored
     from dataclasses import replace
     identity = task['metadata']['presence_event_identity']
@@ -106,10 +106,43 @@ def record_heard(root, task, event, reason, *, captured_task_id=None):
             facts = json.loads(row['dispatch_input'] or '{}')
             facts.setdefault('place_attention', {'decision': 'heard', 'reason': reason,
                              'facts': list(event.facts or ()),
-                             'delivery_reporting_version': event.delivery_reporting_version})
+                             'delivery_reporting_version': event.delivery_reporting_version,
+                             **({'recipient': recipient} if recipient else {})})
             conn.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
                          (json.dumps(facts), row['seq']))
         return heard_replay(root, arrival_id, identity, event.continuation_version)
+
+
+def arrival_recipient(root, captured_task_id):
+    """Who holds this arrival (``place_recipient`` on its dedup record), else ``{}``: one source, one holder."""
+    with dialogue_store.transaction(root, write=False) as conn:
+        row = _record(conn, captured_task_id)
+    return (json.loads(row['dispatch_input'] or '{}').get('place_recipient') or {}) if row is not None else {}
+
+
+def pin_recipient(root, captured_task_id, conversation_key, pin, *, expect, admit=None):
+    """Compare-and-set the holder after acquiring intake and dialogue locks; None means admission refused.
+
+    The caller holds its mailbox lock. Check admission after all potentially blocking acquisition,
+    before the first claim or a retry: a final close may have timed out while capture held intake.
+    A lost answer or a crash keeps the claimed holder; a pre-claim refusal changes nothing.
+    """
+    with intake_lock(root, conversation_key), dialogue_store.transaction(root, write=True) as conn:
+        row = _record(conn, captured_task_id)
+        if row is None:
+            raise ValueError('An arrival holder requires its captured event')
+        facts = json.loads(row['dispatch_input'] or '{}')
+        current = facts.get('place_recipient') or {}
+        if admit is not None and not admit():
+            return None
+        if current != (expect or {}) or current == pin:
+            return current
+        if pin:
+            facts['place_recipient'] = pin
+        else:
+            facts.pop('place_recipient', None)
+        conn.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?", (json.dumps(facts), row['seq']))
+        return pin or {}
 
 
 def retain_focus_source(root, task_id):
