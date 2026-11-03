@@ -887,8 +887,9 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
     result once per preparation; no history scan, second store or focus clock: the
     line's age is computed at the row's sample instant ``now`` (``ago_text``), outside
     the identity, so a reprepare of the same row keeps its text and the cache. A root
-    that may publish (``may_publish_focus``) and has no line is told so; a child or a
-    speaker, which may not, is told nothing.
+    that may publish (``may_publish_focus``) and has no line is told so when a work card
+    would carry one; a direct turn of Main (a reply, a wake) has no card, and a child or a
+    speaker may not publish: they are told nothing.
     """
     from ouroboros.deadline_utils import ago_text, parse_deadline_ts
     from ouroboros.focus import compact_focus, focus_fingerprint
@@ -908,9 +909,10 @@ def _own_focus_fact(ctx: Any, now: float) -> Tuple[str, str]:
         if raw is None:
             from ouroboros.tools.project_journal import may_publish_focus
 
-            publishes = tool_ctx is not None and may_publish_focus(tool_ctx)
+            carded = (tool_ctx is not None and not getattr(tool_ctx, "is_direct_chat", False)
+                      and may_publish_focus(tool_ctx))
             return "absent", ("self-authored focus: none; my human reads nothing under this work's name"
-                              if publishes else "")
+                              if carded else "")
         focus = compact_focus(raw)
         if focus is None:
             return "unknown", "own focus unavailable"

@@ -248,16 +248,19 @@ def test_an_unreadable_authoring_time_is_said_not_guessed(tmp_path, monkeypatch)
     assert "ago" not in line.split("self-authored focus", 1)[1].split("{", 1)[0]
 
 
-@pytest.mark.parametrize("metadata,told", [
-    ({"delegation_role": "root"}, True),  # an independent root may publish: its missing line is a fact
-    ({"delegation_role": "subagent", "parent_task_id": "parent"}, False),  # a child may not publish
-    ({"delegation_role": "root", "_presence_turn": True}, False),  # a speaker's line is its place's, never its own
-    ({}, False),  # no root marker is no publishing authority
+@pytest.mark.parametrize("metadata,direct,told", [
+    ({"delegation_role": "root"}, False, True),  # an independent root's work card would carry a line: a fact
+    ({"delegation_role": "root"}, True, False),  # a direct turn of Main (a reply, a wake) has no card to carry one
+    ({}, True, False),  # a direct turn is a root by its door alone: still no card
+    ({"delegation_role": "subagent", "parent_task_id": "parent"}, False, False),  # a child may not publish
+    ({"delegation_role": "root", "_presence_turn": True}, False, False),  # a speaker's line is its place's
+    ({}, False, False),  # no root marker is no publishing authority
 ])
-def test_a_missing_line_is_named_only_to_a_root_that_may_publish_one(tmp_path, metadata, told):
+def test_a_missing_line_is_named_only_to_a_root_whose_work_card_would_carry_one(tmp_path, metadata, direct, told):
     ctx = _ctx(tmp_path)
     ctx.context_fit_plan = None
     ctx.tools._ctx.task_metadata = dict(metadata)
+    ctx.tools._ctx.is_direct_chat = direct
     write_task_result(tmp_path, "task", "running")
     assert append_context_facts(ctx)
     line = _facts(ctx.messages)
@@ -265,3 +268,17 @@ def test_a_missing_line_is_named_only_to_a_root_that_may_publish_one(tmp_path, m
     if not told:
         assert "self-authored focus" not in line
     assert not append_context_facts(ctx), "an absent line has one identity: no new row per reprepare"
+
+
+def test_a_direct_turn_still_reads_the_line_it_published(tmp_path, monkeypatch):
+    """Only the absent line goes unsaid on a direct turn: a line it wrote is dated data like any root's."""
+    ctx = _ctx(tmp_path)
+    ctx.context_fit_plan = None
+    ctx.tools._ctx.task_metadata = {"delegation_role": "root"}
+    ctx.tools._ctx.is_direct_chat = True
+    _record(tmp_path, "Answering the estimate question")
+    _sampled_at(monkeypatch, "2026-10-10T12:05:00Z")
+    assert append_context_facts(ctx)
+    line = _facts(ctx.messages)
+    assert "self-authored focus, the line my human reads under this work's name, written 5 min ago" in line
+    assert "Answering the estimate question" in line and "focus: none" not in line
