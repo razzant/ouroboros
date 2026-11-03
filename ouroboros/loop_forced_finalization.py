@@ -775,6 +775,26 @@ def _disclose_service_finalization(ctx: _RoundLimitContext, llm_trace: Dict[str,
     )
 
 
+def _close_forced_intake(ctx: _RoundLimitContext) -> None:
+    """A committed forced rail is its loop's last read of place mail: close that intake before the rail's first
+    drain, under the admission lock, as the ordinary final close does (``loop_delivery``). What landed before reaches
+    the rail's one call; an arrival after is refused and takes the Host's ordinary route. The durable fact moves with
+    it (``follow_loop_admission``); the local flag only in a Presence context, whose place door reads it (a direct
+    turn's flag is its owner's route and Stop door, and a forced call may run long). Idempotent; nothing reopens it.
+    A budget lookahead that only prices a wrap-up never calls this: healthy work keeps reading."""
+    tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    lock = getattr(tools_ctx, "owner_message_admission_lock", None)
+    agent = getattr(tools_ctx, "owner_message_admission_agent", None)
+    metadata = getattr(tools_ctx, "task_metadata", None)
+    if lock is None or agent is None or not isinstance(metadata, dict) or not isinstance(metadata.get("presence"), dict):
+        return
+    from ouroboros.conversation_lease import follow_loop_admission
+
+    with lock:
+        agent._accepting_owner_messages = False
+        follow_loop_admission(tools_ctx, False)
+
+
 def _drain_forced_owner_directives(
     ctx: _RoundLimitContext,
     llm_trace: Dict[str, Any],
@@ -1069,6 +1089,7 @@ def _forced_fallback_result(
     tool_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     from supervisor.owner_stop import presence_stop_now
 
+    _close_forced_intake(ctx)  # a rail ending without its call reads nothing new either
     if reason_code != REASON_OWNER_REQUESTED_FINALIZATION and presence_stop_now(tool_ctx):
         from ouroboros.loop_round_limits import _handle_direct_turn_hard_stop
 
@@ -1340,8 +1361,19 @@ def _forced_final_answer(
     the fresh request is admitted against them again at its own price."""
     live_trace = getattr(ctx, "llm_trace", None)
     llm_trace = live_trace if isinstance(live_trace, dict) else {}
+    _close_forced_intake(ctx)
+    reprice = False
     if not _prompt_prepared:
         prompt = _loop()._prepare_forced_prompt(ctx, prompt, llm_trace)
+    else:  # its lookahead drained before this rail was committed: what landed since joins the one call, priced
+        from ouroboros.loop_messages import transcript_growth_signature
+
+        grown = transcript_growth_signature(ctx.messages)
+        _loop()._drain_forced_owner_directives(ctx, llm_trace)
+        reprice = transcript_growth_signature(ctx.messages) != grown
+        if reprice:
+            tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
+            prompt += _forced_subject_prompt(ctx, llm_trace, presence_armed=_presence_forced_armed(tools_ctx))
     if ctx.deadline_ts is not None and time.time() >= float(ctx.deadline_ts):
         ctx.accumulated_usage.update(execution_status="failed", reason_code=reason_code)
         return _loop()._forced_fallback_result(
@@ -1368,7 +1400,7 @@ def _forced_final_answer(
     stop_now = False
     while attempt < (1 if single_semantic_turn else 2):
         try:
-            if refresh_late and _deliver_forced_late_results(ctx, llm_trace) and _admitted_request is not None:
+            if (reprice or refresh_late and _deliver_forced_late_results(ctx, llm_trace)) and _admitted_request is not None:
                 from ouroboros import task_pacing
 
                 _admitted_request, _initial_messages = task_pacing.prepared_wrapup_candidate(
@@ -1376,8 +1408,8 @@ def _forced_final_answer(
                     allow_server_web_search=_loop()._server_web_allowed_by_task(tools_ctx))
                 if _admission is not None and task_pacing.wrapup_reservation_fits(
                         request=_admitted_request, **_admission) is False:
-                    raise ForcedCandidateUnaffordable("late result changed the resumed wrap-up price")
-            refresh_late = False
+                    raise ForcedCandidateUnaffordable("late input changed the admitted wrap-up price")
+            refresh_late = reprice = False
             ctx.accumulated_usage.pop("_forced_response_meta", None)
             if attempt == 0 and _admitted_request is not None:
                 forced = _send_admitted_forced_candidate(

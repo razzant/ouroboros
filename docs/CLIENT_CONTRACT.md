@@ -629,7 +629,8 @@ retained room facts, not guesses from current settings. Every consumed wire key 
 
 A Place room's `ChatHistoryMessage.place_history` contains retained facts. Optional `facts: string[]`
 on heard rows is the connector's declared event facts, empty when none were declared; `attention` keeps
-its `decision`/`reason` shape. Old rows without facts stay absent, and focus rows add no facts list.
+its `decision`/`reason` shape, plus `recipient` when `reason` is `current_author` or `conversation_work`: the initial author or work that accepted
+that arrival, not its current holder after a later handoff and not proof of reading. Old rows keep absent facts; focus rows add no facts list.
 Captured incoming rows may expose `identity: {sends_as?: {id, label, kind}, reads_as?: [{id, label, kind}]}`,
 where `kind` is `user|bot`. Receipt rows may expose `sends_as: {id, label, kind}` and `sends_as_owner: boolean`,
 frozen from the delivering focus's identity/owner metadata; current accounts do not rewrite them, and

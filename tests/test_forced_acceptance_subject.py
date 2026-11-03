@@ -201,3 +201,44 @@ def test_elapsed_deadline_preserves_input_without_claiming_it_was_processed(tmp_
     assert registry._ctx._acceptance_ack_source_sha256 == old_ack
     assert old_ack != owner_source_sha256(registry._ctx)
     assert "forced_acceptance_subject" not in result
+
+
+@pytest.mark.parametrize("late", [False, True])
+def test_prepared_wrapup_refreshes_the_owner_observation_before_repricing(tmp_path, monkeypatch, late):
+    from ouroboros import task_pacing
+
+    loop, registry, ctx, trace, candidate = _bound(tmp_path)
+    ctx.incoming_messages.put("Initial owner status followup.")
+    prompt = forced._prepare_forced_prompt(ctx, "Budget final", trace)
+    old_observed = copy.deepcopy(registry._ctx._acceptance_observation)
+    initial_messages = copy.deepcopy(ctx.messages)
+    loop._append_or_merge_user_message(initial_messages, prompt)
+    prepared, priced, sent = object(), [], []
+
+    def price(_ctx, messages, **kwargs):
+        priced.append(copy.deepcopy(messages))
+        return prepared, messages
+
+    def answer(_ctx, **kwargs):
+        observation = registry._ctx._acceptance_observation
+        sent.append(kwargs["initial_messages"])
+        assert observation["owner_source_sha256"] == owner_source_sha256(registry._ctx)
+        assert observation["owner_source_sha256"] in json.dumps(sent[-1])
+        if late:
+            assert "Also check the live backup." in json.dumps(sent[-1])
+        return json.dumps({"delivery_control": "keep", "acceptance_subject": {
+            "owner_source_sha256": observation["owner_source_sha256"],
+            "effective_criteria": "Check the requested subject and preserve the complete result.",
+        }})
+
+    monkeypatch.setattr(task_pacing, "prepared_wrapup_candidate", price)
+    monkeypatch.setattr(loop, "_call_forced_model_once", answer)
+    if late:
+        ctx.incoming_messages.put("Also check the live backup.")
+    text, _usage, result = forced._forced_final_answer(
+        ctx, prompt=prompt, fallback_text=candidate.full_text, reason_code="budget_exhausted",
+        _prompt_prepared=True, _initial_messages=initial_messages, _admitted_request=prepared)
+    assert len(priced) == int(late) and len(sent) == 1
+    assert text == candidate.full_text
+    assert result["forced_acceptance_subject"] == {"applied": True, "reason": ""}
+    assert (registry._ctx._acceptance_observation == old_observed) is (not late)

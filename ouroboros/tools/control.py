@@ -295,6 +295,10 @@ def get_tools() -> List[ToolEntry]:
                             "description": "One plain sentence for the owner, in the owner's language: what this note tells that work."},
                 "quote": {"type": "array", "items": {"type": "string"}, "default": [],
                           "description": "Owner row addresses held by this turn; exact words and attachments travel together."},
+                "arrival": {"type": ["boolean", "string"], "default": False,
+                            "description": "Place focus only: forward the exact message as context, never owner words. true selects the opening "
+                                           "message; a string, a later source_event_id delivered here from this conversation. One receiving work. "
+                                           "Not with quote; note stays your own, separately."},
             }, "required": ["task_id"]},
         }, _tell_task),
         ToolEntry("schedule_subagent", {

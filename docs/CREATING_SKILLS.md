@@ -1182,21 +1182,36 @@ An exhausted or unknown allowance returns `consciousness_allowance_exhausted`,
 `disposition: retry` and `retry_after` seconds. Physical capacity keeps the existing
 `presence_capacity_full` retry response. A matching event focuses consciousness in
 that room under the owner's autonomy level and allowance, independently of its own
-clock. Before allowance, rate or capacity is consulted, the conversation's current author
-receives later arrivals as typed context-only mail, whether or not they match a wake fact;
+clock. Before allowance, rate or capacity is consulted, the conversation's current author, else its
+sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
+is in an unheld cold sleep, or an author parked for its review or private question, whose wait
+wakes and retakes the conversation before any model call), receives later arrivals as typed
+context-only mail, whether or not they match a wake fact; they never answer its question. An untagged message in the same thread, topic or direct message is a
+wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
+current author as background and a root not at all; they stay readable in the room. Several
+readers receive nothing: the arrival takes an ordinary focus under the allowance, whose
+context lists them all, and it may hand this exact message to one (`tell_task(arrival=true)`, or
+`arrival="<source_event_id>"` for a later message of that conversation delivered to it). So does
+living work that is not reading at that moment (preparing, past its final close): its waking
+message is never only heard. Queued, held, cancelling,
+owner-paused and money-paused work receives nothing and is not resumed. Each arrival has one
+holder, recorded on its room row before any mail is written: a retry after a lost answer goes to
+that holder alone, and one whose effect there cannot be proven goes to a focus that is told so,
+never to another work.
 Paused, Off/Panic and a bot event without a bot wake item stay heard only. The mail carries the
 arrival's text, source event id, exact `message` and `conversation` facts, observed `facts` and
 attachments. An attached `transport_queue` keeps every fact but its `events` there, completeness
 included. The mail's `context_source_ref` then names the arrival's retained exact facts:
 `memory_read(source_ref=…)` returns them, the whole snapshot included, and the arrival's room row
 shows the same reference in `chat_history` and `memory_read` rows. The host
-acknowledges this handoff (`completed`, `silent`) only while that author accepts intake under
+acknowledges this handoff (`completed`, `silent`) only while that recipient accepts intake under
 its final-drain lock, or when a retry finds the arrival already held by it after the earlier
-answer was lost; a closed or ended author leaves the event eligible for ordinary admission. If the
-Host process dies between that handoff and its answer, a retry reaches ordinary admission: the
-handoff is not exactly-once across a Host crash. A
+answer was lost; a closed or ended one leaves the event eligible for ordinary admission. A retry
+after a Host crash or a torn write returns to its recorded holder, but the handoff is not
+exactly-once: a write whose effect cannot be proven stays unknown, as above. A
 wake arrival its model has not seen when it finishes reopens it for another round; background
-arrivals alone never do.
+arrivals alone never do. An author's own explicit `action="stop"` stands: an arrival drained at
+its close is acknowledged in its transcript, never read by its model, and starts no round.
 
 A focus, or a root promoted or scheduled from it, uses ordinary `finish_task`, including
 `silent=true`; receipts never choose its outcome. An answer after any send, file or

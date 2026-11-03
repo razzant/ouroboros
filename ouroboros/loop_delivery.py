@@ -1344,6 +1344,17 @@ def _no_tool_final_answer(
     # either forces another round or is rejected after the fence, never stranded.
     admission_lock = getattr(tools._ctx, "owner_message_admission_lock", None)
     admission_agent = getattr(tools._ctx, "owner_message_admission_agent", None)
+
+    def solving_again() -> None:
+        """A hold after this close returns the author to its loop, whose mail it reads again: what it reads,
+        it accepts, locally and in a remote Host's view, until its next final closes."""
+        if admission_lock is not None and admission_agent is not None:
+            with admission_lock:
+                if (getattr(admission_agent, "_busy", False)
+                        and str(getattr(admission_agent, "_current_task_id", "") or "") == limit_ctx.task_id):
+                    admission_agent._accepting_owner_messages = True
+                    follow_loop_admission(tools._ctx, True)
+
     if admission_lock is not None and admission_agent is not None:
         before_directives = len(getattr(tools._ctx, "_owner_directives", []) or [])
         sealed = bool(getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None))
@@ -1414,6 +1425,7 @@ def _no_tool_final_answer(
             "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
         )
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        solving_again()
         return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
     if isinstance(candidate, _loop().DeliveryCandidate):
         _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
@@ -1428,6 +1440,7 @@ def _no_tool_final_answer(
     if not allowed:
         messages.append({"role": "user", "content": refusal})
         _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        solving_again()
         return held("focus_reply_refused")
     if isinstance(getattr(tools._ctx, "_presence_completion", None), dict):  # Accept only at this common exit.
         tools._ctx._presence_completion_accepted = True

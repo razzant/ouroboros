@@ -247,22 +247,28 @@ async def _api_presence_turn(request: Request) -> JSONResponse:
             started = await host._bounded_host_read(ctx, functools.partial(
                 live_author, event.conversation_key, drive_root=ctx.data_dir)) == turn_id
         if result is None and admission.place is not None and not started:
-            from ouroboros.place_intake import author_hears, decide_attention, offer_to_author, settle_heard
+            from ouroboros.place_intake import (
+                ROUTE_TO_MIND, allowance_attention, author_hears, decide_attention, offer_arrival, settle_heard,
+            )
             decision, allowance = await host._bounded_host_read(ctx, functools.partial(
                 decide_attention, ctx.data_dir, admission, event))
-            # The conversation's current author hears it first, wake or background, before any
-            # rate, reservation, slot or allowance; its final drain settles what it accepted.
+            # The conversation's current author, else its sole reading root, hears it first, wake or background,
+            # before any rate, reservation, slot or allowance; its final drain settles what it accepted.
             wake = author_hears(decision, allowance, event)
-            if wake is not None and await host._bounded_host_read(ctx, functools.partial(
-                    offer_to_author, ctx.data_dir, captured, event, wake=wake)):
-                result = await host._bounded_host_read(ctx, functools.partial(settle_heard, ctx.data_dir, captured, event, "current_author"))
+            handed, recipient = ("", "") if wake is None else await host._bounded_host_read(ctx, functools.partial(
+                offer_arrival, ctx.data_dir, captured, event, wake=wake))
+            if handed == ROUTE_TO_MIND and decision == "silent":  # several works read it: a focus chooses, as any wake
+                decision, allowance = await host._bounded_host_read(ctx, functools.partial(allowance_attention, ctx.data_dir))
+            if handed and handed != ROUTE_TO_MIND:
+                result = await host._bounded_host_read(ctx, functools.partial(
+                    settle_heard, ctx.data_dir, captured, event, handed, recipient=recipient))
             elif decision == "silent":
                 result = await host._bounded_host_read(ctx, functools.partial(settle_heard, ctx.data_dir, captured, event, allowance["reason"]))
             elif decision == "retry":
                 return _presence_error("Consciousness allowance is unavailable; retry this event.", 429,
                     "consciousness_allowance_exhausted", "retry", retry_after=allowance["retry_after"])
             else:
-                admission = replace(admission, allowance=allowance)
+                admission = replace(admission, allowance={**allowance, **({ROUTE_TO_MIND: True} if handed == ROUTE_TO_MIND else {})})
         if result is None:
             if not ctx.rate_limiter.allow(f"{skill_name}:presence"):
                 return _presence_error("rate limit exceeded", 429, "presence_rate_limited", "retry")

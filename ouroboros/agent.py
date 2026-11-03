@@ -1222,21 +1222,23 @@ class OuroborosAgent:
                     # Only this prepared loop reads what intake accepts: a version-2 Presence author answers
                     # its event here, after every start check and before its first model send.
                     self.intake_opened_callback(task)
+                from ouroboros.conversation_lease import root_intake
                 try:
-                    text, usage, llm_trace = run_llm_loop(
-                        messages=messages,
-                        tools=self.tools,
-                        llm=self.llm,
-                        drive_logs=drive_logs,
-                        emit_progress=self._emit_progress,
-                        incoming_messages=self._incoming_messages,
-                        task_type=task_type_str,
-                        task_id=str(task.get("id") or ""),
-                        budget_remaining_usd=budget_remaining,
-                        event_queue=self._event_queue,
-                        initial_effort=initial_effort,
-                        drive_root=self.env.drive_root,
-                    )
+                    with root_intake(self.env.drive_root, task):  # a promoted root reads its conversation (``place_intake``)
+                        text, usage, llm_trace = run_llm_loop(
+                            messages=messages,
+                            tools=self.tools,
+                            llm=self.llm,
+                            drive_logs=drive_logs,
+                            emit_progress=self._emit_progress,
+                            incoming_messages=self._incoming_messages,
+                            task_type=task_type_str,
+                            task_id=str(task.get("id") or ""),
+                            budget_remaining_usd=budget_remaining,
+                            event_queue=self._event_queue,
+                            initial_effort=initial_effort,
+                            drive_root=self.env.drive_root,
+                        )
                 except (BudgetExceeded, BudgetPauseRequested):
                     raise
                 except Exception as e:
