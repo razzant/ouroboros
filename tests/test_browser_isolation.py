@@ -1,4 +1,5 @@
 """Tests for browser state isolation and infrastructure error detection."""
+import json
 import pathlib
 import os
 from functools import partial
@@ -9,9 +10,19 @@ import types
 import pytest
 
 import ouroboros.tools.browser as browser_mod
-from ouroboros import browser_policy
+from ouroboros import browser_policy, chromium_runtime
 
 _blocked = partial(browser_policy.browser_url_block_reason, restricted=True)
+
+
+def _pinned_layout(root: pathlib.Path, receipt: dict | None = None) -> pathlib.Path:
+    """A browsers root holding this host's exact pin, as ``chromium_runtime.install`` publishes it."""
+    pin = chromium_runtime.host_pin()
+    directory = root / pin.directory
+    directory.mkdir(parents=True)
+    (directory / pin.executable).write_text("stub", encoding="utf-8")
+    (directory / chromium_runtime.RECEIPT_NAME).write_text(json.dumps(receipt or pin.receipt()), encoding="utf-8")
+    return directory / pin.executable
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +89,7 @@ class TestBrowserModuleState:
             new_context=_new_context,
             is_connected=lambda: True,
             close=lambda: None,
+            version=chromium_runtime.CHROMIUM_VERSION,
         )
         fake_playwright = types.SimpleNamespace(
             chromium=types.SimpleNamespace(launch=lambda **kwargs: fake_browser),
@@ -96,7 +108,8 @@ class TestBrowserModuleState:
             sync_playwright=lambda: types.SimpleNamespace(start=lambda: fake_playwright)
         )
         monkeypatch.setattr(browser_mod, "_HAS_STEALTH", False)
-        monkeypatch.setattr(browser_mod, "_ensure_playwright_installed", lambda *args, **kwargs: None)
+        monkeypatch.setattr(browser_mod, "_ensure_playwright_installed",
+                            lambda *, engine, **_kw: "/pinned/chrome-headless-shell" if engine == "chromium" else None)
         monkeypatch.setattr(
             browser_policy.socket,
             "getaddrinfo",
@@ -217,32 +230,6 @@ class TestBrowserModuleState:
         assert "analyze_screenshot" in result
         assert ctx.browser_state.last_screenshot_b64
 
-    def test_aliases_arm64_browser_cache_for_missing_x64_binary(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(browser_mod.sys, "platform", "darwin", raising=False)
-        root = tmp_path / "playwright" / "chromium_headless_shell-1208"
-        arm_dir = root / "chrome-headless-shell-mac-arm64"
-        arm_dir.mkdir(parents=True)
-        arm_binary = arm_dir / "chrome-headless-shell"
-        arm_binary.write_text("stub", encoding="utf-8")
-
-        missing_binary = root / "chrome-headless-shell-mac-x64" / "chrome-headless-shell"
-        err = RuntimeError(f"BrowserType.launch: Executable doesn't exist at {missing_binary}")
-
-        assert browser_mod._maybe_alias_playwright_binary(err) is True
-        alias_dir = missing_binary.parent
-        assert alias_dir.is_symlink()
-        assert pathlib.Path(alias_dir.resolve()) == arm_dir.resolve()
-
-        arm_dir_2 = root / "chrome-headless-shell-mac-arm64-copy"
-        arm_dir_2.mkdir(parents=True)
-        (arm_dir_2 / "chrome-headless-shell").write_text("stub", encoding="utf-8")
-        missing_binary_2 = root / "chrome-headless-shell-mac-x64-copy" / "chrome-headless-shell"
-        err2 = RuntimeError(f"BrowserType.launch: Executable doesn't exist at {missing_binary_2}")
-        fake_pw = types.SimpleNamespace(chromium=types.SimpleNamespace(launch=lambda **_kwargs: (_ for _ in ()).throw(err2)))
-        with pytest.raises(RuntimeError):
-            browser_mod._launch_browser_with_fallback(fake_pw, allow_cache_write=False)
-        assert not missing_binary_2.parent.exists()
-
     def test_launches_selected_webkit_engine_without_chromium_args(self):
         launch_calls = []
         fake_pw = types.SimpleNamespace(
@@ -256,75 +243,35 @@ class TestBrowserModuleState:
 
 
 class TestHasPlatformChromium:
-    """_has_platform_chromium: two-level check — chromium-* dir + platform-matching subdir.
-
-    Parametrized in v5.15.x — 7 tests collapsed into 2 (one for the
-    "not found" matrix, one for the "found via real executable" matrix).
-    Each subcase builds its filesystem skeleton inside tmp_path via a
-    small builder kwarg.
-    """
-
-    def _build_fixture(self, tmp_path, kind: str):
-        """kind values:
-        - missing       : nothing exists
-        - empty         : tmp_path has no chromium-* subdir
-        - non_chromium  : a firefox-* dir but no chromium-*
-        - wrong_platform: chromium-X/chrome-linux-x64 (wrong platform on darwin)
-        - metadata_only : chromium-X/chrome-mac-x64/metadata.json (no exe)
-        - real_app      : chromium-X/chrome-mac-x64/Chromium.app/.../Chromium
-        - headless_shell: chromium_headless_shell-X/chrome-headless-shell-mac-arm64/chrome-headless-shell
-        """
-        if kind == "missing":
-            return tmp_path / "nonexistent"
-        if kind == "empty":
-            return tmp_path
-        if kind == "non_chromium":
-            (tmp_path / "firefox-1234").mkdir()
-            return tmp_path
-        if kind == "wrong_platform":
-            cdir = tmp_path / "chromium-1234"
-            cdir.mkdir()
-            (cdir / "chrome-linux-x64").mkdir()
-            return tmp_path
-        if kind == "metadata_only":
-            cdir = tmp_path / "chromium-1234"
-            cdir.mkdir()
-            pdir = cdir / "chrome-mac-x64"
-            pdir.mkdir()
-            (pdir / "metadata.json").write_text("{}", encoding="utf-8")
-            return tmp_path
-        if kind == "real_app":
-            cdir = tmp_path / "chromium-1234"
-            cdir.mkdir()
-            exe = cdir / "chrome-mac-x64" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
-            exe.parent.mkdir(parents=True)
-            exe.write_text("stub", encoding="utf-8")
-            return tmp_path
-        if kind == "headless_shell":
-            cdir = tmp_path / "chromium_headless_shell-1234"
-            cdir.mkdir()
-            exe = cdir / "chrome-headless-shell-mac-arm64" / "chrome-headless-shell"
-            exe.parent.mkdir(parents=True)
-            exe.write_text("stub", encoding="utf-8")
-            return tmp_path
-        raise ValueError(f"unknown kind: {kind}")
+    """Only the exact pinned headless shell is a usable Chromium; Playwright's own builds,
+    however complete, and a pin directory with a foreign receipt never count."""
 
     @pytest.mark.parametrize("kind,expected", [
-        ("missing",        False),
-        ("empty",          False),
-        ("non_chromium",   False),
-        ("wrong_platform", False),
-        ("metadata_only",  False),
-        ("real_app",       True),
-        ("headless_shell", True),
+        ("missing", False),
+        ("playwright_app", False),
+        ("playwright_headless_shell", False),
+        ("foreign_receipt", False),
+        ("pinned", True),
     ])
-    def test_classification(self, kind, expected, tmp_path, monkeypatch):
-        from ouroboros.tools import browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        from ouroboros.tools.browser import _has_platform_chromium
-
-        root = self._build_fixture(tmp_path, kind)
-        assert _has_platform_chromium(root) is expected
+    def test_classification(self, kind, expected, tmp_path):
+        if kind == "missing":
+            root = tmp_path / "nonexistent"
+        else:
+            root = tmp_path
+        if kind == "playwright_app":
+            exe = root / "chromium-1234" / "chrome-mac-x64" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("stub", encoding="utf-8")
+        elif kind == "playwright_headless_shell":
+            pin = chromium_runtime.host_pin()
+            exe = root / "chromium_headless_shell-1234" / pin.folder / pin.executable
+            exe.parent.mkdir(parents=True)
+            exe.write_text("stub", encoding="utf-8")
+        elif kind == "foreign_receipt":
+            _pinned_layout(root, {**chromium_runtime.host_pin().receipt(), "version": "151.0.7922.34"})
+        elif kind == "pinned":
+            _pinned_layout(root)
+        assert browser_mod._has_platform_chromium(root) is expected
 
 
 class TestHasPlatformWebKit:
@@ -369,36 +316,25 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         import os
         assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "/some/custom/path"
 
-    def test_sets_zero_when_chromium_dir_matches(self, monkeypatch, tmp_path):
+    def test_stale_playwright_chromium_is_not_a_bundled_browser(self, monkeypatch, tmp_path):
         import os
         monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
         import ouroboros.tools.browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        # Build fake playwright package structure
         local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
-        chromium_dir = local_browsers / "chromium-9999"
-        chromium_dir.mkdir(parents=True)
-        platform_dir = chromium_dir / "chrome-mac-x64"
-        exe = platform_dir / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+        pin = chromium_runtime.host_pin()
+        exe = local_browsers / "chromium_headless_shell-9999" / pin.folder / pin.executable
         exe.parent.mkdir(parents=True)
-        exe.write_text("stub", encoding="utf-8")  # real macOS executable path
+        exe.write_text("stub", encoding="utf-8")
         fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
         monkeypatch.setitem(sys.modules, "playwright", fake_pw)
         bmod._set_playwright_browsers_path_if_bundled()
-        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
+        assert "PLAYWRIGHT_BROWSERS_PATH" not in os.environ
 
-    def test_sets_zero_when_headless_shell_dir_matches(self, monkeypatch, tmp_path):
+    def test_sets_zero_when_the_pinned_chromium_is_bundled(self, monkeypatch, tmp_path):
         import os
         monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
         import ouroboros.tools.browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
-        chromium_dir = local_browsers / "chromium_headless_shell-9999"
-        chromium_dir.mkdir(parents=True)
-        platform_dir = chromium_dir / "chrome-headless-shell-mac-arm64"
-        exe = platform_dir / "chrome-headless-shell"
-        exe.parent.mkdir(parents=True)
-        exe.write_text("stub", encoding="utf-8")
+        _pinned_layout(tmp_path / "driver" / "package" / ".local-browsers")
         fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
         monkeypatch.setitem(sys.modules, "playwright", fake_pw)
         bmod._set_playwright_browsers_path_if_bundled()
@@ -429,58 +365,71 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         bmod._set_playwright_browsers_path_if_bundled()
         assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
 
-    def test_import_time_side_effect_sets_env_when_bundled(self, monkeypatch, tmp_path):
-        """Module-import calls _set_playwright_browsers_path_if_bundled(); reloading the
-        module with a fake bundled Chromium present must set PLAYWRIGHT_BROWSERS_PATH=0."""
-        import os
-        monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
-        # Build fake playwright package with a non-empty platform dir
-        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
-        exe = local_browsers / "chromium-9999" / "chrome-mac-x64" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
-        exe.parent.mkdir(parents=True)
-        exe.write_text("stub", encoding="utf-8")  # real macOS executable path
-        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
-        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
-        import ouroboros.tools.browser as bmod
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        # Simulate a fresh module import by calling the module-level init directly
-        # (importlib.reload would re-run the side-effect but also re-register tools;
-        # calling the function directly tests the same code path without side effects)
-        bmod._set_playwright_browsers_path_if_bundled()
-        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
-
-    def test_browser_install_uses_data_cache_when_zero_has_no_browser(self, monkeypatch, tmp_path):
+    def test_chromium_installs_the_pin_into_the_data_cache_when_zero_has_none(self, monkeypatch, tmp_path):
         import os
 
         import ouroboros.tools.browser as bmod
 
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
         monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
-        monkeypatch.setattr(bmod, "_playwright_ready", False)
-        monkeypatch.setattr(bmod, "_playwright_ready_engines", set())
+        monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
+        calls, installs = [], []
+        monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: calls.append(cmd))
+        monkeypatch.setitem(sys.modules, "playwright",
+                            types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
+
+        def install(root, pin):
+            installs.append(pathlib.Path(root))
+            return _pinned_layout(pathlib.Path(root))
+
+        monkeypatch.setattr(chromium_runtime, "install", install)
+
+        executable = bmod._ensure_playwright_installed()
+
+        cache = tmp_path / "data" / "playwright-browsers"
+        assert installs == [cache] and executable == str(cache / chromium_runtime.host_pin().directory
+                                                          / chromium_runtime.host_pin().executable)
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "0"  # Chromium never moves Playwright's root
+        assert [cmd[-3:] for cmd in calls] == [["playwright", "install-deps", "chromium"]]
+        assert bmod._ensure_playwright_installed() == executable and len(installs) == 1  # found, not reinstalled
+
+    def test_chromium_installs_into_an_operator_browsers_path(self, monkeypatch, tmp_path):
+        import ouroboros.tools.browser as bmod
+
+        operator = tmp_path / "operator-browsers"
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(operator))
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+        monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
+        monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: None)
+        monkeypatch.setitem(sys.modules, "playwright",
+                            types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
+        installs = []
+        monkeypatch.setattr(chromium_runtime, "install",
+                            lambda root, pin: installs.append(pathlib.Path(root)) or _pinned_layout(pathlib.Path(root)))
+
+        bmod._ensure_playwright_installed(engine="chromium")
+
+        assert installs == [operator] and not (tmp_path / "data" / "playwright-browsers").exists()
+
+    def test_readonly_chromium_without_the_pin_refuses_without_installing(self, monkeypatch, tmp_path):
+        import ouroboros.tools.browser as bmod
+
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
         monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
         calls = []
         monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: calls.append(cmd))
-        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py"))
-        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
-        fake_sync = types.ModuleType("playwright.sync_api")
+        stale = tmp_path / "playwright" / "driver" / "package" / ".local-browsers" / "chromium_headless_shell-1234"
+        stale.mkdir(parents=True)  # an older Playwright Chromium is present and must not be used
+        monkeypatch.setitem(sys.modules, "playwright",
+                            types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py")))
+        monkeypatch.setattr(chromium_runtime, "install", lambda *a, **k: pytest.fail("read-only actor installed"))
 
-        class FakeSyncPlaywright:
-            def __enter__(self):
-                chromium = types.SimpleNamespace(executable_path=str(tmp_path / "missing-chromium"))
-                webkit = types.SimpleNamespace(executable_path=str(tmp_path / "missing-webkit"))
-                return types.SimpleNamespace(chromium=chromium, webkit=webkit)
+        with pytest.raises(chromium_runtime.ChromiumRefusal) as refused:
+            bmod._ensure_playwright_installed(engine="chromium", allow_install=False)
 
-            def __exit__(self, *_args):
-                return False
-
-        fake_sync.sync_playwright = lambda: FakeSyncPlaywright()
-        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync)
-
-        bmod._ensure_playwright_installed()
-
-        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "data" / "playwright-browsers")
-        assert calls[-1][-3:] == ["playwright", "install", "chromium"]
+        assert refused.value.code == chromium_runtime.UNAVAILABLE and "read-only" in str(refused.value)
+        assert calls == [] and not (tmp_path / "data" / "playwright-browsers").exists()
 
     def test_webkit_install_uses_data_cache_when_zero_has_no_bundled_webkit(self, monkeypatch, tmp_path):
         import os
@@ -525,27 +474,18 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         monkeypatch.setattr(bmod, "_playwright_ready", False)
         monkeypatch.setattr(bmod, "_playwright_ready_engines", set())
         monkeypatch.setattr(bmod, "_playwright_browsers_path_managed", False)
-        monkeypatch.setattr(bmod.sys, "platform", "darwin", raising=False)
-        local_browsers = tmp_path / "playwright" / "driver" / "package" / ".local-browsers"
-        chrome = (
-            local_browsers
-            / "chromium_headless_shell-9999"
-            / "chrome-headless-shell-mac-arm64"
-            / "chrome-headless-shell"
-        )
-        chrome.parent.mkdir(parents=True)
-        chrome.write_text("stub", encoding="utf-8")
+        bundled = _pinned_layout(tmp_path / "playwright" / "driver" / "package" / ".local-browsers")
         calls = []
         monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: calls.append(cmd))
+        monkeypatch.setattr(chromium_runtime, "install", lambda *a, **k: pytest.fail("bundled pin was reinstalled"))
         fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py"))
         monkeypatch.setitem(sys.modules, "playwright", fake_pw)
         fake_sync = types.ModuleType("playwright.sync_api")
 
         class FakeSyncPlaywright:
             def __enter__(self):
-                chromium = types.SimpleNamespace(executable_path=str(chrome))
                 webkit = types.SimpleNamespace(executable_path=str(tmp_path / "data" / "playwright-browsers" / "missing-webkit"))
-                return types.SimpleNamespace(chromium=chromium, webkit=webkit)
+                return types.SimpleNamespace(webkit=webkit)
 
             def __exit__(self, *_args):
                 return False
@@ -556,11 +496,9 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         bmod._ensure_playwright_installed(engine="webkit")
         assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "data" / "playwright-browsers")
 
-        bmod._ensure_playwright_installed(engine="chromium")
-
-        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+        assert bmod._ensure_playwright_installed(engine="chromium") == str(bundled)
         assert any(cmd[-3:] == ["playwright", "install", "webkit"] for cmd in calls)
-        assert not any(cmd[-3:] == ["playwright", "install", "chromium"] for cmd in calls)
+        assert not any("chromium" in cmd for cmd in calls)
 
     def test_frozen_missing_bundled_engine_installs_with_embedded_python(self, monkeypatch, tmp_path):
         import os

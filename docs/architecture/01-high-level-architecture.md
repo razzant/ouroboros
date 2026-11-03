@@ -390,7 +390,8 @@ ouroboros/ — agent core and shared runtime (§6)
   tool_policy.py — Round-one tool visibility (the sets live in tool_capabilities.py)
   tool_effects.py, place_guard.py — per-tool effect facts (read · message · write) declared by connectors, and the dispatch refusals they drive: Advises, Silent/Paused places, one author per conversation
   icon_geometry.py — connector icons reduced to bounded geometry and drawn by the host in currentColor
-  browser_policy.py — every browser surface's target, script and control-request policy: granted origins, metadata/private/reserved refusals, three-valued `runtime_service_kind` (§6 MCP)
+  browser_policy.py — Browser targets, scripts and control requests: grants and service identity (§6 MCP)
+  chromium_runtime.py — Pinned Chromium supply and sandbox selection (§6)
   skill_payload_binding.py — Skill payload targeting: `.seed-origin` distinguishes native from external; read/list/search only for read profiles
   utils.py — atomic/locked JSON, timestamps, hashes, sanitization, subprocess helpers, `truncate_review_artifact`
   jsonl_tail.py — `JsonlChainSnapshot` (captured byte reads of a file chain; the swarm rollup) and the bounded filtered tail over the rotated file logs
